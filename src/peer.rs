@@ -55,7 +55,17 @@ pub enum IndexBuildFault {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndexBuildScope {
     Administrative,
-    Background,
+    /// Finish this finite demand, including its physical maintenance, without
+    /// turning transactions that arrive during that maintenance into demand.
+    Background {
+        through: u64,
+    },
+}
+
+impl IndexBuildScope {
+    fn is_background(self) -> bool {
+        matches!(self, Self::Background { .. })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -915,8 +925,12 @@ impl PostgresIndexer {
     /// entry point never reconstructs the full database from the log.
     pub(crate) fn consolidate_background_once(
         &mut self,
+        through: u64,
     ) -> Result<Option<IndexBuildReceipt>, SemanticError> {
-        self.consolidate_once(IndexBuildFault::None, IndexBuildScope::Background)
+        self.consolidate_once(
+            IndexBuildFault::None,
+            IndexBuildScope::Background { through },
+        )
     }
 
     fn consolidate_once(
@@ -961,7 +975,7 @@ impl PostgresIndexer {
         {
             self.tree_store.discard_completed_avet_sort();
         }
-        if scope == IndexBuildScope::Background && !selection.newest_live_complete {
+        if scope.is_background() && !selection.newest_live_complete {
             let manifest_hash = selection.newest_observed_manifest_hash.ok_or_else(|| {
                 background_rebuild_required(
                     "automatic indexing has no native publication to extend",
@@ -980,15 +994,20 @@ impl PostgresIndexer {
             && previous.publication_revision == selection.newest_observed_revision
             && selection.newest_live_complete
             && previous.pending_avet.is_empty()
-            && previous.basis_t == basis_t
-            && previous.tx_hash == tx_hash
-            && previous.state_hash == stored_state
+            && (matches!(scope, IndexBuildScope::Background { through } if previous.basis_t >= through)
+                || (previous.basis_t == basis_t
+                    && previous.tx_hash == tx_hash
+                    && previous.state_hash == stored_state))
         {
+            // The selector authenticated this publication independently of
+            // the current head. Once finite background demand is covered,
+            // newer ordinary novelty belongs to the scheduler's next byte
+            // threshold, not to this publication's live-set completion.
             let manifest_hash = *previous_hash;
             let stats = self.tree_store.stats();
             return Ok(Some(IndexBuildReceipt {
                 publication_revision: previous.publication_revision,
-                basis_t,
+                basis_t: previous.basis_t,
                 manifest_hash,
                 manifest_candidates_examined: selection.manifest_candidates_examined,
                 manifest_candidates_rejected: selection.manifest_candidates_rejected,
@@ -1034,7 +1053,7 @@ impl PostgresIndexer {
             .is_some_and(|(previous, _, _, _)| {
                 selection.newest_live_complete
                     && previous.pending_avet.is_empty()
-                    && (scope == IndexBuildScope::Background
+                    && (scope.is_background()
                         || previous.publication_revision == selection.newest_observed_revision)
             });
         // Selection may decode/cache source nodes before a potentially long
@@ -1065,7 +1084,7 @@ impl PostgresIndexer {
             None
         };
         let fallback_predecessor = if can_increment
-            && scope == IndexBuildScope::Background
+            && scope.is_background()
             && selection
                 .usable
                 .as_ref()
@@ -1158,7 +1177,7 @@ impl PostgresIndexer {
                 &self.tree_config,
                 old_cache,
             )?
-        } else if scope == IndexBuildScope::Background {
+        } else if scope.is_background() {
             return Err(if selection.manifest_probe_limit_reached {
                 background_rebuild_required(
                     "automatic indexing reached the bounded corrupt-manifest probe limit; run explicit administrative consolidation",
@@ -1276,7 +1295,7 @@ impl PostgresIndexer {
                     "injected failure after immutable tree-node insertion",
                 ));
             }
-            if scope == IndexBuildScope::Background {
+            if scope.is_background() {
                 self.tree_store.publish_manifest_with_delta_bounded(
                     &tree_record,
                     expected_publication_revision,
@@ -1326,7 +1345,7 @@ impl PostgresIndexer {
             manifest_candidates_rejected: selection.manifest_candidates_rejected,
             manifest_probe_limit_reached: selection.manifest_probe_limit_reached,
             pending_avet_projections: tree_manifest.pending_avet.len(),
-            index_work_remaining: scope == IndexBuildScope::Background,
+            index_work_remaining: scope.is_background(),
             segment_count: build.nodes.len(),
             reused: publication == TreePublishOutcome::AlreadyPublished,
             input_datoms: build.input_datoms,
@@ -2150,13 +2169,13 @@ fn build_incremental_native(
         )
     })?;
     let mut changes = BTreeMap::<Vec<u8>, CurrentTreeChange>::new();
+    let mut current_lookup = IndexEavLookup::new(store, &current_eavt.descriptor, &mut old_cache)?;
     for datom in tail.iter().flat_map(|transaction| &transaction.tx_data) {
         let key = stored_eav_key(datom)?;
         if changes.contains_key(&key) {
             continue;
         }
-        let found =
-            postgres_tree_exact_stored_eav(store, &current_eavt.descriptor, datom, &mut old_cache)?;
+        let found = current_lookup.exact(store, datom, &mut old_cache)?;
         changes.insert(
             key,
             CurrentTreeChange {
@@ -3347,69 +3366,108 @@ fn postgres_tree_seek(
     Ok(None)
 }
 
-/// Find one exact stored E/A/V inside a recovered logical-comparator group.
-/// BigDecimal scale is deliberately ordered only after T/op, so an exact
-/// representation is not necessarily the group's first physical datom.
-fn postgres_tree_exact_stored_eav(
-    store: &mut PostgresTreeStore,
-    descriptor: &crate::persistent_tree::TreeDescriptor,
-    exemplar: &Datom,
-    cache: &mut TreeNodeSet,
-) -> Result<Option<Datom>, SemanticError> {
-    let lower = eav_bound(exemplar, true);
-    let mut candidate = postgres_tree_seek(store, descriptor, &lower, cache)?;
-    while let Some(datom) = candidate {
-        if !same_logical_eav(&datom, exemplar) {
-            return Ok(None);
-        }
-        if same_eav(&datom, exemplar) {
-            return Ok(Some(datom));
-        }
-        candidate = postgres_tree_successor(store, descriptor, &datom, cache)?;
-    }
-    Ok(None)
+/// The current-EAV assessment retains one authenticated directory and leaf,
+/// not just their encoded bytes. Adjacent bulk edits must not decode an entire
+/// segment for every assertion. Memory is bounded by one shallow tree path.
+struct IndexEavLookup {
+    root: RootNode,
+    directory: Option<(usize, DirectoryNode)>,
+    leaf: Option<(usize, usize, LeafSegment)>,
 }
 
-fn postgres_tree_successor(
-    store: &mut PostgresTreeStore,
-    descriptor: &crate::persistent_tree::TreeDescriptor,
-    key: &Datom,
-    cache: &mut TreeNodeSet,
-) -> Result<Option<Datom>, SemanticError> {
-    let root = load_old_root(store, descriptor, cache)?;
-    if root.directories.is_empty() {
-        return Ok(None);
+impl IndexEavLookup {
+    fn new(
+        store: &mut PostgresTreeStore,
+        descriptor: &crate::persistent_tree::TreeDescriptor,
+        cache: &mut TreeNodeSet,
+    ) -> Result<Self, SemanticError> {
+        Ok(Self {
+            root: load_old_root(store, descriptor, cache)?,
+            directory: None,
+            leaf: None,
+        })
     }
-    let first_directory = floor_tree_child(&root.directories, key, descriptor.order);
-    for (directory_index, reference) in root.directories.iter().enumerate().skip(first_directory) {
-        let directory = load_old_directory(
-            store,
-            cache,
-            reference,
-            descriptor.order,
-            descriptor.history,
-        )?;
-        let first_leaf = if directory_index == first_directory {
-            floor_tree_child(&directory.leaves, key, descriptor.order)
-        } else {
-            0
-        };
-        for (leaf_index, leaf_ref) in directory.leaves.iter().enumerate().skip(first_leaf) {
-            let leaf = load_old_leaf(store, cache, leaf_ref, descriptor.order, descriptor.history)?;
-            let mut index = if directory_index == first_directory && leaf_index == first_leaf {
-                leaf_lower_bound(&leaf, key, descriptor.order)
+
+    /// BigDecimal scale is ordered after T/op. Seek through the complete
+    /// logical-comparator group until the exact stored representation appears.
+    fn exact(
+        &mut self,
+        store: &mut PostgresTreeStore,
+        exemplar: &Datom,
+        cache: &mut TreeNodeSet,
+    ) -> Result<Option<Datom>, SemanticError> {
+        let lower = eav_bound(exemplar, true);
+        let mut candidate = self.seek(store, &lower, false, cache)?;
+        while let Some(datom) = candidate {
+            if !same_logical_eav(&datom, exemplar) {
+                return Ok(None);
+            }
+            if same_eav(&datom, exemplar) {
+                return Ok(Some(datom));
+            }
+            candidate = self.seek(store, &datom, true, cache)?;
+        }
+        Ok(None)
+    }
+
+    fn seek(
+        &mut self,
+        store: &mut PostgresTreeStore,
+        key: &Datom,
+        strict: bool,
+        cache: &mut TreeNodeSet,
+    ) -> Result<Option<Datom>, SemanticError> {
+        if self.root.directories.is_empty() {
+            return Ok(None);
+        }
+        let order = self.root.order;
+        let history = self.root.history;
+        let first_directory = floor_tree_child(&self.root.directories, key, order);
+        for directory_index in first_directory..self.root.directories.len() {
+            if self
+                .directory
+                .as_ref()
+                .is_none_or(|(index, _)| *index != directory_index)
+            {
+                let directory = load_old_directory(
+                    store,
+                    cache,
+                    &self.root.directories[directory_index],
+                    order,
+                    history,
+                )?;
+                self.directory = Some((directory_index, directory));
+            }
+            let directory = &self.directory.as_ref().expect("loaded directory").1;
+            let first_leaf = if directory_index == first_directory {
+                floor_tree_child(&directory.leaves, key, order)
             } else {
                 0
             };
-            while let Some(datom) = leaf.datom(index) {
-                if datom.cmp_in(key, descriptor.order).is_gt() {
-                    return Ok(Some(datom));
+            for leaf_index in first_leaf..directory.leaves.len() {
+                if self.leaf.as_ref().is_none_or(|(directory, leaf, _)| {
+                    (*directory, *leaf) != (directory_index, leaf_index)
+                }) {
+                    let leaf =
+                        load_old_leaf(store, cache, &directory.leaves[leaf_index], order, history)?;
+                    self.leaf = Some((directory_index, leaf_index, leaf));
                 }
-                index += 1;
+                let leaf = &self.leaf.as_ref().expect("loaded leaf").2;
+                let mut index = if directory_index == first_directory && leaf_index == first_leaf {
+                    leaf_lower_bound(leaf, key, order)
+                } else {
+                    0
+                };
+                while let Some(datom) = leaf.datom(index) {
+                    if !strict || datom.cmp_in(key, order).is_gt() {
+                        return Ok(Some(datom));
+                    }
+                    index += 1;
+                }
             }
         }
+        Ok(None)
     }
-    Ok(None)
 }
 
 struct TreeStructuralChunk {
@@ -3827,35 +3885,58 @@ fn preload_merge_paths(
         points.push(pair.assertion.clone());
     }
     sort_dedup_datoms(&mut points, descriptor.order);
-    let mut last_directory_touched = false;
-    for point in points {
-        let directory_index = floor_tree_child(&root.directories, &point, descriptor.order);
-        let directory_ref = &root.directories[directory_index];
-        let directory = load_old_directory(
+    let selected = select_merge_leaves(&root, &points, |reference| {
+        load_old_directory(
             store,
             cache,
-            directory_ref,
+            reference,
             descriptor.order,
             descriptor.history,
-        )?;
+        )
+    })?;
+    for (directory_index, leaf_index) in selected.leaves {
+        let leaf_ref = &selected.directories[&directory_index].leaves[leaf_index];
+        load_old_leaf(store, cache, leaf_ref, descriptor.order, descriptor.history)?;
+    }
+    Ok(())
+}
+
+struct SelectedMergeLeaves {
+    directories: BTreeMap<usize, DirectoryNode>,
+    leaves: BTreeSet<(usize, usize)>,
+}
+
+/// Plan the union of touched and separator-repair paths before decoding their
+/// leaves. Cached immutable bytes still require authentication, but doing that
+/// once per insertion turned one bulk merge into repeated whole-leaf decoding.
+/// Coordinates (not just hashes) retain every distinct parent/child witness.
+fn select_merge_leaves(
+    root: &RootNode,
+    points: &[Datom],
+    mut load_directory: impl FnMut(&ChildRef) -> Result<DirectoryNode, SemanticError>,
+) -> Result<SelectedMergeLeaves, SemanticError> {
+    let mut directories = BTreeMap::new();
+    let mut leaves = BTreeSet::new();
+    for point in points {
+        let directory_index = floor_tree_child(&root.directories, point, root.order);
+        let directory = match directories.entry(directory_index) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(load_directory(&root.directories[directory_index])?)
+            }
+        };
         // The affected directory itself is re-encoded even when only one
         // interior leaf changes. Root separator repair authenticates its new
         // first and last datoms, which may live in otherwise untouched leaves.
-        if let Some(first) = directory.leaves.first() {
-            load_old_leaf(store, cache, first, descriptor.order, descriptor.history)?;
-        }
-        if let Some(last) = directory.leaves.last()
-            && directory.leaves.first() != Some(last)
-        {
-            load_old_leaf(store, cache, last, descriptor.order, descriptor.history)?;
-        }
-        let leaf_index = floor_tree_child(&directory.leaves, &point, descriptor.order);
+        leaves.insert((directory_index, 0));
+        leaves.insert((directory_index, directory.leaves.len() - 1));
+        let leaf_index = floor_tree_child(&directory.leaves, point, root.order);
         let first_leaf = leaf_index.saturating_sub(1);
         let last_leaf = leaf_index
             .saturating_add(1)
             .min(directory.leaves.len().saturating_sub(1));
-        for leaf_ref in &directory.leaves[first_leaf..=last_leaf] {
-            load_old_leaf(store, cache, leaf_ref, descriptor.order, descriptor.history)?;
+        for leaf_index in first_leaf..=last_leaf {
+            leaves.insert((directory_index, leaf_index));
         }
 
         // Rewriting a leaf or directory can change the sparse separator on
@@ -3863,50 +3944,27 @@ fn preload_merge_paths(
         // reused. `merge_tree` authenticates those boundary datoms when it
         // repairs routing keys, so preload exactly those adjacent paths too.
         if let Some(previous_index) = directory_index.checked_sub(1) {
-            let previous_ref = &root.directories[previous_index];
-            let previous = load_old_directory(
-                store,
-                cache,
-                previous_ref,
-                descriptor.order,
-                descriptor.history,
-            )?;
-            if let Some(last) = previous.leaves.last() {
-                load_old_leaf(store, cache, last, descriptor.order, descriptor.history)?;
-            }
+            let previous = match directories.entry(previous_index) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(load_directory(&root.directories[previous_index])?)
+                }
+            };
+            leaves.insert((previous_index, previous.leaves.len() - 1));
         }
-        if let Some(next_ref) = root.directories.get(directory_index.saturating_add(1)) {
-            let next =
-                load_old_directory(store, cache, next_ref, descriptor.order, descriptor.history)?;
-            if let Some(first) = next.leaves.first() {
-                load_old_leaf(store, cache, first, descriptor.order, descriptor.history)?;
+        let next_index = directory_index + 1;
+        if let Some(next_ref) = root.directories.get(next_index) {
+            if let std::collections::btree_map::Entry::Vacant(entry) = directories.entry(next_index)
+            {
+                entry.insert(load_directory(next_ref)?);
             }
-        }
-        if directory_index + 1 == root.directories.len() {
-            last_directory_touched = true;
+            leaves.insert((next_index, 0));
         }
     }
-    // A rewritten final directory can still end in an untouched old leaf.
-    // The merge authenticates it to derive the new descriptor's last key.
-    if last_directory_touched {
-        let directory_ref = root
-            .directories
-            .last()
-            .expect("non-empty root has a final directory");
-        let directory = load_old_directory(
-            store,
-            cache,
-            directory_ref,
-            descriptor.order,
-            descriptor.history,
-        )?;
-        let leaf_ref = directory
-            .leaves
-            .last()
-            .expect("validated directory has a final leaf");
-        load_old_leaf(store, cache, leaf_ref, descriptor.order, descriptor.history)?;
-    }
-    Ok(())
+    Ok(SelectedMergeLeaves {
+        directories,
+        leaves,
+    })
 }
 
 fn all_index_orders() -> [IndexOrder; 4] {
@@ -4034,14 +4092,38 @@ impl RootPinManager {
         let Some(tree) = tree else {
             return Ok(None);
         };
-        let manifest_hash = tree.manifest_hash;
+        self.acquire_manifest(tree.manifest_hash, true).map(Some)
+    }
+
+    /// `verify_authority=false` is a pre-discovery fence only. The caller
+    /// must authenticate the exact required manifest before exposing a value.
+    /// Retaining that same pin prevents an archive conversion from changing
+    /// source ownership between the scan's READ COMMITTED statements.
+    fn acquire_manifest(
+        self: &Arc<Self>,
+        manifest_hash: Digest,
+        verify_authority: bool,
+    ) -> Result<Arc<RootPin>, SemanticError> {
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)?;
         if !state.counts.contains_key(&manifest_hash)
-            && let Err(error) = acquire_root_pin(
-                state.client.as_mut().expect("root pin session was ensured"),
-                manifest_hash,
-            )
+            && let Err(error) = if verify_authority {
+                acquire_root_pin(
+                    state.client.as_mut().expect("root pin session was ensured"),
+                    manifest_hash,
+                )
+            } else {
+                state
+                    .client
+                    .as_mut()
+                    .expect("root pin session was ensured")
+                    .query_one(
+                        "SELECT pg_advisory_lock_shared($1)",
+                        &[&tree_manifest_advisory_key(&manifest_hash)],
+                    )
+                    .map(|_| ())
+                    .map_err(|error| postgres_error("peer/exact-manifest-fence", error))
+            }
         {
             // The server may have accepted the session lock before a later
             // verification statement failed. Discarding the whole session
@@ -4056,10 +4138,10 @@ impl RootPinManager {
         }
         *state.counts.entry(manifest_hash).or_default() += 1;
         drop(state);
-        Ok(Some(Arc::new(RootPin {
+        Ok(Arc::new(RootPin {
             manager: Arc::clone(self),
             manifest_hash,
-        })))
+        }))
     }
 
     fn acquire_generation(
@@ -6853,6 +6935,13 @@ impl TieredSnapshot {
         let counters = PeerLoadCounters::default();
         let mut tree_cache =
             TreeNodeCache::new(configuration.cache_entries, configuration.cache_bytes);
+        let root_pins = RootPinManager::connect(connection, &database_id)?;
+        let required_generation_pin = required_manifest
+            .map(|_| root_pins.acquire_generation(endpoint.generation))
+            .transpose()?;
+        let required_root_pin = required_manifest
+            .map(|hash| root_pins.acquire_manifest(hash, false))
+            .transpose()?;
         let (base, scan_stats) = exact_tree_selection(
             scan_latest_tree_base(
                 &mut client,
@@ -6866,13 +6955,18 @@ impl TieredSnapshot {
             required_manifest,
         )?;
 
-        // Pins close both load-versus-tree-GC and load-versus-generation-GC
-        // races before the authoritative tail is read.
-        let root_pins = RootPinManager::connect(connection, &database_id)?;
-        let generation_pin = root_pins.acquire_generation(endpoint.generation)?;
-        let root_pin = root_pins
-            .acquire(Some(&base))
-            .map_err(|error| exact_pin_error(error, required_manifest))?;
+        // Unqualified selection learns its hash during discovery. Required
+        // receipt selection already owns the fence acquired before discovery.
+        let generation_pin = match required_generation_pin {
+            Some(pin) => pin,
+            None => root_pins.acquire_generation(endpoint.generation)?,
+        };
+        let root_pin = match required_root_pin {
+            Some(pin) => Some(pin),
+            None => root_pins
+                .acquire(Some(&base))
+                .map_err(|error| exact_pin_error(error, required_manifest))?,
+        };
         let (state, tail_transactions, tail_range_reads) = build_exact_tiered_state(
             &mut client,
             ExactTieredBuild {
@@ -6973,6 +7067,12 @@ impl TieredSnapshot {
         }
         let endpoint = endpoint.validate()?;
         self.core.root_pins.ensure()?;
+        let required_generation_pin = required_manifest
+            .map(|_| self.core.root_pins.acquire_generation(endpoint.generation))
+            .transpose()?;
+        let required_root_pin = required_manifest
+            .map(|hash| self.core.root_pins.acquire_manifest(hash, false))
+            .transpose()?;
         let mut io = lock(&self.core.io);
         let scan = {
             let PeerIo { client, tree_cache } = &mut *io;
@@ -6987,15 +7087,21 @@ impl TieredSnapshot {
             )?
         };
         let (base, scan_stats) = exact_tree_selection(scan, required_manifest)?;
-        let generation_pin = self
-            .core
-            .root_pins
-            .acquire_generation(endpoint.generation)?;
-        let root_pin = self
-            .core
-            .root_pins
-            .acquire(Some(&base))
-            .map_err(|error| exact_pin_error(error, required_manifest))?;
+        let generation_pin = match required_generation_pin {
+            Some(pin) => pin,
+            None => self
+                .core
+                .root_pins
+                .acquire_generation(endpoint.generation)?,
+        };
+        let root_pin = match required_root_pin {
+            Some(pin) => Some(pin),
+            None => self
+                .core
+                .root_pins
+                .acquire(Some(&base))
+                .map_err(|error| exact_pin_error(error, required_manifest))?,
+        };
         let local_generation = self.state.generation.saturating_add(1);
         let (state, tail_transactions, tail_range_reads) = {
             let PeerIo {
@@ -8544,6 +8650,8 @@ fn scan_latest_tree_base<C: GenericClient>(
         let archive_exists: bool = client
             .query_one(
                 "SELECT EXISTS (SELECT 1 FROM atomic_request_base_archives archive \
+                  JOIN atomic_request_base_archive_completions complete \
+                    ON complete.manifest_hash = archive.manifest_hash \
                   WHERE archive.database_id = $1 AND archive.generation = $2 \
                     AND archive.basis_t <= $3 AND archive.manifest_hash = $4)",
                 &[
@@ -9951,6 +10059,54 @@ mod tests {
     }
 
     #[test]
+    fn bulk_merge_preloads_each_directory_and_leaf_coordinate_once() {
+        let datoms = (0..512)
+            .map(|index| Datom {
+                entity: crate::make_eid(crate::USER_PARTITION, index + 1).unwrap(),
+                attribute: 1_000,
+                value: Value::String("x".repeat(128)),
+                tx: crate::t_to_tx(1).unwrap(),
+                added: true,
+            })
+            .collect::<Vec<_>>();
+        let config = TreeConfig {
+            max_leaf_datoms: 16,
+            max_leaves_per_directory: 4,
+            ..TreeConfig::default()
+        };
+        let built = build_tree(IndexOrder::Eavt, true, datoms.clone(), &config).unwrap();
+        let TreeNode::Root(root) = decode_tree_node(
+            &built.descriptor.root_hash,
+            built.nodes.get(&built.descriptor.root_hash).unwrap(),
+        )
+        .unwrap() else {
+            panic!("root expected")
+        };
+        let mut directory_loads = BTreeMap::<Digest, usize>::new();
+        let selected = select_merge_leaves(&root, &datoms, |reference| {
+            *directory_loads.entry(reference.hash).or_default() += 1;
+            let TreeNode::Directory(directory) =
+                decode_tree_node(&reference.hash, built.nodes.get(&reference.hash).unwrap())?
+            else {
+                panic!("directory expected")
+            };
+            Ok(directory)
+        })
+        .unwrap();
+        assert_eq!(directory_loads.len(), root.directories.len());
+        assert!(directory_loads.values().all(|loads| *loads == 1));
+        assert_eq!(
+            selected.leaves.len(),
+            selected
+                .directories
+                .values()
+                .map(|directory| directory.leaves.len())
+                .sum::<usize>()
+        );
+        assert!(selected.leaves.len() < datoms.len() / 8);
+    }
+
+    #[test]
     fn pending_avet_direction_is_bound_to_reconstructed_schema() {
         let mut schema = Schema::new();
         let mut indexed = Attribute::new(
@@ -10361,6 +10517,158 @@ mod tests {
         .err()
         .expect("a generation without a publication must fail");
         assert_eq!(no_publication.code, "peer/exact-no-native-publication");
+    }
+
+    #[test]
+    fn exact_receipt_discovery_ignores_partial_archives_and_fences_handoff() {
+        let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
+            return;
+        };
+        crate::PostgresMigrator::connect(&connection)
+            .unwrap()
+            .migrate()
+            .unwrap();
+        let database_id = unique_database("archive_discovery_fence");
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("fence", "value"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        crate::PostgresStore::connect(&connection)
+            .unwrap()
+            .create_database(&database_id, schema)
+            .unwrap();
+        let receipt = PostgresIndexer::connect(&connection, &database_id)
+            .unwrap()
+            .consolidate()
+            .unwrap();
+        let endpoint = Peer::connect(&connection, &database_id, 64)
+            .unwrap()
+            .tiered_snapshot()
+            .endpoint();
+        let config = PostgresConnectionConfig::plaintext(&connection);
+        let mut administrator = Client::connect(&connection, NoTls).unwrap();
+        // Model the intermediate conversion state without bypassing any read
+        // authentication: the header is intentionally not a completed owner.
+        let mut staging = administrator.transaction().unwrap();
+        staging
+            .batch_execute("SET LOCAL session_replication_role=replica")
+            .unwrap();
+        staging.execute(
+            "INSERT INTO atomic_request_base_archives \
+                 (database_id,generation,archive_revision,basis_t,tx_hash,state_hash, \
+                  eidx_frontier,manifest_version,manifest_hash,payload,expected_node_count,node_set_hash) \
+             SELECT database_id,log_generation,publication_revision,basis_t,tx_hash,state_hash, \
+                    eidx_frontier,manifest_version,manifest_hash,payload,1,$2 \
+               FROM atomic_tree_manifests WHERE manifest_hash=$1",
+            &[&&receipt.manifest_hash[..], &&[0u8;32][..]],
+        ).unwrap();
+        staging.commit().unwrap();
+
+        let pins = RootPinManager::connect(&config, &database_id).unwrap();
+        let _generation = pins.acquire_generation(endpoint.generation).unwrap();
+        let fence = pins.acquire_manifest(receipt.manifest_hash, false).unwrap();
+        let key = tree_manifest_advisory_key(&receipt.manifest_hash);
+        let mut competitor = administrator.transaction().unwrap();
+        assert!(
+            !competitor
+                .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                .unwrap()
+                .get::<_, bool>(0),
+            "handoff must not pass a pre-discovery fence"
+        );
+        competitor.rollback().unwrap();
+        let (exact, _) = TieredSnapshot::open_exact_configured(
+            &config,
+            &database_id,
+            endpoint,
+            Some(receipt.manifest_hash),
+            64,
+            1024 * 1024,
+            RecentLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(exact.endpoint(), endpoint);
+        assert_eq!(exact.durable_manifest_hash(), Some(receipt.manifest_hash));
+        assert_eq!(
+            exact
+                .core
+                .load_counters
+                .snapshot()
+                .compatibility_materializations,
+            0
+        );
+        drop(fence);
+        let mut competitor = administrator.transaction().unwrap();
+        assert!(
+            !competitor
+                .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                .unwrap()
+                .get::<_, bool>(0),
+            "the returned value must retain its discovery pin"
+        );
+        competitor.rollback().unwrap();
+        drop(exact);
+
+        // A genuinely contradictory completed owner is still corruption,
+        // rather than silently preferring either copy of the same hash.
+        let mut staging = administrator.transaction().unwrap();
+        assert!(
+            staging
+                .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                .unwrap()
+                .get::<_, bool>(0)
+        );
+        staging
+            .batch_execute("SET LOCAL session_replication_role=replica")
+            .unwrap();
+        staging
+            .execute(
+                "INSERT INTO atomic_request_base_archive_completions(manifest_hash) VALUES($1)",
+                &[&&receipt.manifest_hash[..]],
+            )
+            .unwrap();
+        staging.commit().unwrap();
+        let error = TieredSnapshot::open_exact_configured(
+            &config,
+            &database_id,
+            endpoint,
+            Some(receipt.manifest_hash),
+            64,
+            1024 * 1024,
+            RecentLimits::default(),
+        )
+        .err()
+        .expect("two completed source owners must fail closed");
+        assert_eq!(error.code, "peer/exact-manifest-corrupt");
+        let mut cleanup = administrator.transaction().unwrap();
+        assert!(
+            cleanup
+                .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                .unwrap()
+                .get::<_, bool>(0),
+            "a rejected open must release its temporary fence"
+        );
+        cleanup
+            .batch_execute("SET LOCAL session_replication_role=replica")
+            .unwrap();
+        cleanup
+            .execute(
+                "DELETE FROM atomic_request_base_archive_completions WHERE manifest_hash=$1",
+                &[&&receipt.manifest_hash[..]],
+            )
+            .unwrap();
+        cleanup
+            .execute(
+                "DELETE FROM atomic_request_base_archives WHERE manifest_hash=$1",
+                &[&&receipt.manifest_hash[..]],
+            )
+            .unwrap();
+        cleanup.commit().unwrap();
     }
 
     #[test]

@@ -452,6 +452,7 @@ fn inventory_has_work(inventory: &GarbageInventory) -> bool {
         || !inventory.tree_manifest_hashes.is_empty()
         || !inventory.tree_node_hashes.is_empty()
         || !inventory.request_base_archives.is_empty()
+        || !inventory.receipt_archive_conversions.is_empty()
         || !inventory.log_generations.is_empty()
         || !inventory.semantic_commitment_roots.is_empty()
         || !inventory.semantic_commitment_node_hashes.is_empty()

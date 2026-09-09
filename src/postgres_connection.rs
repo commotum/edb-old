@@ -7,6 +7,101 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Explicit per-connection I/O settings shared by plaintext and verified TLS.
+/// `None` preserves the parameter string/driver/server default. There is no
+/// implicit production timeout: administrative and runtime roles may need
+/// different policies.
+///
+/// SQL timeouts are server-side and apply to each statement or lock wait,
+/// not the complete transaction or arbitrary Rust code. Connection timeout
+/// caps each socket/address attempt, not DNS, TLS/authentication/startup, or
+/// the complete multi-host operation. TCP controls are OS-dependent and have
+/// no effect on Unix-domain sockets; they are not a measured outage bound.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PostgresIoPolicy {
+    /// Upper bound per socket/address connection attempt, before protocol startup.
+    pub connect_timeout: Option<Duration>,
+    /// Server-side limit per SQL statement. Positive milliseconds, rounded up.
+    pub statement_timeout: Option<Duration>,
+    /// Server-side limit per lock wait. Positive milliseconds, rounded up.
+    pub lock_timeout: Option<Duration>,
+    /// OS-dependent bound on unacknowledged TCP data, not a query deadline.
+    pub tcp_user_timeout: Option<Duration>,
+    /// Enable or disable TCP keepalives; ignored for Unix-domain sockets.
+    pub keepalives: Option<bool>,
+    /// Idle time before keepalive probes. Positive seconds, rounded up.
+    pub keepalives_idle: Option<Duration>,
+    /// Interval between keepalive probes. Positive seconds, rounded up.
+    pub keepalives_interval: Option<Duration>,
+    /// Maximum unanswered keepalive probes; the OS may impose tighter limits.
+    pub keepalives_retries: Option<u32>,
+}
+
+impl PostgresIoPolicy {
+    fn validate(&self) -> Result<(), SemanticError> {
+        for (field, duration) in [
+            ("connect_timeout", self.connect_timeout),
+            ("statement_timeout", self.statement_timeout),
+            ("lock_timeout", self.lock_timeout),
+            ("tcp_user_timeout", self.tcp_user_timeout),
+            ("keepalives_idle", self.keepalives_idle),
+            ("keepalives_interval", self.keepalives_interval),
+        ] {
+            if duration.is_some_and(|duration| duration.is_zero()) {
+                return Err(invalid_io_policy(field));
+            }
+        }
+        for (field, duration) in [
+            ("statement_timeout", self.statement_timeout),
+            ("lock_timeout", self.lock_timeout),
+            ("tcp_user_timeout", self.tcp_user_timeout),
+        ] {
+            if let Some(duration) = duration {
+                policy_milliseconds(field, duration)?;
+            }
+        }
+        for (field, duration) in [
+            ("keepalives_idle", self.keepalives_idle),
+            ("keepalives_interval", self.keepalives_interval),
+        ] {
+            if let Some(duration) = duration {
+                policy_seconds(field, duration)?;
+            }
+        }
+        if self
+            .keepalives_retries
+            .is_some_and(|retries| retries == 0 || retries > i32::MAX as u32)
+        {
+            return Err(invalid_io_policy("keepalives_retries"));
+        }
+        Ok(())
+    }
+}
+
+fn invalid_io_policy(field: &'static str) -> SemanticError {
+    SemanticError::incorrect(
+        "postgres/invalid-io-policy",
+        "PostgreSQL I/O policy values must be positive and within the supported setting range",
+    )
+    .detail("field", field)
+}
+
+fn policy_milliseconds(field: &'static str, duration: Duration) -> Result<u64, SemanticError> {
+    let milliseconds = duration.as_nanos().div_ceil(1_000_000);
+    if milliseconds == 0 || milliseconds > i32::MAX as u128 {
+        return Err(invalid_io_policy(field));
+    }
+    Ok(milliseconds as u64)
+}
+
+fn policy_seconds(field: &'static str, duration: Duration) -> Result<u64, SemanticError> {
+    let seconds = duration.as_nanos().div_ceil(1_000_000_000);
+    if seconds == 0 || seconds > i32::MAX as u128 {
+        return Err(invalid_io_policy(field));
+    }
+    Ok(seconds as u64)
+}
+
 /// One concrete PostgreSQL connection policy shared by every runtime role.
 ///
 /// The legacy string constructors remain available and deliberately select
@@ -19,6 +114,7 @@ use std::time::Duration;
 pub struct PostgresConnectionConfig {
     parameters: Arc<str>,
     root_certificates: Option<Arc<[Vec<u8>]>>,
+    io_policy: PostgresIoPolicy,
 }
 
 impl fmt::Debug for PostgresConnectionConfig {
@@ -40,6 +136,7 @@ impl fmt::Debug for PostgresConnectionConfig {
                     .as_ref()
                     .map_or(0, |certificates| certificates.len()),
             )
+            .field("io_policy", &self.io_policy)
             .finish_non_exhaustive()
     }
 }
@@ -50,6 +147,7 @@ impl PostgresConnectionConfig {
         Self {
             parameters: Arc::from(parameters.into()),
             root_certificates: None,
+            io_policy: PostgresIoPolicy::default(),
         }
     }
 
@@ -58,6 +156,7 @@ impl PostgresConnectionConfig {
         Self {
             parameters: Arc::from(parameters.into()),
             root_certificates: Some(Arc::default()),
+            io_policy: PostgresIoPolicy::default(),
         }
     }
 
@@ -87,6 +186,94 @@ impl PostgresConnectionConfig {
         self.root_certificates.is_some()
     }
 
+    /// Apply explicit settings to every connection/reconnection using this
+    /// configuration. SQL settings override corresponding startup options;
+    /// unrelated options are retained. Socket connection caps only tighten
+    /// the parameter string's existing cap. Fractional SQL/TCP milliseconds
+    /// and keepalive seconds round upward, never to disabling zero.
+    pub fn with_io_policy(mut self, policy: PostgresIoPolicy) -> Result<Self, SemanticError> {
+        policy.validate()?;
+        self.io_policy = policy;
+        Ok(self)
+    }
+
+    pub fn io_policy(&self) -> &PostgresIoPolicy {
+        &self.io_policy
+    }
+
+    fn prepared_config(
+        &self,
+        operation: &'static str,
+        timeout: Option<Duration>,
+    ) -> Result<Config, SemanticError> {
+        let mut config = self.parameters.parse::<Config>().map_err(|_| {
+            SemanticError::incorrect(
+                "postgres/invalid-connection-config",
+                "invalid PostgreSQL connection configuration",
+            )
+            .detail("operation", operation)
+        })?;
+        if timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(SemanticError::new(
+                ErrorCategory::Unavailable,
+                operation,
+                "PostgreSQL connection deadline elapsed",
+            )
+            .detail("postgres_transport", "true"));
+        }
+        let cap = [
+            config.get_connect_timeout().copied(),
+            self.io_policy.connect_timeout,
+            timeout,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        if let Some(cap) = cap {
+            config.connect_timeout(cap);
+        }
+        if let Some(timeout) = self.io_policy.tcp_user_timeout {
+            config.tcp_user_timeout(Duration::from_millis(policy_milliseconds(
+                "tcp_user_timeout",
+                timeout,
+            )?));
+        }
+        if let Some(enabled) = self.io_policy.keepalives {
+            config.keepalives(enabled);
+        }
+        if let Some(duration) = self.io_policy.keepalives_idle {
+            config.keepalives_idle(Duration::from_secs(policy_seconds(
+                "keepalives_idle",
+                duration,
+            )?));
+        }
+        if let Some(duration) = self.io_policy.keepalives_interval {
+            config.keepalives_interval(Duration::from_secs(policy_seconds(
+                "keepalives_interval",
+                duration,
+            )?));
+        }
+        if let Some(retries) = self.io_policy.keepalives_retries {
+            config.keepalives_retries(retries);
+        }
+        let mut options = config.get_options().unwrap_or_default().to_owned();
+        for (name, duration) in [
+            ("statement_timeout", self.io_policy.statement_timeout),
+            ("lock_timeout", self.io_policy.lock_timeout),
+        ] {
+            if let Some(duration) = duration {
+                let milliseconds = policy_milliseconds(name, duration)?;
+                use std::fmt::Write;
+                write!(&mut options, " -c {name}={milliseconds}ms")
+                    .expect("writing into a String cannot fail");
+            }
+        }
+        if self.io_policy.statement_timeout.is_some() || self.io_policy.lock_timeout.is_some() {
+            config.options(&options);
+        }
+        Ok(config)
+    }
+
     /// Open a caller-owned PostgreSQL client under this transport policy.
     pub fn connect(&self) -> Result<Client, SemanticError> {
         self.connect_for("postgres/connect")
@@ -96,24 +283,16 @@ impl PostgresConnectionConfig {
         self.connect_for_with_timeout(operation, None)
     }
 
-    /// Open a connection whose socket-level attempt cannot exceed the caller's
-    /// remaining operation deadline. `None` preserves the configured/default
-    /// PostgreSQL timeout for constructors without an outer deadline.
+    /// Cap each socket-level attempt by the smallest configured/policy/caller
+    /// timeout. This never lengthens an existing cap. DNS, protocol startup,
+    /// authentication/TLS, and multiple address attempts are not a complete
+    /// wall-clock deadline; see [`PostgresIoPolicy`].
     pub(crate) fn connect_for_with_timeout(
         &self,
         operation: &'static str,
         timeout: Option<Duration>,
     ) -> Result<Client, SemanticError> {
-        let mut config = self.parameters.parse::<Config>().map_err(|_| {
-            SemanticError::incorrect(
-                "postgres/invalid-connection-config",
-                "invalid PostgreSQL connection configuration",
-            )
-            .detail("operation", operation)
-        })?;
-        if let Some(timeout) = timeout {
-            config.connect_timeout(timeout);
-        }
+        let mut config = self.prepared_config(operation, timeout)?;
         let Some(root_certificates) = &self.root_certificates else {
             return config
                 .connect(NoTls)
@@ -172,6 +351,146 @@ fn invalid_root_certificate() -> SemanticError {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn remaining_deadlines_never_extend_configured_connection_caps() {
+        for config in [
+            PostgresConnectionConfig::plaintext("host=localhost connect_timeout=1"),
+            PostgresConnectionConfig::require_tls("host=localhost connect_timeout=1"),
+        ] {
+            let config = config
+                .with_io_policy(PostgresIoPolicy {
+                    connect_timeout: Some(Duration::from_secs(2)),
+                    ..PostgresIoPolicy::default()
+                })
+                .unwrap();
+            for deadline in [None, Some(Duration::from_secs(10))] {
+                assert_eq!(
+                    config
+                        .prepared_config("test", deadline)
+                        .unwrap()
+                        .get_connect_timeout(),
+                    Some(&Duration::from_secs(1))
+                );
+            }
+            assert_eq!(
+                config
+                    .prepared_config("test", Some(Duration::from_millis(20)))
+                    .unwrap()
+                    .get_connect_timeout(),
+                Some(&Duration::from_millis(20))
+            );
+            let error = config
+                .prepared_config("test", Some(Duration::ZERO))
+                .unwrap_err();
+            assert_eq!(error.category, ErrorCategory::Unavailable);
+            assert_eq!(error.details["postgres_transport"], "true");
+            let config = config
+                .with_io_policy(PostgresIoPolicy {
+                    connect_timeout: Some(Duration::from_millis(30)),
+                    ..PostgresIoPolicy::default()
+                })
+                .unwrap();
+            assert_eq!(
+                config
+                    .prepared_config("test", Some(Duration::from_secs(10)))
+                    .unwrap()
+                    .get_connect_timeout(),
+                Some(&Duration::from_millis(30))
+            );
+        }
+    }
+
+    #[test]
+    fn tls_and_plaintext_prepare_identical_io_settings_and_preserve_other_options() {
+        let policy = PostgresIoPolicy {
+            connect_timeout: Some(Duration::from_millis(75)),
+            statement_timeout: Some(Duration::from_micros(500)),
+            lock_timeout: Some(Duration::from_millis(20)),
+            tcp_user_timeout: Some(Duration::from_micros(1_500)),
+            keepalives: Some(true),
+            keepalives_idle: Some(Duration::from_millis(1_500)),
+            keepalives_interval: Some(Duration::from_millis(1)),
+            keepalives_retries: Some(3),
+        };
+        for config in [
+            PostgresConnectionConfig::plaintext(
+                "host=localhost options='-c application_name=io-test -c statement_timeout=0'",
+            ),
+            PostgresConnectionConfig::require_tls(
+                "host=localhost options='-c application_name=io-test -c statement_timeout=0'",
+            ),
+        ] {
+            let config = config.with_io_policy(policy.clone()).unwrap();
+            assert_eq!(config.io_policy(), &policy);
+            let prepared = config.prepared_config("test", None).unwrap();
+            assert_eq!(
+                prepared.get_connect_timeout(),
+                Some(&Duration::from_millis(75))
+            );
+            assert_eq!(
+                prepared.get_tcp_user_timeout(),
+                Some(&Duration::from_millis(2))
+            );
+            assert!(prepared.get_keepalives());
+            assert_eq!(prepared.get_keepalives_idle(), Duration::from_secs(2));
+            assert_eq!(
+                prepared.get_keepalives_interval(),
+                Some(Duration::from_secs(1))
+            );
+            assert_eq!(prepared.get_keepalives_retries(), Some(3));
+            assert_eq!(
+                prepared.get_options(),
+                Some(
+                    "-c application_name=io-test -c statement_timeout=0 -c statement_timeout=1ms -c lock_timeout=20ms"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn io_policy_admission_and_diagnostics_do_not_expose_connection_secrets() {
+        for policy in [
+            PostgresIoPolicy {
+                connect_timeout: Some(Duration::ZERO),
+                ..PostgresIoPolicy::default()
+            },
+            PostgresIoPolicy {
+                statement_timeout: Some(Duration::MAX),
+                ..PostgresIoPolicy::default()
+            },
+            PostgresIoPolicy {
+                lock_timeout: Some(Duration::ZERO),
+                ..PostgresIoPolicy::default()
+            },
+            PostgresIoPolicy {
+                keepalives_retries: Some(0),
+                ..PostgresIoPolicy::default()
+            },
+            PostgresIoPolicy {
+                keepalives_retries: Some(u32::MAX),
+                ..PostgresIoPolicy::default()
+            },
+        ] {
+            let error =
+                PostgresConnectionConfig::plaintext("password=secret-password host=secret-host")
+                    .with_io_policy(policy)
+                    .unwrap_err();
+            assert_eq!(error.code, "postgres/invalid-io-policy");
+            assert!(!format!("{error:?}").contains("secret-"));
+        }
+        let config =
+            PostgresConnectionConfig::require_tls("password=secret-password invalid=secret-value")
+                .with_io_policy(PostgresIoPolicy {
+                    statement_timeout: Some(Duration::from_millis(100)),
+                    ..PostgresIoPolicy::default()
+                })
+                .unwrap();
+        assert!(!format!("{config:?}").contains("secret-"));
+        let error = config.prepared_config("test", None).unwrap_err();
+        assert_eq!(error.code, "postgres/invalid-connection-config");
+        assert!(!format!("{error:?}").contains("secret-"));
+    }
 
     #[test]
     fn caller_deadline_caps_an_unreachable_postgres_host() {

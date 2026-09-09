@@ -137,7 +137,7 @@ rule; full-basis transactions retain supplied result filters. History rejects.
   metadata reconciliation remains explicit Goal 5 work; measured operating
   envelope and final integrated acceptance remain Goal 6 work.
 
-## Current integration checkpoint — 2026-09-08
+## Earlier integration checkpoint — superseded by closure evidence above
 
 - Tuple suite: 9/9 live PostgreSQL 15.11 main socket, 33.97s. Operation/map
   permutations, CAS/retraction, nil/type errors, conflicting upserts, socket

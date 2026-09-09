@@ -1,6 +1,6 @@
 use crate::{
     Cardinality, Database, DatabaseValue, ErrorCategory, IndexPrefix, Keyword, QueryValue,
-    SemanticError, Value, ValueType, schema_eid_to_attr_id,
+    SemanticError, Symbol, Value, ValueType, schema_eid_to_attr_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
@@ -66,6 +66,125 @@ pub enum PullNested {
     Recursion(Option<usize>),
 }
 
+type TransformFunction = dyn Fn(&QueryValue) -> Result<QueryValue, SemanticError> + Send + Sync;
+
+/// Peer-local value transformation, applied after limits/nesting and before a
+/// default. A missing attribute is passed as `QueryValue::Nil`. Native callbacks
+/// are explicitly supplied Rust code, not dynamically resolved JVM functions.
+/// Callbacks are cooperatively controlled: cancellation/deadlines are checked
+/// before and after invocation, but cannot preempt arbitrary Rust code.
+#[derive(Clone)]
+pub enum PullTransform {
+    /// Native readable text. Strings are unquoted at the top level; collections
+    /// and maps include delimiters. This is not a JVM/wire serialization format.
+    String,
+    Keyword,
+    Symbol,
+    Name,
+    Namespace,
+    Function {
+        name: Arc<str>,
+        function: Arc<TransformFunction>,
+    },
+}
+
+impl PullTransform {
+    pub fn new(
+        name: impl Into<Arc<str>>,
+        function: impl Fn(&QueryValue) -> Result<QueryValue, SemanticError> + Send + Sync + 'static,
+    ) -> Self {
+        Self::Function {
+            name: name.into(),
+            function: Arc::new(function),
+        }
+    }
+
+    fn apply(
+        &self,
+        value: &QueryValue,
+        state: &mut PullState<'_>,
+    ) -> Result<QueryValue, SemanticError> {
+        let scalar = |value| Ok(QueryValue::Scalar(value));
+        match (self, value) {
+            (Self::Function { function, .. }, value) => function(value),
+            (Self::String, value) => scalar(Value::String(pull_value_text(value, state)?)),
+            (Self::Keyword, QueryValue::Nil) => Ok(QueryValue::Nil),
+            (Self::Keyword, QueryValue::Scalar(Value::Keyword(value))) => {
+                scalar(Value::Keyword(value.clone()))
+            }
+            (Self::Keyword, QueryValue::Scalar(Value::Symbol(value))) => {
+                scalar(Value::Keyword(Keyword {
+                    namespace: value.namespace.clone(),
+                    name: value.name.clone(),
+                }))
+            }
+            (Self::Keyword, QueryValue::Scalar(Value::String(value))) => {
+                let (namespace, name) = pull_name_parts(value.strip_prefix(':').unwrap_or(value));
+                scalar(Value::Keyword(Keyword { namespace, name }))
+            }
+            (Self::Symbol, QueryValue::Scalar(Value::Symbol(value))) => {
+                scalar(Value::Symbol(value.clone()))
+            }
+            (Self::Symbol, QueryValue::Scalar(Value::String(value))) => {
+                let (namespace, name) = pull_name_parts(value);
+                scalar(Value::Symbol(Symbol { namespace, name }))
+            }
+            (Self::Name, QueryValue::Scalar(Value::String(value))) => {
+                scalar(Value::String(value.clone()))
+            }
+            (Self::Name, QueryValue::Scalar(Value::Keyword(value))) => {
+                scalar(Value::String(value.name.clone()))
+            }
+            (Self::Name, QueryValue::Scalar(Value::Symbol(value))) => {
+                scalar(Value::String(value.name.clone()))
+            }
+            (Self::Namespace, QueryValue::Scalar(Value::Keyword(value))) => {
+                Ok(value.namespace.as_ref().map_or(QueryValue::Nil, |value| {
+                    QueryValue::Scalar(Value::String(value.clone()))
+                }))
+            }
+            (Self::Namespace, QueryValue::Scalar(Value::Symbol(value))) => {
+                Ok(value.namespace.as_ref().map_or(QueryValue::Nil, |value| {
+                    QueryValue::Scalar(Value::String(value.clone()))
+                }))
+            }
+            _ => Err(SemanticError::incorrect(
+                "pull/transform-type",
+                "pull transform does not accept this value type",
+            )),
+        }
+    }
+}
+
+impl std::fmt::Debug for PullTransform {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::String => formatter.write_str("String"),
+            Self::Keyword => formatter.write_str("Keyword"),
+            Self::Symbol => formatter.write_str("Symbol"),
+            Self::Name => formatter.write_str("Name"),
+            Self::Namespace => formatter.write_str("Namespace"),
+            Self::Function { name, .. } => formatter.debug_tuple("Function").field(name).finish(),
+        }
+    }
+}
+
+impl PartialEq for PullTransform {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Function { function: left, .. },
+                Self::Function {
+                    function: right, ..
+                },
+            ) => Arc::ptr_eq(left, right),
+            _ => std::mem::discriminant(self) == std::mem::discriminant(other),
+        }
+    }
+}
+
+impl Eq for PullTransform {}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PullAttribute {
     pub direction: PullDirection,
@@ -73,6 +192,7 @@ pub struct PullAttribute {
     pub default: Option<QueryValue>,
     pub limit: PullLimit,
     pub nested: Option<PullNested>,
+    pub transform: Option<PullTransform>,
 }
 
 impl PullAttribute {
@@ -83,6 +203,7 @@ impl PullAttribute {
             default: None,
             limit: PullLimit::Default,
             nested: None,
+            transform: None,
         }
     }
 
@@ -93,15 +214,114 @@ impl PullAttribute {
             default: None,
             limit: PullLimit::Default,
             nested: None,
+            transform: None,
         }
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Default)]
 pub struct PullPattern {
     pub wildcard: bool,
     pub attributes: Vec<PullAttribute>,
 }
+
+impl Clone for PullPattern {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Visit(&'a PullPattern),
+            Finish(&'a PullPattern, usize),
+        }
+        let mut pending = vec![Task::Visit(self)];
+        let mut results = Vec::new();
+        while let Some(task) = pending.pop() {
+            match task {
+                Task::Visit(pattern) => {
+                    let children = pattern.attributes.iter().filter_map(|attribute| {
+                        if let Some(PullNested::Pattern(child)) = &attribute.nested {
+                            Some(child.as_ref())
+                        } else {
+                            None
+                        }
+                    });
+                    pending.push(Task::Finish(pattern, children.clone().count()));
+                    pending.extend(children.rev().map(Task::Visit));
+                }
+                Task::Finish(pattern, count) => {
+                    let mut children = results.split_off(results.len() - count).into_iter();
+                    let attributes = pattern
+                        .attributes
+                        .iter()
+                        .map(|attribute| PullAttribute {
+                            direction: attribute.direction.clone(),
+                            alias: attribute.alias.clone(),
+                            default: attribute.default.clone(),
+                            limit: attribute.limit,
+                            transform: attribute.transform.clone(),
+                            nested: match &attribute.nested {
+                                Some(PullNested::Pattern(_)) => Some(PullNested::Pattern(
+                                    Box::new(children.next().expect("nested pattern result")),
+                                )),
+                                Some(PullNested::Recursion(limit)) => {
+                                    Some(PullNested::Recursion(*limit))
+                                }
+                                None => None,
+                            },
+                        })
+                        .collect();
+                    results.push(Self {
+                        wildcard: pattern.wildcard,
+                        attributes,
+                    });
+                }
+            }
+        }
+        results.pop().expect("one pattern clone")
+    }
+}
+
+impl Drop for PullPattern {
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.attributes);
+        while let Some(mut attribute) = pending.pop() {
+            if let Some(PullNested::Pattern(mut pattern)) = attribute.nested.take() {
+                pending.append(&mut pattern.attributes);
+            }
+        }
+    }
+}
+
+impl PartialEq for PullPattern {
+    fn eq(&self, other: &Self) -> bool {
+        let mut pending = vec![(self, other)];
+        while let Some((left, right)) = pending.pop() {
+            if left.wildcard != right.wildcard || left.attributes.len() != right.attributes.len() {
+                return false;
+            }
+            for (left, right) in left.attributes.iter().zip(&right.attributes) {
+                if left.direction != right.direction
+                    || left.alias != right.alias
+                    || left.default != right.default
+                    || left.limit != right.limit
+                    || left.transform != right.transform
+                {
+                    return false;
+                }
+                match (&left.nested, &right.nested) {
+                    (Some(PullNested::Pattern(left)), Some(PullNested::Pattern(right))) => {
+                        pending.push((left, right));
+                    }
+                    (Some(PullNested::Recursion(left)), Some(PullNested::Recursion(right)))
+                        if left == right => {}
+                    (None, None) => {}
+                    _ => return false,
+                }
+            }
+        }
+        true
+    }
+}
+
+impl Eq for PullPattern {}
 
 #[derive(Clone, Debug)]
 pub struct PullControl {
@@ -243,7 +463,35 @@ impl PullPattern {
 pub struct Entity {
     database: DatabaseValue,
     id: u64,
-    cache: Arc<Mutex<BTreeMap<PullDirection, Option<EntityValue>>>>,
+    cache: Option<Arc<Mutex<EntityCache>>>,
+}
+
+type EntityCache = BTreeMap<PullDirection, Option<EntityValue>>;
+
+// A touched entity owns a potentially deep tree of cached component entities.
+// Empty a uniquely owned cache before its Arc is dropped so normal destruction
+// has the same stack-safety as navigation. Shared caches are drained by their
+// final owner, without mutating another live entity's cache.
+impl Drop for Entity {
+    fn drop(&mut self) {
+        fn drain(entity: &mut Entity, pending: &mut Vec<EntityValue>) {
+            if let Some(cache) = entity.cache.take().and_then(Arc::into_inner) {
+                let cache = cache
+                    .into_inner()
+                    .unwrap_or_else(|error| error.into_inner());
+                pending.extend(cache.into_values().flatten());
+            }
+        }
+        let mut pending = Vec::new();
+        drain(self, &mut pending);
+        while let Some(value) = pending.pop() {
+            match value {
+                EntityValue::Entity(mut entity) => drain(&mut entity, &mut pending),
+                EntityValue::Collection(mut values) => pending.append(&mut values),
+                EntityValue::Scalar(_) => {}
+            }
+        }
+    }
 }
 
 /// One value reached through Datomic-style associative entity navigation.
@@ -273,7 +521,7 @@ impl Entity {
         Self {
             database,
             id,
-            cache: Arc::new(Mutex::new(BTreeMap::new())),
+            cache: Some(Arc::new(Mutex::new(BTreeMap::new()))),
         }
     }
 
@@ -305,6 +553,8 @@ impl Entity {
     ) -> Result<Option<EntityValue>, SemanticError> {
         if let Some(value) = self
             .cache
+            .as_ref()
+            .expect("live entity cache")
             .lock()
             .expect("entity cache poisoned")
             .get(direction)
@@ -313,6 +563,8 @@ impl Entity {
         }
         let value = self.read_direction(direction)?;
         self.cache
+            .as_ref()
+            .expect("live entity cache")
             .lock()
             .expect("entity cache poisoned")
             .insert(direction.clone(), value.clone());
@@ -424,25 +676,51 @@ impl Entity {
     }
 
     /// Realize every direct attribute and recursively realize component
-    /// entities. Non-component references remain lazy.
+    /// entities. Non-component references remain lazy. Cyclic component paths
+    /// stop at the revisited entity; traversal and cache destruction are iterative.
     pub fn touch(&self) -> Result<Self, SemanticError> {
-        let attributes = self
-            .database
-            .datoms_with_prefix(&IndexPrefix::Eavt {
-                entity: self.id,
-                attribute: None,
-                value: None,
-            })?
-            .iter()
-            .map(|datom| datom.attribute)
-            .collect::<BTreeSet<_>>();
-        for attribute in attributes {
-            let schema = self.database.schema().attribute(attribute)?;
-            let value = self.get(attribute)?;
-            if schema.component
-                && let Some(value) = value.as_ref()
-            {
-                touch_entity_value(value)?;
+        enum Task {
+            Entity(Entity),
+            Value(EntityValue),
+            Leave(u64),
+        }
+        let mut pending = vec![Task::Entity(self.clone())];
+        let mut path = BTreeSet::new();
+        while let Some(task) = pending.pop() {
+            match task {
+                Task::Entity(entity) => {
+                    if !path.insert(entity.id) {
+                        continue;
+                    }
+                    pending.push(Task::Leave(entity.id));
+                    let attributes = entity
+                        .database
+                        .datoms_with_prefix(&IndexPrefix::Eavt {
+                            entity: entity.id,
+                            attribute: None,
+                            value: None,
+                        })?
+                        .iter()
+                        .map(|datom| datom.attribute)
+                        .collect::<BTreeSet<_>>();
+                    for attribute in attributes {
+                        let schema = entity.database.schema().attribute(attribute)?;
+                        let value = entity.get(attribute)?;
+                        if schema.component
+                            && let Some(value) = value
+                        {
+                            pending.push(Task::Value(value));
+                        }
+                    }
+                }
+                Task::Value(EntityValue::Entity(entity)) => pending.push(Task::Entity(entity)),
+                Task::Value(EntityValue::Collection(values)) => {
+                    pending.extend(values.into_iter().rev().map(Task::Value));
+                }
+                Task::Value(EntityValue::Scalar(_)) => {}
+                Task::Leave(entity) => {
+                    path.remove(&entity);
+                }
             }
         }
         Ok(self.clone())
@@ -475,21 +753,6 @@ fn entity_navigation_value(
             entity,
         )))
     }
-}
-
-fn touch_entity_value(value: &EntityValue) -> Result<(), SemanticError> {
-    match value {
-        EntityValue::Entity(entity) => {
-            entity.touch()?;
-        }
-        EntityValue::Collection(values) => {
-            for value in values {
-                touch_entity_value(value)?;
-            }
-        }
-        EntityValue::Scalar(_) => {}
-    }
-    Ok(())
 }
 
 impl Database {
@@ -675,7 +938,8 @@ enum PullTask<'a> {
     FinishAttribute {
         start: usize,
         key: QueryValue,
-        default: Option<QueryValue>,
+        default: Option<&'a QueryValue>,
+        transform: Option<&'a PullTransform>,
         multiple: bool,
         omit_empty: bool,
     },
@@ -692,10 +956,9 @@ enum PullOutput {
 }
 
 enum PreparedAttribute {
-    Complete(Option<(QueryValue, QueryValue)>),
+    Complete(QueryValue, Option<QueryValue>),
     Values {
         key: QueryValue,
-        default: Option<QueryValue>,
         values: Vec<Value>,
         multiple: bool,
         value_type: ValueType,
@@ -802,22 +1065,25 @@ fn pull_entity(
             }
             PullTask::Attribute(entity, selector, context) => {
                 let default_selector;
-                let (selector_index, nested, selector) = match selector {
-                    Selector::Explicit(index, selector) => {
-                        (Some(index), selector.nested.as_ref(), selector)
-                    }
+                let (selector_index, nested, default, transform, selector) = match selector {
+                    Selector::Explicit(index, selector) => (
+                        Some(index),
+                        selector.nested.as_ref(),
+                        selector.default.as_ref(),
+                        selector.transform.as_ref(),
+                        selector,
+                    ),
                     Selector::Wildcard(attribute) => {
                         default_selector = PullAttribute::forward(AttributeName::Id(attribute));
-                        (None, None, &default_selector)
+                        (None, None, None, None, &default_selector)
                     }
                 };
                 match prepare_attribute(database, entity, selector, state)? {
-                    PreparedAttribute::Complete(attribute) => {
-                        output.push(PullOutput::Attribute(attribute))
-                    }
+                    PreparedAttribute::Complete(key, value) => output.push(PullOutput::Attribute(
+                        finish_attribute(key, value, default, transform, state)?,
+                    )),
                     PreparedAttribute::Values {
                         key,
-                        default,
                         values,
                         multiple,
                         value_type,
@@ -827,6 +1093,7 @@ fn pull_entity(
                             start: output.len(),
                             key,
                             default,
+                            transform,
                             multiple,
                             omit_empty: nested.is_some(),
                         });
@@ -939,6 +1206,7 @@ fn pull_entity(
                 start,
                 key,
                 default,
+                transform,
                 multiple,
                 omit_empty,
             } => {
@@ -954,11 +1222,13 @@ fn pull_entity(
                 let value = if multiple {
                     Some(QueryValue::Collection(values))
                 } else if values.is_empty() {
-                    default
+                    None
                 } else {
                     Some(values.remove(0))
                 };
-                output.push(PullOutput::Attribute(value.map(|value| (key, value))));
+                output.push(PullOutput::Attribute(finish_attribute(
+                    key, value, default, transform, state,
+                )?));
             }
             PullTask::LeaveRecursion {
                 key,
@@ -983,6 +1253,120 @@ fn pull_entity(
     }
 }
 
+fn finish_attribute(
+    key: QueryValue,
+    value: Option<QueryValue>,
+    default: Option<&QueryValue>,
+    transform: Option<&PullTransform>,
+    state: &mut PullState<'_>,
+) -> Result<Option<(QueryValue, QueryValue)>, SemanticError> {
+    let value = if let Some(transform) = transform {
+        state.check(1)?;
+        let input = value.unwrap_or(QueryValue::Nil);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transform.apply(&input, state)
+        }))
+        .map_err(|_| fault("pull/transform-panicked", "pull transform panicked"))?;
+        state.check(0)?;
+        match result? {
+            QueryValue::Nil => None,
+            value => Some(value),
+        }
+    } else {
+        value
+    };
+    Ok(value.or_else(|| default.cloned()).map(|value| (key, value)))
+}
+
+fn pull_name_parts(value: &str) -> (Option<String>, String) {
+    match value.split_once('/') {
+        Some((namespace, name)) if !namespace.is_empty() && !name.is_empty() => {
+            (Some(namespace.to_owned()), name.to_owned())
+        }
+        _ => (None, value.to_owned()),
+    }
+}
+
+fn pull_value_text(value: &QueryValue, state: &mut PullState<'_>) -> Result<String, SemanticError> {
+    enum Task<'a> {
+        Query(&'a QueryValue, bool),
+        Stored(&'a Value, bool),
+        Text(&'static str),
+    }
+    let mut pending = vec![Task::Query(value, false)];
+    let mut result = String::new();
+    while let Some(task) = pending.pop() {
+        state.check(1)?;
+        match task {
+            Task::Text(text) => result.push_str(text),
+            Task::Query(QueryValue::Nil, quoted) => {
+                if quoted {
+                    result.push_str("nil");
+                }
+            }
+            Task::Query(QueryValue::Scalar(value), quoted) => {
+                pending.push(Task::Stored(value, quoted));
+            }
+            Task::Query(QueryValue::Collection(values) | QueryValue::Tuple(values), _) => {
+                result.push('[');
+                pending.push(Task::Text("]"));
+                for (index, value) in values.iter().enumerate().rev() {
+                    pending.push(Task::Query(value, true));
+                    if index > 0 {
+                        pending.push(Task::Text(" "));
+                    }
+                }
+            }
+            Task::Query(QueryValue::Map(entries), _) => {
+                result.push('{');
+                pending.push(Task::Text("}"));
+                for (index, (key, value)) in entries.iter().enumerate().rev() {
+                    pending.push(Task::Query(value, true));
+                    pending.push(Task::Text(" "));
+                    pending.push(Task::Query(key, true));
+                    if index > 0 {
+                        pending.push(Task::Text(", "));
+                    }
+                }
+            }
+            Task::Stored(Value::Tuple(values), _) => {
+                result.push('[');
+                pending.push(Task::Text("]"));
+                for (index, value) in values.iter().enumerate().rev() {
+                    pending.push(match value {
+                        Some(value) => Task::Stored(value, true),
+                        None => Task::Text("nil"),
+                    });
+                    if index > 0 {
+                        pending.push(Task::Text(" "));
+                    }
+                }
+            }
+            Task::Stored(value, quoted) => {
+                let text = match value {
+                    Value::String(value) if quoted => format!("{value:?}"),
+                    Value::String(value) | Value::Uri(value) => value.clone(),
+                    Value::Keyword(value) => format!(":{}", value.qualified_name()),
+                    Value::Symbol(value) => value.qualified_name(),
+                    Value::Long(value) | Value::Instant(value) => value.to_string(),
+                    Value::Ref(value) => value.to_string(),
+                    Value::Bool(value) => value.to_string(),
+                    Value::Double(value) => value.to_string(),
+                    Value::Float(value) => value.to_string(),
+                    Value::BigDec(value) => value.to_string(),
+                    Value::BigInt(value) => value.to_string(),
+                    Value::Uuid(value) => format!("{value:032x}"),
+                    Value::Bytes(value) => format!("#bytes{value:?}"),
+                    Value::Function(value) => format!("#function{value:02x?}"),
+                    Value::Tuple(_) => unreachable!("tuples use iterative tasks"),
+                };
+                result.push_str(&text);
+            }
+        }
+    }
+    Ok(result)
+}
+
 fn prepare_attribute(
     database: &DatabaseValue,
     entity: u64,
@@ -999,10 +1383,10 @@ fn prepare_attribute(
             .alias
             .clone()
             .unwrap_or_else(|| keyword_key(db_id()));
-        return Ok(PreparedAttribute::Complete(Some((
+        return Ok(PreparedAttribute::Complete(
             key,
-            QueryValue::Scalar(Value::Ref(entity)),
-        ))));
+            Some(QueryValue::Scalar(Value::Ref(entity))),
+        ));
     }
     let Some(attribute) = resolve_pull_attribute(database, name)? else {
         let AttributeName::Ident(ident) = name else {
@@ -1012,9 +1396,7 @@ fn prepare_attribute(
             .alias
             .clone()
             .unwrap_or_else(|| keyword_key(reverse_ident(ident, reverse)));
-        return Ok(PreparedAttribute::Complete(
-            selector.default.clone().map(|default| (key, default)),
-        ));
+        return Ok(PreparedAttribute::Complete(key, None));
     };
     let schema = database.schema().attribute(attribute)?;
     if reverse && schema.value_type != ValueType::Ref {
@@ -1045,9 +1427,7 @@ fn prepare_attribute(
     };
     state.check(values.len())?;
     if values.is_empty() {
-        return Ok(PreparedAttribute::Complete(
-            selector.default.clone().map(|default| (key, default)),
-        ));
+        return Ok(PreparedAttribute::Complete(key, None));
     }
     let multiple = if reverse {
         !schema.component
@@ -1068,7 +1448,6 @@ fn prepare_attribute(
     }
     Ok(PreparedAttribute::Values {
         key,
-        default: selector.default.clone(),
         values,
         multiple,
         value_type: schema.value_type,

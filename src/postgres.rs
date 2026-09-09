@@ -28,8 +28,8 @@ use std::sync::{Arc, Mutex};
 #[path = "program_bindings.rs"]
 pub(crate) mod program_bindings;
 use program_bindings::{
-    SharedProgramBudget, collect_program_hashes, expand_submission_forms, persisted_predicates,
-    transaction_program_roots, validate_successor_program_bindings, visit_program_closure,
+    SharedProgramBudget, expand_submission_forms, persisted_predicates, transaction_program_roots,
+    validate_successor_program_bindings, visit_program_closure,
 };
 
 pub(crate) type SharedProgramCache = Arc<Mutex<ProgramCache>>;
@@ -241,12 +241,25 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         23,
         include_str!("../migrations/0023_authenticated_index_basis.sql"),
     ),
+    (
+        24,
+        include_str!("../migrations/0024_versioned_program_references.sql"),
+    ),
+    (
+        25,
+        include_str!("../migrations/0025_receipt_archive_conversion.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 23;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 25;
+
+/// Version of the authenticated fixed-dependency walker whose result GC may
+/// trust. Any future traversal change that adds roots must bump this version
+/// and install a corresponding fail-closed SQL migration before reuse.
+pub(crate) const PROGRAM_REFERENCE_WALKER_VERSION: i64 = 1;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -519,13 +532,25 @@ fn tree_live_set_backfill_required<C: GenericClient>(
 fn program_generation_ref_backfill_required<C: GenericClient>(
     client: &mut C,
 ) -> Result<bool, SemanticError> {
-    client
+    let row = client
         .query_opt(
-            "SELECT complete FROM atomic_program_reference_state WHERE singleton",
+            "SELECT complete, problem_code, walker_version \
+               FROM atomic_program_reference_state WHERE singleton",
             &[],
         )
-        .map(|row| row.is_none_or(|row| !row.get::<_, bool>(0)))
-        .map_err(|error| postgres_error("postgres/program-ref-repair-discovery", error))
+        .map_err(|error| postgres_error("postgres/program-ref-repair-discovery", error))?;
+    let Some(row) = row else { return Ok(true) };
+    let version: i64 = row.get(2);
+    if version > PROGRAM_REFERENCE_WALKER_VERSION {
+        return Err(SemanticError::new(
+            ErrorCategory::Unavailable,
+            "postgres/program-reference-walker-too-new",
+            "program reference evidence belongs to a newer dependency walker",
+        ));
+    }
+    Ok(!row.get::<_, bool>(0)
+        || row.get::<_, Option<String>>(1).is_some()
+        || version != PROGRAM_REFERENCE_WALKER_VERSION)
 }
 
 /// Rebuild the exact per-generation temporal program roots and their fixed
@@ -540,26 +565,66 @@ fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<
             // order so it cannot form the old generation<->membership cycle.
             "LOCK TABLE atomic_log_generations IN SHARE MODE; \
              LOCK TABLE atomic_generation_transactions IN SHARE MODE; \
-             LOCK TABLE atomic_transactions IN SHARE MODE",
+             LOCK TABLE atomic_transactions IN SHARE MODE; \
+             LOCK TABLE atomic_heads, atomic_log_generation_builds, \
+                        atomic_log_generation_activations, atomic_log_generation_retirements, \
+                        atomic_log_generation_collection_progress, \
+                        atomic_log_generation_abandonment_progress, \
+                        atomic_generation_requests, atomic_requests, \
+                        atomic_transaction_contents, atomic_programs, \
+                        atomic_program_generation_refs IN SHARE MODE",
         )
         .map_err(|error| postgres_error("postgres/program-ref-lock", error))?;
     client
         .execute(
-            "UPDATE atomic_program_reference_state \
+            "INSERT INTO atomic_program_reference_state \
+                (singleton, complete, problem_code, walker_version) \
+             VALUES (true, false, 'program/reference-rebuild', 0) \
+             ON CONFLICT (singleton) DO UPDATE \
                 SET complete = false, problem_code = 'program/reference-rebuild', \
-                    updated_at = clock_timestamp() \
-              WHERE singleton",
+                    updated_at = clock_timestamp()",
             &[],
         )
         .map_err(|error| postgres_error("postgres/program-ref-incomplete", error))?;
+    // Restore stages authenticated code and its marks before future log
+    // batches. Preserve those deliberate roots only while its builder remains
+    // unpublished and unclaimed; a GC claim must never regain drained marks.
+    // The owner->reference table locks above also serialize staging across
+    // this capture/clear boundary.
+    let mut staged = BTreeMap::<(String, u64), BTreeSet<Digest>>::new();
+    for row in client
+        .query(
+            "SELECT r.database_id, r.log_generation, r.program_hash \
+           FROM atomic_program_generation_refs r \
+           JOIN atomic_log_generation_builds b \
+             ON b.database_id=r.database_id AND b.generation=r.log_generation \
+          WHERE NOT EXISTS (SELECT 1 FROM atomic_heads h \
+                             WHERE h.database_id=b.database_id AND h.log_generation=b.generation) \
+            AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                             WHERE a.database_id=b.database_id AND a.generation=b.generation) \
+            AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_collection_progress p \
+                             WHERE p.database_id=b.database_id AND p.generation=b.generation) \
+            AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_abandonment_progress p \
+                             WHERE p.database_id=b.database_id AND p.generation=b.generation)",
+            &[],
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-staged-roots", error))?
+    {
+        let database_id: String = row.get(0);
+        let generation = pg_basis(row.get(1), "staged program reference generation")?;
+        staged
+            .entry((database_id, generation))
+            .or_default()
+            .insert(digest(row.get(2), "staged program root")?);
+    }
     client
         .execute("DELETE FROM atomic_program_generation_refs", &[])
         .map_err(|error| postgres_error("postgres/program-ref-clear", error))?;
 
     let databases = client
         .query(
-            "SELECT d.database_id, d.genesis_hash, h.log_generation \
-               FROM atomic_databases d JOIN atomic_heads h USING (database_id) \
+            "SELECT d.database_id, d.genesis_hash, h.log_generation, h.basis_t, h.tx_hash \
+               FROM atomic_databases d LEFT JOIN atomic_heads h USING (database_id) \
               ORDER BY d.database_id",
             &[],
         )
@@ -567,7 +632,18 @@ fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<
     for row in databases {
         let database_id: String = row.get(0);
         let genesis_hash = digest(row.get(1), "program-reference genesis hash")?;
-        let active_generation = pg_basis(row.get(2), "program-reference active generation")?;
+        let active_generation = row
+            .get::<_, Option<i64>>(2)
+            .map(|generation| pg_basis(generation, "program-reference active generation"))
+            .transpose()?;
+        let active_endpoint = active_generation
+            .map(|_| {
+                Ok::<_, SemanticError>((
+                    pg_basis(row.get(3), "program-reference published basis")?,
+                    digest(row.get(4), "program-reference published hash")?,
+                ))
+            })
+            .transpose()?;
         let mut generations = client
             .query(
                 "SELECT generation FROM atomic_log_generations \
@@ -580,11 +656,11 @@ fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<
             .collect::<Result<BTreeSet<_>, _>>()?;
         let has_legacy: bool = client
             .query_one(
-                "SELECT $2::bigint = 0 \
+                "SELECT COALESCE($2::bigint = 0, false) \
                         OR EXISTS (SELECT 1 FROM atomic_transactions WHERE database_id = $1) \
                         OR EXISTS (SELECT 1 FROM atomic_log_generation_retirements \
                                     WHERE database_id = $1 AND generation = 0)",
-                &[&database_id, &sql_basis(active_generation)?],
+                &[&database_id, &active_generation.map(sql_basis).transpose()?],
             )
             .map_err(|error| postgres_error("postgres/program-ref-legacy", error))?
             .get(0);
@@ -620,13 +696,44 @@ fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<
                 ),
                 None => (0, genesis_hash),
             };
-            let recovered = recover_generation_to(client, &database_id, generation, basis, hash)?;
-            let mut roots = BTreeSet::new();
-            for datom in recovered
-                .database
-                .datoms(crate::View::History, crate::IndexOrder::Eavt)
-            {
-                collect_program_hashes(&datom.value, &mut roots);
+            let partial = program_reference_partial_generation(
+                client,
+                &database_id,
+                generation,
+                active_generation,
+            )?;
+            if partial.is_none() {
+                // Active and retained readable generations still require a
+                // complete authenticated semantic replay. Typed non-readable
+                // build/GC owners may legitimately lack receipt/log prefixes.
+                // A valid surviving prefix is not proof that the published
+                // endpoint survived: anchor it before rebuilding any marks.
+                validate_program_reference_endpoint(
+                    client,
+                    &database_id,
+                    generation,
+                    if Some(generation) == active_generation {
+                        active_endpoint
+                    } else {
+                        None
+                    },
+                    basis,
+                    hash,
+                )?;
+                recover_generation_to(client, &database_id, generation, basis, hash)?;
+            }
+            let mut roots = retained_generation_program_roots(
+                client,
+                &database_id,
+                generation,
+                partial.unwrap_or(false),
+            )?;
+            if partial == Some(false) {
+                roots.extend(
+                    staged
+                        .remove(&(database_id.clone(), generation))
+                        .unwrap_or_default(),
+                );
             }
             let reachable = authenticated_program_closure(client, roots)?;
             let generation_sql = sql_basis(generation)?;
@@ -645,9 +752,10 @@ fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<
     let updated = client
         .execute(
             "UPDATE atomic_program_reference_state \
-                SET complete = true, problem_code = NULL, updated_at = clock_timestamp() \
+                SET complete = true, problem_code = NULL, walker_version = $1, \
+                    updated_at = clock_timestamp() \
               WHERE singleton",
-            &[],
+            &[&PROGRAM_REFERENCE_WALKER_VERSION],
         )
         .map_err(|error| postgres_error("postgres/program-ref-complete", error))?;
     if updated != 1 {
@@ -657,6 +765,241 @@ fn backfill_program_generation_refs<C: GenericClient>(client: &mut C) -> Result<
         ));
     }
     Ok(())
+}
+
+/// Publication authority is independent of the rows being authenticated.
+/// A retired readable generation's successor records its final basis. Newer
+/// catalogs also retain an exact semantic coordinate; old pre-v15 retired
+/// generations may lack that derived coordinate, but never the final basis.
+fn validate_program_reference_endpoint<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    active_endpoint: Option<(u64, Digest)>,
+    retained_basis: u64,
+    retained_hash: Digest,
+) -> Result<(), SemanticError> {
+    let (expected_basis, expected_hash) = if let Some((basis, hash)) = active_endpoint {
+        (basis, Some(hash))
+    } else {
+        let row = client
+            .query_opt(
+                "SELECT a.prior_generation, a.prior_basis_t, c.tx_hash \
+                   FROM atomic_log_generation_retirements r \
+                   JOIN atomic_log_generation_activations a \
+                     ON a.database_id=r.database_id AND a.generation=r.successor_generation \
+                   LEFT JOIN atomic_semantic_commitment_roots c \
+                     ON c.database_id=r.database_id AND c.generation=r.generation \
+                    AND c.basis_t=a.prior_basis_t \
+                  WHERE r.database_id=$1 AND r.generation=$2",
+                &[&database_id, &sql_basis(generation)?],
+            )
+            .map_err(|error| postgres_error("postgres/program-ref-retired-endpoint", error))?
+            .ok_or_else(|| {
+                fault(
+                    "postgres/program-ref-endpoint-authority",
+                    "readable generation has neither an active head nor retirement authority",
+                )
+            })?;
+        if pg_basis(row.get(0), "program-reference retired predecessor")? != generation {
+            return Err(fault(
+                "postgres/program-ref-endpoint-authority",
+                "successor activation does not identify its retired predecessor",
+            ));
+        }
+        (
+            pg_basis(row.get(1), "program-reference retired basis")?,
+            row.get::<_, Option<Vec<u8>>>(2)
+                .map(|hash| digest(hash, "program-reference retired hash"))
+                .transpose()?,
+        )
+    };
+    if retained_basis != expected_basis || expected_hash.is_some_and(|hash| retained_hash != hash) {
+        return Err(fault(
+            "postgres/program-ref-endpoint-mismatch",
+            "retained generation terminal does not match its published or retired endpoint",
+        ));
+    }
+    Ok(())
+}
+
+/// `Some(false)` is an unpublished builder: receipts may be absent, but its
+/// log must remain a contiguous prefix. `Some(true)` is a durable GC claim,
+/// which closes reader admission and may have drained an initial log prefix.
+fn program_reference_partial_generation<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    active_generation: Option<u64>,
+) -> Result<Option<bool>, SemanticError> {
+    let row = client
+        .query_one(
+            "SELECT EXISTS (SELECT 1 FROM atomic_log_generation_collection_progress \
+                         WHERE database_id = $1 AND generation = $2), \
+                EXISTS (SELECT 1 FROM atomic_log_generation_abandonment_progress \
+                         WHERE database_id = $1 AND generation = $2), \
+                EXISTS (SELECT 1 FROM atomic_log_generation_builds b \
+                         WHERE b.database_id = $1 AND b.generation = $2 \
+                           AND NOT EXISTS (SELECT 1 FROM atomic_log_generation_activations a \
+                                            WHERE a.database_id = b.database_id \
+                                              AND a.generation = b.generation))",
+            &[&database_id, &sql_basis(generation)?],
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-generation-state", error))?;
+    let collecting: bool = row.get(0);
+    let abandoning: bool = row.get(1);
+    let building: bool = row.get(2);
+    if Some(generation) == active_generation {
+        if collecting || abandoning {
+            return Err(fault(
+                "postgres/program-ref-active-collection",
+                "active generation has a collection claim",
+            ));
+        }
+        return Ok(None);
+    }
+    if collecting || abandoning {
+        Ok(Some(true))
+    } else if building {
+        Ok(Some(false))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Hash-authenticate every retained canonical value, independently of receipt
+/// retention and noHistory's materialized projection. This deliberately marks
+/// code in retractions and otherwise hidden log facts until their owning rows
+/// have actually been collected. It does not confer readability on a builder
+/// or a partially collected generation.
+fn retained_generation_program_roots<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    allow_missing_prefix: bool,
+) -> Result<BTreeSet<Digest>, SemanticError> {
+    let catalog = client
+        .query_one(
+            "SELECT lineage_id, genesis, genesis_hash FROM atomic_databases WHERE database_id = $1",
+            &[&database_id],
+        )
+        .map_err(|error| postgres_error("postgres/program-ref-catalog", error))?;
+    let lineage: String = catalog.get(0);
+    let genesis: Vec<u8> = catalog.get(1);
+    let genesis_hash = digest(catalog.get(2), "program reference genesis hash")?;
+    if sha256(&genesis) != genesis_hash {
+        return Err(fault(
+            "recovery/genesis-checksum-mismatch",
+            "genesis row does not match its digest",
+        ));
+    }
+    let mut roots = transaction_program_roots(&decode_genesis(&genesis)?);
+    let rows = if generation == 0 {
+        client.query(
+            "SELECT basis_t, previous_hash, tx_hash, payload, state_hash, \
+                    NULL::bytea, NULL::bigint, NULL::text, NULL::bigint, NULL::bigint, NULL::smallint \
+               FROM atomic_transactions WHERE database_id = $1 ORDER BY basis_t",
+            &[&database_id],
+        )
+    } else {
+        client.query(
+            "SELECT t.basis_t, t.previous_hash, t.tx_hash, c.payload, t.state_hash, \
+                    t.content_hash, t.eidx_frontier, c.lineage_id, c.basis_t, c.eidx_frontier, c.envelope_version \
+               FROM atomic_generation_transactions t \
+               LEFT JOIN atomic_transaction_contents c USING (content_hash) \
+              WHERE t.database_id = $1 AND t.generation = $2 ORDER BY t.basis_t",
+            &[&database_id, &sql_basis(generation)?],
+        )
+    }.map_err(|error| postgres_error("postgres/program-ref-retained-log", error))?;
+    let mut previous: Option<(u64, Digest)> = None;
+    for row in rows {
+        let basis = pg_basis(row.get(0), "program reference transaction basis")?;
+        let previous_hash = digest(row.get(1), "program reference predecessor")?;
+        let hash = digest(row.get(2), "program reference transaction hash")?;
+        if let Some((previous_basis, expected_hash)) = previous {
+            if basis != previous_basis + 1 || previous_hash != expected_hash {
+                return Err(fault(
+                    "recovery/noncontiguous-basis",
+                    "retained generation log has a gap or broken predecessor",
+                ));
+            }
+        } else if (basis != 1 && !allow_missing_prefix)
+            || (basis == 1 && previous_hash != genesis_hash)
+        {
+            return Err(fault(
+                "recovery/predecessor-mismatch",
+                "retained generation does not begin at its required genesis",
+            ));
+        }
+        let payload: Vec<u8> = row.get::<_, Option<Vec<u8>>>(3).ok_or_else(|| {
+            fault(
+                "recovery/missing-transaction-content",
+                "retained generation references missing immutable transaction content",
+            )
+        })?;
+        let datoms = if generation == 0 {
+            if transaction_hash(&payload) != hash {
+                return Err(fault(
+                    "recovery/transaction-checksum-mismatch",
+                    "retained transaction does not match its digest",
+                ));
+            }
+            let transaction = decode_transaction(&payload)?;
+            if transaction.database_id != database_id
+                || transaction.basis_t != basis
+                || transaction.previous_hash != previous_hash
+            {
+                return Err(fault(
+                    "recovery/envelope-mismatch",
+                    "retained transaction coordinates disagree with its row",
+                ));
+            }
+            transaction.tx_data
+        } else {
+            let content_hash = digest(row.get(5), "program reference content hash")?;
+            let state_hash = digest(row.get(4), "program reference state hash")?;
+            let frontier = pg_basis(row.get(6), "program reference entity frontier")?;
+            let content = LineageTransactionContent::decode(&payload)?;
+            if sha256(&payload) != content_hash {
+                return Err(fault(
+                    "recovery/content-checksum-mismatch",
+                    "retained transaction content does not match its digest",
+                ));
+            }
+            if row.get::<_, Option<String>>(7).as_deref() != Some(lineage.as_str())
+                || row.get::<_, Option<i64>>(8) != Some(sql_basis(basis)?)
+                || row.get::<_, Option<i64>>(9) != Some(sql_basis(frontier)?)
+                || row.get::<_, Option<i16>>(10) != Some(1)
+                || content.lineage_id != lineage
+                || content.basis_t != basis
+                || content.eidx_frontier != frontier
+            {
+                return Err(fault(
+                    "recovery/content-coordinate-mismatch",
+                    "retained content metadata disagrees with its membership",
+                ));
+            }
+            if generation_transaction_hash(
+                &lineage,
+                generation,
+                basis,
+                previous_hash,
+                content_hash,
+                state_hash,
+                frontier,
+            )? != hash
+            {
+                return Err(fault(
+                    "recovery/generation-membership-mismatch",
+                    "retained generation membership commitment is invalid",
+                ));
+            }
+            content.tx_data
+        };
+        roots.extend(transaction_program_roots(&datoms));
+        previous = Some((basis, hash));
+    }
+    Ok(roots)
 }
 
 fn authenticated_program_closure<C: GenericClient>(
@@ -4375,6 +4718,8 @@ pub(crate) fn postgres_error(code: &'static str, error: postgres::Error) -> Sema
     let category = match sqlstate {
         Some("23505" | "40001" | "40P01") => ErrorCategory::Conflict,
         Some("42501") => ErrorCategory::Forbidden,
+        Some("57014") => ErrorCategory::Interrupted,
+        Some("55P03") => ErrorCategory::Busy,
         Some(state) if state.starts_with("08") || matches!(state, "57P01" | "57P02" | "57P03") => {
             ErrorCategory::Unavailable
         }

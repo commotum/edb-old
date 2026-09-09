@@ -1135,7 +1135,23 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             collected = true;
             break;
         }
-        abandoned_operator.collect_garbage(Duration::ZERO).unwrap();
+        // Other parallel fixtures can hold the catalog-wide GC fence. That
+        // documented Busy response is retryable; corruption and other errors
+        // must still fail immediately, and contention must not wait forever.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            match abandoned_operator.collect_garbage(Duration::ZERO) {
+                Ok(_) => break,
+                Err(error)
+                    if error.category == ErrorCategory::Busy
+                        && error.code == "operations/semantic-gc-pinned"
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("restore cleanup failed: {error}"),
+            }
+        }
     }
     assert!(
         collected,

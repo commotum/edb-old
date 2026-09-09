@@ -32,6 +32,8 @@ mod postgres_internal_tests;
 mod program;
 mod pull;
 mod query;
+mod query_return_maps;
+mod query_value_debug;
 pub mod recent;
 mod recent_btset;
 mod schema;
@@ -73,12 +75,13 @@ pub use local_transport::{CommittedTransaction, LocalTransactionServer, LocalTra
 pub use operations::{
     ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
     LogGenerationGarbage, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC,
-    MAX_PROGRAMS_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
+    MAX_PROGRAMS_PER_GC, MAX_RECEIPT_ARCHIVE_WORK_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
     MAX_SEMANTIC_COMMITMENT_NODES_PER_GC, MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
     MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC, MAX_TREE_NODES_PER_GC,
     MAX_TREE_RETIREMENT_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics,
-    PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, RequestBaseArchiveGarbage,
-    SemanticCommitmentRootGarbage, TreeBuildIntentGarbage, TreePublicationGarbage,
+    PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, ReceiptArchiveConversion,
+    RequestBaseArchiveGarbage, SemanticCommitmentRootGarbage, TreeBuildIntentGarbage,
+    TreePublicationGarbage,
 };
 pub use peer::native_log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
 pub use peer::{
@@ -89,7 +92,7 @@ pub use postgres::{
     CapacityLimits, POSTGRES_IN_PLACE_UPGRADE_FLOOR, POSTGRES_SCHEMA_VERSION, PostgresMigrator,
     PostgresStore, ProgramCacheStats, WriterResidencyStats,
 };
-pub use postgres_connection::PostgresConnectionConfig;
+pub use postgres_connection::{PostgresConnectionConfig, PostgresIoPolicy};
 pub use program::{
     CallableRef, Instruction, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, PROGRAM_ABI_VERSION,
     Program, ProgramBudget, ProgramCall, ProgramControl, ProgramHash, ProgramInvocation,
@@ -98,13 +101,14 @@ pub use program::{
 };
 pub use pull::{
     AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl,
-    PullDirection, PullLimit, PullNested, PullPattern,
+    PullDirection, PullLimit, PullNested, PullPattern, PullTransform,
 };
 pub use query::{
     Aggregate, Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, PlanStep,
     Predicate, Query, QueryControl, QueryEngine, QueryExtensions, QueryInput, QueryOutcome,
-    QueryResult, QuerySource, QueryStats, QueryValue, Rule, Term, Variable,
+    QueryResult, QuerySequence, QuerySource, QueryStats, QueryValue, Rule, Term, Variable,
 };
+pub use query_return_maps::{ReturnMap, ReturnMapShape, ReturnMaps};
 pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use service::{
     BackgroundIndexingConfig, BackgroundIndexingFailure, BackgroundIndexingStats,

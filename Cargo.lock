@@ -23,6 +23,7 @@ dependencies = [
  "num-traits",
  "postgres",
  "postgres-native-tls",
+ "rand",
  "sha2 0.10.9",
  "socket2",
  "tempfile",

@@ -1,7 +1,7 @@
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, Keyword, Peer, PostgresStore, Schema, TransactionRequest,
-    TransactionServiceConfig, TransactionStandby, TxOp, TxValue, USER_PARTITION, Value, ValueType,
-    make_eid,
+    Attribute, Cardinality, EntityRef, Keyword, Peer, PostgresIndexer, PostgresStore, Schema,
+    TransactionRequest, TransactionServiceConfig, TransactionStandby, TxOp, TxValue,
+    USER_PARTITION, Value, ValueType, make_eid,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -52,6 +52,12 @@ fn standby_takes_over_abandoned_lease_while_peer_reads_remain_available() {
     let created = setup.create_database(&database_id, schema()).unwrap();
     let initial_basis = created.basis_t();
     drop(setup);
+    // Publish the initial native basis before simulating an unavailable
+    // writer. Ordinary peer reads never silently reconstruct an eager index.
+    PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .consolidate()
+        .unwrap();
     let mut observer = Client::connect(&connection, NoTls).unwrap();
     observer
         .execute(
@@ -77,10 +83,10 @@ fn standby_takes_over_abandoned_lease_while_peer_reads_remain_available() {
     )
     .unwrap();
     let peer = Peer::connect(&connection, &database_id, 2).unwrap();
-    let old = peer.db_compatibility();
+    let old = peer.database_value();
     assert_eq!(old.basis_t(), initial_basis);
     assert_eq!(
-        peer.db_compatibility().basis_t(),
+        peer.database_value().basis_t(),
         initial_basis,
         "reads do not require a live writer"
     );
@@ -103,11 +109,17 @@ fn standby_takes_over_abandoned_lease_while_peer_reads_remain_available() {
     assert_eq!(report.basis_t, initial_basis + 1);
     assert_eq!(old.basis_t(), initial_basis);
     assert_eq!(
-        peer.sync_to_compatibility(report.basis_t, Duration::from_secs(1))
+        peer.sync_to(report.basis_t, Duration::from_secs(1))
             .unwrap()
             .basis_t(),
         report.basis_t
     );
+    assert!(old.values(user(42), ITEM_COUNT).unwrap().is_empty());
+    assert_eq!(
+        peer.database_value().values(user(42), ITEM_COUNT).unwrap(),
+        [Value::Long(1)]
+    );
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 
     let lease = observer
         .query_one(

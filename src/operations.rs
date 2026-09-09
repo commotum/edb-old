@@ -20,6 +20,12 @@ use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+#[path = "receipt_archive.rs"]
+mod receipt_archive;
+#[path = "receipt_archive_hash.rs"]
+mod receipt_archive_hash;
+pub use receipt_archive::{MAX_RECEIPT_ARCHIVE_WORK_PER_GC, ReceiptArchiveConversion};
+
 /// Recommended grace period for routine garbage collection.
 ///
 /// Datomic's capacity guidance recommends roughly a month outside an initial
@@ -158,6 +164,9 @@ pub struct GarbageInventory {
     /// Restored exact-retry roots advanced by one bounded archive release.
     /// These roots never participate in ordinary accelerator selection.
     pub request_base_archives: Vec<RequestBaseArchiveGarbage>,
+    /// One bounded ownership-conversion phase for a live exact receipt base.
+    /// This preserves its hash while releasing the ordinary retirement prefix.
+    pub receipt_archive_conversions: Vec<ReceiptArchiveConversion>,
     /// Retired authoritative log generations advanced by exactly one durable
     /// phase. Empty phases are included because closing admission or moving
     /// the restart cursor is itself material collection progress.
@@ -237,6 +246,7 @@ struct GarbageCandidates {
     tree_manifests: Vec<Digest>,
     tree_nodes: Vec<Digest>,
     request_base_archives: Vec<RequestBaseArchiveGarbage>,
+    receipt_archive_conversion: Option<receipt_archive::ConversionPlan>,
     log_generations: Vec<LogGenerationGarbage>,
     semantic_roots: Vec<SemanticCommitmentRootGarbage>,
     semantic_nodes: Vec<Digest>,
@@ -252,6 +262,11 @@ impl GarbageCandidates {
             tree_manifest_hashes: self.tree_manifests,
             tree_node_hashes: self.tree_nodes,
             request_base_archives: self.request_base_archives,
+            receipt_archive_conversions: self
+                .receipt_archive_conversion
+                .into_iter()
+                .map(|conversion| conversion.report)
+                .collect(),
             log_generations: self.log_generations,
             semantic_commitment_roots: self.semantic_roots,
             semantic_commitment_node_hashes: self.semantic_nodes,
@@ -953,17 +968,25 @@ impl PostgresOperator {
         }
         // Drain only the frontier visible in the preview. Semantic roots
         // removed below may expose parent nodes; those become work for the
-        // next bounded call, mirroring native-tree publication work.
-        let mut collected_semantic_nodes = transaction
-            .query(
-                "SELECT node_hash \
-                   FROM atomic_collect_semantic_commitment_garbage($1, $2) AS node_hash",
-                &[&millis, &(MAX_SEMANTIC_COMMITMENT_NODES_PER_GC as i64)],
-            )
-            .map_err(|error| operation_error("operations/gc-semantic-nodes", error))?
-            .into_iter()
-            .map(|row| digest(row.get(0), "collected semantic commitment node"))
-            .collect::<Result<Vec<_>, _>>()?;
+        // next bounded call, mirroring native-tree publication work. Archive
+        // release is a separate phase: the preview deliberately excludes all
+        // semantic/log work then, including unrelated orphan nodes. Applying
+        // a fresh semantic frontier here would diverge and roll back archive
+        // progress indefinitely whenever such orphans coexist.
+        let mut collected_semantic_nodes = if candidates.request_base_archives.is_empty() {
+            transaction
+                .query(
+                    "SELECT node_hash \
+                       FROM atomic_collect_semantic_commitment_garbage($1, $2) AS node_hash",
+                    &[&millis, &(MAX_SEMANTIC_COMMITMENT_NODES_PER_GC as i64)],
+                )
+                .map_err(|error| operation_error("operations/gc-semantic-nodes", error))?
+                .into_iter()
+                .map(|row| digest(row.get(0), "collected semantic commitment node"))
+                .collect::<Result<Vec<_>, _>>()?
+        } else {
+            Vec::new()
+        };
         collected_semantic_nodes.sort_unstable();
         if collected_semantic_nodes != candidates.semantic_nodes {
             return Err(SemanticError::new(
@@ -1074,6 +1097,9 @@ impl PostgresOperator {
                     ],
                 )
                 .map_err(|error| operation_error("operations/gc-publication-work", error))?;
+        }
+        if let Some(conversion) = &candidates.receipt_archive_conversion {
+            receipt_archive::apply(&mut transaction, conversion.clone(), millis)?;
         }
         transaction
             .commit()
@@ -2742,6 +2768,26 @@ fn inspect_native_semantic_projection<C: postgres::GenericClient>(
                 }
             };
             if order == IndexOrder::Avet {
+                // Pending copies may be incomplete, and clearing ranges may
+                // legitimately retain obsolete rows. Neither permits invented
+                // information: share the backup verifier's exact prefix and
+                // authoritative-history provenance checks before excluding them.
+                if let Err(error) = crate::backup::validate_pending_avet_projection(
+                    pending_avet,
+                    &observed,
+                    source,
+                    &replayed_history,
+                    history,
+                ) {
+                    problem(
+                        problems,
+                        error.code,
+                        format!(
+                            "tree revision {revision} pending AVET history={history}: {}",
+                            error.message,
+                        ),
+                    );
+                }
                 observed.retain(|datom| {
                     !avet_projection_is_pending(pending_avet, datom.attribute, history)
                 });
@@ -2802,7 +2848,7 @@ fn native_tree_datoms(
     Ok(datoms)
 }
 
-fn derive_index_projection(
+pub(crate) fn derive_index_projection(
     database: &crate::Database,
     source: &[Datom],
     order: IndexOrder,
@@ -2832,7 +2878,7 @@ fn derive_index_projection(
     Ok(datoms)
 }
 
-fn same_stored_datoms(left: &[Datom], right: &[Datom]) -> bool {
+pub(crate) fn same_stored_datoms(left: &[Datom], right: &[Datom]) -> bool {
     left.len() == right.len()
         && left
             .iter()
@@ -2858,7 +2904,7 @@ fn same_stored_datom(left: &Datom, right: &Datom) -> bool {
 /// at a transaction boundary on or after it. This proves permission, not the
 /// exact scheduler instant: Datomic documents no precise time at which an
 /// eligible pair is physically forgotten.
-fn validate_physical_history_projection(
+pub(crate) fn validate_physical_history_projection(
     replayed: &[Datom],
     physical: &[Datom],
     through_t: u64,
@@ -3500,6 +3546,7 @@ fn garbage_candidates<C: postgres::GenericClient>(
             "semantic commitment collection is already active",
         ));
     }
+    let receipt_archive_conversion = receipt_archive::plan(client, older_than_millis)?;
     // Advance only one globally oldest root in this call. This is a contiguous
     // per-database prefix by construction; a pin on an earlier root prevents
     // a later root of that database from being selected out of order.
@@ -3543,6 +3590,8 @@ fn garbage_candidates<C: postgres::GenericClient>(
                 ) \
                 AND NOT EXISTS (SELECT 1 FROM atomic_tree_build_intents intent \
                                  WHERE intent.manifest_hash = r.manifest_hash) \
+                AND NOT EXISTS (SELECT 1 FROM atomic_receipt_archive_conversions conversion \
+                                 WHERE conversion.manifest_hash = r.manifest_hash) \
               ORDER BY r.retired_at, r.database_id, r.publication_revision \
               LIMIT 64 OFFSET $2",
                 &[&older_than_millis, &retirement_offset],
@@ -3746,12 +3795,17 @@ fn garbage_candidates<C: postgres::GenericClient>(
               WHERE c.candidate_at < clock_timestamp() - \
                                      $1::bigint * interval '1 millisecond' \
                 AND EXISTS (SELECT 1 FROM atomic_program_reference_state s \
-                            WHERE s.singleton AND s.complete AND s.problem_code IS NULL) \
+                            WHERE s.singleton AND s.complete AND s.problem_code IS NULL \
+                              AND s.walker_version = $3) \
                 AND NOT EXISTS (SELECT 1 FROM atomic_program_generation_refs r \
                                 WHERE r.program_hash = c.program_hash) \
               ORDER BY c.candidate_at, c.program_hash \
               LIMIT $2",
-            &[&older_than_millis, &(MAX_PROGRAMS_PER_GC as i64)],
+            &[
+                &older_than_millis,
+                &(MAX_PROGRAMS_PER_GC as i64),
+                &crate::postgres::PROGRAM_REFERENCE_WALKER_VERSION,
+            ],
         )
         .map_err(|error| operation_error("operations/gc-program-candidates", error))?
         .into_iter()
@@ -3810,6 +3864,7 @@ fn garbage_candidates<C: postgres::GenericClient>(
         tree_manifests,
         tree_nodes,
         request_base_archives,
+        receipt_archive_conversion,
         log_generations,
         semantic_roots,
         semantic_nodes,
@@ -3857,7 +3912,9 @@ fn request_base_archive_candidates<C: postgres::GenericClient>(
                    LEFT JOIN atomic_log_generation_abandonment_progress abandonment \
                      ON abandonment.database_id = archive.database_id \
                     AND abandonment.generation = archive.generation \
-                  WHERE NOT EXISTS ( \
+                  WHERE NOT EXISTS (SELECT 1 FROM atomic_receipt_archive_conversions conversion \
+                                     WHERE conversion.manifest_hash=archive.manifest_hash) \
+                    AND NOT EXISTS ( \
                             SELECT 1 FROM atomic_heads active \
                              WHERE active.database_id = archive.database_id \
                                AND active.log_generation = archive.generation \
@@ -4892,7 +4949,7 @@ fn inspect_temporal_program_references<C: postgres::GenericClient>(
 ) -> Result<Option<BTreeSet<Digest>>, SemanticError> {
     let state = client
         .query_opt(
-            "SELECT complete, problem_code FROM atomic_program_reference_state \
+            "SELECT complete, problem_code, walker_version FROM atomic_program_reference_state \
               WHERE singleton",
             &[],
         )
@@ -4907,6 +4964,15 @@ fn inspect_temporal_program_references<C: postgres::GenericClient>(
     };
     let complete: bool = state.get(0);
     let problem_code: Option<String> = state.get(1);
+    let walker_version: i64 = state.get(2);
+    if walker_version != crate::postgres::PROGRAM_REFERENCE_WALKER_VERSION {
+        problem(
+            problems,
+            "integrity/program-reference-walker-mismatch",
+            format!("program reference walker {walker_version} does not match this binary"),
+        );
+        return Ok(None);
+    }
     if !complete || problem_code.is_some() {
         problem(
             problems,
@@ -5163,5 +5229,35 @@ mod history_projection_tests {
             USER_ATTRIBUTE,
             true
         ));
+    }
+
+    #[test]
+    fn clearing_avet_can_retain_old_facts_but_never_invent_them() {
+        let genuine = datom(1_000, USER_ATTRIBUTE, Value::Long(7), 1, true);
+        let replayed = canonical(vec![genuine.clone()]);
+        let clearing = crate::AvetProjectionWork::new(USER_ATTRIBUTE, false);
+        assert!(clearing.clearing);
+        crate::backup::validate_pending_avet_projection(
+            &[clearing],
+            std::slice::from_ref(&genuine),
+            &[],
+            &replayed,
+            false,
+        )
+        .unwrap();
+        let mut forged = genuine;
+        forged.value = Value::Long(8);
+        assert_eq!(
+            crate::backup::validate_pending_avet_projection(
+                &[clearing],
+                &[forged],
+                &[],
+                &replayed,
+                false,
+            )
+            .unwrap_err()
+            .code,
+            "integrity/tree-pending-avet-projection-mismatch"
+        );
     }
 }

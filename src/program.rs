@@ -6,6 +6,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeSet;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::time::Instant;
 
 pub type ProgramHash = Digest;
 
@@ -634,7 +635,9 @@ impl Default for ProgramControl<'_> {
 }
 
 /// Mutable accounting shared by every initial call, recursively emitted call,
-/// predicate, and query host operation in one transaction attempt.
+/// predicate, and query host operation in one transaction attempt. Peer query
+/// extensions also use this accounting and charge their consumed fuel back to
+/// the enclosing query's shared allowance.
 ///
 /// `ProgramControl` is only configuration. Creating a new budget per
 /// invocation is intentionally a convenience for isolated evaluation; the
@@ -654,6 +657,7 @@ pub struct ProgramBudget<'a> {
     value_bytes: usize,
     calls: usize,
     cancelled: Option<&'a AtomicBool>,
+    deadline: Option<Instant>,
 }
 
 impl<'a> ProgramBudget<'a> {
@@ -683,7 +687,15 @@ impl<'a> ProgramBudget<'a> {
             value_bytes: 0,
             calls: 0,
             cancelled: control.cancelled,
+            deadline: None,
         })
+    }
+
+    /// Internal read-side bridge for an enclosing query's absolute deadline.
+    /// Transaction program controls and persisted bytecode retain their ABI.
+    pub(crate) fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
+        self.deadline = deadline;
+        self
     }
 
     pub fn remaining_fuel(&self) -> u64 {
@@ -723,10 +735,22 @@ impl<'a> ProgramBudget<'a> {
     }
 
     fn check_cancel(&self) -> Result<(), SemanticError> {
-        check_cancel(self.cancelled)
+        check_cancel(self.cancelled)?;
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Interrupted,
+                "program/timeout",
+                "program execution exceeded its enclosing query deadline",
+            ));
+        }
+        Ok(())
     }
 
     fn charge(&mut self, amount: u64) -> Result<(), SemanticError> {
+        self.check_cancel()?;
         charge(&mut self.fuel, amount)
     }
 
@@ -1251,6 +1275,21 @@ impl ProgramRuntime {
         arguments: &[Value],
         control: ProgramControl<'_>,
     ) -> Result<ProgramOutput, SemanticError> {
+        let mut budget = ProgramBudget::new(control)?;
+        self.execute_query_with_budget(program, database, arguments, &mut budget)
+    }
+
+    /// Exact-value query execution with caller-owned accounting. Reuse this
+    /// budget across invocations, or charge its consumed fuel back to the
+    /// enclosing query before constructing a subsequent invocation's budget.
+    pub fn execute_query_with_budget(
+        &self,
+        program: &Program,
+        database: &DatabaseValue,
+        arguments: &[Value],
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<ProgramOutput, SemanticError> {
+        budget.check_cancel()?;
         if program.kind != ProgramKind::Query {
             return Err(incorrect(
                 "program/not-query-program",
@@ -1262,14 +1301,14 @@ impl ProgramRuntime {
             .cloned()
             .map(RuntimeValue::Scalar)
             .collect::<Vec<_>>();
-        let mut budget = ProgramBudget::new(control)?;
         contain_runtime_panic(|| {
             program.validate()?;
+            budget.check_cancel()?;
             self.execute_validated_runtime_with_budget_inner(
                 program,
                 ProgramRead::Exact(database),
                 &arguments,
-                &mut budget,
+                budget,
             )
         })
     }

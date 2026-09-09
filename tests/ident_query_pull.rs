@@ -162,9 +162,7 @@ fn pull_resolves_attribute_aliases_and_retains_the_requested_key() {
             holder,
         )
         .unwrap();
-    let QueryValue::Map(entries) = result else {
-        panic!("pull must return a map");
-    };
+    let entries = result.into_map().expect("pull must return a map");
 
     assert_eq!(
         entries,

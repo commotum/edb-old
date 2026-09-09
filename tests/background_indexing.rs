@@ -471,7 +471,8 @@ fn incomplete_live_fold_is_finished_before_the_bounded_tail_merge() {
     let indexed = wait_for_stats(&service, |stats| {
         stats.published_basis_t == committed.basis_t
             && stats.published_revision > large.publication_revision
-            && stats.jobs_completed == 1
+            && stats.jobs_completed >= 2
+            && !stats.job_in_flight
             && stats.total_bytes == 0
     });
     assert_eq!(indexed.published_revision, large.publication_revision + 1);
@@ -491,6 +492,163 @@ fn incomplete_live_fold_is_finished_before_the_bounded_tail_merge() {
         .get(0);
     assert_eq!(old_work, 0, "predecessor fold was not sealed");
     assert!(service.client().is_available());
+    service.shutdown();
+}
+
+#[test]
+fn finishing_a_multibatch_publication_does_not_index_a_new_subthreshold_tail() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("background_finite_demand");
+    setup(&connection, &database_id);
+    let seed = TransactionService::start(service_config(
+        &connection,
+        &database_id,
+        "finite-demand-seed",
+    ))
+    .unwrap();
+    seed.client()
+        .transact(
+            TransactionRequest::new(
+                "finite-demand-populate",
+                (0..1_024)
+                    .map(|ordinal| TxOp::Add {
+                        entity: EntityRef::Temp(format!("seed-{ordinal}")),
+                        attribute: ITEM_COUNT,
+                        value: Value::Long(ordinal).into(),
+                    })
+                    .collect(),
+            ),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    seed.shutdown();
+    let large = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .with_segment_datoms(8)
+        .unwrap()
+        .consolidate()
+        .unwrap();
+    assert!(large.segment_count > 512);
+
+    let mut sql = Client::connect(&connection, NoTls).unwrap();
+    let mut pause = sql.transaction().unwrap();
+    let pending_nodes: i64 = pause
+        .query_one(
+            "SELECT count(*) FROM atomic_tree_delta_nodes WHERE manifest_hash = $1",
+            &[&&large.manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        pending_nodes > 0,
+        "publishing consumed the first 512-node fold batch"
+    );
+    // Hold just this publication's continuation row. Native activation and
+    // commits remain available, but the worker cannot finish its next batch
+    // until a below-threshold transaction has committed after selection.
+    pause
+        .query_one(
+            "SELECT delta_state FROM atomic_tree_delta_headers \
+             WHERE manifest_hash = $1 AND delta_state = 2 FOR UPDATE",
+            &[&&large.manifest_hash[..]],
+        )
+        .unwrap();
+    let limits = BackgroundIndexingConfig {
+        memory_index_threshold_bytes: 16 * 1024,
+        memory_index_max_bytes: 1024 * 1024,
+    };
+    let service = TransactionService::start_with_indexing(
+        service_config(&connection, &database_id, "finite-demand-resume"),
+        limits,
+    )
+    .unwrap();
+    wait_for_stats(&service, |stats| stats.job_in_flight);
+    let tail = service
+        .client()
+        .transact(
+            request("finite-demand-small-tail", 9),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+    assert!(tail.basis_t > large.basis_t);
+    let during_fold = service.background_indexing_stats();
+    assert!(during_fold.total_bytes > 0);
+    assert!(during_fold.total_bytes < limits.memory_index_threshold_bytes);
+    pause.commit().unwrap();
+    let finished = wait_for_stats(&service, |stats| {
+        stats.jobs_completed >= 1 && !stats.job_in_flight
+    });
+    assert_eq!(finished.jobs_started, 1);
+    assert_eq!(finished.jobs_completed, 1);
+    assert_eq!(finished.published_revision, large.publication_revision);
+    assert_eq!(finished.published_basis_t, large.basis_t);
+    assert_eq!(finished.target_basis_t, tail.basis_t);
+    assert_eq!(finished.total_transactions, 1);
+    assert_eq!(finished.jobs_failed, 0);
+    let sealed: bool = sql
+        .query_one(
+            "SELECT complete FROM atomic_tree_live_sets \
+             WHERE database_id = $1 AND manifest_hash = $2",
+            &[&database_id, &&large.manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert!(sealed);
+    for value in 10..13 {
+        service
+            .client()
+            .transact(
+                request(&format!("finite-demand-small-{value}"), value),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+    }
+    assert_eq!(service.background_indexing_stats().jobs_started, 1);
+    service.shutdown();
+
+    // Restart must neither forget retained novelty nor reinterpret a sealed
+    // publication as an unconditional request to merge that small tail.
+    let service = TransactionService::start_with_indexing(
+        service_config(&connection, &database_id, "finite-demand-second-resume"),
+        limits,
+    )
+    .unwrap();
+    let restarted = service.background_indexing_stats();
+    assert_eq!(restarted.total_transactions, 4);
+    assert_eq!(restarted.jobs_started, 0);
+    assert_eq!(restarted.published_revision, large.publication_revision);
+    let crossing = service
+        .client()
+        .transact(
+            TransactionRequest::new(
+                "finite-demand-cross-threshold",
+                (0..128)
+                    .map(|ordinal| TxOp::Add {
+                        entity: EntityRef::Temp(format!("cross-{ordinal}")),
+                        attribute: ITEM_COUNT,
+                        value: Value::Long(ordinal).into(),
+                    })
+                    .collect(),
+            ),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    let indexed = wait_for_stats(&service, |stats| {
+        stats.published_basis_t == crossing.basis_t && !stats.job_in_flight
+    });
+    assert_eq!(indexed.published_revision, large.publication_revision + 1);
+    assert_eq!(indexed.total_bytes, 0);
+    assert_eq!(indexed.jobs_failed, 0);
+    assert_eq!(
+        PostgresStore::connect(&connection)
+            .unwrap()
+            .recover(&database_id)
+            .unwrap()
+            .basis_t(),
+        crossing.basis_t
+    );
     service.shutdown();
 }
 

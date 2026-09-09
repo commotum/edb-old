@@ -417,3 +417,68 @@ fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
     writer.shutdown();
     drop(roles);
 }
+
+#[test]
+fn lazy_log_authenticates_each_payload_and_fuses_on_corruption() {
+    let Some((postgres, id)) = setup(false) else {
+        return;
+    };
+    let writer = common::start_service(&postgres, &id);
+    let first = write(&writer, "first", EntityRef::Temp("item".into()), 1, 1_000);
+    let second = write(
+        &writer,
+        "second",
+        EntityRef::Id(first.tempids["item"]),
+        2,
+        2_000,
+    );
+    writer.shutdown();
+    let peer = Peer::connect(&postgres, &id, 4).unwrap();
+    let log = peer.log();
+    let mut cursor = log
+        .tx_range(Some(TimePoint::T(first.basis_t)), None)
+        .unwrap();
+    assert_eq!(cursor.next().unwrap().unwrap().data, first.tx_data);
+    let mut client = Client::connect(&postgres, NoTls).unwrap();
+    let row = client.query_one(
+        "SELECT t.content_hash, c.payload FROM atomic_generation_transactions t JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash WHERE t.database_id = $1 AND t.generation = $2 AND t.basis_t = $3",
+        &[&id, &(log.generation() as i64), &(second.basis_t as i64)],
+    ).unwrap();
+    let hash: Vec<u8> = row.get(0);
+    let payload: Vec<u8> = row.get(1);
+    let mut changed = payload.clone();
+    let last = changed.last_mut().unwrap();
+    *last ^= 1;
+    // The selected content belongs to this unique database lineage. Restore
+    // it before assertions, even if the read unexpectedly succeeds.
+    let affected = common::with_replica_triggers_disabled(&mut client, |client| {
+        client.execute(
+            "UPDATE atomic_transaction_contents SET payload = $2 WHERE content_hash = $1",
+            &[&hash, &changed],
+        )
+    })
+    .unwrap();
+    assert_eq!(affected, 1);
+    let result = cursor.next();
+    let exhausted = cursor.next();
+    let restored = common::with_replica_triggers_disabled(&mut client, |client| {
+        client.execute(
+            "UPDATE atomic_transaction_contents SET payload = $2 WHERE content_hash = $1",
+            &[&hash, &payload],
+        )
+    })
+    .unwrap();
+    assert_eq!(restored, 1);
+    assert_eq!(
+        result.unwrap().unwrap_err().code,
+        "recovery/content-checksum-mismatch"
+    );
+    assert!(exhausted.is_none());
+    assert_eq!(cursor.stats().transactions_read, 1);
+    assert_eq!(cursor.stats().range_reads, 2);
+    assert_eq!(
+        log.tx_data(IndexTransaction::T(second.basis_t)).unwrap(),
+        Some(second.tx_data)
+    );
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
+}

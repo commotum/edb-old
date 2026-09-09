@@ -285,8 +285,11 @@ struct IndexingSeed {
     newest_observed_revision: u64,
     target_basis_t: u64,
     pending: VecDeque<Novelty>,
-    /// Latest schema-membership transaction that must reach a fully projected
-    /// root before the special indexing demand can be cleared.
+    /// A published value whose live-set/AVET work must finish independently
+    /// of the ordinary novelty threshold.
+    publication_work_through: Option<u64>,
+    /// Latest schema-membership or explicit hard-cap demand that must reach
+    /// a fully projected root before the special demand can be cleared.
     required_publication_t: u64,
     /// No usable native publication covers the newest observed revision. A
     /// positive generation's canonical basis-zero value is publishable too.
@@ -304,6 +307,7 @@ struct IndexingBacklog {
     total_datoms: u64,
     total_bytes: u64,
     indexing_through: Option<u64>,
+    publication_work_through: Option<u64>,
     required_publication_t: u64,
     needs_publication: bool,
 }
@@ -353,6 +357,7 @@ impl BackgroundIndexing {
                 total_datoms,
                 total_bytes,
                 indexing_through: None,
+                publication_work_through: seed.publication_work_through,
                 required_publication_t: seed.required_publication_t,
                 needs_publication: seed.needs_publication,
             }),
@@ -414,6 +419,10 @@ impl BackgroundIndexing {
                 false
             } else {
                 backlog.needs_publication = true;
+                // A force racing an older publication's maintenance must
+                // survive that publication's final completion signal.
+                backlog.required_publication_t =
+                    backlog.required_publication_t.max(backlog.target_basis_t);
                 true
             }
         };
@@ -434,17 +443,20 @@ impl BackgroundIndexing {
         let _ = self.sender.send(IndexCommand::Shutdown);
     }
 
-    fn begin_job(&self) -> bool {
+    fn begin_job(&self) -> Option<u64> {
         let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
         if backlog.indexing_through.is_some() {
-            return false;
+            return None;
         }
         if !should_index(&backlog, self.config) {
-            return false;
+            return None;
         }
-        backlog.indexing_through = Some(backlog.target_basis_t);
+        let through = backlog
+            .publication_work_through
+            .unwrap_or(backlog.target_basis_t);
+        backlog.indexing_through = Some(through);
         self.jobs_started.fetch_add(1, Ordering::Relaxed);
-        true
+        Some(through)
     }
 
     fn complete_job(
@@ -471,6 +483,7 @@ impl BackgroundIndexing {
             }
         }
         backlog.indexing_through = None;
+        backlog.publication_work_through = index_work_remaining.then_some(published_basis_t);
         backlog.needs_publication = index_work_remaining
             || pending_avet_projections != 0
             || backlog.published_revision < backlog.newest_observed_revision
@@ -1906,8 +1919,7 @@ fn run_index_worker(
     let mut requested = shared.indexing.should_continue();
     loop {
         if requested && shared.accepting.load(Ordering::Acquire) {
-            let began = shared.indexing.begin_job();
-            if began {
+            if let Some(through) = shared.indexing.begin_job() {
                 let mut reconnect_before_attempt = false;
                 loop {
                     match retry_index_job(
@@ -1915,7 +1927,7 @@ fn run_index_worker(
                             if reconnect_before_attempt {
                                 indexer.reconnect()?;
                             }
-                            let result = indexer.consolidate_background_once();
+                            let result = indexer.consolidate_background_once(through);
                             reconnect_before_attempt =
                                 result.as_ref().is_err_and(is_postgres_connection_error);
                             result
@@ -2232,6 +2244,10 @@ fn load_indexing_seed(
         newest_observed_revision,
         target_basis_t,
         pending,
+        publication_work_through: (pending_avet_projections != 0
+            || !live_complete
+            || live_work_pending)
+            .then_some(published_basis_t),
         required_publication_t,
         needs_publication,
     })
@@ -2420,6 +2436,7 @@ mod tests {
                 newest_observed_revision: 0,
                 target_basis_t: 0,
                 pending: VecDeque::new(),
+                publication_work_through: None,
                 required_publication_t: 0,
                 needs_publication: true,
             },
@@ -2427,7 +2444,7 @@ mod tests {
         );
 
         assert!(indexing.should_continue());
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(1, 0, 0, false);
         assert!(!indexing.should_continue());
         indexing.note_commit(
@@ -2440,7 +2457,7 @@ mod tests {
         );
         assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
         assert!(indexing.should_continue());
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(2, 1, 0, false);
         assert!(!indexing.should_continue());
         assert_eq!(indexing.stats().published_basis_t, 1);
@@ -2464,6 +2481,7 @@ mod tests {
                     datoms: 1,
                     bytes: 1_024,
                 }]),
+                publication_work_through: None,
                 required_publication_t: 0,
                 needs_publication: true,
             },
@@ -2471,7 +2489,7 @@ mod tests {
         );
 
         assert!(indexing.should_continue());
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(2, 1, 0, false);
         let repaired = indexing.stats();
         assert_eq!(repaired.published_revision, 2);
@@ -2495,6 +2513,7 @@ mod tests {
             total_datoms: 1,
             total_bytes: config.memory_index_threshold_bytes,
             indexing_through: None,
+            publication_work_through: None,
             required_publication_t: 0,
             needs_publication: false,
         };
@@ -2517,6 +2536,7 @@ mod tests {
                     datoms: 1,
                     bytes: config.memory_index_max_bytes,
                 }]),
+                publication_work_through: None,
                 required_publication_t: 0,
                 needs_publication: false,
             },
@@ -2556,6 +2576,7 @@ mod tests {
                     datoms: 1,
                     bytes: 1,
                 }]),
+                publication_work_through: None,
                 required_publication_t: 0,
                 needs_publication: false,
             },
@@ -2566,7 +2587,7 @@ mod tests {
         assert!(indexing.force_publication());
         assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
         assert!(indexing.should_continue());
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(2, 2, 0, false);
         assert_eq!(indexing.stats().total_bytes, 0);
         assert!(!indexing.should_continue());
@@ -2590,6 +2611,7 @@ mod tests {
                 newest_observed_revision: 1,
                 target_basis_t: 1,
                 pending: VecDeque::new(),
+                publication_work_through: None,
                 required_publication_t: 0,
                 needs_publication: false,
             },
@@ -2603,7 +2625,7 @@ mod tests {
             },
             true,
         );
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(2, 2, 1, true);
         let partial = indexing.stats();
         assert_eq!(partial.published_basis_t, 2);
@@ -2624,16 +2646,113 @@ mod tests {
             },
             true,
         );
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(3, 2, 0, false);
         assert!(indexing.should_continue());
 
-        assert!(indexing.begin_job());
+        assert!(indexing.begin_job().is_some());
         indexing.complete_job(4, 3, 0, false);
         let complete = indexing.stats();
         assert_eq!(complete.pending_avet_projections, 0);
         assert_eq!(complete.total_bytes, 0);
         assert!(!indexing.should_continue());
+    }
+
+    #[test]
+    fn publication_maintenance_does_not_turn_small_new_tails_into_demand() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            test_config(),
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 1,
+                published_basis_t: 1,
+                pending_avet_projections: 0,
+                newest_observed_revision: 1,
+                target_basis_t: 2,
+                pending: VecDeque::from([Novelty {
+                    basis_t: 2,
+                    datoms: 1,
+                    bytes: 1_025,
+                }]),
+                publication_work_through: None,
+                required_publication_t: 0,
+                needs_publication: false,
+            },
+            sender,
+        );
+        assert_eq!(indexing.begin_job(), Some(2));
+        indexing.complete_job(2, 2, 0, true);
+        indexing.note_commit(
+            Novelty {
+                basis_t: 3,
+                datoms: 1,
+                bytes: 100,
+            },
+            false,
+        );
+        assert_eq!(
+            indexing.begin_job(),
+            Some(2),
+            "finish only the published value"
+        );
+        indexing.complete_job(2, 2, 0, false);
+        assert_eq!(indexing.stats().total_bytes, 100);
+        assert_eq!(
+            indexing.begin_job(),
+            None,
+            "new novelty is below the threshold"
+        );
+        indexing.note_commit(
+            Novelty {
+                basis_t: 4,
+                datoms: 1,
+                bytes: 925,
+            },
+            false,
+        );
+        assert_eq!(indexing.begin_job(), Some(4));
+    }
+
+    #[test]
+    fn forced_demand_survives_an_older_publications_final_maintenance_receipt() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            test_config(),
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 2,
+                published_basis_t: 2,
+                pending_avet_projections: 0,
+                newest_observed_revision: 2,
+                target_basis_t: 2,
+                pending: VecDeque::new(),
+                publication_work_through: Some(2),
+                required_publication_t: 0,
+                needs_publication: true,
+            },
+            sender,
+        );
+        assert_eq!(indexing.begin_job(), Some(2));
+        indexing.note_commit(
+            Novelty {
+                basis_t: 3,
+                datoms: 1,
+                bytes: 100,
+            },
+            false,
+        );
+        assert!(indexing.force_publication());
+        indexing.complete_job(2, 2, 0, false);
+        assert_eq!(
+            indexing.begin_job(),
+            Some(3),
+            "the newer force remains parked"
+        );
+        indexing.complete_job(3, 3, 0, true);
+        assert_eq!(indexing.begin_job(), Some(3));
+        indexing.complete_job(3, 3, 0, false);
+        assert_eq!(indexing.begin_job(), None);
     }
 
     #[test]
@@ -2738,6 +2857,7 @@ mod tests {
                 newest_observed_revision: 1,
                 target_basis_t: 1,
                 pending: VecDeque::new(),
+                publication_work_through: None,
                 required_publication_t: 0,
                 needs_publication: false,
             },

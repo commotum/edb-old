@@ -18,6 +18,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const PAYLOAD_MAGIC: &[u8; 4] = b"ATSC";
 const PAYLOAD_VERSION: u8 = 1;
+// Bound statement payloads independently of transaction/administrative size.
+const NODE_WRITE_BATCH: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PersistentSemanticRoot {
@@ -180,6 +182,7 @@ impl StoredNode {
 
 struct NodeStore<'a, C: GenericClient> {
     client: &'a mut C,
+    load_statement: Option<postgres::Statement>,
     cache: BTreeMap<Digest, StoredNode>,
     /// Nodes constructed by this update but not yet known durable. Multiple
     /// logical changes can replace an earlier path again before a coordinate
@@ -193,6 +196,7 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
     fn new(client: &'a mut C) -> Self {
         Self {
             client,
+            load_statement: None,
             cache: BTreeMap::new(),
             pending: BTreeMap::new(),
             work: CommitmentWork::default(),
@@ -203,11 +207,25 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         if let Some(node) = self.cache.get(&hash) {
             return Ok(node.clone());
         }
+        // One touched-path update performs many point loads on the same
+        // connection. Preparing the identical SQL for each node adds protocol
+        // round trips without adding authentication or isolation.
+        if self.load_statement.is_none() {
+            self.load_statement = Some(
+                self.client
+                    .prepare(
+                        "SELECT payload, left_hash, right_hash, subtree_count \
+                   FROM atomic_semantic_commitment_nodes WHERE node_hash = $1",
+                    )
+                    .map_err(|error| pg_error("persistent-commitment/node-read", error))?,
+            );
+        }
         let row = self
             .client
             .query_opt(
-                "SELECT payload, left_hash, right_hash, subtree_count \
-                   FROM atomic_semantic_commitment_nodes WHERE node_hash = $1",
+                self.load_statement
+                    .as_ref()
+                    .expect("point-load statement prepared"),
                 &[&&hash[..]],
             )
             .map_err(|error| pg_error("persistent-commitment/node-read", error))?
@@ -324,8 +342,12 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
     fn flush_reachable(&mut self, root: Option<Digest>) -> Result<(), SemanticError> {
         let mut visiting = BTreeSet::new();
         let mut flushed = BTreeSet::new();
+        let mut batch = Vec::with_capacity(NODE_WRITE_BATCH);
         if let Some(root) = root {
-            self.flush_pending(root, &mut visiting, &mut flushed)?;
+            self.flush_pending(root, &mut visiting, &mut flushed, &mut batch)?;
+        }
+        if !batch.is_empty() {
+            self.persist_nodes(&batch)?;
         }
         Ok(())
     }
@@ -335,6 +357,7 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         hash: Digest,
         visiting: &mut BTreeSet<Digest>,
         flushed: &mut BTreeSet<Digest>,
+        batch: &mut Vec<(Digest, StoredNode)>,
     ) -> Result<(), SemanticError> {
         if flushed.contains(&hash) {
             return Ok(());
@@ -349,53 +372,107 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
             ));
         }
         if let Some(left) = node.left {
-            self.flush_pending(left, visiting, flushed)?;
+            self.flush_pending(left, visiting, flushed, batch)?;
         }
         if let Some(right) = node.right {
-            self.flush_pending(right, visiting, flushed)?;
+            self.flush_pending(right, visiting, flushed, batch)?;
         }
-        self.persist_node(hash, &node)?;
+        batch.push((hash, node));
+        if batch.len() == NODE_WRITE_BATCH {
+            self.persist_nodes(batch)?;
+            batch.clear();
+        }
         visiting.remove(&hash);
         flushed.insert(hash);
         Ok(())
     }
 
-    fn persist_node(&mut self, hash: Digest, node: &StoredNode) -> Result<(), SemanticError> {
-        let payload = node.encode();
-        let left_bytes = node.left.map(|value| value.to_vec());
-        let right_bytes = node.right.map(|value| value.to_vec());
-        let count_sql = to_sql_u64(node.count, "semantic commitment subtree count")?;
+    /// Immediate self-FKs see every row inserted by the statement. Postorder
+    /// batches ensure all children are in this batch or an earlier durable one.
+    /// Authenticate every resulting row, including ON CONFLICT reuse; batching
+    /// changes round trips, never canonical hashes or collision acceptance.
+    fn persist_nodes(&mut self, batch: &[(Digest, StoredNode)]) -> Result<(), SemanticError> {
+        let hashes = batch
+            .iter()
+            .map(|(hash, _)| hash.to_vec())
+            .collect::<Vec<_>>();
+        let payloads = batch
+            .iter()
+            .map(|(_, node)| node.encode())
+            .collect::<Vec<_>>();
+        let left = batch
+            .iter()
+            .map(|(_, node)| node.left.map(|hash| hash.to_vec()))
+            .collect::<Vec<_>>();
+        let right = batch
+            .iter()
+            .map(|(_, node)| node.right.map(|hash| hash.to_vec()))
+            .collect::<Vec<_>>();
+        let counts = batch
+            .iter()
+            .map(|(_, node)| to_sql_u64(node.count, "semantic commitment subtree count"))
+            .collect::<Result<Vec<_>, _>>()?;
+        let positions = batch
+            .iter()
+            .enumerate()
+            .map(|(position, (hash, _))| (hash.to_vec(), position))
+            .collect::<BTreeMap<_, _>>();
         let inserted = self
             .client
-            .execute(
+            .query(
                 "INSERT INTO atomic_semantic_commitment_nodes \
                      (node_hash, payload, left_hash, right_hash, subtree_count) \
-                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (node_hash) DO NOTHING",
-                &[&&hash[..], &payload, &left_bytes, &right_bytes, &count_sql],
+                 SELECT * FROM unnest($1::bytea[], $2::bytea[], $3::bytea[], \
+                                      $4::bytea[], $5::bigint[]) \
+                 ON CONFLICT (node_hash) DO NOTHING RETURNING node_hash",
+                &[&hashes, &payloads, &left, &right, &counts],
             )
             .map_err(|error| pg_error("persistent-commitment/node-insert", error))?;
-        if inserted == 1 {
-            self.work.write_sql_node(payload.len());
+        for row in inserted {
+            let hash: Vec<u8> = row.get(0);
+            let position = positions.get(&hash).ok_or_else(|| {
+                corrupt(
+                    "persistent-commitment/node-insert",
+                    "insert returned an unexpected node hash",
+                )
+            })?;
+            self.work.write_sql_node(payloads[*position].len());
         }
-        let stored = self
+        let stored_rows = self
             .client
-            .query_one(
-                "SELECT payload, left_hash, right_hash, subtree_count \
-                   FROM atomic_semantic_commitment_nodes WHERE node_hash = $1",
-                &[&&hash[..]],
+            .query(
+                "SELECT node_hash, payload, left_hash, right_hash, subtree_count \
+                   FROM atomic_semantic_commitment_nodes WHERE node_hash = ANY($1::bytea[])",
+                &[&hashes],
             )
             .map_err(|error| pg_error("persistent-commitment/node-verify", error))?;
-        let stored_payload: Vec<u8> = stored.get(0);
-        self.work.read_sql_node(stored_payload.len());
-        if stored_payload != payload
-            || optional_digest(stored.get(1), "semantic commitment left child")? != node.left
-            || optional_digest(stored.get(2), "semantic commitment right child")? != node.right
-            || from_sql_u64(stored.get(3), "semantic commitment subtree count")? != node.count
-        {
+        if stored_rows.len() != batch.len() {
             return Err(corrupt(
-                "persistent-commitment/node-collision",
-                "semantic commitment node hash resolves to different canonical content",
+                "persistent-commitment/missing-node",
+                "inserted commitment batch contains missing nodes",
             ));
+        }
+        for stored in stored_rows {
+            let hash: Vec<u8> = stored.get(0);
+            let position = positions.get(&hash).ok_or_else(|| {
+                corrupt(
+                    "persistent-commitment/node-verify",
+                    "verification returned an unexpected node hash",
+                )
+            })?;
+            let node = &batch[*position].1;
+            let stored_payload: Vec<u8> = stored.get(1);
+            self.work.read_sql_node(stored_payload.len());
+            if stored_payload != payloads[*position]
+                || optional_digest(stored.get(2), "semantic commitment left child")? != node.left
+                || optional_digest(stored.get(3), "semantic commitment right child")? != node.right
+                || from_sql_u64(stored.get(4), "semantic commitment subtree count")? != node.count
+            {
+                return Err(corrupt(
+                    "persistent-commitment/node-collision",
+                    "semantic commitment node hash resolves to different canonical content",
+                ));
+            }
         }
         Ok(())
     }
@@ -1288,6 +1365,92 @@ mod codec_tests {
             .get(0);
         assert_eq!(durable, i64::try_from(root.count()).unwrap());
 
+        drop(client);
+        drop_schema(&connection, &schema_name);
+    }
+
+    #[test]
+    fn bulk_seed_preserves_exact_nodes_and_reports_statement_cost() {
+        let Some(connection) = connection() else {
+            return;
+        };
+        let schema_name = isolated_schema(&connection, "persistent_commitment_batch");
+        crate::PostgresMigrator::from_client(client_in_schema(&connection, &schema_name))
+            .migrate()
+            .unwrap();
+        let mut client = client_in_schema(&connection, &schema_name);
+        client
+            .batch_execute(
+                "CREATE TEMP TABLE commitment_insert_calls(calls bigint NOT NULL); \
+             INSERT INTO commitment_insert_calls VALUES(0); \
+             CREATE FUNCTION pg_temp.count_commitment_insert() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN \
+                 UPDATE pg_temp.commitment_insert_calls SET calls=calls+1; \
+                 RETURN NULL; END $$; \
+             CREATE TRIGGER count_commitment_insert AFTER INSERT \
+             ON atomic_semantic_commitment_nodes FOR EACH STATEMENT \
+             EXECUTE FUNCTION pg_temp.count_commitment_insert()",
+            )
+            .unwrap();
+        let database = Database::new(test_schema())
+            .unwrap()
+            .with(
+                &(0..512)
+                    .map(|ordinal| TxOp::Add {
+                        entity: EntityRef::Temp(format!("bulk-{ordinal}")),
+                        attribute: ITEM_COUNT,
+                        value: Value::Long(ordinal).into(),
+                    })
+                    .collect::<Vec<_>>(),
+                10,
+            )
+            .unwrap()
+            .db_after;
+        let started = std::time::Instant::now();
+        let mut transaction = client.transaction().unwrap();
+        let root = persist_eager_snapshot(&mut transaction, &database).unwrap();
+        transaction.commit().unwrap();
+        let elapsed = started.elapsed();
+        assert_matches_eager(root, &database);
+        let calls: i64 = client
+            .query_one("SELECT calls FROM pg_temp.commitment_insert_calls", &[])
+            .unwrap()
+            .get(0);
+        let count: i64 = client
+            .query_one("SELECT count(*) FROM atomic_semantic_commitment_nodes", &[])
+            .unwrap()
+            .get(0);
+        assert_eq!(count as u64, root.count());
+        eprintln!("bulk semantic seed nodes={count} insert_statements={calls} elapsed={elapsed:?}");
+        assert_eq!(calls as usize, (count as usize).div_ceil(NODE_WRITE_BATCH));
+        assert_eq!(
+            persist_eager_snapshot(&mut client, &database).unwrap(),
+            root
+        );
+        let mut corrupt = client.transaction().unwrap();
+        corrupt
+            .batch_execute(
+                "ALTER TABLE atomic_semantic_commitment_nodes DISABLE TRIGGER \
+             atomic_semantic_commitment_nodes_immutable",
+            )
+            .unwrap();
+        corrupt
+            .execute(
+                "UPDATE atomic_semantic_commitment_nodes SET payload=$1 WHERE node_hash=$2",
+                &[&vec![0_u8], &&root.root.unwrap()[..]],
+            )
+            .unwrap();
+        assert_eq!(
+            persist_eager_snapshot(&mut corrupt, &database)
+                .unwrap_err()
+                .code,
+            "persistent-commitment/node-collision"
+        );
+        corrupt.rollback().unwrap();
+        assert_eq!(
+            persist_eager_snapshot(&mut client, &database).unwrap(),
+            root
+        );
         drop(client);
         drop_schema(&connection, &schema_name);
     }

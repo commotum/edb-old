@@ -7,10 +7,11 @@ preserved in `goal-archive/`; the fresh `goal-0/` is the active strategy.
 The repository contains a substantial PostgreSQL-only Rust reconstruction: a
 pure transactional kernel, durable log/recovery, peer indexes and snapshots,
 local query/pull, constrained persisted programs, a transaction service, and
-operational tooling. Remaining work centers on the native connection and report
-boundary, transaction and query/API completeness, operational verification,
-and integrated production evidence. The project is not yet claiming the full
-Goal 0 production outcome.
+operational tooling. The native connection/report and transaction stages are
+verified, as is native read composition. Integrated testing exposed and repaired
+an ordinary-GC receipt-retention defect; schema25 now preserves exact receipts
+while allowing reclamation. Goal6 is running the measured deployment/failure
+acceptance. The project is not yet claiming the full Goal0 outcome.
 
 ## Start here
 
@@ -24,9 +25,10 @@ Goal 0 production outcome.
   A1 and corrective goals 9–17 in A2. Their completion labels are historical.
 - [The corrective evidence ledger](goal-archive/A2/goal-9/EVIDENCE_LEDGER.md)
   maps prior repairs and unresolved questions to the docs and recovered source.
-- [The operational contract](goal-archive/A2/goal-15/OPERATIONS.md) and
-  [tiered writer architecture](goal-archive/A2/goal-16/ARCHITECTURE.md) retain
-  detailed implementation evidence; check them against current code.
+- [The active operational guide](docs/operations.md) describes provisioning,
+  I/O policy, backup/restore, GC and excision. The archived
+  [tiered writer architecture](goal-archive/A2/goal-16/ARCHITECTURE.md) retains
+  implementation evidence; check it against current code.
 - [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
   Transactor reference corpus.
 - [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
@@ -119,7 +121,9 @@ transaction-report queues are unbounded; consumers must drain or disable them.
 Dropping a read connection requests observer shutdown without waiting for a
 stalled storage read; its worker and pins release when that in-flight read ends.
 
-These examples establish application paths, not production or scale acceptance.
+These small examples establish application paths, not scale acceptance. Goal 6
+adds measured deployment/maintenance drivers; its plan records actual runs and
+the workload-specific operating envelope.
 
 `DatabaseValue::with(&ops, tx_instant)` now returns a pure
 `SpeculativeTransactionReport`; its `db_after` can be extended, queried, pulled,
@@ -135,7 +139,57 @@ new inputs select new grammars and (for code literals) program ABI 6. Transactio
 on filtered values use the full basis and retain the filters on their result:
 `as_of` is not a branch of the past. History values cannot transact. Controlled
 generation follows this same docs-first native rule. Goal 3's live acceptance
-is recorded in its plan; overall query, operations and scale work remains.
+is recorded in its plan; integrated load and failure acceptance remains.
+
+## Native read access
+
+Queries and Pull use exact immutable `DatabaseValue`s, including temporal and
+custom-filtered values. `QueryControl` and `PullControl` default to no arbitrary
+work/row/depth/entity ceilings; configure explicit budgets and cancellation for
+untrusted or broad reads. Pull's documented default many-valued limit remains
+1,000. Limits are cooperative logical-work policies, not hard allocator or SQL
+preemption guarantees. Result cloning, comparison, formatting and destruction,
+unlimited Pull, explicit selector ownership, and component `Entity::touch` use
+heap traversal instead of depending on Rust call-stack depth.
+
+`QueryEngine::sequence` / `DatabaseValue::query_sequence` prepare joins and
+aggregates eagerly, then defer Pull and transforms until each row is consumed.
+`remaining_rows()` counts prepared tuples without running those projections;
+a later error terminates the iterator. Distinct entity bindings remain distinct
+even when their projected maps compare equal. `PullAttribute::transform` accepts
+native conversions or a named `PullTransform::new` Rust callback; transforms see
+missing nil values, run before defaults, and propagate errors. Arbitrary local
+Rust callbacks are trusted/cooperative, not forcibly preempted.
+
+`Function::Query` embeds a native subquery. It uses the clause's exact source as
+`$` and retains named sources, sharing the enclosing resource controls.
+`Aggregate::Rand(n)` samples with replacement; `Sample(n)` returns up to n
+distinct values. This randomness is local read behavior, not persisted program
+semantics. `QueryResult::into_return_maps` gives keyword/string/symbol keys plus
+positional access; use `into_return_maps_with_arity` when empty-result arity must
+also be checked. Stack-safe `QueryValue` destruction requires the consuming
+`into_map`/`into_collection`/`into_tuple`/`into_scalar` accessors to move fields;
+borrowed enum matching is unchanged.
+
+`Connection::log()` / `Peer::log()` capture an immutable authenticated transaction
+log, independently of writer availability. `tx_range` uses inclusive start and
+exclusive end T/Tx/instant bounds; `tx_ids` and `tx_data` expose query-friendly
+transaction data without reconstructing the database. Log data retains original
+noHistory transactions. `DatabaseValue::index_pull` lazily projects AVET/AEVT
+ranges with forward/reverse bounds, offset and optional limit, using the exact
+captured database and documented reference/cardinality rules.
+
+Two specialized capabilities are deliberately absent. Fulltext would require
+an analyzed, ranked, eventually consistent search index and immutable lifecycle;
+ordinary exact string queries do not replace it. `db/fulltext` remains rejected,
+so applications needing token search must supply a separate search projection.
+Transaction hints are optional peer-to-writer segment prefetch, not transaction
+meaning. The writer has bounded read memoization but no cross-peer hint channel;
+cold submissions may incur additional index reads. Neither omission changes
+identity, transactions, history, or local Datalog/Pull semantics. See Goal 4 for
+the source-based decisions and measured read fixtures. Goal 5 records operational
+integrity evidence and the reopened GC repair; Goal 6 retains integrated
+acceptance work and the unsuccessful first large-run evidence.
 
 ## Working boundary
 

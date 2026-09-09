@@ -13,6 +13,12 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
+#[path = "query_sequence.rs"]
+mod sequence;
+pub use sequence::QuerySequence;
+#[path = "query_nested.rs"]
+mod nested;
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Variable(String);
 
@@ -101,6 +107,9 @@ pub enum Function {
     GetElse,
     GetSome,
     Extension(String),
+    /// Execute a native subquery against this clause's exact source (as `$`)
+    /// and the enclosing named sources, sharing work, deadline and cancellation.
+    Query(Box<Query>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -178,6 +187,10 @@ pub enum Aggregate {
     StandardDeviation,
     MinN(usize),
     MaxN(usize),
+    /// Select exactly n items with replacement (empty input produces none).
+    Rand(usize),
+    /// Select up to n logically distinct items without replacement.
+    Sample(usize),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,7 +242,6 @@ pub struct QuerySource {
     pub database: DatabaseValue,
 }
 
-#[derive(Debug)]
 pub enum QueryValue {
     Nil,
     Scalar(Value),
@@ -289,14 +301,9 @@ impl QueryValue {
                     }
                 }
                 (Self::Map(left), Self::Map(right)) => {
-                    let left = sorted_query_map_entries(left);
-                    let right = sorted_query_map_entries(right);
-                    pending.push(Task::Length(left.len(), right.len()));
-                    for ((left_key, left_value), (right_key, right_value)) in
-                        left.into_iter().zip(right).rev()
-                    {
-                        pending.push(Task::Values(left_value, right_value));
-                        pending.push(Task::Values(left_key, right_key));
+                    let order = compare_query_maps(left, right);
+                    if order != Ordering::Equal {
+                        return order;
                     }
                 }
                 _ => unreachable!("equal query-value ranks must have matching variants"),
@@ -438,16 +445,157 @@ impl PartialEq for QueryValue {
 
 impl Eq for QueryValue {}
 
-fn sorted_query_map_entries(
-    entries: &[(QueryValue, QueryValue)],
-) -> Vec<&(QueryValue, QueryValue)> {
-    let mut entries = entries.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left_key, left_value), (right_key, right_value)| {
-        left_key
-            .canonical_cmp(right_key)
-            .then_with(|| left_value.canonical_cmp(right_value))
-    });
-    entries
+/// Map sorting must not recursively invoke `QueryValue::canonical_cmp` on
+/// map-shaped keys or equal-key values. Build canonical child order bottom-up
+/// in a flat arena, then compare arena nodes with explicit heap tasks. The
+/// arena borrows scalar leaves and never clones or recursively owns results.
+enum CanonicalQueryNode<'a> {
+    Nil,
+    Scalar(&'a Value),
+    Tuple(Vec<usize>),
+    Collection(Vec<usize>),
+    Map(Vec<(usize, usize)>),
+}
+
+fn compare_query_maps(
+    left: &[(QueryValue, QueryValue)],
+    right: &[(QueryValue, QueryValue)],
+) -> std::cmp::Ordering {
+    if left.is_empty() || right.is_empty() {
+        return left.len().cmp(&right.len());
+    }
+    let mut arena = Vec::new();
+    let left = canonical_query_map_root(left, &mut arena);
+    let right = canonical_query_map_root(right, &mut arena);
+    compare_canonical_query_nodes(&arena, left, right)
+}
+
+fn canonical_query_map_root<'a>(
+    entries: &'a [(QueryValue, QueryValue)],
+    arena: &mut Vec<CanonicalQueryNode<'a>>,
+) -> usize {
+    enum Task<'a> {
+        Value(&'a QueryValue),
+        Tuple(usize),
+        Collection(usize),
+        Map(usize),
+    }
+    let mut pending = vec![Task::Map(entries.len())];
+    for (key, value) in entries.iter().rev() {
+        pending.push(Task::Value(value));
+        pending.push(Task::Value(key));
+    }
+    let mut completed = Vec::new();
+    while let Some(task) = pending.pop() {
+        let node = match task {
+            Task::Value(QueryValue::Nil) => CanonicalQueryNode::Nil,
+            Task::Value(QueryValue::Scalar(value)) => CanonicalQueryNode::Scalar(value),
+            Task::Value(QueryValue::Tuple(values)) => {
+                pending.push(Task::Tuple(values.len()));
+                pending.extend(values.iter().rev().map(Task::Value));
+                continue;
+            }
+            Task::Value(QueryValue::Collection(values)) => {
+                pending.push(Task::Collection(values.len()));
+                pending.extend(values.iter().rev().map(Task::Value));
+                continue;
+            }
+            Task::Value(QueryValue::Map(entries)) => {
+                pending.push(Task::Map(entries.len()));
+                for (key, value) in entries.iter().rev() {
+                    pending.push(Task::Value(value));
+                    pending.push(Task::Value(key));
+                }
+                continue;
+            }
+            Task::Tuple(count) => {
+                CanonicalQueryNode::Tuple(completed.split_off(completed.len() - count))
+            }
+            Task::Collection(count) => {
+                CanonicalQueryNode::Collection(completed.split_off(completed.len() - count))
+            }
+            Task::Map(count) => {
+                let children = completed.split_off(completed.len() - 2 * count);
+                let mut entries = children
+                    .chunks_exact(2)
+                    .map(|entry| (entry[0], entry[1]))
+                    .collect::<Vec<_>>();
+                entries.sort_by(|(left_key, left_value), (right_key, right_value)| {
+                    compare_canonical_query_nodes(arena, *left_key, *right_key).then_with(|| {
+                        compare_canonical_query_nodes(arena, *left_value, *right_value)
+                    })
+                });
+                CanonicalQueryNode::Map(entries)
+            }
+        };
+        completed.push(arena.len());
+        arena.push(node);
+    }
+    completed.pop().expect("one canonical map root")
+}
+
+fn compare_canonical_query_nodes(
+    arena: &[CanonicalQueryNode<'_>],
+    left: usize,
+    right: usize,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    enum Task {
+        Nodes(usize, usize),
+        Length(usize, usize),
+    }
+    let rank = |node: &CanonicalQueryNode<'_>| match node {
+        CanonicalQueryNode::Nil => 0_u8,
+        CanonicalQueryNode::Scalar(_) => 1,
+        CanonicalQueryNode::Tuple(_) => 2,
+        CanonicalQueryNode::Collection(_) => 3,
+        CanonicalQueryNode::Map(_) => 4,
+    };
+    let mut pending = vec![Task::Nodes(left, right)];
+    while let Some(task) = pending.pop() {
+        let (left, right) = match task {
+            Task::Length(left, right) => {
+                let order = left.cmp(&right);
+                if order != Ordering::Equal {
+                    return order;
+                }
+                continue;
+            }
+            Task::Nodes(left, right) if left == right => continue,
+            Task::Nodes(left, right) => (&arena[left], &arena[right]),
+        };
+        let order = rank(left).cmp(&rank(right));
+        if order != Ordering::Equal {
+            return order;
+        }
+        match (left, right) {
+            (CanonicalQueryNode::Nil, CanonicalQueryNode::Nil) => {}
+            (CanonicalQueryNode::Scalar(left), CanonicalQueryNode::Scalar(right)) => {
+                let order = left.index_cmp(right);
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (CanonicalQueryNode::Tuple(left), CanonicalQueryNode::Tuple(right))
+            | (CanonicalQueryNode::Collection(left), CanonicalQueryNode::Collection(right)) => {
+                pending.push(Task::Length(left.len(), right.len()));
+                for (left, right) in left.iter().zip(right).rev() {
+                    pending.push(Task::Nodes(*left, *right));
+                }
+            }
+            (CanonicalQueryNode::Map(left), CanonicalQueryNode::Map(right)) => {
+                pending.push(Task::Length(left.len(), right.len()));
+                for ((left_key, left_value), (right_key, right_value)) in
+                    left.iter().zip(right).rev()
+                {
+                    pending.push(Task::Nodes(*left_value, *right_value));
+                    pending.push(Task::Nodes(*left_key, *right_key));
+                }
+            }
+            _ => unreachable!("equal canonical query-value ranks have matching variants"),
+        }
+    }
+    Ordering::Equal
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -460,6 +608,8 @@ pub enum QueryResult {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct QueryStats {
+    /// Cooperative evaluator and projection work charged to QueryControl.
+    pub work: u64,
     pub clauses_executed: u64,
     pub datoms_examined: u64,
     pub index_seeks: u64,
@@ -515,8 +665,14 @@ type NativeQueryFunction = dyn Fn(&DatabaseValue, &[Value], &QueryControl) -> Re
 
 #[derive(Clone)]
 struct QueryExtension {
-    callback: Arc<NativeQueryFunction>,
+    implementation: QueryExtensionImplementation,
     exact_hash: Option<ProgramHash>,
+}
+
+#[derive(Clone)]
+enum QueryExtensionImplementation {
+    Local(Arc<NativeQueryFunction>),
+    Program(Arc<Program>),
 }
 
 #[derive(Clone, Default)]
@@ -542,6 +698,9 @@ impl QueryExtensions {
         Self::default()
     }
 
+    /// Register trusted peer-local Rust code. The callback receives remaining
+    /// work/time allowances; cancellation and deadline checks surround it.
+    /// Arbitrary Rust code is cooperative, not forcibly preempted or metered.
     pub fn register_local<F>(&mut self, name: impl Into<String>, function: F)
     where
         F: Fn(&DatabaseValue, &[Value], &QueryControl) -> Result<Vec<Vec<Value>>, SemanticError>
@@ -552,12 +711,14 @@ impl QueryExtensions {
         self.functions.insert(
             name.into(),
             QueryExtension {
-                callback: Arc::new(function),
+                implementation: QueryExtensionImplementation::Local(Arc::new(function)),
                 exact_hash: None,
             },
         );
     }
 
+    /// Register controlled native bytecode. Interpreter fuel is charged to
+    /// the enclosing query, and siblings share its original absolute deadline.
     pub fn register_program(
         &mut self,
         name: impl Into<String>,
@@ -570,30 +731,11 @@ impl QueryExtensions {
                 "persisted query extension must have query program kind",
             ));
         }
+        program.validate()?;
         self.functions.insert(
             name.into(),
             QueryExtension {
-                callback: Arc::new(move |database, arguments, control| {
-                    let program_control = ProgramControl {
-                        fuel: control.max_work as u64,
-                        max_stack: control.max_intermediate_rows,
-                        max_value_bytes: control.max_work,
-                        max_collection_items: control.max_intermediate_rows,
-                        max_forms: control.max_result_rows,
-                        max_output: control.max_work,
-                        max_calls: 1,
-                        cancelled: Some(control.cancel.as_ref()),
-                    };
-                    match ProgramRuntime.execute_query(
-                        &program,
-                        database,
-                        arguments,
-                        program_control,
-                    )? {
-                        ProgramOutput::Query(rows) => Ok(rows),
-                        _ => unreachable!("program kind was checked"),
-                    }
-                }),
+                implementation: QueryExtensionImplementation::Program(Arc::new(program)),
                 exact_hash: Some(hash),
             },
         );
@@ -606,15 +748,58 @@ impl QueryExtensions {
         database: &DatabaseValue,
         arguments: &[Value],
         control: &QueryControl,
-    ) -> Result<Vec<Vec<Value>>, SemanticError> {
-        let extension = self.functions.get(name).ok_or_else(|| {
-            SemanticError::incorrect(
-                "query/unknown-extension",
-                format!("unknown query extension {name}"),
-            )
-        })?;
-        catch_unwind(AssertUnwindSafe(|| {
-            (extension.callback)(database, arguments, control)
+        deadline: Option<Instant>,
+    ) -> (Result<Vec<Vec<Value>>, SemanticError>, usize) {
+        let mut work = 0;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let extension = self.functions.get(name).ok_or_else(|| {
+                SemanticError::incorrect(
+                    "query/unknown-extension",
+                    format!("unknown query extension {name}"),
+                )
+            })?;
+            match &extension.implementation {
+                QueryExtensionImplementation::Local(callback) => {
+                    callback(database, arguments, control)
+                }
+                QueryExtensionImplementation::Program(program) => {
+                    if control.max_work == 0 {
+                        return Err(resource(
+                            "query/work-limit",
+                            "query has no remaining program fuel",
+                        ));
+                    }
+                    let fuel = u64::try_from(control.max_work).unwrap_or(u64::MAX);
+                    let program_control = ProgramControl {
+                        fuel,
+                        max_stack: control.max_intermediate_rows,
+                        max_value_bytes: control.max_work,
+                        max_collection_items: control.max_intermediate_rows,
+                        max_forms: control.max_result_rows,
+                        max_output: control.max_work,
+                        max_calls: 1,
+                        cancelled: Some(control.cancel.as_ref()),
+                    };
+                    let mut budget =
+                        crate::ProgramBudget::new(program_control)?.with_deadline(deadline);
+                    let result = ProgramRuntime.execute_query_with_budget(
+                        program,
+                        database,
+                        arguments,
+                        &mut budget,
+                    );
+                    work = usize::try_from(fuel - budget.remaining_fuel()).unwrap_or(usize::MAX);
+                    match result {
+                        Ok(ProgramOutput::Query(rows)) => Ok(rows),
+                        Ok(_) => unreachable!("program kind was checked"),
+                        Err(error) if error.code == "program/fuel-exhausted" => Err(resource(
+                            "query/work-limit",
+                            "query program exhausted the remaining shared work",
+                        )),
+                        Err(error) => Err(error),
+                    }
+                }
+            }
         }))
         .map_err(|_| {
             SemanticError::new(
@@ -622,7 +807,9 @@ impl QueryExtensions {
                 "query/local-extension-panicked",
                 format!("query extension {name} panicked"),
             )
-        })?
+        })
+        .and_then(|result| result);
+        (result, work)
     }
 
     fn description(&self, name: &str) -> String {
@@ -646,6 +833,9 @@ impl QueryExtensions {
 enum BoundValue {
     Nil,
     Stored(Value),
+    /// Query-only containers never enter persisted values or index keys.
+    /// Construction normalizes nil/scalar leaves to the variants above.
+    Query(QueryValue),
 }
 
 impl Ord for BoundValue {
@@ -663,7 +853,7 @@ impl PartialOrd for BoundValue {
 impl BoundValue {
     fn stored(&self) -> Option<&Value> {
         match self {
-            Self::Nil => None,
+            Self::Nil | Self::Query(_) => None,
             Self::Stored(value) => Some(value),
         }
     }
@@ -671,9 +861,10 @@ impl BoundValue {
     fn index_cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::Nil, Self::Nil) => std::cmp::Ordering::Equal,
-            (Self::Nil, Self::Stored(_)) => std::cmp::Ordering::Less,
-            (Self::Stored(_), Self::Nil) => std::cmp::Ordering::Greater,
+            (Self::Nil, _) | (Self::Stored(_), Self::Query(_)) => std::cmp::Ordering::Less,
+            (_, Self::Nil) | (Self::Query(_), Self::Stored(_)) => std::cmp::Ordering::Greater,
             (Self::Stored(left), Self::Stored(right)) => left.index_cmp(right),
+            (Self::Query(left), Self::Query(right)) => left.canonical_cmp(right),
         }
     }
 
@@ -681,8 +872,65 @@ impl BoundValue {
         match self {
             Self::Nil => QueryValue::Nil,
             Self::Stored(value) => QueryValue::Scalar(value.clone()),
+            Self::Query(value) => value.clone(),
         }
     }
+
+    fn from_query_value(value: QueryValue) -> Self {
+        match &value {
+            QueryValue::Nil => Self::Nil,
+            QueryValue::Scalar(_) => Self::Stored(value.into_scalar().expect("scalar variant")),
+            QueryValue::Tuple(_) => {
+                query_tuple_value(&value).map_or_else(|| Self::Query(value), Self::Stored)
+            }
+            _ => Self::Query(value),
+        }
+    }
+
+    /// One-level sequence destructuring; nested containers remain intact.
+    fn sequence_values(&self) -> Option<Vec<Self>> {
+        match self {
+            Self::Stored(Value::Tuple(values)) => Some(
+                values
+                    .iter()
+                    .cloned()
+                    .map(|value| value.map_or(Self::Nil, Self::Stored))
+                    .collect(),
+            ),
+            Self::Query(QueryValue::Tuple(values) | QueryValue::Collection(values)) => {
+                Some(values.iter().cloned().map(Self::from_query_value).collect())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// A sequential tuple of stored values is the same legal tuple join key
+/// whether constructed by `tuple` or returned by a tuple-shaped subquery.
+/// Traverse iteratively; maps/collections remain query-only containers.
+fn query_tuple_value(value: &QueryValue) -> Option<Value> {
+    enum Task<'a> {
+        Value(&'a QueryValue),
+        Tuple(usize),
+    }
+    let mut pending = vec![Task::Value(value)];
+    let mut values = Vec::new();
+    while let Some(task) = pending.pop() {
+        match task {
+            Task::Value(QueryValue::Nil) => values.push(None),
+            Task::Value(QueryValue::Scalar(value)) => values.push(Some(value.clone())),
+            Task::Value(QueryValue::Tuple(children)) => {
+                pending.push(Task::Tuple(children.len()));
+                pending.extend(children.iter().rev().map(Task::Value));
+            }
+            Task::Value(QueryValue::Collection(_) | QueryValue::Map(_)) => return None,
+            Task::Tuple(count) => {
+                let children = values.split_off(values.len() - count);
+                values.push(Some(Value::Tuple(children)));
+            }
+        }
+    }
+    values.pop().flatten()
 }
 
 impl From<Value> for BoundValue {
@@ -729,7 +977,7 @@ impl QueryEngine {
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
     ) -> Result<QueryOutcome, SemanticError> {
-        validate_query(query, inputs)?;
+        validate_query(query, inputs.len())?;
         let mut source_map = BTreeMap::new();
         for source in sources {
             if source_map
@@ -743,7 +991,9 @@ impl QueryEngine {
             }
         }
         validate_consumed_sources(query, &source_map)?;
-        let deadline = control.timeout.map(|timeout| Instant::now() + timeout);
+        let deadline = control
+            .timeout
+            .and_then(|timeout| Instant::now().checked_add(timeout));
         let mut state = State {
             sources: source_map,
             control,
@@ -771,6 +1021,7 @@ impl QueryEngine {
             &mut pull_budget,
         )?;
         state.work = pull_budget.work();
+        state.stats.work = state.work as u64;
         state.stats.rows_produced = result_len(&result) as u64;
         Ok(QueryOutcome {
             result,
@@ -815,6 +1066,64 @@ fn validate_consumed_sources(
                 .require_point_in_time("pull")?;
         }
     }
+    validate_nested_sources(
+        &query.clauses,
+        &query.rules,
+        None,
+        sources,
+        &mut BTreeSet::new(),
+    )?;
+    Ok(())
+}
+
+// Validate semantic source consumers even when an outer relation is empty.
+// Subquery rule scopes are independent; inherited `$` must follow the same
+// mapping as runtime invocation, including queries nested in rule bodies.
+fn validate_nested_sources(
+    clauses: &[Clause],
+    rules: &[Rule],
+    inherited: Option<&str>,
+    sources: &BTreeMap<&str, &DatabaseValue>,
+    visited: &mut BTreeSet<(String, String)>,
+) -> Result<(), SemanticError> {
+    for clause in clauses {
+        match clause {
+            Clause::Function {
+                function: Function::Query(query),
+                source,
+                ..
+            } => {
+                let selected = effective_source(source, inherited);
+                let database = find_source(sources, selected)?;
+                let mut nested = sources.clone();
+                nested.insert("$", database);
+                validate_consumed_sources(query, &nested)?;
+            }
+            Clause::Not { clauses, .. } => {
+                validate_nested_sources(clauses, rules, inherited, sources, visited)?
+            }
+            Clause::Or { branches, .. } => {
+                for branch in branches {
+                    validate_nested_sources(branch, rules, inherited, sources, visited)?;
+                }
+            }
+            Clause::Rule { source, name, .. } => {
+                let source = effective_source(source, inherited);
+                if visited.insert((name.clone(), source.into())) {
+                    for rule in rules.iter().filter(|rule| rule.name == *name) {
+                        validate_nested_sources(
+                            &rule.clauses,
+                            rules,
+                            Some(source),
+                            sources,
+                            visited,
+                        )?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     Ok(())
 }
 
@@ -836,7 +1145,8 @@ fn collect_consumed_sources(
                 ..
             }
             | Clause::Function {
-                function: Function::GetElse | Function::GetSome | Function::Extension(_),
+                function:
+                    Function::GetElse | Function::GetSome | Function::Extension(_) | Function::Query(_),
                 source,
                 ..
             } => {
@@ -935,20 +1245,20 @@ impl Database {
     }
 }
 
-fn validate_query(query: &Query, inputs: &[QueryInput]) -> Result<(), SemanticError> {
+fn validate_query(query: &Query, input_count: usize) -> Result<(), SemanticError> {
     if query.clauses.is_empty() && query.inputs.is_empty() {
         return Err(SemanticError::incorrect(
             "query/no-input-or-where",
             "query requires input bindings or where clauses",
         ));
     }
-    if query.inputs.len() != inputs.len() {
+    if query.inputs.len() != input_count {
         return Err(SemanticError::incorrect(
             "query/input-arity",
             format!(
                 "expected {} inputs, got {}",
                 query.inputs.len(),
-                inputs.len()
+                input_count
             ),
         ));
     }
@@ -1044,7 +1354,11 @@ fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
     Ok(())
 }
 
-fn bind_inputs(specs: &[InputSpec], values: &[QueryInput], state: &mut State<'_>) -> Result<Vec<Row>, SemanticError> {
+fn bind_inputs(
+    specs: &[InputSpec],
+    values: &[QueryInput],
+    state: &mut State<'_>,
+) -> Result<Vec<Row>, SemanticError> {
     state.check(0)?;
     let mut rows = vec![Row::new()];
     for (spec, value) in specs.iter().zip(values) {
@@ -1113,7 +1427,12 @@ fn bind_inputs(specs: &[InputSpec], values: &[QueryInput], state: &mut State<'_>
         }
         rows = dedupe_rows(next);
         state.check(0)?;
-        if rows.len() > state.control.max_intermediate_rows { return Err(resource("query/intermediate-limit", "query input relation exceeded its row limit")); }
+        if rows.len() > state.control.max_intermediate_rows {
+            return Err(resource(
+                "query/intermediate-limit",
+                "query input relation exceeded its row limit",
+            ));
+        }
     }
     Ok(rows)
 }
@@ -1581,14 +1900,22 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), Sema
             let produced = evaluate_rule_key(&key, rules, state)?;
             ensure_rule_memo_entry(state, key.clone());
             let (length, added) = {
-                let rows = state.rule_memo.get_mut(&key).expect("rule memo entry was ensured");
+                let rows = state
+                    .rule_memo
+                    .get_mut(&key)
+                    .expect("rule memo entry was ensured");
                 let prior = rows.len();
                 rows.extend(produced);
                 stable_dedupe_by(rows, Ord::cmp);
                 (rows.len(), rows.len() - prior)
             };
             state.check(added)?;
-            if length > state.control.max_intermediate_rows { return Err(resource("query/intermediate-limit", "rule memo relation exceeded the intermediate row limit")); }
+            if length > state.control.max_intermediate_rows {
+                return Err(resource(
+                    "query/intermediate-limit",
+                    "rule memo relation exceeded the intermediate row limit",
+                ));
+            }
         }
 
         state.stats.rule_iterations += 1;
@@ -1704,13 +2031,23 @@ fn evaluate_function(
     source: &str,
     args: &[BoundValue],
     binding: &Binding,
-    state: &State<'_>,
+    state: &mut State<'_>,
 ) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
     match function {
+        Function::Query(query) => nested::execute(&query, source, args, binding, state),
         Function::Ground => ground_output(args, binding),
-        Function::Tuple => Ok(vec![vec![BoundValue::Stored(Value::Tuple(
-            args.iter().map(|value| value.stored().cloned()).collect(),
-        ))]]),
+        Function::Tuple => Ok(vec![vec![if args
+            .iter()
+            .any(|value| matches!(value, BoundValue::Query(_)))
+        {
+            BoundValue::Query(QueryValue::Tuple(
+                args.iter().map(BoundValue::query_value).collect(),
+            ))
+        } else {
+            BoundValue::Stored(Value::Tuple(
+                args.iter().map(|value| value.stored().cloned()).collect(),
+            ))
+        }]]),
         Function::Untuple => match args {
             [BoundValue::Stored(Value::Tuple(values))] => Ok(vec![
                 values
@@ -1719,6 +2056,9 @@ fn evaluate_function(
                     .map(|value| value.map_or(BoundValue::Nil, BoundValue::Stored))
                     .collect(),
             ]),
+            [value @ BoundValue::Query(QueryValue::Tuple(_))] => {
+                Ok(vec![value.sequence_values().expect("tuple variant")])
+            }
             _ => Err(SemanticError::incorrect(
                 "query/function-type",
                 "untuple requires one tuple",
@@ -1792,6 +2132,7 @@ fn evaluate_function(
             Ok(Vec::new())
         }
         Function::Extension(name) => {
+            state.check(1)?;
             let database = source_database(state, source)?;
             let extensions = state.extensions.ok_or_else(|| {
                 SemanticError::incorrect(
@@ -1803,9 +2144,23 @@ fn evaluate_function(
                 .iter()
                 .map(|value| require_stored(value, "query/nil-extension-arg").cloned())
                 .collect::<Result<Vec<_>, _>>()?;
-            let rows = extensions.invoke(&name, database, &extension_args, state.control)?;
+            // Native callbacks are trusted cooperative code, but receive only
+            // the parent's remaining allowance. Persisted programs report
+            // interpreter fuel back into that same allowance on every call.
+            let mut control = state.control.clone();
+            control.max_work = control.max_work.saturating_sub(state.work);
+            control.timeout = state
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            let (rows, work) =
+                extensions.invoke(&name, database, &extension_args, &control, state.deadline);
+            state.check(work)?;
+            let rows = rows?;
             if rows.len() > state.control.max_result_rows
-                || rows.iter().map(Vec::len).sum::<usize>() > state.control.max_intermediate_rows
+                || rows
+                    .iter()
+                    .fold(0_usize, |total, row| total.saturating_add(row.len()))
+                    > state.control.max_intermediate_rows
             {
                 return Err(resource(
                     "query/extension-output-limit",
@@ -1832,39 +2187,33 @@ fn ground_output(
     };
     match binding {
         Binding::Scalar(_) | Binding::Collection(_) => Ok(vec![vec![constant.clone()]]),
-        Binding::Tuple(_) => match constant {
-            BoundValue::Stored(Value::Tuple(values)) => Ok(vec![
-                values
-                    .iter()
-                    .cloned()
-                    .map(|value| value.map_or(BoundValue::Nil, BoundValue::Stored))
-                    .collect(),
-            ]),
-            _ => Err(SemanticError::incorrect(
-                "query/function-binding",
-                "ground tuple binding requires one tuple constant",
-            )),
-        },
-        Binding::Relation(_) => match constant {
-            BoundValue::Stored(Value::Tuple(rows)) => rows
-                .iter()
-                .map(|row| match row {
-                    Some(Value::Tuple(values)) => Ok(values
-                        .iter()
-                        .cloned()
-                        .map(|value| value.map_or(BoundValue::Nil, BoundValue::Stored))
-                        .collect()),
-                    _ => Err(SemanticError::incorrect(
+        Binding::Tuple(_) => constant
+            .sequence_values()
+            .map(|values| vec![values])
+            .ok_or_else(|| {
+                SemanticError::incorrect(
+                    "query/function-binding",
+                    "tuple binding requires one sequential value",
+                )
+            }),
+        Binding::Relation(_) => constant
+            .sequence_values()
+            .ok_or_else(|| {
+                SemanticError::incorrect(
+                    "query/function-binding",
+                    "relation binding requires a collection of tuple values",
+                )
+            })?
+            .iter()
+            .map(|row| {
+                row.sequence_values().ok_or_else(|| {
+                    SemanticError::incorrect(
                         "query/function-binding",
-                        "ground relation binding requires a collection of tuple constants",
-                    )),
+                        "relation binding requires sequential rows",
+                    )
                 })
-                .collect(),
-            _ => Err(SemanticError::incorrect(
-                "query/function-binding",
-                "ground relation binding requires a collection of tuple constants",
-            )),
-        },
+            })
+            .collect(),
     }
 }
 
@@ -1873,7 +2222,7 @@ fn require_stored<'a>(
     code: &'static str,
 ) -> Result<&'a Value, SemanticError> {
     value.stored().ok_or_else(|| {
-        SemanticError::incorrect(code, "nil is not valid for this query function argument")
+        SemanticError::incorrect(code, "this query function argument must be a stored scalar value, not nil or a query container")
     })
 }
 
@@ -1929,15 +2278,20 @@ fn bind_output(
     output: &[BoundValue],
 ) -> Result<Vec<Row>, SemanticError> {
     if let Binding::Collection(variable) = binding {
-        let [BoundValue::Stored(Value::Tuple(values))] = output else {
+        let [value] = output else {
             return Err(SemanticError::incorrect(
                 "query/function-binding",
-                "collection binding requires one tuple value",
+                "collection binding requires one sequential value",
             ));
         };
+        let values = value.sequence_values().ok_or_else(|| {
+            SemanticError::incorrect(
+                "query/function-binding",
+                "collection binding requires one sequential value",
+            )
+        })?;
         let mut rows = Vec::new();
         for value in values {
-            let value = value.clone().map_or(BoundValue::Nil, BoundValue::Stored);
             let mut candidate = row.clone();
             if unify_variable(&mut candidate, variable, &value) {
                 rows.push(candidate);
@@ -2027,7 +2381,13 @@ fn shape_results(
             })
             .collect::<Result<Vec<_>, _>>()?
     };
-    dedupe_query_rows(&mut output, query.with.is_empty());
+    // Pull is a post-projection of distinct entity bindings, not a new set
+    // operation on maps. Different entities may intentionally pull alike.
+    // Recovered query.clj apply-pf uses mapv after relational set formation.
+    let has_pull = elements
+        .iter()
+        .any(|element| matches!(element, FindElement::Pull { .. }));
+    dedupe_query_rows(&mut output, query.with.is_empty() && !has_pull);
     pull_budget.check(0)?;
     if output.len() > max {
         return Err(resource(
@@ -2075,7 +2435,10 @@ fn aggregate_rows(
                 .clone()
             })
             .collect::<Vec<_>>();
-        let index = *group_indices.entry(key).or_insert_with(|| { groups.push(Vec::new()); groups.len() - 1 });
+        let index = *group_indices.entry(key).or_insert_with(|| {
+            groups.push(Vec::new());
+            groups.len() - 1
+        });
         groups[index].push(row);
     }
     if groups.is_empty() && group_variables.is_empty() {
@@ -2131,7 +2494,11 @@ fn aggregate_rows(
                                     format!("aggregate variable {} is unbound", variable.name()),
                                 )
                             })?;
-                        aggregate(*function, rows.iter().map(|row| &row[index]).collect())
+                        aggregate(
+                            *function,
+                            rows.iter().map(|row| &row[index]).collect(),
+                            pull_budget,
+                        )
                     }
                 })
                 .collect()
@@ -2142,8 +2509,40 @@ fn aggregate_rows(
 fn aggregate(
     function: Aggregate,
     mut values: Vec<&BoundValue>,
+    budget: &mut QueryPullBudget,
 ) -> Result<QueryValue, SemanticError> {
     match function {
+        Aggregate::Rand(count) => {
+            if values.is_empty() {
+                return Ok(QueryValue::Collection(Vec::new()));
+            }
+            // With-replacement output can exceed its input size. Admit before
+            // allocation, and remain cooperatively interruptible while building.
+            budget.check(count)?;
+            let mut output = Vec::new();
+            for _ in 0..count {
+                budget.check(0)?;
+                output.push(values[rand::random_range(0..values.len())].query_value());
+            }
+            Ok(QueryValue::Collection(output))
+        }
+        Aggregate::Sample(count) => {
+            values.sort_by(|left, right| left.index_cmp(right));
+            values.dedup_by(|left, right| left.index_cmp(right).is_eq());
+            let count = count.min(values.len());
+            for index in 0..count {
+                budget.check(0)?;
+                let selected = rand::random_range(index..values.len());
+                values.swap(index, selected);
+            }
+            Ok(QueryValue::Collection(
+                values
+                    .into_iter()
+                    .take(count)
+                    .map(BoundValue::query_value)
+                    .collect(),
+            ))
+        }
         Aggregate::Count => Ok(QueryValue::Scalar(Value::Long(values.len() as i64))),
         Aggregate::CountDistinct => {
             values.sort_by(|left, right| left.index_cmp(right));
@@ -2462,7 +2861,7 @@ fn resolve_entity(
 ) -> Result<Option<u64>, SemanticError> {
     match term_bound_value(term, row) {
         Some(BoundValue::Stored(value)) => entity_value(database, &value),
-        Some(BoundValue::Nil) | None => Ok(None),
+        Some(BoundValue::Nil | BoundValue::Query(_)) | None => Ok(None),
     }
 }
 fn resolve_attribute(
@@ -2473,6 +2872,10 @@ fn resolve_attribute(
     match term_bound_value(term, row) {
         Some(BoundValue::Stored(value)) => attribute_value(database, &value).map(Some),
         Some(BoundValue::Nil) | None => Ok(None),
+        Some(BoundValue::Query(_)) => Err(SemanticError::incorrect(
+            "query/attribute-value",
+            "a query container cannot identify an attribute",
+        )),
     }
 }
 fn attribute_value(database: &DatabaseValue, value: &Value) -> Result<u32, SemanticError> {
@@ -2545,7 +2948,7 @@ fn unify_entity_term(
         Term::Nil => Ok(false),
         Term::Constant(_) => Ok(resolved == Some(entity)),
         Term::Variable(variable) => match row.get(variable) {
-            Some(BoundValue::Nil) => Ok(false),
+            Some(BoundValue::Nil | BoundValue::Query(_)) => Ok(false),
             Some(BoundValue::Stored(expected)) => Ok(match resolved {
                 Some(resolved) => resolved == entity,
                 None => entity_value(database, expected)? == Some(entity),
@@ -2569,7 +2972,7 @@ fn unify_attribute_term(
         Term::Nil => Ok(false),
         Term::Constant(_) => Ok(resolved == Some(attribute)),
         Term::Variable(variable) => match row.get(variable) {
-            Some(BoundValue::Nil) => Ok(false),
+            Some(BoundValue::Nil | BoundValue::Query(_)) => Ok(false),
             Some(BoundValue::Stored(expected)) => Ok(match resolved {
                 Some(resolved) => resolved == attribute,
                 None => attribute_value(database, expected)? == attribute,
@@ -2597,7 +3000,7 @@ fn unify_value_term(
         Term::Nil => Ok(false),
         Term::Constant(_) => Ok(resolved == Some(value)),
         Term::Variable(variable) => match row.get(variable) {
-            Some(BoundValue::Nil) => Ok(false),
+            Some(BoundValue::Nil | BoundValue::Query(_)) => Ok(false),
             Some(BoundValue::Stored(expected)) => Ok(match resolved {
                 Some(resolved) => resolved == value,
                 None => resolve_pattern_value(database, resolved_attribute, expected)? == *value,

@@ -52,6 +52,10 @@ const PEER_TABLES: &[&str] = &[
 const WRITER_SELECT_TABLES: &[&str] = &[
     "atomic_transactor_leases",
     "atomic_log_generation_checkpoints",
+    // The existing invoker semantic-root trigger reads these GC claims to
+    // reject publication into a generation whose collection has begun.
+    "atomic_log_generation_collection_progress",
+    "atomic_log_generation_abandonment_progress",
     "atomic_tree_build_intents",
     "atomic_tree_build_intent_nodes",
     "atomic_tree_delta_headers",
@@ -690,6 +694,8 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         "atomic_request_base_archive_nodes",
         "atomic_request_base_archive_roots",
         "atomic_request_base_archive_completions",
+        "atomic_receipt_archive_conversions",
+        "atomic_receipt_archive_frontier",
     ] {
         let may_stage_archive: bool = roles
             .admin
@@ -701,12 +707,17 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
             .get(0);
         assert!(
             !may_stage_archive,
-            "ordinary writer may stage restore-only archive relation {relation}"
+            "ordinary writer may stage operator-only archive relation {relation}"
         );
     }
     for function in [
         "atomic_complete_request_base_archive(text,bigint,bytea)",
         "atomic_collect_request_base_archive(text,bigint,bytea,bigint,bigint)",
+        "atomic_receipt_archive_conversion_context(bytea)",
+        "atomic_begin_receipt_archive_conversion(bytea,bigint)",
+        "atomic_finish_receipt_archive_conversion(bytea,bigint)",
+        "atomic_collect_tree_retirement_unconverted_v22(text,bigint,bytea,bigint,bigint)",
+        "atomic_collect_request_base_archive_unconverted_v20(text,bigint,bytea,bigint,bigint)",
     ] {
         let may_manage_archive: bool = roles
             .admin

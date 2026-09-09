@@ -2,11 +2,15 @@
 //! ATOMIC_POSTGRES_URL='host=... user=... dbname=...' cargo run --example native_workflow
 use atomic_core::{
     Attribute, AttributeName, CallableRef, CapacityLimits, Cardinality, Clause, Connection,
-    DataPattern, EntityRef, FindElement, FindSpec, IndexOrder, Instruction, Keyword,
-    PostgresMigrator, PostgresStore, Program, ProgramCall, ProgramKind, PullAttribute, PullPattern,
-    Query, QueryControl, QueryResult, QueryValue, Schema, Term, TransactionRequest,
-    TransactionService, TransactionServiceConfig, TupleSpec, TxForm, TxOp, TxValue, Unique, Value,
-    ValueType, Variable,
+    DataPattern, EntityRef, FindElement, FindSpec, IndexComponents, IndexOrder, IndexPullOptions,
+    IndexTransaction, Instruction, Keyword, PostgresMigrator, PostgresStore, Program, ProgramCall,
+    ProgramKind, PullAttribute, PullPattern, PullTransform, Query, QueryControl, QueryResult,
+    QueryValue, ReturnMapShape, Schema, Term, TimePoint, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TupleSpec, TxForm, TxOp, TxValue, Unique, Value, ValueType, Variable,
+};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -48,16 +52,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let connection = Connection::attach(&config.connection, writer.client(), 64)?;
     let reader = Connection::connect(&config.connection, &database_id, 64)?;
     let timeout = Duration::from_secs(10);
+    let mut name_attribute = Attribute::new(
+        NAME,
+        Keyword::new("person", "name"),
+        ValueType::String,
+        Cardinality::One,
+    );
+    name_attribute.indexed = true;
     connection.transact(
         TransactionRequest::new(
             "schema",
             vec![
-                TxOp::InstallAttribute(Attribute::new(
-                    NAME,
-                    Keyword::new("person", "name"),
-                    ValueType::String,
-                    Cardinality::One,
-                )),
+                TxOp::InstallAttribute(name_attribute),
                 TxOp::InstallAttribute(
                     Attribute::new(
                         REGISTRATION,
@@ -130,6 +136,83 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )))],
     };
     let original_pull = original.pull(&pattern, person)?;
+    // Log capture and index-pull retain this exact endpoint, not the mutable
+    // connection. Neither cursor is consumed until after a later commit and
+    // writer shutdown below.
+    let original_log = connection.log();
+    assert_eq!(original_log.basis_t(), original.basis_t());
+    let mut original_transactions =
+        original_log.tx_range(Some(TimePoint::T(inserted.basis_t)), None)?;
+    assert_eq!(original_transactions.stats().range_reads, 0);
+    let start = original.avet_boundary(IndexComponents::One(AttributeName::Ident(
+        Keyword::new("person", "name"),
+    )))?;
+    let mut original_index_pull =
+        original.index_pull(IndexPullOptions::new(start, pattern.clone()))?;
+
+    let person_variable = Variable::new("person")?;
+    let name_variable = Variable::new("name")?;
+    let relation_clause = Clause::Pattern(Box::new(DataPattern::new(
+        Term::Variable(person_variable.clone()),
+        Term::Constant(Value::Keyword(Keyword::new("person", "name"))),
+        Term::Variable(name_variable.clone()),
+    )));
+    let relation = Query::new(
+        FindSpec::Relation(vec![
+            FindElement::Variable(person_variable.clone()),
+            FindElement::Variable(name_variable),
+        ]),
+        vec![relation_clause.clone()],
+    );
+    let return_keys = || {
+        vec![
+            Value::Keyword(Keyword::new("person", "id")),
+            Value::String("name".into()),
+        ]
+    };
+    let original_rows = original
+        .query(&relation, &[], &QueryControl::default())?
+        .result
+        .into_return_maps_with_arity(return_keys(), 2)?;
+    assert_eq!(original_rows.shape(), ReturnMapShape::Relation);
+    assert_eq!(original_rows.len(), 1);
+    assert_eq!(original_rows[0][0], QueryValue::Scalar(Value::Ref(person)));
+    assert_eq!(
+        original_rows[0].get(&Value::String("name".into())),
+        Some(&QueryValue::Scalar(Value::String("Ada".into())))
+    );
+
+    // Joins are prepared now; the pull transform is deferred until the one
+    // result row is consumed. The counter makes that distinction observable.
+    let transforms = Arc::new(AtomicUsize::new(0));
+    let observed_transforms = Arc::clone(&transforms);
+    let mut transformed_name = PullAttribute::forward(AttributeName::Id(NAME));
+    transformed_name.transform = Some(PullTransform::new("workflow/captured-name", move |value| {
+        observed_transforms.fetch_add(1, Ordering::Relaxed);
+        let QueryValue::Scalar(Value::String(name)) = value else {
+            return Err(atomic_core::SemanticError::incorrect(
+                "workflow/name-type",
+                "expected a person name",
+            ));
+        };
+        Ok(QueryValue::Scalar(Value::String(format!(
+            "captured:{name}"
+        ))))
+    }));
+    let sequence_query = Query::new(
+        FindSpec::Relation(vec![
+            FindElement::Variable(person_variable.clone()),
+            FindElement::Pull {
+                source: "$".into(),
+                variable: person_variable,
+                pattern: Box::new(PullPattern::attributes(vec![transformed_name])),
+            },
+        ]),
+        vec![relation_clause],
+    );
+    let mut deferred = original.query_sequence(&sequence_query, &[], &QueryControl::default())?;
+    assert_eq!(deferred.remaining_rows(), 1);
+    assert_eq!(transforms.load(Ordering::Relaxed), 0);
     // Pure native branches can be queried, navigated, and extended without
     // advancing either peer or the durable writer.
     let speculative_instant = original.last_tx_instant()?.unwrap_or(0) + 1;
@@ -210,6 +293,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(reader.load_stats().compatibility_materializations, 0);
     drop(connection);
     writer.shutdown();
+    // The producer is gone, but captured log/index values and prepared
+    // sequences still read their original immutable database, including pull.
+    assert_eq!(transforms.load(Ordering::Relaxed), 0);
+    let deferred_row = deferred.next().transpose()?.expect("one prepared person");
+    assert_eq!(deferred_row[0], QueryValue::Scalar(Value::Ref(person)));
+    assert_eq!(
+        deferred_row[1],
+        QueryValue::Map(vec![(
+            QueryValue::Scalar(Value::Keyword(Keyword::new("person", "name"))),
+            QueryValue::Scalar(Value::String("captured:Ada".into())),
+        )])
+    );
+    assert_eq!(transforms.load(Ordering::Relaxed), 1);
+    assert!(deferred.next().is_none());
+    assert_eq!(
+        original_index_pull.next().transpose()?,
+        Some(original_pull.clone())
+    );
+    assert!(original_index_pull.next().is_none());
+    let original_transaction = original_transactions
+        .next()
+        .transpose()?
+        .expect("insert is in captured log");
+    assert_eq!(original_transaction.t, inserted.basis_t);
+    assert_eq!(original_transaction.data, inserted.tx_data);
+    assert!(original_transactions.next().is_none());
+    assert_eq!(original_log.basis_t(), original.basis_t());
+    assert!(
+        original_log
+            .tx_data(IndexTransaction::T(changed.basis_t))?
+            .is_none()
+    );
+    let latest_log = reader.log();
+    assert_eq!(latest_log.basis_t(), changed.basis_t);
+    let latest_transactions = latest_log
+        .tx_range(Some(TimePoint::T(inserted.basis_t)), None)?
+        .collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        latest_transactions
+            .iter()
+            .map(|transaction| transaction.t)
+            .collect::<Vec<_>>(),
+        [inserted.basis_t, changed.basis_t]
+    );
+    assert_eq!(latest_transactions[1].data, changed.tx_data);
     // Reads and reopening do not acquire or retain a writer lease.
     assert_eq!(names(&reader.db())?, expected);
     let reopened = Connection::connect(&config.connection, &database_id, 64)?;
@@ -217,8 +345,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(reopened.db().basis_t(), changed.basis_t);
     assert_eq!(names(&reopened.db())?, expected);
     assert_eq!(original.pull(&pattern, person)?, original_pull);
+    let reopened_database = reopened.db();
+    let start = reopened_database.avet_boundary(IndexComponents::One(AttributeName::Id(NAME)))?;
+    assert_eq!(
+        reopened_database
+            .index_pull(IndexPullOptions::new(start, pattern.clone()))?
+            .collect::<Result<Vec<_>, _>>()?,
+        vec![reopened_database.pull(&pattern, person)?],
+    );
+    let current_rows = reopened_database
+        .query(&relation, &[], &QueryControl::default())?
+        .result
+        .into_return_maps_with_arity(return_keys(), 2)?;
+    assert_eq!(
+        current_rows[0].get(&Value::String("name".into())),
+        Some(&QueryValue::Scalar(Value::String("Ada Lovelace".into())))
+    );
+    assert_eq!(
+        original_rows[0].get(&Value::String("name".into())),
+        Some(&QueryValue::Scalar(Value::String("Ada".into())))
+    );
+    assert_eq!(reopened.load_stats().compatibility_materializations, 0);
     println!(
-        "PASS {database_id}: schema, controlled transact, tuple references, lookup keys, query, pull, history, chained native speculation, immutable values, reopen at t={}",
+        "PASS {database_id}: schema, controlled transact, tuple references, lookup keys, query, pull, immutable log, index-pull, deferred query transforms, return maps, history, chained native speculation, immutable values, reopen at t={}",
         changed.basis_t
     );
     Ok(())

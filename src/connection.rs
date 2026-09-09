@@ -108,7 +108,47 @@ impl Connection {
         database_id: impl Into<String>,
         cache_capacity: usize,
     ) -> Result<Self, SemanticError> {
-        let peer = Peer::connect_configured(&connection, database_id, cache_capacity)?;
+        Self::connect_configured_with_cache_limits(
+            connection,
+            database_id,
+            cache_capacity,
+            cache_capacity.saturating_mul(512 * 1024),
+        )
+    }
+
+    /// Open a writer-independent read connection with separate immutable-node
+    /// cache entry and accounted-byte limits. Zero disables cache retention.
+    /// These limits do not cap recent information, resident roots/schema,
+    /// caller-retained values, or total process memory.
+    pub fn connect_with_cache_limits(
+        connection: &str,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+        cache_bytes: usize,
+    ) -> Result<Self, SemanticError> {
+        Self::connect_configured_with_cache_limits(
+            PostgresConnectionConfig::plaintext(connection),
+            database_id,
+            cache_entries,
+            cache_bytes,
+        )
+    }
+
+    /// Open with explicit transport/I/O policy and independent cache limits.
+    /// As with `connect_configured`, the configuration is owned by the reader;
+    /// opening it does not acquire or retain a writer's lease.
+    pub fn connect_configured_with_cache_limits(
+        connection: PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+        cache_bytes: usize,
+    ) -> Result<Self, SemanticError> {
+        let peer = Peer::connect_configured_with_cache_limits(
+            &connection,
+            database_id,
+            cache_entries,
+            cache_bytes,
+        )?;
         Self::from_peer(
             peer,
             None,
@@ -261,6 +301,18 @@ impl Connection {
 
     pub fn load_stats(&self) -> crate::PeerLoadStats {
         self.core.peer.load_stats()
+    }
+
+    /// Shared immutable-node cache counters, including byte/entry residency
+    /// and eviction. This is representation accounting, not process RSS.
+    pub fn cache_stats(&self) -> crate::CacheStats {
+        self.core.peer.cache_stats()
+    }
+
+    /// Recent-log residency of the latest adopted value, independent of the
+    /// immutable-node cache and of older values retained by callers.
+    pub fn recent_stats(&self) -> crate::recent::RecentStats {
+        self.core.peer.recent_stats()
     }
 
     #[cfg(unix)]

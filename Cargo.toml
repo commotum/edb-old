@@ -12,6 +12,7 @@ num-traits = "0.2.19"
 native-tls = "0.2.14"
 postgres = "0.19.14"
 postgres-native-tls = "0.5.1"
-sha2 = "0.10.9"
+rand = "0.10.2"
+sha2 = { version = "0.10.9", features = ["compress"] }
 socket2 = "0.6.5"
 tempfile = "3.27.0"

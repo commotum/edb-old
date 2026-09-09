@@ -50,7 +50,7 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage 4 is the first unfinished stage. This is a fresh
+**Status:** Open; Stage 6 is active after repairing the integrated GC defect. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -202,7 +202,17 @@ the same accepted facts and identity without full-database reconstruction.
 
 ### 4. Finish useful query, pull, and history access
 
-**Status:** Active; [Goal 4](../goal-4/0-plan.md) owns execution.
+**Status:** Complete; [Goal 4](../goal-4/0-plan.md) records native read acceptance.
+
+Progress: accidental query/Pull defaults removed, iterative traversal and deep
+result/selector ownership verified, native log and index-pull pass real PG,
+and useful query/Pull composition is implemented. Shared persisted-query fuel,
+deferred projections, return maps and native random aggregates have focused
+tests. The expanded public workflow and all eight final nested shape fixtures
+pass on actual PostgreSQL after writer shutdown. All-target clippy and broad
+Rust regression pass; unconfigured PG cases are not live evidence. Fulltext and transaction
+hints have individual documented consequences/deferral rationale, not blanket
+parity exclusions. Stages 5–6 remain required.
 
 **Outcome:** Local queries and navigation preserve exact snapshot semantics,
 have no accidental finite language limits, and expose a truthful useful surface.
@@ -224,7 +234,27 @@ or is hidden behind a parity claim.
 
 ### 5. Establish operational integrity and recovery
 
-**Status:** Pending; retain the substantial existing lifecycle implementation.
+**Status:** Complete again; [Goal 5](../goal-5/0-plan.md) records the repaired
+ordinary-GC liveness gap and current25 operational evidence.
+
+Integrated testing found that active-generation receipt bases pin the oldest
+physical publication and prevent later prefix-ordered retirement indefinitely.
+Migration25 now provides bounded resumable same-hash archive handoff preserving
+receipts and snapshot pins. Actual tiny workflow reclaims publications8→2 and
+nodes138→120 with blocked prefixes2→0 and no lost receipt bindings. New ordinary
+conversion, interrupted kind1-generation/excision, backup/restore/exact retry,
+upgrade/role and all15GC+3integrity checks pass. A second archive/semantic-GC
+phase mismatch exposed by this lifecycle was also repaired and verified. Costs
+of distinct retained receipt closures remain to be measured at Stage6 scale.
+
+Deep backup/archive and pending-index provenance checks now reject validly
+hashed false trees. Migration24 repairs versioned code roots, preserves paused
+restore roots and rejects truncated published/retired logs atomically; all eight
+upgrade fixtures pass live. Real backup/restore, GC/pins, interrupted excision,
+role/TLS, configured SQL timeout/unknown-retry and actual PostgreSQL restart
+witnesses pass. Native and separate writer/two-peer workflows pass on schema24.
+The active operator guide states quiesced repair, retention and deadline limits.
+Broad administrative costs and deployment scale remain required Stage6 work.
 
 **Outcome:** Operators can protect, recover, upgrade, inspect, reclaim, and
 excise the database under an explicit and tested trust and retention model.
@@ -244,7 +274,8 @@ remain lazy. Operator procedures state supported guarantees and limitations.
 
 ### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Pending; integration work begins in Stage 1 and continues throughout.
+**Status:** Active; [Goal 6](../goal-6/0-plan.md) resumes the scaled integrated
+acceptance workflow with current25 binaries and the verified GC/indexing repairs.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -269,10 +300,13 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-08:** Goal 4 is the only active child.
+**Continuation checkpoint — 2026-09-09:** Goal 6 is the only active child.
 Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
-successors and dependency retention. Begin with accidental default query/pull
-ceilings and stack-safe deep pull, then finish useful native read APIs. Goals
-2–3 record actual PostgreSQL evidence and fixtures. Reopen an owning child for
-later failures. Stages 4–6 remain open; no realistic scale or complete operational
-acceptance claim has been made.
+successors and dependency retention. Goal 4 read-depth/history/composition APIs
+and public workflow pass. Goal5 closes semantic backup verification, versioned
+program-reference repair. Goal6 exposed active-receipt publication-prefix GC
+blocking, repeated index leaf decoding and a missing import retry policy.
+Those GC/index path/commitment SQL batching and retry repairs now pass focused
+live checks. Run Goal6's100k deployment and scaled recovery/maintenance with
+current25 optimized binaries. The first100k run stopped atbasis82, not acceptance.
+No overall production outcome has yet been claimed.

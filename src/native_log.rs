@@ -58,8 +58,9 @@ pub struct LogCursorStats {
 
 /// Fallible ordered transaction traversal. It reads one authenticated
 /// transaction per payload page and fuses after an error or range exhaustion.
-/// Memory is bounded by one codec-bounded transaction, not by the range length;
-/// a large individual transaction still requires correspondingly large memory.
+/// Additional traversal memory, beyond the shared captured snapshot, is bounded
+/// by one codec-bounded transaction rather than the range length. A large
+/// individual transaction still requires correspondingly large memory.
 pub struct LogCursor {
     log: LogValue,
     next_t: u64,
@@ -186,14 +187,24 @@ impl LogValue {
                             "transaction instant index contains a non-instant value",
                         ));
                     };
-                    if !datom.added || found < instant || crate::tx_to_t(datom.entity)? != datom.tx
+                    let t = crate::tx_to_t(datom.tx).map_err(|_| {
+                        fault(
+                            "log/invalid-tx-instant",
+                            "transaction instant index contains an invalid transaction entity id",
+                        )
+                    })?;
+                    if !datom.added
+                        || found < instant
+                        || datom.entity != datom.tx
+                        || t == 0
+                        || t > self.basis_t()
                     {
                         return Err(fault(
                             "log/invalid-tx-instant",
                             "transaction instant index contains an invalid transaction coordinate",
                         ));
                     }
-                    Ok(datom.tx)
+                    Ok(t)
                 } else {
                     self.basis_t().checked_add(1).ok_or_else(|| {
                         fault(

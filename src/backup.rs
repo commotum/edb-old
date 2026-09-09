@@ -792,7 +792,11 @@ impl PortableBackup {
         let mut current_state_hash = checkpoint_state_hash(&database)?;
         let log = load_backup_log(directory, &manifest)?;
         let mut objects_read = 1 + log.objects_read;
-        let mut pending_avet_by_basis = BTreeMap::<u64, Vec<Vec<crate::AvetProjectionWork>>>::new();
+        // Check each accelerator while the single authoritative replay is at
+        // its exact endpoint. Receipt archives can name many earlier bases;
+        // retaining one Database clone per archive would make deep verification
+        // grow with the number of endpoints as well as the database size.
+        let mut trees_by_basis = BTreeMap::<u64, Vec<TreeBackup>>::new();
         if deep {
             let mut trees = request_base_trees(&log);
             if let Some(tree) = &manifest.tree {
@@ -800,30 +804,28 @@ impl PortableBackup {
             }
             for tree in trees {
                 let decoded = decode_bound_tree_manifest(directory, &manifest, &log, &tree, None)?;
-                pending_avet_by_basis
-                    .entry(decoded.basis_t)
-                    .or_default()
-                    .push(decoded.pending_avet);
+                objects_read = objects_read.saturating_add(1);
+                let at_basis = trees_by_basis.entry(decoded.basis_t).or_default();
+                if !at_basis
+                    .iter()
+                    .any(|existing| existing.manifest_hash == tree.manifest_hash)
+                {
+                    at_basis.push(tree);
+                }
             }
         }
-        if let Some(work_sets) = pending_avet_by_basis.remove(&0) {
-            for pending in work_sets {
-                crate::peer::validate_avet_work_directions(&pending, database.schema())?;
+        if let Some(trees) = trees_by_basis.remove(&0) {
+            for tree in trees {
+                objects_read = objects_read.saturating_add(verify_tree_backup(
+                    directory,
+                    &manifest,
+                    &log,
+                    &tree,
+                    &database,
+                    current_state_hash,
+                )?);
             }
         }
-        let tree_basis = if deep {
-            manifest
-                .tree
-                .as_ref()
-                .map(|tree| {
-                    PersistentTreeManifest::decode(&read_object(directory, tree.manifest_hash)?)
-                        .map(|tree| tree.basis_t)
-                })
-                .transpose()?
-        } else {
-            None
-        };
-        let mut tree_state_hash = None;
         for entry in &log.entries {
             for datom in &entry.transaction.tx_data {
                 collect_function_hashes(&datom.value, &mut required_programs);
@@ -850,13 +852,17 @@ impl PortableBackup {
                 database.apply_committed(&entry.transaction)?
             };
             current_state_hash = checkpoint_state_hash(&database)?;
-            if let Some(work_sets) = pending_avet_by_basis.remove(&entry.transaction.basis_t) {
-                for pending in work_sets {
-                    crate::peer::validate_avet_work_directions(&pending, database.schema())?;
+            if let Some(trees) = trees_by_basis.remove(&entry.transaction.basis_t) {
+                for tree in trees {
+                    objects_read = objects_read.saturating_add(verify_tree_backup(
+                        directory,
+                        &manifest,
+                        &log,
+                        &tree,
+                        &database,
+                        current_state_hash,
+                    )?);
                 }
-            }
-            if tree_basis == Some(entry.transaction.basis_t) {
-                tree_state_hash = Some(current_state_hash);
             }
             if entry
                 .legacy_state_hash
@@ -880,7 +886,7 @@ impl PortableBackup {
                 "backup reconstruction disagrees with its endpoint root",
             ));
         }
-        if !pending_avet_by_basis.is_empty() {
+        if !trees_by_basis.is_empty() {
             return Err(fault(
                 "backup/tree-basis",
                 "backed-up tree metadata is outside the reconstructed log range",
@@ -905,18 +911,13 @@ impl PortableBackup {
         let programs = load_program_graph(directory, required_programs)?;
         objects_read += programs.len();
         verify_legacy_program_declarations(&manifest, &programs)?;
-        if let Some(tree) = &manifest.tree {
-            if deep {
-                objects_read +=
-                    verify_tree_backup(directory, &manifest, &log, tree, tree_state_hash)?;
-            } else {
-                verify_tree_presence(directory, &manifest, &log, tree)?;
-            }
+        if let Some(tree) = &manifest.tree
+            && !deep
+        {
+            verify_tree_presence(directory, &manifest, &log, tree)?;
         }
         for tree in request_base_trees(&log) {
-            if deep {
-                objects_read += verify_tree_backup(directory, &manifest, &log, &tree, None)?;
-            } else {
+            if !deep {
                 verify_tree_presence(directory, &manifest, &log, &tree)?;
             }
         }
@@ -4007,6 +4008,8 @@ fn capture_bound_request_tree<C: postgres::GenericClient>(
                         AND publication.log_generation = $2 \
                         AND publication.manifest_hash = $3), \
                     (SELECT count(*) FROM atomic_request_base_archives archive \
+                      JOIN atomic_request_base_archive_completions complete \
+                        ON complete.manifest_hash = archive.manifest_hash \
                       WHERE archive.database_id = $1 \
                         AND archive.generation = $2 \
                         AND archive.manifest_hash = $3)",
@@ -4598,27 +4601,79 @@ fn verify_tree_backup(
     backup: &Manifest,
     log: &LoadedBackupLog,
     tree: &TreeBackup,
-    expected_state_hash: Option<Digest>,
+    database: &Database,
+    expected_state_hash: Digest,
 ) -> Result<usize, SemanticError> {
-    let manifest = decode_bound_tree_manifest(directory, backup, log, tree, expected_state_hash)?;
+    use crate::operations::{
+        derive_index_projection, same_stored_datoms, validate_physical_history_projection,
+    };
+    use crate::{IndexOrder, View};
+    let manifest =
+        decode_bound_tree_manifest(directory, backup, log, tree, Some(expected_state_hash))?;
+    if database.basis_t() != manifest.basis_t {
+        return Err(fault(
+            "backup/tree-basis",
+            "tree verification requires its exact replayed database value",
+        ));
+    }
+    crate::peer::validate_avet_work_directions(&manifest.pending_avet, database.schema())?;
     let mut legacy_reachable = tree.legacy_node_hashes.as_ref().map(|_| BTreeSet::new());
     let mut objects_read: usize = 1;
-    for tree_root in &manifest.trees {
-        let root_hash = tree_root.descriptor.root_hash;
-        let expected_root_bytes = tree_root.root_bytes;
-        let validated = persistent_tree::validate_tree_streaming(&tree_root.descriptor, |hash| {
-            let payload = read_object(directory, *hash)?;
-            if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
-                return Err(fault(
-                    "backup/tree-root-bytes",
-                    "backed-up tree root size disagrees with its manifest",
-                ));
-            }
-            Ok(payload)
-        })?;
+    let mut load = |root: &crate::ManifestTree| {
+        let (datoms, validated) = read_validated_backup_tree(directory, root)?;
         objects_read = objects_read.saturating_add(validated.nodes_read as usize);
         if let Some(reachable) = &mut legacy_reachable {
             reachable.extend(validated.node_hashes);
+        }
+        Ok::<_, SemanticError>(datoms)
+    };
+    let current = database.datoms(View::Current, IndexOrder::Eavt);
+    let replayed_history = database.datoms(View::History, IndexOrder::Eavt);
+    let physical_history = load(
+        manifest
+            .tree(IndexOrder::Eavt, true)
+            .expect("manifest validates eight roots"),
+    )?;
+    validate_physical_history_projection(&replayed_history, &physical_history, database.basis_t())
+        .map_err(|error| tree_semantic_error(&manifest, IndexOrder::Eavt, true, error.message))?;
+    for root in &manifest.trees {
+        let order = root.descriptor.order;
+        let history = root.descriptor.history;
+        if history && order == IndexOrder::Eavt {
+            continue;
+        }
+        let mut observed = load(root)?;
+        let source = if history { &physical_history } else { &current };
+        let mut expected = derive_index_projection(database, source, order)?;
+        if order == IndexOrder::Avet {
+            validate_pending_avet_projection(
+                &manifest.pending_avet,
+                &observed,
+                source,
+                &replayed_history,
+                history,
+            )
+            .map_err(|error| tree_semantic_error(&manifest, order, history, error.message))?;
+            let pending = |attribute| {
+                manifest
+                    .pending_avet
+                    .iter()
+                    .any(|work| work.attribute == attribute && (!work.history || history))
+            };
+            observed.retain(|datom| !pending(datom.attribute));
+            expected.retain(|datom| !pending(datom.attribute));
+        }
+        if !same_stored_datoms(&observed, &expected) {
+            return Err(tree_semantic_error(
+                &manifest,
+                order,
+                history,
+                format!(
+                    "physical index disagrees with authoritative replay ({} observed vs {} expected datoms)",
+                    observed.len(),
+                    expected.len()
+                ),
+            ));
         }
     }
     if let (Some(expected), Some(reachable)) = (&tree.legacy_node_hashes, legacy_reachable)
@@ -4630,6 +4685,113 @@ fn verify_tree_backup(
         ));
     }
     Ok(objects_read)
+}
+
+/// Payload memory remains one node at a time; datoms for one index are
+/// materialized for exact comparison. The structural walk authenticates
+/// ordering/routing while the loader collects only reachable leaf contents.
+fn read_validated_backup_tree(
+    directory: &Path,
+    root: &crate::ManifestTree,
+) -> Result<(Vec<crate::Datom>, persistent_tree::StreamingTreeValidation), SemanticError> {
+    let mut datoms = Vec::new();
+    let validated = persistent_tree::validate_tree_streaming(&root.descriptor, |hash| {
+        let payload = read_object(directory, *hash)?;
+        if *hash == root.descriptor.root_hash && payload.len() as u64 != root.root_bytes {
+            return Err(fault(
+                "backup/tree-root-bytes",
+                "backed-up tree root size disagrees with its manifest",
+            ));
+        }
+        if let persistent_tree::TreeNode::Leaf(leaf) =
+            persistent_tree::decode_tree_node(hash, &payload)?
+        {
+            for index in 0..leaf.len() {
+                datoms.push(leaf.datom(index).expect("validated leaf columns"));
+            }
+        }
+        Ok(payload)
+    })?;
+    datoms.sort_by(|left, right| left.cmp_in(right, root.descriptor.order));
+    Ok((datoms, validated))
+}
+
+/// A copy phase is an exact AEVT-derived AVET prefix. Clearing phases can
+/// retain stale ranges across disable/data/re-enable tails; those are hidden
+/// from peer queries, but even stale data must occur in the authoritative log.
+/// A pending marker is never permission to smuggle fabricated values through
+/// backup verification. Once the current phase finishes it is checked exactly
+/// by the ordinary comparison, even while history is still pending.
+pub(crate) fn validate_pending_avet_projection(
+    pending_avet: &[crate::AvetProjectionWork],
+    observed: &[crate::Datom],
+    source: &[crate::Datom],
+    replayed_history: &[crate::Datom],
+    history: bool,
+) -> Result<(), SemanticError> {
+    for work in pending_avet.iter().filter(|work| !work.history || history) {
+        let actual = observed
+            .iter()
+            .filter(|datom| datom.attribute == work.attribute)
+            .cloned()
+            .collect::<Vec<_>>();
+        if work.history == history && !work.clearing {
+            let mut expected = source
+                .iter()
+                .filter(|datom| datom.attribute == work.attribute)
+                .cloned()
+                .collect::<Vec<_>>();
+            expected.sort_by(|left, right| left.cmp_in(right, crate::IndexOrder::Avet));
+            let prefix = usize::try_from(work.offset)
+                .ok()
+                .and_then(|offset| expected.get(..offset));
+            if !prefix.is_some_and(|prefix| crate::operations::same_stored_datoms(&actual, prefix))
+            {
+                return Err(fault(
+                    "integrity/tree-pending-avet-projection-mismatch",
+                    format!(
+                        "pending attribute {} is not its exact copy prefix at offset {}",
+                        work.attribute, work.offset
+                    ),
+                ));
+            }
+        } else {
+            for datom in actual {
+                let present = replayed_history
+                    .binary_search_by(|candidate| candidate.cmp_in(&datom, crate::IndexOrder::Eavt))
+                    .ok()
+                    .is_some_and(|index| {
+                        crate::operations::same_stored_datoms(
+                            &replayed_history[index..index + 1],
+                            std::slice::from_ref(&datom),
+                        )
+                    });
+                if !present || (!history && !datom.added) {
+                    return Err(fault(
+                        "integrity/tree-pending-avet-projection-mismatch",
+                        format!(
+                            "pending attribute {} contains data absent from authoritative replay",
+                            work.attribute
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn tree_semantic_error(
+    manifest: &PersistentTreeManifest,
+    order: crate::IndexOrder,
+    history: bool,
+    message: impl Into<String>,
+) -> SemanticError {
+    fault("backup/tree-semantic-mismatch", message)
+        .detail("basis_t", manifest.basis_t.to_string())
+        .detail("log_generation", manifest.excision_generation.to_string())
+        .detail("order", format!("{order:?}"))
+        .detail("history", history.to_string())
 }
 
 /// Prove that every restored kind-2 receipt names the deterministic archive
