@@ -330,9 +330,11 @@ fn native_bidirectional_raw_seek_is_lazy_and_matches_every_eager_index_view() {
     let (mut store, _) = populated(&connection, &database_id, false, 24);
     let eager = store.recover(&database_id).unwrap().database_value();
 
-    let mut config = TreeConfig::default();
-    config.max_leaf_datoms = 1;
-    config.max_leaves_per_directory = 2;
+    let config = TreeConfig {
+        max_leaf_datoms: 1,
+        max_leaves_per_directory: 2,
+        ..TreeConfig::default()
+    };
     let mut indexer = PostgresIndexer::connect(&connection, &database_id)
         .unwrap()
         .with_tree_config(config)
@@ -390,7 +392,7 @@ fn native_bidirectional_raw_seek_is_lazy_and_matches_every_eager_index_view() {
     }
 
     let keep_even_t = |_: &atomic_core::DatabaseValue, datom: &Datom| {
-        atomic_core::tx_to_t(datom.tx).unwrap() % 2 == 0
+        atomic_core::tx_to_t(datom.tx).unwrap().is_multiple_of(2)
     };
     let eager_filtered = eager.clone().history().filter(keep_even_t);
     let native_filtered = native.clone().history().filter(keep_even_t);
@@ -447,7 +449,7 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
     let expected = store.recover(&database_id).unwrap();
 
     let before_index = Peer::connect(&connection, &database_id, 2).unwrap();
-    let old = before_index.db();
+    let old = before_index.db_compatibility();
     // The transactor owns a background indexer, so startup may already have
     // published an early immutable base. What matters is that this captured
     // value is older than the explicit consolidation below and remains exact.
@@ -481,7 +483,7 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
     let peer = Peer::connect(&connection, &database_id, 2).unwrap();
     assert_eq!(peer.durable_base_t(), expected.basis_t());
     assert_eq!(peer.load_stats().compatibility_materializations, 0);
-    assert_current_eq(&peer.db(), &expected);
+    assert_current_eq(&peer.db_compatibility(), &expected);
     assert_eq!(peer.load_stats().compatibility_materializations, 1);
 
     // Opening the peer loaded the eight small roots plus only the authenticated
@@ -609,7 +611,7 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
         vec![&Value::Long(8)]
     );
     let advanced = peer
-        .sync_to(committed.basis_t, Duration::from_secs(1))
+        .sync_to_compatibility(committed.basis_t, Duration::from_secs(1))
         .unwrap();
     assert_current_eq(&advanced, &committed.db_after);
     let live = peer.snapshot();
@@ -669,7 +671,10 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
         peer.take_tx_reports().last().unwrap().basis_t,
         committed.basis_t
     );
-    assert_current_eq(&before_index.sync().unwrap(), &committed.db_after);
+    assert_current_eq(
+        &before_index.sync_compatibility().unwrap(),
+        &committed.db_after,
+    );
     service.shutdown();
 
     let prefix = IndexPrefix::Eavt {
@@ -735,8 +740,14 @@ fn transaction_reports_are_opt_in_and_removable_connection_state() {
     );
     peer.sync_to_snapshot(observed.basis_t, Duration::from_secs(1))
         .unwrap();
+    let reports = peer.take_tx_reports();
+    assert_eq!(reports.len(), 1);
+    common::assert_same_information(&reports[0].db_before, &observed.db_before);
+    common::assert_same_information(&reports[0].db_after, &observed.db_after);
+    assert_eq!(reports[0].tx_data, observed.tx_data);
+    assert_eq!(reports[0].tempids, observed.tempids);
     assert_eq!(
-        peer.take_tx_reports()
+        reports
             .into_iter()
             .map(|report| report.basis_t)
             .collect::<Vec<_>>(),
@@ -813,7 +824,7 @@ fn corrupt_current_root_is_repaired_at_the_same_basis_and_peer_adopts_revision()
     assert!(peer.refresh_index().unwrap());
     assert_eq!(peer.durable_base_revision(), repaired.publication_revision);
     assert_eq!(peer.durable_base_t(), repaired.basis_t);
-    assert_current_eq(&peer.db(), &expected);
+    assert_current_eq(&peer.db_compatibility(), &expected);
 
     // Captured values pin their old root and remain usable even after the live
     // connection swaps a newer physical root at the same logical basis.
@@ -838,7 +849,7 @@ fn corrupt_current_root_is_repaired_at_the_same_basis_and_peer_adopts_revision()
         reopened.durable_base_revision(),
         repaired.publication_revision
     );
-    assert_current_eq(&reopened.db(), &expected);
+    assert_current_eq(&reopened.db_compatibility(), &expected);
 }
 
 #[test]
@@ -1033,7 +1044,7 @@ fn interrupted_build_is_invisible_and_corrupt_derived_data_falls_back_to_log() {
             .code,
         "tree/content-hash-mismatch"
     );
-    assert_current_eq(&peer.db(), &expected);
+    assert_current_eq(&peer.db_compatibility(), &expected);
 }
 
 #[test]
@@ -1104,7 +1115,7 @@ fn self_consistent_legacy_manifest_falls_back_but_invalid_native_authority_fails
 
     let peer = Peer::connect(&connection, &database_id, 32).unwrap();
     assert_eq!(peer.durable_base_t(), 0);
-    assert_current_eq(&peer.db(), &expected);
+    assert_current_eq(&peer.db_compatibility(), &expected);
 }
 
 #[test]
@@ -1160,7 +1171,7 @@ fn no_history_consolidation_forgets_old_values_without_changing_current_state() 
         .consolidate()
         .unwrap();
     let peer = Peer::connect(&connection, &database_id, 8).unwrap();
-    assert_current_eq(&peer.db(), &expected);
+    assert_current_eq(&peer.db_compatibility(), &expected);
     let snapshot = peer.snapshot();
     let retained = retained_attribute_history(&snapshot, IndexOrder::Eavt, entity, ITEM_COUNT);
     assert_eq!(retained.len(), 1);
@@ -1287,7 +1298,7 @@ fn enabling_no_history_changes_only_future_indexing_jobs() {
         .unwrap();
     let peer = Peer::connect(&connection, &database_id, 16).unwrap();
     assert_eq!(peer.durable_base_t(), fourth.basis_t);
-    assert_current_eq(&peer.db(), &expected_current);
+    assert_current_eq(&peer.db_compatibility(), &expected_current);
     let retained = peer
         .snapshot()
         .datoms(true, IndexOrder::Eavt)
@@ -1461,7 +1472,7 @@ fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
     let waiting_peer = Peer::connect(&connection, &database_id, 16).unwrap();
     let synchronizer = waiting_peer.clone();
     let observer = waiting_peer.clone();
-    let old = waiting_peer.db();
+    let old = waiting_peer.db_compatibility();
     let reader_snapshot = Arc::clone(&old);
     let reader = std::thread::spawn(move || {
         for _ in 0..1_000 {
@@ -1492,13 +1503,13 @@ fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
         committed
     });
     let advanced = synchronizer
-        .sync_to(basis + 1, Duration::from_secs(2))
+        .sync_to_compatibility(basis + 1, Duration::from_secs(2))
         .unwrap();
     let committed = writer.join().unwrap();
     reader.join().unwrap();
     assert_current_eq(&advanced, &committed.db_after);
     assert_eq!(waiting_peer.basis_t(), committed.basis_t);
-    assert_current_eq(&observer.db(), &committed.db_after);
+    assert_current_eq(&observer.db_compatibility(), &committed.db_after);
     assert_eq!(old.basis_t(), basis);
     assert_eq!(old.values(entity, ITEM_COUNT), vec![&Value::Long(30)]);
 
@@ -1596,7 +1607,7 @@ fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
     assert_eq!(restarted.load_stats().root_reads, 8);
     assert!(restarted.load_stats().leaf_reads > 0);
     assert_eq!(restarted.load_stats().compatibility_materializations, 0);
-    assert_current_eq(&restarted.db(), &committed.db_after);
+    assert_current_eq(&restarted.db_compatibility(), &committed.db_after);
 }
 
 #[test]
@@ -1756,11 +1767,32 @@ fn avet_transition_waits_for_a_covering_native_publication() {
     );
     assert_eq!(unready_query.plan[0].access, "AEVT seek");
 
+    // A concurrent background publication is allowed to win this race, but
+    // sync-schema must never succeed with the still-unready AVET value merely
+    // because the schema transaction's logical basis has been reached.
+    match peer.sync_schema(altered.basis_t, Duration::ZERO) {
+        Ok(database) => assert_eq!(
+            database.collect_datoms_with_prefix(&prefix).unwrap().len(),
+            1
+        ),
+        Err(error) => assert_eq!(error.code, "peer/sync-schema-timeout"),
+    }
+
     PostgresIndexer::connect(&connection, &database_id)
         .unwrap()
         .consolidate()
         .unwrap();
-    assert!(peer.refresh_index().unwrap());
+    peer.refresh_index().unwrap();
+    let schema_ready = peer
+        .sync_schema(altered.basis_t, Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        schema_ready
+            .collect_datoms_with_prefix(&prefix)
+            .unwrap()
+            .len(),
+        1
+    );
     let ready = peer.snapshot().datoms_with_prefix(false, &prefix).unwrap();
     assert_eq!(ready.datoms.len(), 1);
     assert_eq!(ready.datoms[0].entity, entity);
@@ -1844,12 +1876,12 @@ fn failed_multi_row_tail_does_not_tear_peer_state_and_can_retry() {
     assert_eq!(corrupted, 1);
 
     let rejected = peer
-        .sync_to(second.basis_t, Duration::from_secs(1))
+        .sync_to_compatibility(second.basis_t, Duration::from_secs(1))
         .unwrap_err();
     assert_eq!(rejected.category, atomic_core::ErrorCategory::Fault);
     assert_eq!(rejected.code, "recovery/generation-membership-mismatch");
     assert_eq!(peer.basis_t(), initial_hash_basis);
-    assert_current_eq(&peer.db(), &initial);
+    assert_current_eq(&peer.db_compatibility(), &initial);
     assert!(peer.take_tx_reports().is_empty());
 
     let restored = common::with_replica_triggers_disabled(&mut client, |client| {
@@ -1863,7 +1895,7 @@ fn failed_multi_row_tail_does_not_tear_peer_state_and_can_retry() {
     assert_eq!(restored, 1);
 
     let retried = peer
-        .sync_to(second.basis_t, Duration::from_secs(1))
+        .sync_to_compatibility(second.basis_t, Duration::from_secs(1))
         .unwrap();
     assert_current_eq(&retried, &second.db_after);
     assert_eq!(peer.take_tx_reports().len(), 2);
@@ -1925,7 +1957,7 @@ fn peer_native_api_transacts_syncs_queries_navigates_and_pulls_one_basis() {
             Duration::from_secs(2),
         )
         .unwrap();
-    peer.sync_to(receipt.basis_t, Duration::from_secs(2))
+    peer.sync_to_compatibility(receipt.basis_t, Duration::from_secs(2))
         .unwrap();
     old_reader.join().unwrap();
     assert_eq!(peer.basis_t(), receipt.basis_t);

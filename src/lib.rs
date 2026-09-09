@@ -1,8 +1,9 @@
-//! Native single-process transactional kernel for Atomic.
+//! Native Rust/PostgreSQL Datomic-inspired database.
 //!
 //! The kernel applies declarative transaction information to immutable
-//! database values and exposes Datomic-shaped indexes and temporal views. It
-//! deliberately contains no PostgreSQL, network, query, or pull machinery.
+//! database values. PostgreSQL stores the serialized durable log and indexes;
+//! independent peers provide local queries, pull, temporal views, and native
+//! immutable snapshots. The pure kernel remains available as an explicit oracle.
 
 mod backup;
 mod connection;
@@ -16,6 +17,8 @@ mod excision;
 mod identity;
 mod idents;
 mod index;
+#[cfg(unix)]
+mod local_transport;
 mod log_generation;
 mod operations;
 mod peer;
@@ -62,6 +65,8 @@ pub use identity::{
     tx_to_t,
 };
 pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
+#[cfg(unix)]
+pub use local_transport::{CommittedTransaction, LocalTransactionServer, LocalTransportConfig};
 pub use operations::{
     ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
     LogGenerationGarbage, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC,

@@ -13,6 +13,13 @@ use num_bigint::BigInt;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
+#[path = "submission_codec.rs"]
+mod submission_codec;
+pub(crate) use submission_codec::{
+    WireOutcome, WireReport, decode_submission, decode_submission_outcome, encode_submission,
+    encode_submission_outcome,
+};
+
 pub type Digest = [u8; 32];
 
 const MAGIC: &[u8; 4] = b"ATMC";
@@ -722,7 +729,7 @@ pub fn request_digest(
     put_i64(&mut body, tx_instant);
     put_len(&mut body, encoded_ops.len())?;
     for encoded in encoded_ops {
-        put_bytes(&mut body, &encoded)?;
+        put_framed_bytes(&mut body, &encoded)?;
     }
     Ok(sha256(&encode_blob(KIND_REQUEST, &body)?))
 }
@@ -790,7 +797,7 @@ pub(crate) fn canonical_submission_request(
     }
     put_len(&mut body, encoded_forms.len())?;
     for encoded in encoded_forms {
-        put_bytes(&mut body, &encoded)?;
+        put_framed_bytes(&mut body, &encoded)?;
     }
     let encoded = encode_blob(KIND_SUBMISSION_REQUEST, &body)?;
     if encoded.len() > max_bytes {
@@ -1834,7 +1841,7 @@ fn encode_entity_map(
     entries.sort();
     put_len(output, entries.len())?;
     for entry in entries {
-        put_bytes(output, &entry)?;
+        put_framed_bytes(output, &entry)?;
     }
     Ok(())
 }
@@ -1897,7 +1904,7 @@ fn encode_map_value(
             values.sort();
             put_len(output, values.len())?;
             for value in values {
-                put_bytes(output, &value)?;
+                put_framed_bytes(output, &value)?;
             }
         }
     }
@@ -2080,6 +2087,21 @@ fn put_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SemanticError> {
         return Err(SemanticError::incorrect(
             "encoding/value-too-large",
             format!("encoded value exceeds {MAX_VALUE_LEN} bytes"),
+        ));
+    }
+    put_len(output, bytes.len())?;
+    output.extend_from_slice(bytes);
+    Ok(())
+}
+
+// A compound form contains scalar bytes plus framing/other values. Its limit
+// is the enclosing blob's, not the smaller individual scalar-value ceiling.
+// The framing bytes are unchanged, preserving existing request digests.
+fn put_framed_bytes(output: &mut Vec<u8>, bytes: &[u8]) -> Result<(), SemanticError> {
+    if bytes.len() > MAX_BLOB_LEN {
+        return Err(SemanticError::incorrect(
+            "encoding/blob-too-large",
+            "compound form exceeds blob limit",
         ));
     }
     put_len(output, bytes.len())?;

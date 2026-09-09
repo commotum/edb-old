@@ -50,7 +50,7 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage 1 is the first unfinished stage. This is a fresh
+**Status:** Open; Stage 2 is the first unfinished stage. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -107,7 +107,15 @@ any discovered gap to its owning child before declaring Goal 0 complete.
 
 ### 1. Restore a trustworthy runnable baseline
 
-**Status:** Pending execution; [Goal 1](../goal-1/0-plan.md) is scaffolded.
+**Status:** Complete; [Goal 1](../goal-1/0-plan.md) records the verified baseline.
+
+Lineage initialization, forward raw-boundary routing, and atomic catch-up report
+publication repaired. Build/clippy and pure baseline pass. Real PostgreSQL
+15.11 evidence: 19 peer, 6 durability (including actual restart), and 15 selected
+service tests pass; the corrected corruption witness ran separately. A public
+schema/transact/query/pull/history/immutable-value/reopen example runs. These
+are baseline checks, not full live-suite or scale acceptance. See child evidence
+for corrected fixtures and the isolated rerun after restart interference.
 
 **Outcome:** The current implementation builds, its real failures are known,
 and an ordinary application workflow provides a continuing integration check.
@@ -124,7 +132,17 @@ every later feature to be complete before banking this baseline.
 
 ### 2. Complete the native connection and observation model
 
-**Status:** Pending; substantial implementation already exists.
+**Status:** Active; [Goal 2](../goal-2/0-plan.md) owns execution.
+
+Progress: strict independent native reads, non-owning writer attachment and
+replacement, ordered service observation independent of ticket waits,
+background catch-up with complete tempid receipts, and native index/schema/
+excision synchronization now have focused real PostgreSQL evidence. The public
+two-peer workflow reads and reopens after writer shutdown. An eight-transaction
+lagging-peer witness adopts the indexed prefix with zero recent datoms and zero
+eager materializations; this is not a realistic scale benchmark. Independent-
+process submission and broader failure/deadline/retention checks remain open;
+the in-process handle is not remote access. See the child continuation.
 
 **Outcome:** Applications connect, submit transactions, and observe exact
 immutable native values through a coherent API, with reads independent of
@@ -229,8 +247,11 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Next action:** Execute `goal-1/`: recheck the missing `lineage_id` initializer
-and current build, then establish the Stage 1 baseline and investigate the
-connection/report issues. Fold completion back here and scaffold/resume Goal 2.
-The scaffold alone completes no implementation stage. Keep one concise
-continuation note here identifying the active child when execution stops.
+**Continuation checkpoint — 2026-09-08:** Goal 2 remains the only active child;
+its internal Stage 2 is first unfinished. Finish independent-process submission
+and its observation/failure integration, preserving the verified attachment,
+report, native-sync, and checkpoint-adoption repairs. Review callback/SQL stall
+and shutdown deadlines and keep exercising the two-peer public workflow.
+Goal 2 records exact evidence and temporary PostgreSQL fixtures. Stages 3–6
+remain open and must be executed after Goal 2; neither this baseline nor the
+partial connection implementation completes the parent objective.

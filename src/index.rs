@@ -361,6 +361,7 @@ impl NormalizedIndexBoundary {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn matches(&self, datom: &Datom) -> bool {
         self.compare_datom(datom).is_eq()
     }

@@ -44,7 +44,7 @@ being rebuilt in small, Rust-facing pieces as concrete porting questions arise.
 Do not restore the old workflow wholesale: that would reintroduce thousands of
 historical requirements unrelated to the port.
 
-The pure suite runs with:
+The default suite runs with (PostgreSQL-dependent tests self-skip without configuration):
 
 ```sh
 cargo test --offline
@@ -58,6 +58,68 @@ server state:
 ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
   cargo test --all-targets -- --test-threads=1
 ```
+
+Restart witnesses additionally require `ATOMIC_POSTGRES_CTL` (the absolute
+`pg_ctl` path) and `ATOMIC_POSTGRES_DATA` (that disposable server's data
+directory). Do not run other tests on that server during restart checks. Some
+TLS and role fixtures have additional prerequisites; a green exit without
+those prerequisites is not evidence that they executed.
+
+`postgres_restart_resilience` deliberately uses a separate fixture:
+`ATOMIC_RESTART_POSTGRES_URL`, `ATOMIC_RESTART_POSTGRES_DATA`,
+`ATOMIC_RESTART_PG_CTL`, `ATOMIC_RESTART_POSTGRES_LOG`, and
+`ATOMIC_RESTART_POSTGRES_OPTIONS`. Set the last variable to the server's exact
+`-k`, `-p`, and `-h` startup options; `pg_ctl start` does not infer a prior
+custom endpoint. Never point a restart fixture at a shared or production server.
+
+Run the public-API application workflow against a disposable database:
+
+```sh
+ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
+  cargo run --offline --example native_workflow
+```
+
+It explicitly provisions a unique logical database, then uses the connection
+API for schema, transact, query, pull, history, immutable old values, and reopen.
+It fails if PostgreSQL configuration is missing. The writer has a separate
+lifetime; a second read-only peer observes its commits and reopens after writer
+shutdown. Submission attachment in this example is an in-process handle, not a
+remote writer protocol.
+
+The Unix-only independent-process workflow runs a writer and two submitting
+peer child processes, with a separate observer:
+
+```sh
+ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
+  cargo run --offline --example process_workflow
+```
+
+`LocalTransactionServer` exposes an existing writer through a bounded, versioned
+native Unix socket. `Connection::transact_socket` submits full declarative forms
+and opens exact native receipt values using the peer's read-only PostgreSQL
+permissions. Socket access is restricted to the same OS user (private 0700
+directory, 0600 socket); this is a same-host deployment, not a TCP service or
+Datomic wire protocol. Restarting the adapter creates a new endpoint to pass
+to callers. PostgreSQL transport can independently require verified TLS.
+
+A lost response after attempted delivery is `UnknownOutcome`: retry the same
+request key and content. A confirmed commit returns `CommittedTransaction`;
+its `report` can separately fail to open without changing the known commit.
+Remote semantic errors retain category, details, and structured anomaly; the
+original code is in `details["remote_code"]`. Delivery uses a total socket
+deadline; native receipt opening uses the configured PostgreSQL I/O policy.
+
+Both `Connection::db()` and `Peer::db()` capture native immutable values without
+I/O. Eager diagnostic access is explicitly named `Peer::db_compatibility`,
+`try_db_compatibility`, `sync_compatibility`, and `sync_to_compatibility`.
+Connections advance in the background without blocking the writer: a bounded
+one-slot hint channel is repaired from the durable log. Only explicitly enabled
+transaction-report queues are unbounded; consumers must drain or disable them.
+`observation_error()` is separate from a transaction's durable outcome.
+Dropping a read connection requests observer shutdown without waiting for a
+stalled storage read; its worker and pins release when that in-flight read ends.
+
+These examples establish application paths, not production or scale acceptance.
 
 ## Working boundary
 

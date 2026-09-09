@@ -1291,20 +1291,19 @@ impl PostgresTreeStore {
             observed_generation,
             observed_manifest,
             observed_index_basis,
-        ) =
-            if let Some(row) = current {
-                (
-                    pg_u64(row.get(0), "current tree publication revision")?,
-                    Some(pg_u64(row.get(1), "current tree publication basis")?),
-                    Some(pg_u64(row.get(2), "current tree publication generation")?),
-                    Some(digest(row.get(3), "current tree publication manifest")?),
-                    row.get::<_, Option<i64>>(4)
-                        .map(|value| pg_u64(value, "current tree publication index basis"))
-                        .transpose()?,
-                )
-            } else {
-                (0, None, None, None, None)
-            };
+        ) = if let Some(row) = current {
+            (
+                pg_u64(row.get(0), "current tree publication revision")?,
+                Some(pg_u64(row.get(1), "current tree publication basis")?),
+                Some(pg_u64(row.get(2), "current tree publication generation")?),
+                Some(digest(row.get(3), "current tree publication manifest")?),
+                row.get::<_, Option<i64>>(4)
+                    .map(|value| pg_u64(value, "current tree publication index basis"))
+                    .transpose()?,
+            )
+        } else {
+            (0, None, None, None, None)
+        };
         if observed_revision != expected_revision {
             return Err(SemanticError::conflict(
                 "tree/publication-cas-lost",
@@ -1366,8 +1365,7 @@ impl PostgresTreeStore {
         if matches!(delta, TreePublicationDelta::Unknown) {
             let manifest_lineage =
                 (manifest.excision_generation > 0).then_some(lineage_id.as_str());
-            let stored_index_basis =
-                (candidate_manifest_version >= 6).then_some(index_basis);
+            let stored_index_basis = (candidate_manifest_version >= 6).then_some(index_basis);
             manifest_inserted = transaction
                 .execute(
                     "INSERT INTO atomic_tree_manifests \

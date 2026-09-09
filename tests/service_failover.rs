@@ -77,10 +77,10 @@ fn standby_takes_over_abandoned_lease_while_peer_reads_remain_available() {
     )
     .unwrap();
     let peer = Peer::connect(&connection, &database_id, 2).unwrap();
-    let old = peer.db();
+    let old = peer.db_compatibility();
     assert_eq!(old.basis_t(), initial_basis);
     assert_eq!(
-        peer.db().basis_t(),
+        peer.db_compatibility().basis_t(),
         initial_basis,
         "reads do not require a live writer"
     );
@@ -103,7 +103,7 @@ fn standby_takes_over_abandoned_lease_while_peer_reads_remain_available() {
     assert_eq!(report.basis_t, initial_basis + 1);
     assert_eq!(old.basis_t(), initial_basis);
     assert_eq!(
-        peer.sync_to(report.basis_t, Duration::from_secs(1))
+        peer.sync_to_compatibility(report.basis_t, Duration::from_secs(1))
             .unwrap()
             .basis_t(),
         report.basis_t

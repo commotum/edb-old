@@ -150,15 +150,19 @@ fn live_handles_reborrow_after_server_restart_without_losing_peer_values() {
     let first_publication = indexer.consolidate().unwrap();
     let mut tree_store = PostgresTreeStore::connect(&connection).unwrap();
     let peer = Peer::connect(&connection, &database_id, 32).unwrap();
-    let old_database = peer.try_db().unwrap();
+    let old_database = peer.try_db_compatibility().unwrap();
     let old_snapshot = peer.sync_snapshot().unwrap();
+    let native_connection = atomic_core::Connection::connect(&connection, &database_id, 4).unwrap();
+    let old_native = native_connection.db();
+    native_connection.enable_transaction_reports();
     assert_eq!(old_database.basis_t(), first.basis_t);
     assert_eq!(old_snapshot.basis_t(), first.basis_t);
 
     fixture.stop();
+    assert_eq!(native_connection.db().basis_t(), first.basis_t);
     // d/db-shaped access returns the already-published immutable value while
     // both the transactor and storage process are unavailable.
-    assert_eq!(peer.db().basis_t(), first.basis_t);
+    assert_eq!(peer.db_compatibility().basis_t(), first.basis_t);
     assert!(
         !old_database
             .datoms(View::Current, IndexOrder::Eavt)
@@ -192,6 +196,30 @@ fn live_handles_reborrow_after_server_restart_without_losing_peer_values() {
     assert_eq!(old_snapshot.basis_t(), first.basis_t);
 
     store.reconnect().unwrap();
+    assert_eq!(
+        native_connection
+            .sync_to(target, Duration::from_secs(10))
+            .unwrap()
+            .basis_t(),
+        target
+    );
+    let observed = native_connection
+        .next_transaction_report(Duration::from_secs(10))
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.basis_t, second.basis_t);
+    assert_eq!(observed.tempids, second.tempids);
+    assert_eq!(observed.tx_data, second.tx_data);
+    assert_eq!(
+        old_native.collect_datoms(IndexOrder::Eavt).unwrap(),
+        first.db_after.collect_datoms(IndexOrder::Eavt).unwrap()
+    );
+    assert_eq!(
+        native_connection
+            .load_stats()
+            .compatibility_materializations,
+        0
+    );
     assert_eq!(store.recover(&database_id).unwrap().basis_t(), target);
     tree_store.reconnect().unwrap();
     assert_eq!(

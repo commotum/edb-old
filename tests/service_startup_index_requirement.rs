@@ -130,6 +130,16 @@ fn missing_late_native_root_requires_explicit_admin_consolidation() {
     .unwrap();
     assert_eq!(publication_count(&mut sql, &database_id), 0);
 
+    let peer_error = atomic_core::Peer::connect(&connection, &database_id, 4)
+        .err()
+        .expect("ordinary peer must not recover the entire database");
+    assert_eq!(peer_error.code, "peer/native-index-required");
+    let compatibility =
+        atomic_core::Peer::connect_compatibility(&connection, &database_id, 4).unwrap();
+    assert_eq!(compatibility.basis_t(), committed.basis_t);
+    assert_eq!(compatibility.load_stats().compatibility_materializations, 1);
+    drop(compatibility);
+
     let error = match TransactionService::start(config(
         &connection,
         &database_id,

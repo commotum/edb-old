@@ -840,7 +840,7 @@ fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments(
     );
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
     assert_eq!(
-        peer.db().values(user(42), ITEM_VALUE),
+        peer.db_compatibility().values(user(42), ITEM_VALUE),
         vec![&Value::Long(1)]
     );
     service.shutdown();
@@ -1643,7 +1643,7 @@ fn concurrent_consolidation_and_gc_never_remove_published_segments() {
     assert_eq!(report.metrics.index_lag, 0);
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
     assert_eq!(
-        peer.db().values(user(42), ITEM_VALUE),
+        peer.db_compatibility().values(user(42), ITEM_VALUE),
         vec![&Value::Long(4)]
     );
     service.shutdown();
@@ -1799,7 +1799,7 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
     assert_eq!(publication.get::<_, i64>(1), 1);
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
     assert_eq!(
-        peer.db().values(user(42), ITEM_VALUE),
+        peer.db_compatibility().values(user(42), ITEM_VALUE),
         vec![&Value::Long(value)]
     );
 }

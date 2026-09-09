@@ -409,7 +409,9 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     assert_eq!(restored_peer.durable_base_t(), basis2);
     assert_eq!(restored_peer.durable_base_revision(), 1);
     assert_eq!(
-        restored_peer.db().values(user(42), ITEM_VALUE),
+        restored_peer
+            .db_compatibility()
+            .values(user(42), ITEM_VALUE),
         vec![&Value::String("two".into())]
     );
     let source_states: Vec<Vec<u8>> = physical_catalog

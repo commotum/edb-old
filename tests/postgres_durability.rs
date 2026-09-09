@@ -93,7 +93,7 @@ fn migrations_are_idempotent() {
         .query_one("SELECT count(*) FROM atomic_schema_migrations", &[])
         .unwrap()
         .get(0);
-    assert_eq!(versions, 12);
+    assert_eq!(versions, atomic_core::POSTGRES_SCHEMA_VERSION);
 }
 
 #[test]
@@ -465,7 +465,9 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
     service.shutdown();
     let error = client
         .execute(
-            "UPDATE atomic_transactions SET payload = payload WHERE database_id = $1",
+            "UPDATE atomic_transaction_contents SET payload = payload \
+             WHERE content_hash IN (SELECT content_hash FROM atomic_generation_transactions \
+             WHERE database_id = $1)",
             &[&database_id],
         )
         .unwrap_err();
@@ -475,7 +477,8 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
     client
         .batch_execute(&format!(
             "CREATE ROLE {role}; \
-             GRANT SELECT, INSERT ON atomic_transactions, atomic_requests TO {role}; \
+             GRANT SELECT, INSERT ON atomic_generation_transactions, \
+             atomic_generation_requests, atomic_transaction_contents TO {role}; \
              GRANT SELECT, UPDATE ON atomic_heads TO {role}; \
              GRANT SELECT ON atomic_databases TO {role}"
         ))
@@ -486,7 +489,7 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
         .unwrap();
     let error = runtime
         .execute(
-            "DELETE FROM atomic_transactions WHERE database_id = $1",
+            "DELETE FROM atomic_generation_transactions WHERE database_id = $1",
             &[&database_id],
         )
         .unwrap_err();
@@ -496,21 +499,20 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
         .batch_execute(&format!("DROP OWNED BY {role}; DROP ROLE {role}"))
         .unwrap();
 
-    client
-        .batch_execute("ALTER TABLE atomic_transactions DISABLE TRIGGER USER")
-        .unwrap();
-    client
-        .execute(
-            "UPDATE atomic_transactions SET payload = set_byte(payload, 16, \
-             get_byte(payload, 16) # 1) WHERE database_id = $1 AND basis_t = 1",
+    common::with_replica_triggers_disabled(&mut client, |client| {
+        let affected = client.execute(
+            "UPDATE atomic_transaction_contents SET payload = set_byte(payload, 16, \
+             get_byte(payload, 16) # 1) WHERE content_hash IN \
+             (SELECT content_hash FROM atomic_generation_transactions \
+             WHERE database_id = $1 AND basis_t = 1)",
             &[&database_id],
-        )
-        .unwrap();
-    client
-        .batch_execute("ALTER TABLE atomic_transactions ENABLE TRIGGER USER")
-        .unwrap();
+        )?;
+        assert_eq!(affected, 1, "fault injection must corrupt actual content");
+        Ok(())
+    })
+    .unwrap();
     let error = store.recover(&database_id).unwrap_err();
-    assert_eq!(error.code, "recovery/transaction-checksum-mismatch");
+    assert_eq!(error.code, "recovery/content-checksum-mismatch");
 
     let missing_id = unique("missing");
     store.create_database(&missing_id, schema()).unwrap();
@@ -530,14 +532,20 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
     // referential triggers for this one scoped fault injection, leaving the
     // dangling derived publication in place for recovery to distrust.
     common::with_replica_triggers_disabled(&mut client, |client| {
-        client.execute(
-            "DELETE FROM atomic_requests WHERE database_id = $1",
+        let requests = client.execute(
+            "DELETE FROM atomic_generation_requests WHERE database_id = $1",
             &[&missing_id],
         )?;
-        client.execute(
-            "DELETE FROM atomic_transactions WHERE database_id = $1",
+        let transactions = client.execute(
+            "DELETE FROM atomic_generation_transactions WHERE database_id = $1",
             &[&missing_id],
         )?;
+        // Provisioning the nonempty schema is itself the first transaction.
+        assert_eq!(requests, 2);
+        assert_eq!(
+            transactions, 2,
+            "fault injection must remove an actual transaction"
+        );
         Ok(())
     })
     .unwrap();

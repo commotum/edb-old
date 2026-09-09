@@ -153,7 +153,7 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
     request_service.shutdown();
 
     let peer = Peer::connect(&connection, &database_id, 8).unwrap();
-    let old_value = peer.db();
+    let old_value = peer.db_compatibility();
     assert_eq!(
         old_value.values(user(42), SECRET),
         vec![&Value::String("erase-this-secret".into())]
@@ -300,7 +300,7 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         old_value.values(user(42), SECRET),
         vec![&Value::String("erase-this-secret".into())]
     );
-    let refreshed = peer.sync().unwrap();
+    let refreshed = peer.sync_compatibility().unwrap();
     assert_eq!(peer.durable_base_t(), refreshed.basis_t());
     assert!(refreshed.values(user(42), SECRET).is_empty());
     assert!(refreshed.values(user(42), RETAINED).is_empty());

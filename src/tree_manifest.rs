@@ -293,7 +293,7 @@ impl PersistentTreeManifest {
         } else {
             Vec::new()
         };
-        let index_basis_t = encoded_index_basis_t.unwrap_or_else(|| {
+        let index_basis_t = encoded_index_basis_t.unwrap_or({
             if version == AVET_PROJECTION_VERSION && !pending_avet.is_empty() {
                 // V5 did not authenticate this coordinate. Zero is the safe
                 // upgrade floor: the next completed V6 publication advances

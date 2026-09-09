@@ -221,6 +221,7 @@ fn granted_runtime_roles_start_and_operate_without_ddl_or_history_mutation() {
     assert_eq!(publication.basis_t, 2);
     let peer = Peer::connect(&peer_connection, &database_id, 4).unwrap();
     assert_eq!(peer.db().basis_t(), 2);
+    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 
     let mut writer = Client::connect(&writer_connection, NoTls).unwrap();
     let ddl_error = writer
@@ -255,6 +256,42 @@ fn granted_runtime_roles_start_and_operate_without_ddl_or_history_mutation() {
         peer_write_error.as_db_error().unwrap().code().code(),
         "42501"
     );
+
+    #[cfg(unix)]
+    {
+        let endpoint =
+            atomic_core::LocalTransactionServer::start(service.client(), Default::default())
+                .unwrap();
+        let connection =
+            atomic_core::Connection::connect(&peer_connection, &database_id, 4).unwrap();
+        let receipt = connection
+            .transact_socket(
+                endpoint.endpoint(),
+                atomic_core::TransactionRequest::new(
+                    "read-role-socket-request",
+                    vec![TxOp::Add {
+                        entity: EntityRef::Temp("remote".into()),
+                        attribute: ITEM_NAME,
+                        value: Value::String("via-writer".into()).into(),
+                    }],
+                ),
+                Duration::from_secs(10),
+            )
+            .unwrap()
+            .report
+            .unwrap();
+        assert_eq!(
+            receipt
+                .db_after
+                .values(receipt.tempids["remote"], ITEM_NAME)
+                .unwrap(),
+            vec![Value::String("via-writer".into())]
+        );
+        assert_eq!(connection.load_stats().compatibility_materializations, 0);
+        drop(receipt);
+        drop(connection);
+        drop(endpoint);
+    }
 
     drop(peer);
     drop(peer_client);

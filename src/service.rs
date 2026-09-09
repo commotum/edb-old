@@ -669,6 +669,27 @@ impl ReportRetention {
     }
 }
 
+pub(crate) type CommitObserver = Arc<dyn Fn(Arc<ServiceTransactionReport>) + Send + Sync>;
+
+/// Registration does not own the writer. Removing it releases the peer and
+/// does not affect admitted transactions or other connections.
+pub(crate) struct NativeObserver {
+    id: u64,
+    shared: Weak<Shared>,
+}
+
+impl Drop for NativeObserver {
+    fn drop(&mut self) {
+        if let Some(shared) = self.shared.upgrade() {
+            shared
+                .observers
+                .lock()
+                .expect("observer mutex poisoned")
+                .remove(&self.id);
+        }
+    }
+}
+
 struct Shared {
     accepting: AtomicBool,
     admission: Mutex<()>,
@@ -678,6 +699,7 @@ struct Shared {
     rejected_full: AtomicU64,
     next_subscriber: AtomicU64,
     subscribers: Mutex<BTreeMap<u64, ReportSubscriber>>,
+    observers: Mutex<BTreeMap<u64, CommitObserver>>,
     queued_reports: AtomicUsize,
     max_queued_reports: AtomicUsize,
     queued_report_payload_bytes: AtomicU64,
@@ -708,6 +730,7 @@ impl Shared {
             rejected_full: AtomicU64::new(0),
             next_subscriber: AtomicU64::new(1),
             subscribers: Mutex::new(BTreeMap::new()),
+            observers: Mutex::new(BTreeMap::new()),
             queued_reports: AtomicUsize::new(0),
             max_queued_reports: AtomicUsize::new(0),
             queued_report_payload_bytes: AtomicU64::new(0),
@@ -729,7 +752,25 @@ impl Shared {
         )
     }
 
+    fn observe(&self, report: &ServiceTransactionReport) {
+        let observers = self.observers.lock().expect("observer mutex poisoned");
+        if !observers.is_empty() {
+            let report = Arc::new(report.clone());
+            for observer in observers.values() {
+                observer(Arc::clone(&report));
+            }
+        }
+    }
+
     fn publish(&self, report: &ServiceTransactionReport) {
+        // Also covers a durable commit discovered after an unknown outcome.
+        // Native adoption is idempotent; normal outcomes were observed before
+        // their originating result was delivered.
+        self.observe(report);
+        self.publish_reports(report);
+    }
+
+    fn publish_reports(&self, report: &ServiceTransactionReport) {
         let retention = ReportRetention::from_report(report);
         let mut subscribers = self.subscribers.lock().expect("subscriber mutex poisoned");
         subscribers.retain(|_, subscriber| {
@@ -850,6 +891,30 @@ pub struct TransactionClient {
 }
 
 impl TransactionClient {
+    /// Register a nonblocking notification hint. Setup must not hold the writer
+    /// notification lock across peer I/O. Durable-log catch-up fills any gap
+    /// between initial opening and registration, or a full local hint channel.
+    pub(crate) fn observe_commits<T>(
+        &self,
+        setup: impl FnOnce() -> Result<(T, CommitObserver), SemanticError>,
+    ) -> Result<(T, NativeObserver), SemanticError> {
+        let (value, observer) = setup()?;
+        let mut observers = self
+            .shared
+            .observers
+            .lock()
+            .expect("observer mutex poisoned");
+        let id = self.shared.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        observers.insert(id, observer);
+        Ok((
+            value,
+            NativeObserver {
+                id,
+                shared: Arc::downgrade(&self.shared),
+            },
+        ))
+    }
+
     /// Stable identity of the one database this client can transact against.
     ///
     /// Request-key hashing is lineage scoped, so exposing the same pair to
@@ -1820,9 +1885,12 @@ fn run_worker(
             .writer_residency
             .lock()
             .expect("writer residency mutex poisoned") = store.writer_residency_stats(database_id);
+        if let Ok(report) = &result {
+            shared.observe(report);
+        }
         let _ = work.response.send(result);
         if let Some(report) = publish {
-            shared.publish(&report);
+            shared.publish_reports(&report);
         }
         // Future/result delivery precedes report notification, matching the
         // recovered peer. Reconciliation therefore begins only after the

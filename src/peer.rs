@@ -20,11 +20,10 @@ use crate::{
     AvetProjectionWork, Database, DatabaseIdentity, DatabaseValue, Datom, Digest,
     DurableTransaction, Entity, EntityIdentifier, ErrorCategory, IndexBoundary, IndexManifest,
     IndexOrder, IndexPrefix, IndexSegment, ManifestTree, PersistentTreeManifest,
-    PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query, QueryControl,
-    QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
-    ServiceTransactionReport, TreeManifestRecord, TreePublicationDelta, TreePublishOutcome,
-    TreeRootBinding, View, decode_index_manifest, decode_index_segment, encode_genesis, sha256,
-    tx_to_t,
+    PostgresConnectionConfig, PostgresTreeStore, PullPattern, Query, QueryControl, QueryExtensions,
+    QueryInput, QueryOutcome, QueryValue, SemanticError, ServiceTransactionReport,
+    TreeManifestRecord, TreePublicationDelta, TreePublishOutcome, TreeRootBinding, View,
+    decode_index_manifest, decode_index_segment, encode_genesis, sha256, tx_to_t,
 };
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
@@ -4333,6 +4332,7 @@ struct TieredReadCore {
 
 struct PeerCore {
     read: Arc<TieredReadCore>,
+    allow_compatibility: bool,
     recent_limits: RecentLimits,
     /// Serializes catch-up/adoption work. Readers never take this lock.
     update: Mutex<()>,
@@ -4341,6 +4341,7 @@ struct PeerCore {
     reports: Mutex<Option<VecDeque<ServiceTransactionReport>>>,
     report_ready: Condvar,
     state_advanced: Condvar,
+    observed_basis: Mutex<u64>,
     /// One publication cell for all peer-observable connection state.
     state: RwLock<Arc<PeerState>>,
 }
@@ -4376,6 +4377,11 @@ pub struct Peer {
 }
 
 impl Peer {
+    #[cfg(test)]
+    pub(crate) fn pause_updates_for_test(&self) -> MutexGuard<'_, ()> {
+        lock(&self.core.update)
+    }
+
     pub fn connect(
         connection: &str,
         database_id: impl Into<String>,
@@ -4453,7 +4459,53 @@ impl Peer {
         cache_bytes: usize,
         recent_limits: RecentLimits,
     ) -> Result<Self, SemanticError> {
-        let database_id = database_id.into();
+        Self::connect_with_mode(
+            connection,
+            database_id.into(),
+            cache_entries,
+            cache_bytes,
+            recent_limits,
+            false,
+        )
+    }
+
+    /// Explicit administrative/legacy adapter. Unlike ordinary peer opens,
+    /// this may reconstruct an entire eager database when no native root exists.
+    pub fn connect_compatibility(
+        connection: &str,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+    ) -> Result<Self, SemanticError> {
+        Self::connect_compatibility_configured(
+            &PostgresConnectionConfig::plaintext(connection),
+            database_id,
+            cache_entries,
+        )
+    }
+
+    pub fn connect_compatibility_configured(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+    ) -> Result<Self, SemanticError> {
+        Self::connect_with_mode(
+            connection,
+            database_id.into(),
+            cache_entries,
+            cache_entries.saturating_mul(512 * 1024),
+            RecentLimits::default(),
+            true,
+        )
+    }
+
+    fn connect_with_mode(
+        connection: &PostgresConnectionConfig,
+        database_id: String,
+        cache_entries: usize,
+        cache_bytes: usize,
+        recent_limits: RecentLimits,
+        allow_compatibility: bool,
+    ) -> Result<Self, SemanticError> {
         let mut client = connection.connect_for("peer/connect")?;
         // Fail before reading a head or any derived value when this peer does
         // not understand the installed PostgreSQL schema.
@@ -4527,6 +4579,7 @@ impl Peer {
                 end_state_hash,
                 eidx_frontier,
                 range_reads: _,
+                state_hashes: _,
             } = tail;
             let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &database_id,
@@ -4548,6 +4601,13 @@ impl Peer {
                 OnceLock::new(),
             )
         } else {
+            if !allow_compatibility {
+                return Err(SemanticError::new(
+                    ErrorCategory::Unavailable,
+                    "peer/native-index-required",
+                    "ordinary peers require a native index; run administrative consolidation or explicitly open the eager compatibility adapter",
+                ));
+            }
             // Pre-native databases remain readable, but the fallback is
             // deliberately explicit: only a valid native publication gets
             // the root-only startup path.
@@ -4631,11 +4691,13 @@ impl Peer {
         Ok(Self {
             core: Arc::new(PeerCore {
                 read,
+                allow_compatibility,
                 recent_limits,
                 update: Mutex::new(()),
                 reports: Mutex::new(None),
                 report_ready: Condvar::new(),
                 state_advanced: Condvar::new(),
+                observed_basis: Mutex::new(basis_t),
                 state: RwLock::new(Arc::new(PeerState {
                     tiered: Arc::new(TieredState {
                         basis_t,
@@ -4658,16 +4720,19 @@ impl Peer {
         })
     }
 
-    /// Materialize the compatibility kernel value for the current immutable
-    /// snapshot. Native tree users should prefer [`Peer::snapshot`]; this
-    /// method retains the original infallible API and panics only when durable
-    /// data is corrupt or unavailable. [`Peer::try_db`] exposes that failure.
-    pub fn db(&self) -> Arc<Database> {
-        self.try_db()
+    /// Capture the current immutable native value without SQL or eager recovery.
+    pub fn db(&self) -> DatabaseValue {
+        self.database_value()
+    }
+
+    /// Explicit eager kernel/oracle adapter; may read the entire database.
+    /// Use `try_db_compatibility` to handle storage errors without panicking.
+    pub fn db_compatibility(&self) -> Arc<Database> {
+        self.try_db_compatibility()
             .unwrap_or_else(|error| panic!("peer database materialization failed: {error}"))
     }
 
-    pub fn try_db(&self) -> Result<Arc<Database>, SemanticError> {
+    pub fn try_db_compatibility(&self) -> Result<Arc<Database>, SemanticError> {
         let state = self.state();
         self.database_for_state(&state)
     }
@@ -4753,6 +4818,41 @@ impl Peer {
         )
     }
 
+    #[cfg(unix)]
+    pub(crate) fn open_socket_report(
+        &self,
+        wire: crate::encoding::WireReport,
+    ) -> Result<ServiceTransactionReport, SemanticError> {
+        if wire.before.basis_t.checked_add(1) != Some(wire.after.basis_t)
+            || wire.before.generation != wire.after.generation
+        {
+            return Err(fault(
+                "transport/report-coordinate",
+                "invalid before/after receipt coordinates",
+            ));
+        }
+        let snapshot = self.tiered_snapshot();
+        let (before, _) = snapshot.open_exact_sharing_core(
+            &self.core.read.database_id,
+            wire.before,
+            Some(wire.before_manifest),
+        )?;
+        let (after, _) = snapshot.open_exact_sharing_core(
+            &self.core.read.database_id,
+            wire.after,
+            Some(wire.after_manifest),
+        )?;
+        Ok(ServiceTransactionReport {
+            db_before: before.database_value(),
+            db_after: after.database_value(),
+            basis_t: wire.after.basis_t,
+            tx_hash: wire.after.tx_hash,
+            tx_data: wire.tx_data,
+            tempids: wire.tempids,
+            replayed: wire.replayed,
+        })
+    }
+
     pub fn recent_stats(&self) -> crate::recent::RecentStats {
         self.state().recent.stats()
     }
@@ -4792,7 +4892,12 @@ impl Peer {
         self.database_value().pull(pattern, entity)
     }
 
-    pub fn sync(&self) -> Result<Arc<Database>, SemanticError> {
+    pub fn sync(&self) -> Result<DatabaseValue, SemanticError> {
+        self.sync_database_value()
+    }
+
+    /// Explicit eager catch-up for oracle/admin callers.
+    pub fn sync_compatibility(&self) -> Result<Arc<Database>, SemanticError> {
         match self.sync_once(true) {
             Err(error) if is_postgres_connection_error(&error) => {
                 self.reconnect()?;
@@ -4812,7 +4917,15 @@ impl Peer {
         self.advance_to_locked(&mut io, target, require_compatibility)
     }
 
-    pub fn sync_to(&self, target: u64, timeout: Duration) -> Result<Arc<Database>, SemanticError> {
+    pub fn sync_to(&self, target: u64, timeout: Duration) -> Result<DatabaseValue, SemanticError> {
+        self.sync_to_database_value(target, timeout)
+    }
+
+    pub fn sync_to_compatibility(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<Arc<Database>, SemanticError> {
         let state = self.wait_for_basis(target, timeout, true)?;
         compatibility_value(&state)
     }
@@ -4832,7 +4945,8 @@ impl Peer {
 
     /// Advance and return the ordinary immutable native database value.
     pub fn sync_database_value(&self) -> Result<DatabaseValue, SemanticError> {
-        self.sync_snapshot().map(|snapshot| snapshot.database_value())
+        self.sync_snapshot()
+            .map(|snapshot| snapshot.database_value())
     }
 
     pub fn sync_to_snapshot(
@@ -4855,6 +4969,110 @@ impl Peer {
             .map(|snapshot| snapshot.database_value())
     }
 
+    /// Wait for physical indexing, including outstanding AVET projections.
+    pub fn sync_index(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<DatabaseValue, SemanticError> {
+        self.wait_for_frontier(target, timeout, "peer/sync-index-timeout", |_, state| {
+            Ok(state
+                .tree_base
+                .as_ref()
+                .is_some_and(|base| base.manifest.index_basis_t >= target))
+        })
+    }
+
+    /// Wait for schema adoption and readiness of the adopted schema's AVET
+    /// projections. This may also wait for newer concurrently adopted schema
+    /// work; it never reports readiness from logical basis alone.
+    pub fn sync_schema(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<DatabaseValue, SemanticError> {
+        self.wait_for_frontier(target, timeout, "peer/sync-schema-timeout", |_, state| {
+            Ok(state.avet_unready.is_empty())
+        })
+    }
+
+    /// Wait for every excision request through target and the active
+    /// generation's root-last completion marker, without eager recovery.
+    pub fn sync_excise(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<DatabaseValue, SemanticError> {
+        self.wait_for_frontier(target, timeout, "peer/sync-excise-timeout", |peer, state| {
+            let generation = sql_basis(state.excision_generation)?;
+            if generation > 0 {
+                let complete: bool = lock(&peer.core.read.io).client.query_one(
+                    "SELECT EXISTS (SELECT 1 FROM atomic_log_generation_completions \
+                     WHERE database_id = $1 AND generation = $2)",
+                    &[&peer.core.read.database_id, &generation],
+                ).map_err(|error| postgres_error("peer/excision-completion", error))?.get(0);
+                if !complete { return Ok(false); }
+            }
+            let value = peer.snapshot_for_state(Arc::clone(state)).database_value().history();
+            for datom in value.prefix_cursor(&IndexPrefix::Aevt {
+                attribute: crate::DB_EXCISE as u32, entity: None, value: None,
+            })? {
+                let datom = datom?;
+                let request_t = crate::tx_to_t(datom.tx)?;
+                if !datom.added || request_t > target { continue; }
+                if generation == 0 { return Ok(false); }
+                let complete: bool = lock(&peer.core.read.io).client.query_one(
+                    "SELECT EXISTS (SELECT 1 FROM atomic_completed_excision_requests \
+                     WHERE database_id = $1 AND generation = $2 AND request_t = $3 AND request_entity = $4)",
+                    &[&peer.core.read.database_id, &generation, &sql_basis(request_t)?, &sql_basis(datom.entity)?],
+                ).map_err(|error| postgres_error("peer/excision-request-completion", error))?.get(0);
+                if !complete { return Ok(false); }
+            }
+            Ok(true)
+        })
+    }
+
+    fn wait_for_frontier(
+        &self,
+        target: u64,
+        timeout: Duration,
+        code: &'static str,
+        ready: impl Fn(&Self, &Arc<PeerState>) -> Result<bool, SemanticError>,
+    ) -> Result<DatabaseValue, SemanticError> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self
+                .sync_database_value()
+                .and_then(|_| self.refresh_index())
+                .and_then(|_| {
+                    let state = self.state();
+                    if state.basis_t >= target && ready(self, &state)? {
+                        Ok(Some(self.snapshot_for_state(state).database_value()))
+                    } else {
+                        Ok(None)
+                    }
+                }) {
+                Ok(Some(value)) => return Ok(value),
+                Ok(None) => {}
+                // COW activation precedes root-last native publication. Keep
+                // the old value intact and wait for that real prerequisite.
+                Err(error) if error.code == "peer/native-index-required" => {}
+                Err(error) if is_postgres_connection_error(&error) => {}
+                Err(error) => return Err(error),
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SemanticError::new(
+                    ErrorCategory::Unavailable,
+                    code,
+                    "timed out waiting for the requested native frontier",
+                )
+                .detail("target_t", target.to_string()));
+            }
+            std::thread::sleep(remaining.min(Duration::from_millis(10)));
+        }
+    }
+
     fn wait_for_basis(
         &self,
         target: u64,
@@ -4863,7 +5081,15 @@ impl Peer {
     ) -> Result<Arc<PeerState>, SemanticError> {
         let deadline = Instant::now() + timeout;
         loop {
-            self.core.read.root_pins.ensure()?;
+            if let Err(error) = self.core.read.root_pins.ensure() {
+                if !is_postgres_connection_error(&error) {
+                    return Err(error);
+                }
+                if !self.reconnect_before(deadline)? {
+                    return Err(sync_timeout(target));
+                }
+                continue;
+            }
             // Never retain the updater or I/O/cache mutex across sleep. Lazy
             // readers can continue loading nodes while a waiter observes an
             // unchanged authoritative head.
@@ -5070,8 +5296,7 @@ impl Peer {
             }
             return Ok(self.database_value());
         }
-        if current.basis_t != before.basis_t()
-            || current.current_hash != before.transaction_hash()
+        if current.basis_t != before.basis_t() || current.current_hash != before.transaction_hash()
         {
             return Err(fault(
                 "peer/report-gap",
@@ -5244,6 +5469,16 @@ impl Peer {
             }
             return Ok(state);
         }
+        // A lagging peer with no observer queue need not replay the entire
+        // indexed prefix. Adopt a newer authenticated root and only its bounded
+        // tail, just as a fresh native open does. Opted-in reports still require
+        // each intermediate transaction; they may intentionally retain history.
+        if !require_compatibility
+            && lock(&self.core.reports).is_none()
+            && let Some(published) = self.advance_from_newer_base_locked(io, &state, target)?
+        {
+            return Ok(published);
+        }
         let tail = read_authenticated_tail(
             &mut io.client,
             &self.core.read.database_id,
@@ -5308,8 +5543,199 @@ impl Peer {
             tiered: Arc::new(successor),
             compatibility,
         });
+        // Prepare all intermediate values before publishing anything. A bad
+        // tail must change neither the live head nor the optional report queue.
+        let reports = if lock(&self.core.reports).is_some() {
+            self.tail_reports_with_io(io, &state, &tail)?
+        } else {
+            Vec::new()
+        };
         self.publish_arc(Arc::clone(&published));
+        if let Some(queue) = lock(&self.core.reports).as_mut() {
+            queue.extend(reports);
+            self.core.report_ready.notify_all();
+        }
         Ok(published)
+    }
+
+    fn advance_from_newer_base_locked(
+        &self,
+        io: &mut PeerIo,
+        state: &Arc<PeerState>,
+        target: u64,
+    ) -> Result<Option<Arc<PeerState>>, SemanticError> {
+        let PeerIo { client, tree_cache } = io;
+        let adopted_revision = state
+            .tree_base
+            .as_ref()
+            .map_or(0, |base| base.manifest.publication_revision);
+        if current_tree_publication_revision(client, &self.core.read.database_id)?
+            <= adopted_revision
+        {
+            return Ok(None);
+        }
+        let Some(base) = load_latest_tree_base(
+            client,
+            &self.core.read.database_id,
+            target,
+            state.excision_generation,
+            &self.core.read.load_counters,
+            tree_cache,
+        )?
+        else {
+            return Ok(None);
+        };
+        if base.manifest.basis_t <= state.basis_t {
+            return Ok(None);
+        }
+        let tail = read_authenticated_tail(
+            client,
+            &self.core.read.database_id,
+            state.excision_generation,
+            TailBase {
+                basis_t: base.manifest.basis_t,
+                tx_hash: base.manifest.tx_hash,
+                state_hash: base.manifest.state_hash,
+                eidx_frontier: base.manifest.eidx_frontier,
+            },
+            target,
+            None,
+        )?;
+        let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
+            &base.metadata,
+            &manifest_avet_unready(&base.manifest),
+            &tail.transactions,
+            |attribute| {
+                tree_base_has_attribute_history(
+                    client,
+                    &base,
+                    attribute,
+                    &self.core.read.load_counters,
+                    tree_cache,
+                )
+            },
+        )?;
+        let recent = RecentTier::new_authenticated_existing(
+            &self.core.read.database_id,
+            base.manifest.basis_t,
+            base.manifest.tx_hash,
+            tail.transaction_hashes.into_iter().zip(tail.transactions),
+            metadata.endpoint(),
+            self.core.recent_limits,
+        )?;
+        let mut successor = (*state.tiered).clone();
+        successor.basis_t = target;
+        successor.eidx_frontier = tail.eidx_frontier;
+        successor.current_hash = tail.end_hash;
+        successor.current_state_hash = tail.end_state_hash;
+        successor.durable_base_t = base.manifest.basis_t;
+        successor._root_pin = self.core.read.root_pins.acquire(Some(&base))?;
+        successor.tree_base = Some(Arc::new(base));
+        successor.recent = Arc::new(recent);
+        successor.metadata = Arc::new(metadata);
+        successor.avet_unready = Arc::new(avet_unready);
+        successor.generation = successor.generation.saturating_add(1);
+        let published = Arc::new(PeerState {
+            tiered: Arc::new(successor),
+            compatibility: Arc::new(PeerCompatibility {
+                value: OnceLock::new(),
+                segments: Arc::clone(&state.compatibility.segments),
+            }),
+        });
+        self.publish_arc(Arc::clone(&published));
+        Ok(Some(published))
+    }
+
+    fn tail_reports_with_io(
+        &self,
+        io: &mut PeerIo,
+        initial: &PeerState,
+        tail: &AuthenticatedTail,
+    ) -> Result<Vec<ServiceTransactionReport>, SemanticError> {
+        let mut before = initial.clone();
+        let mut reports = Vec::with_capacity(tail.transactions.len());
+        for ((transaction, tx_hash), state_hash) in tail
+            .transactions
+            .iter()
+            .zip(&tail.transaction_hashes)
+            .zip(&tail.state_hashes)
+        {
+            let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
+                &before.metadata,
+                &before.avet_unready,
+                std::slice::from_ref(transaction),
+                |attribute| {
+                    peer_state_has_attribute_history_with_io(
+                        &self.core.read,
+                        io,
+                        &before,
+                        attribute,
+                    )
+                },
+            )?;
+            let recent = before.recent.extend_authenticated_existing(
+                std::iter::once((*tx_hash, transaction.clone())),
+                metadata.endpoint(),
+            )?;
+            let mut after = (*before.tiered).clone();
+            after.basis_t = transaction.basis_t;
+            after.eidx_frontier = transaction.eidx_frontier;
+            after.current_hash = *tx_hash;
+            after.current_state_hash = *state_hash;
+            after.recent = Arc::new(recent);
+            after.metadata = Arc::new(metadata);
+            after.avet_unready = Arc::new(avet_unready);
+            after.generation = after.generation.saturating_add(1);
+            let after = Arc::new(after);
+            let value = |state| {
+                TieredSnapshot {
+                    core: Arc::clone(&self.core.read),
+                    state,
+                }
+                .database_value()
+            };
+            // ATLC deliberately excludes receipt names. Reconstruct them only
+            // for opted-in observers, from the current generation's ordinary
+            // request receipt (retired/excised receipts do not retain names).
+            let tempids = if initial.excision_generation == 0 {
+                transaction.tempids.clone()
+            } else {
+                io.client
+                    .query(
+                        "SELECT t.tempid_name, t.entity_id \
+                     FROM atomic_generation_requests r \
+                     JOIN atomic_generation_request_tempids t \
+                     USING (database_id, generation, request_key_hash) \
+                     WHERE r.database_id = $1 AND r.generation = $2 AND r.basis_t = $3 \
+                     ORDER BY t.tempid_name",
+                        &[
+                            &self.core.read.database_id,
+                            &sql_basis(initial.excision_generation)?,
+                            &sql_basis(transaction.basis_t)?,
+                        ],
+                    )
+                    .map_err(|error| postgres_error("peer/report-tempids", error))?
+                    .into_iter()
+                    .map(|row| {
+                        Ok((
+                            row.get::<_, String>(0),
+                            pg_basis(row.get(1), "report tempid entity")?,
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, SemanticError>>()?
+            };
+            reports.push(ServiceTransactionReport {
+                db_before: value(Arc::clone(&before.tiered)),
+                db_after: value(Arc::clone(&after)),
+                basis_t: transaction.basis_t,
+                tx_hash: *tx_hash,
+                tx_data: transaction.tx_data.clone(),
+                tempids,
+                replayed: false,
+            });
+            before.tiered = after;
+        }
+        Ok(reports)
     }
 
     fn database_for_state(&self, state: &Arc<PeerState>) -> Result<Arc<Database>, SemanticError> {
@@ -5335,6 +5761,108 @@ impl Peer {
             ));
         }
         let (basis, hash) = read_head(&mut io.client, &self.core.read.database_id)?;
+        // A physical generation change is not a transaction. Before adopting
+        // it, opted-in observers must receive the unseen transactions from the
+        // retained source generation, with their original before/after values.
+        // Stage everything first: an unavailable ancestor must not silently
+        // advance the connection past a hole in its report stream.
+        let mut reports = Vec::new();
+        if lock(&self.core.reports).is_some() {
+            let mut ancestry = Vec::new();
+            let mut next = generation;
+            while next != state.excision_generation {
+                let row = io
+                    .client
+                    .query_opt(
+                        "SELECT prior_generation, prior_basis_t, basis_t, head_hash \
+                     FROM atomic_log_generation_activations \
+                     WHERE database_id = $1 AND generation = $2",
+                        &[&self.core.read.database_id, &sql_basis(next)?],
+                    )
+                    .map_err(|error| postgres_error("peer/report-generation", error))?
+                    .ok_or_else(|| {
+                        fault(
+                            "peer/report-generation-gap",
+                            "report generation ancestry is unavailable",
+                        )
+                    })?;
+                let prior = pg_basis(row.get(0), "prior generation")?;
+                if prior >= next || prior < state.excision_generation {
+                    return Err(fault(
+                        "peer/report-generation-gap",
+                        "report generation ancestry does not reach the captured value",
+                    ));
+                }
+                ancestry.push((
+                    next,
+                    pg_basis(row.get(1), "prior basis")?,
+                    pg_basis(row.get(2), "activation basis")?,
+                    digest(row.get(3), "activation head")?,
+                ));
+                next = prior;
+            }
+            let mut before = (*state).clone();
+            for (next, prior_basis, activated_basis, activated_hash) in ancestry.into_iter().rev() {
+                if prior_basis < before.basis_t {
+                    return Err(fault(
+                        "peer/report-generation-gap",
+                        "generation source predates the captured value",
+                    ));
+                }
+                let tail = read_authenticated_tail(
+                    &mut io.client,
+                    &self.core.read.database_id,
+                    before.excision_generation,
+                    TailBase {
+                        basis_t: before.basis_t,
+                        tx_hash: before.current_hash,
+                        state_hash: before.current_state_hash,
+                        eidx_frontier: before.eidx_frontier,
+                    },
+                    prior_basis,
+                    None,
+                )?;
+                reports.extend(self.tail_reports_with_io(io, &before, &tail)?);
+                before = self.build_generation_state_locked(
+                    io,
+                    &before,
+                    next,
+                    activated_basis,
+                    activated_hash,
+                )?;
+            }
+            let tail = read_authenticated_tail(
+                &mut io.client,
+                &self.core.read.database_id,
+                generation,
+                TailBase {
+                    basis_t: before.basis_t,
+                    tx_hash: before.current_hash,
+                    state_hash: before.current_state_hash,
+                    eidx_frontier: before.eidx_frontier,
+                },
+                basis,
+                None,
+            )?;
+            reports.extend(self.tail_reports_with_io(io, &before, &tail)?);
+        }
+        let successor = self.build_generation_state_locked(io, &state, generation, basis, hash)?;
+        self.publish(successor);
+        if let Some(queue) = lock(&self.core.reports).as_mut() {
+            queue.extend(reports);
+            self.core.report_ready.notify_all();
+        }
+        Ok(true)
+    }
+
+    fn build_generation_state_locked(
+        &self,
+        io: &mut PeerIo,
+        state: &PeerState,
+        generation: u64,
+        basis: u64,
+        hash: Digest,
+    ) -> Result<PeerState, SemanticError> {
         {
             let mut segments = lock(&state.compatibility.segments);
             let capacity = segments.capacity;
@@ -5431,6 +5959,13 @@ impl Peer {
                 }),
             }
         } else {
+            if !self.core.allow_compatibility {
+                return Err(SemanticError::new(
+                    ErrorCategory::Unavailable,
+                    "peer/native-index-required",
+                    "new log generation has no usable native index; administrative consolidation is required",
+                ));
+            }
             self.core
                 .read
                 .load_counters
@@ -5478,8 +6013,7 @@ impl Peer {
                 }),
             }
         };
-        self.publish(successor);
-        Ok(true)
+        Ok(successor)
     }
 
     fn state(&self) -> Arc<PeerState> {
@@ -5495,12 +6029,45 @@ impl Peer {
     }
 
     fn publish_arc(&self, state: Arc<PeerState>) {
+        let mut observed = lock(&self.core.observed_basis);
+        *observed = state.basis_t;
         *self
             .core
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = state;
         self.core.state_advanced.notify_all();
+    }
+
+    /// Local observation only: no I/O/update lock can stretch this wait past
+    /// a stalled SQL operation. A committed result remains known if it expires.
+    pub(crate) fn wait_for_local_basis(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> Result<(), SemanticError> {
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .ok_or_else(|| sync_timeout(target))?;
+        let mut observed = lock(&self.core.observed_basis);
+        while *observed < target {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(SemanticError::new(
+                    ErrorCategory::Unavailable,
+                    "connection/observation-timeout",
+                    "transaction committed but local observation has not caught up",
+                )
+                .detail("basis_t", target.to_string()));
+            }
+            observed = self
+                .core
+                .state_advanced
+                .wait_timeout(observed, remaining)
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+        Ok(())
     }
 }
 
@@ -5817,7 +6384,7 @@ impl DurableTreeCursor {
         let order = boundary.order();
         let boundary = TreeBoundary::new(boundary);
         let exhausted = root.directories.is_empty();
-        let directory_index = boundary_floor_child(&root.directories, &boundary).unwrap_or(0);
+        let directory_index = boundary_start_child(&root.directories, &boundary);
         Self {
             snapshot,
             root,
@@ -5987,7 +6554,7 @@ impl DurableTreeCursor {
             } else if let Some(prefix) = &self.prefix {
                 prefix_start_child(&directory.leaves, prefix)
             } else if let Some(boundary) = &self.forward_boundary {
-                boundary_floor_child(&directory.leaves, boundary).unwrap_or(0)
+                boundary_start_child(&directory.leaves, boundary)
             } else {
                 0
             };
@@ -6256,6 +6823,7 @@ impl TieredSnapshot {
         let endpoint = endpoint.validate()?;
         let mut client = connection.connect_for("peer/exact-open")?;
         verify_schema_compatibility(&mut client)?;
+        let lineage_id = read_database_lineage(&mut client, &database_id)?;
         let counters = PeerLoadCounters::default();
         let mut tree_cache =
             TreeNodeCache::new(configuration.cache_entries, configuration.cache_bytes);
@@ -6295,8 +6863,10 @@ impl TieredSnapshot {
             &mut tree_cache,
         )?;
         let stats = exact_open_stats(&state, scan_stats, tail_transactions, tail_range_reads)?;
+        verify_database_lineage(&mut client, &database_id, &lineage_id)?;
         let core = Arc::new(TieredReadCore {
             database_id,
+            lineage_id,
             connection: connection.clone(),
             recent_limits: configuration.recent_limits,
             load_counters: counters,
@@ -6443,6 +7013,19 @@ impl TieredSnapshot {
             state_hash: self.state.current_state_hash,
             eidx_frontier: self.state.eidx_frontier,
         }
+    }
+
+    pub(crate) fn required_manifest_hash(&self) -> Result<Digest, SemanticError> {
+        self.state
+            .tree_base
+            .as_ref()
+            .map(|base| base.manifest_hash)
+            .ok_or_else(|| {
+                fault(
+                    "peer/native-index-required",
+                    "native report has no durable root",
+                )
+            })
     }
 
     pub fn basis_t(&self) -> u64 {
@@ -7568,6 +8151,15 @@ fn boundary_floor_child(children: &[ChildRef], boundary: &TreeBoundary) -> Optio
     children
         .partition_point(|child| !boundary.compare_routing_key(&child.key).is_gt())
         .checked_sub(1)
+}
+
+fn boundary_start_child(children: &[ChildRef], boundary: &TreeBoundary) -> usize {
+    // Equal virtual keys can span children (operation and stored-value ties
+    // are omitted from the boundary). Forward seeks must start before all of
+    // them; reverse seeks use the last equal child instead.
+    children
+        .partition_point(|child| boundary.compare_routing_key(&child.key).is_lt())
+        .saturating_sub(1)
 }
 
 fn leaf_lower_bound(leaf: &LeafSegment, key: &Datom, order: IndexOrder) -> usize {
@@ -8712,6 +9304,7 @@ fn exact_open_stats(
 struct AuthenticatedTail {
     transactions: Vec<DurableTransaction>,
     transaction_hashes: Vec<Digest>,
+    state_hashes: Vec<Digest>,
     end_hash: Digest,
     end_state_hash: Digest,
     eidx_frontier: u64,
@@ -8751,6 +9344,7 @@ fn read_authenticated_tail<C: GenericClient>(
         return Ok(AuthenticatedTail {
             transactions: Vec::new(),
             transaction_hashes: Vec::new(),
+            state_hashes: Vec::new(),
             end_hash: base.tx_hash,
             end_state_hash: base.state_hash,
             eidx_frontier: base.eidx_frontier,
@@ -8763,6 +9357,7 @@ fn read_authenticated_tail<C: GenericClient>(
     let mut eidx_frontier = base.eidx_frontier;
     let mut transactions = Vec::new();
     let mut transaction_hashes = Vec::new();
+    let mut state_hashes = Vec::new();
     let mut scanned_transactions = 0_u64;
     let mut datoms = 0_u64;
     let mut accounted_bytes = 0_u64;
@@ -8831,6 +9426,7 @@ fn read_authenticated_tail<C: GenericClient>(
             end_hash = row.tx_hash;
             end_state_hash = state_hash;
             transaction_hashes.push(row.tx_hash);
+            state_hashes.push(state_hash);
             transactions.push(transaction);
             Ok(())
         },
@@ -8838,6 +9434,7 @@ fn read_authenticated_tail<C: GenericClient>(
     Ok(AuthenticatedTail {
         transactions,
         transaction_hashes,
+        state_hashes,
         end_hash,
         end_state_hash,
         eidx_frontier,
@@ -9473,8 +10070,7 @@ mod tests {
             + local_upper;
         assert_eq!(global_upper, expected_upper);
 
-        let forward_directory_index =
-            boundary_floor_child(&root.directories, &boundary).unwrap_or(0);
+        let forward_directory_index = boundary_start_child(&root.directories, &boundary);
         let forward_directory = match decode_tree_node(
             &root.directories[forward_directory_index].hash,
             build
@@ -9487,8 +10083,7 @@ mod tests {
             TreeNode::Directory(directory) => directory,
             _ => panic!("root child must be a directory"),
         };
-        let forward_leaf_index =
-            boundary_floor_child(&forward_directory.leaves, &boundary).unwrap_or(0);
+        let forward_leaf_index = boundary_start_child(&forward_directory.leaves, &boundary);
         let forward_leaf = match decode_tree_node(
             &forward_directory.leaves[forward_leaf_index].hash,
             build

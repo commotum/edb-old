@@ -103,7 +103,7 @@ fn scale_distinctions_survive_postgres_log_base_and_peer_recovery() {
     let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
     indexer.consolidate().unwrap();
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
-    assert_eq!(scales(&peer.db(), entity), vec![1, 2]);
-    peer.db().validate_invariants().unwrap();
+    assert_eq!(scales(&peer.db_compatibility(), entity), vec![1, 2]);
+    peer.db_compatibility().validate_invariants().unwrap();
     service.shutdown();
 }

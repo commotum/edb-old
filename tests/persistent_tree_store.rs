@@ -324,8 +324,7 @@ fn tree_content_is_idempotent_and_publication_is_root_last() {
         .unwrap_err();
     assert_eq!(regression.code, "tree/publication-basis-regression");
 
-    let mut index_regression_envelope =
-        PersistentTreeManifest::decode(&successor.payload).unwrap();
+    let mut index_regression_envelope = PersistentTreeManifest::decode(&successor.payload).unwrap();
     index_regression_envelope.publication_revision = successor_revision + 1;
     index_regression_envelope.index_basis_t = successor.basis_t - 1;
     index_regression_envelope.pending_avet = vec![AvetProjectionWork::new(42, true)];

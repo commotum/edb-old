@@ -3246,9 +3246,16 @@ mod tests {
             .db_after;
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
+        let excluded_t = latest.basis_t();
         let filtered = latest.database_value().filter(move |_, datom| {
+            // Raw reverse seek continues into earlier entities/attributes.
+            // Isolate this history and use its actual T: schema installation
+            // already consumed the initial transaction in Database::new.
+            if datom.entity != entity || datom.attribute != AMOUNT {
+                return false;
+            }
             observed.fetch_add(1, AtomicOrdering::Relaxed);
-            tx_to_t(datom.tx).unwrap() != 3
+            tx_to_t(datom.tx).unwrap() != excluded_t
         });
         let boundary = IndexBoundary::Eavt(IndexComponents::Three(entity, AMOUNT, decimal("1.0")));
 
@@ -3256,7 +3263,7 @@ mod tests {
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 0);
         assert!(
             cursor.next().is_none(),
-            "after filtering T=3, the visible T=2 retraction hides T=1"
+            "after filtering the newest assertion, the visible retraction hides the older assertion"
         );
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 3);
 
