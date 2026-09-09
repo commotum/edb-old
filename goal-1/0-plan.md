@@ -1,180 +1,105 @@
-# Goal 1 — Make the Native Database Usable Without Example Harnesses
+# Goal 1 — Deliver a Runnable Application and Reusable Test Baseline
 
 ## Objective
 
-Deliver a configurable local transactor executable, a safe administrative CLI,
-and a reproducible application deployment over the existing Rust/PostgreSQL
-database. Complete the small application API gaps: database statistics,
-asynchronous index requests, and time-ordered UUID helpers. An application
-should use normal executables and public library APIs without depending on an
-acceptance example or reimplementing its process lifecycle.
+Deliver a supported local transactor, the minimal explicit setup and status
+commands needed to use it, and a separate application over the existing
+Rust/PostgreSQL database. Establish a small repeatable workload and reusable
+checks that subsequent engine changes can use immediately.
 
-This is Stage 1 of the parent strategy in `/home/jake/Developer/atomic/goal-0/0-plan.md`.
-The scaffold is fresh; no stage below is implemented merely by creating it.
+This is Stage 1 of `/home/jake/Developer/atomic/goal-0/0-plan.md`. The parent
+owns the complete product; this child delivers its first runnable application.
 
 ## Constraints and known context
 
-- Preserve the working database. `goal-archive/G3/` records passed native
-  transaction, peer, history, program, recovery and integrated PostgreSQL
-  acceptance. Those records are evidence, not active instructions or a reason
-  to skip checks of changed behavior. Earlier passes are in G1 and G2.
-- The current project is one unpublished Rust crate with public service,
-  connection, peer and operator APIs plus example executables. Independent
-  writer/peer operation already works. Package and expose it; do not rewrite
-  the baseline or ship a binary that merely launches an acceptance harness.
-- Use `/home/jake/Developer/atomic/datomic_pro_docs` for intended semantics and
-  `/home/jake/Developer/atomic/1.0.7705` for architectural evidence. Preserve
-  immutable values, serialized transactions, exact retry, schema/history,
-  peer-local reads and explicit failure outcomes. JVM/wire parity is not a gate.
-- Runtime accounts use restricted roles and do not migrate on startup. Keep
-  administrative authority separate. Expose configured PostgreSQL TLS and I/O
-  policy; plaintext development use must be explicit, not an inherited example
-  default. Reuse the existing configuration policy; do not invent flags for
-  unimplemented later-stage caches/compression or introduce a new configuration
-  framework. Redact credentials and subject data from diagnostics.
-- Local submission must have a usable configured endpoint or safe discovery,
-  restrictive permissions, and clear restart behavior. Coordinate its contract
-  with Goal 2 without requiring cross-host networking in this child. Do not add
-  a web health endpoint merely to satisfy a deployment checklist.
-- Existing typed operations and monitoring are starting points. Goal 2 owns
-  secure cross-host submission, cross-process wakeups with durable-log replay,
-  checkpointed change consumption, public exact snapshot references and
-  inexpensive public comparison of committed snapshot/view keys. Goal 3 owns
-  full I/O accounting, safe cache-resident read independence, concurrent
-  cache access, an opt-in bounded SSD cache, bounded batched/overlapped verified
-  index I/O, versioned native block compression with old-format/hash/backup
-  safety, structurally shared/indexed speculative state and its measured costs,
-  timing/metrics callbacks and hints. Goal 4 owns program/query expansion,
-  plain-datom mock sources, log-query integration, prepared-query reuse and
-  bounded set-oriented joins/grouped probes. Goals 5 and 6 own fulltext and
-  partitions. Goal 7 owns final integrated acceptance, reader scaling, mixed
-  analytics/application loads, seeded operation/failure campaigns with replayable
-  minimized traces, a complete branch/compare/choose/revalidate/commit application
-  example with a small helper only if needed, and a transaction-pipeline decision
-  based on phase profiling.
-  Deeper pipelining requires measured justification and preserves one serialized
-  commit authority; it is not a required replacement architecture.
-  Coordinate contracts and record dependencies; implementing these later
-  capabilities is not a prerequisite for closing this local-deployment child.
-  Pure `with` already exists; a successful preview alone does not guarantee that
-  a later transaction will commit against a changed database.
-- Deployment/admin documentation must distinguish process-local `db()` capture
-  from an actual cached native query: present storage/protection dependencies
-  honestly, and do not equate cursor node-read counts with all PostgreSQL calls.
-  A live transaction-report queue is not a restartable durable consumer;
-  preserve its existing lossless semantics. Do not promise offline databases,
-  exactly-once external effects or indefinitely retained snapshot references.
-- Keep commands safe around existing data: explicit targets, retention and
-  destructive controls; preserve migration checksums and durable meaning.
-  Measure relevant costs honestly. Broad administrative operations need not
-  become cheap or constant-time as a prerequisite for providing a usable CLI.
-- Reuse existing pure-model comparisons and fault hooks for changed behavior;
-  retain the seed and replay trace for any generated checks used in this child.
-  Add small clock/transport test seams when useful in changed lifecycle code,
-  without a blanket trait refactor. Goal 7 owns the generated campaign and trace
-  minimizer; this child need not build a simulator, testing framework or alternate
-  store. Actual PostgreSQL executable/application acceptance remains required.
+- Use `/home/jake/Developer/atomic/datomic_pro_docs` as semantic authority and
+  `/home/jake/Developer/atomic/1.0.7705` as architectural evidence. Archived
+  G1/G2/G3 results are evidence, not active instructions or new test results.
+- Build on the working service, connection, operator and pure database APIs.
+  Preserve immutable values, serialized transactions, exact retry, schema/history,
+  peer-local reads, durable formats and migration checksums. Do not wrap a
+  self-provisioning acceptance harness as the supported product.
+- Runtime roles remain restricted and never migrate on startup. Keep explicit
+  administrative targets and authority separate; expose existing PostgreSQL
+  TLS/I/O policy, require explicit plaintext development configuration, and
+  redact credentials and subject data. Avoid unimplemented feature flags.
+- Establish a stable logical local endpoint/restart contract with restrictive
+  permissions, compatible with later network discovery. Preserve known commits
+  and unknown outcomes; a failed local observation must not undo a known commit.
+- Actual PostgreSQL and separate-executable acceptance are required. Isolate
+  failure fixtures; self-skipped tests and eager compatibility reads are not
+  evidence. Local `db()` capture does not prove storage-independent querying;
+  existing report queues remain lossless live observation, not durable consumers.
+- Goal 2 owns storage/I/O work plus `db_stats` and `request_index`; Goal 4 owns
+  partition/UUID helpers; Goal 6 owns networking and the full administrative CLI.
+  Other later capabilities remain in the parent plan and are not closing gates
+  here. Reuse and grow this child's test support in each subsequent child.
 
 ## Stages
 
-### 1. Establish the local transactor as a supported executable
+### 1. Expose the local runtime and minimal explicit setup
 
 **Status:** Pending.
 
-**Outcome:** An operator can configure, start, observe and normally stop a local
-transactor for an existing database independently of application processes.
+**Outcome:** Operators can explicitly initialize a database and run a configured
+local transactor independently of application processes.
 
-**Focus:** Real executable entry points and documented configuration; existing
-fenced service/indexer lifecycle; restricted runtime credentials, PostgreSQL
-transport policy, local endpoint ownership/discovery and understandable failure
-reporting. Keep endpoint choices compatible with the later network stage.
+**Focus:** Supported executable entry points for the existing fenced service and
+indexer lifecycle, explicit migration/create, lightweight status and documented
+shutdown/restart behavior. Provide explicit consolidation recovery for a diagnosed
+missing native publication; it is not routine startup work. Keep errors actionable
+and configuration/endpoint contracts reusable by later deployment stages.
 
-**Completion signal:** The executable starts against actual PostgreSQL with a
-restricted writer role, serves a separate application process, reports useful
-status, shuts down normally and restarts with documented endpoint behavior.
-Invalid configuration or authority fails clearly without hidden provisioning,
-and acknowledged or unknown transaction outcomes retain their existing meaning.
+**Completion signal:** Real commands initialize an explicit PostgreSQL fixture;
+the restricted runtime starts, exposes its endpoint/status, stops and restarts.
+Invalid configuration or authority fails clearly without hidden provisioning.
+The diagnosed missing-publication condition has an explicit recovery path.
 
-### 2. Expose safe administrative workflows
-
-**Status:** Pending.
-
-**Outcome:** Operators can provision/create databases, back up, verify, restore,
-inspect/report status, and advance garbage collection through a coherent CLI.
-
-**Focus:** Thin integration of existing migration, backup and operator APIs;
-explicit database/repository selection and administrative authority; retention,
-preview/destructive controls; useful progress, errors and exit status. Distinguish
-healthy pending maintenance from corruption and bounded GC progress from complete
-reclamation. Preserve interruption/retry and existing immutable-data safeguards.
-
-**Completion signal:** Real commands exercise a small PostgreSQL lifecycle from
-provisioning through backup/verification and separate-target restore, inspection
-and deliberately authorized GC. Failure and retry checks show safe target
-selection, preserved data and truthful status. Commands require no source edits
-or acceptance-harness setup to perform their documented function.
-
-### 3. Complete the small application API gaps
+### 2. Deliver the separate application workflow
 
 **Status:** Pending.
 
-**Outcome:** Applications obtain database statistics, request indexing without
-blocking for completion, and generate documented time-ordered UUIDs through the
-public library API.
+**Outcome:** A separate Rust application uses the supported runtime and public
+APIs; its calculation works against both native and fabricated database values.
 
-**Focus:** Expose snapshot history-datom and useful per-attribute counts for
-`db_stats` through existing indexes/cursors, not a deep integrity-inspection
-shortcut; state scan costs for filtered/time views rather than promise O(1).
-Provide an asynchronous `request_index` that captures a finite target and
-composes with the existing `sync_index`; implement UUID helper semantics from
-the docs/source with clear time-ordering limits. Do not confuse these additions
-with Goal 3's broader telemetry work or make ordinary requests eagerly recover
-the whole database.
+**Focus:** Transact/retry, query/Pull and entity navigation, old/history values,
+restart/reopen and reproducible build/run instructions. Capture one native value
+for a function accepting `&DatabaseValue`; run the same function against a complete
+in-memory fixture using existing `Database::new`, `with` and `database_value`.
+This uses no new store or raw-tuple adapter. Pure `with` already exists; preview
+success does not guarantee a later commit against a changed database.
 
-**Completion signal:** Public API checks demonstrate accurate, clearly scoped
-statistics; a nonblocking index request progresses to its captured target without
-chasing a moving head; `sync_index` observes completion. UUID tests establish the
-documented layout/order and clock-related limitations without claiming global
-transaction ordering. PostgreSQL-backed paths actually execute.
+**Completion signal:** The actual separate process submits and retries exactly,
+queries/navigates and reopens durably after restart under documented permissions.
+The calculation gives expected native/fixture results and gives the same result
+when rerun on the retained native value after later commits. No ordinary eager
+compatibility materialization substitutes for the native workflow.
 
-### 4. Prove and document ordinary local application deployment
+### 3. Establish a reusable workload and check baseline
 
 **Status:** Pending.
 
-**Outcome:** A developer can build and run the service, administrative commands
-and a separate Rust application using documented configuration and permissions.
-One application calculation works against a captured native database value and
-a complete fabricated in-memory value through the same public read APIs.
+**Outcome:** Later children can rerun a representative application workload and
+extend existing semantic/failure checks from a recorded baseline.
 
-**Focus:** Reproducible build/run instructions, normal lifecycle and recovery,
-credential separation and the public API path. Exercise schema/transactions,
-query/Pull, immutable old/history values, status/statistics, index requests and
-reopen. Demonstrate a calculation accepting `&DatabaseValue`, with one native
-capture passed through query and entity navigation. Exercise that same function
-against a complete fabricated database built with existing `Database::new`,
-`with` and `database_value`; this fixture needs neither raw-tuple query sources
-nor a new store. Reuse existing acceptance evidence where appropriate and check
-affected boundaries in proportion to risk. Explain current storage dependence,
-the scope of I/O counters and live transaction reports without claiming that
-later-stage read independence or durable consumption already exists. Record
-packaging and operating limits plainly.
+**Focus:** Small reusable workload/setup, elapsed/resource measurements and
+existing counters with explicit coverage, including omitted PostgreSQL calls.
+Extend current pure-oracle/generated tests and fault hooks with selectable seeds
+and replayable traces for a bounded relevant operation/failure sequence. Use small
+clock/transport seams only where changed code benefits. Later children grow fault
+coverage and failure reduction alongside their changes; do not wait until final
+acceptance. This child requires no full instrumentation, framework, minimizer,
+exhaustive failure campaign or complete performance repair.
 
-**Completion signal:** A clean local deployment workflow runs the actual
-executables against PostgreSQL and a separate application uses public APIs
-through restart/reopen, with permissions matching the documented model and no
-ordinary eager compatibility materialization. The calculation returns the
-expected result from both the native value and an equivalent in-memory fixture;
-re-running against the retained native value after later commits gives the same
-result. The fabricated
-fixture complements the actual PostgreSQL and separate-executable workflow.
-Deployment/admin instructions accurately distinguish local value capture,
-native querying and durable change consumption. Material results and remaining
-cross-stage dependencies are reconciled into Goal 0. This child is not the
-parent's finish line.
+**Completion signal:** Retained commands, workload and measurements reproduce the
+baseline with declared limits. Relevant PostgreSQL checks actually execute, and
+a recorded generated seed/trace replays through existing test support. Document
+observed results and remaining costs without claiming unmeasured improvements.
 
 ## Continuation
 
-Scaffold only; implementation has not started. First reconcile the current code
-and parent plan, then begin Stage 1. Keep Goal 1 as the sole active child until
-its observable completion signals are established. Return to Goal 0 afterward
-and scaffold or resume Goal 2 according to the parent's reconciled state.
+Scaffold rewritten; implementation has not begun. Reconcile the parent and
+current executable surfaces, then implement the supported local transactor
+entry point in Stage 1. Keep this the sole active child. Record material results
+and the next action; once its signals hold, return to Goal 0's loop and reconcile
+the next child. Completing this child does not complete the parent.

@@ -21,20 +21,21 @@ local host; broad semantic restore took 56m 7.648s and deep inspection 43m 15.92
 See [G3 Goal 6](goal-archive/G3/goal-6/0-plan.md) and the [operator guide](docs/operations.md) for
 resource limits, retained evidence, commands and deliberate differences.
 
-The fresh [Goal 0](goal-0/0-plan.md) plans the next phase: usable executables and
-administration, missing application APIs, secure cross-host submission and
-discovery, instrumentation and hints, richer persisted programs, fulltext and
-partition controls. Goal1 is scaffolded for the executable/API stage. These are
-planned additions, not newly implemented capabilities or G3 completion claims.
+The fresh [Goal 0](goal-0/0-plan.md) owns the next phase's required capabilities
+and dependency-aware implementation order. Goal1 starts with a supported local
+transactor, separate application and reusable test baseline; storage, functional
+features, distributed delivery and full administration follow. These are planned
+additions, not newly implemented capabilities or G3 completion claims.
 
 ## Start here
 
 - [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the next-phase objective and
   required capabilities; [`0-loop.md`](goal-0/0-loop.md) guides execution and
   [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
-- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: usable local
-  transactor/admin executables and small API additions. Goal0 scaffolds and executes each following child,
-  reconciling results until the overall objective is complete.
+- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: runnable local
+  transactor/application, minimal explicit setup and reusable verification.
+  Goal0 scaffolds and executes each following child, reconciling results until
+  the overall objective is complete.
 - [`goal-archive/`](goal-archive/README.md) indexes original Goals0–8 in G1,
   corrective Goals9–17 in G2, and the completed native-core Goals0–6 in G3.
   Their plans and completion labels are historical evidence, not active policy.

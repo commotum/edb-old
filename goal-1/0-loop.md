@@ -2,46 +2,19 @@
 
 1. Read `/home/jake/Developer/atomic/goal-0/0-plan.md` and
    `/home/jake/Developer/atomic/goal-0/0-loop.md`, then this child's `0-plan.md`.
-   Reconcile their status with actual source, executables, tests and observed
-   results. Preserve completed work; archived G1/G2/G3 goals are evidence only.
-2. Select the first unfinished Goal 1 stage. Inspect the relevant existing APIs
-   and semantic evidence, then take the actions that most directly make the
-   ordinary local deployment usable. Use best judgment; no baseline rewrite,
-   nested goal hierarchy or corrective parent.
-3. Exercise the real executable and application workflow as implementation
-   advances. Verify risky behavior on an isolated actual PostgreSQL fixture with
-   appropriate roles and configured transport. Unconfigured tests that return
-   early are not PostgreSQL evidence. Preserve exact outcomes, old values and
-   bounded ordinary reads; do not mutate shared acceptance data casually.
-   Document actual query/storage dependence, not just local `db()` capture or
-   cursor node counts. Preserve live report-queue semantics and distinguish them
-   from the later checkpointed durable consumer.
-   Reuse pure-model comparisons and fault hooks; preserve a seed/replay trace for
-   generated checks used here. Small clock/transport seams may support changed
-   lifecycle code, without requiring a simulator or replacing PostgreSQL checks.
-   In Stage 4, pass one captured native value through a calculation accepting
-   `&DatabaseValue`, using query and entity navigation; run the same function on
-   a complete in-memory `Database` fixture and re-run against the retained native
-   value after later commits. Use existing construction/`with` APIs; keep real deployment
-   acceptance mandatory.
-4. Fold material decisions, verified commands/results, failures and stage status
-   into `0-plan.md`, and update Goal 0 when a finding changes the parent view.
-   Keep records concise. Separate existing evidence from new observations,
-   pending maintenance from corruption, and measured limits from assumptions.
-   Hand off wakeup/replay, snapshot references and committed snapshot/view key
-   comparison to Goal 2; cache/batched index I/O/compression and shared/indexed
-   speculative state/costs to Goal 3; query sources/preparation/grouped joins to
-   Goal 4; and scaling, generated campaigns/trace minimization, the complete
-   branch/revalidation/commit example and the profiling-based pipeline decision
-   to Goal 7. Do not pull these implementations or premature configuration flags
-   into this child's completion gate.
-5. Continue through this child's stages. A new executable, scaffold or passing
-   unit test alone is not completion. Do not narrow the objective to hide an
-   unresolved deployment/API gap; report blockers or required authority plainly.
-6. Once Goal 1's objective and completion signals are established, return to
-   Goal 0, reconcile remaining stages, then scaffold or resume Goal 2 under the
-   parent loop. Keep one child active; do not execute unrelated later-stage work
-   concurrently or treat this child's completion as the original finish line.
-7. At a session boundary, leave a short continuation note in `0-plan.md`:
-   current stage, last verified result, exact next action, live command handles
-   if any, and any blocker or uncertainty. Resume rather than restart.
+   Reconcile source/results; preserve working code and treat archives as evidence.
+2. Execute the first unfinished stage directly; do not repeat completed slices.
+   Keep minimal setup explicit and runtime roles restricted.
+3. Exercise the separate application on actual PostgreSQL with configured
+   TLS/I/O and exact outcomes. Use one captured `DatabaseValue`, its retained
+   old/history views and the equivalent in-memory fixture; self-skips and eager
+   compatibility materialization do not satisfy native acceptance.
+4. Record the small workload baseline with counter limits. Extend existing
+   oracle/fault/generated support, retaining seeds and replay traces; later
+   children grow this support as they change behavior, not only at final acceptance.
+5. Fold material results, stage status and the next action into `0-plan.md` and
+   reconcile Goal 0. Keep later features out of this child's completion gate:
+   runtime helpers belong to Goal 2, UUID helpers to Goal 4, full operations to 6.
+6. Continue until all three signals hold, then return to the parent loop for
+   the next child. Keep one child active; leave a concise continuation note when
+   interrupted and report blockers plainly. This child is not the parent's finish.
