@@ -1,34 +1,32 @@
 # Atomic
 
 Atomic is a source-study and Rust-port project. Its retained Datomic Pro
-reference corpora are organized by release. Historical plans, one-off runners,
-generated reports, packaged resources, and build products have been removed
-from the active tree.
+reference corpora are organized by release. The two prior Rust goal passes are
+preserved in `goal-archive/`; the fresh `goal-0/` is the active strategy.
 
 The repository contains a substantial PostgreSQL-only Rust reconstruction: a
 pure transactional kernel, durable log/recovery, peer indexes and snapshots,
 local query/pull, constrained persisted programs, a transaction service, and
-operational tooling. A source-backed corrective program is still replacing
-prototype shortcuts in the transactor, persistent indexes, query evaluator,
-and lifecycle boundary; the project is not yet claiming the full Goal 0
-production outcome.
+operational tooling. Remaining work centers on the native connection and report
+boundary, transaction and query/API completeness, operational verification,
+and integrated production evidence. The project is not yet claiming the full
+Goal 0 production outcome.
 
 ## Start here
 
-- [`goal-0/0-plan.md`](goal-0/0-plan.md) is the full PostgreSQL-only Rust reconstruction roadmap.
-- [`goal-9/0-plan.md`](goal-9/0-plan.md) is the active source-backed corrective
-  parent loop, with [`goal-9/EVIDENCE_LEDGER.md`](goal-9/EVIDENCE_LEDGER.md)
-  tying each repair to documentation and recovered 1.0.7705 code.
-- [`goal-11/0-plan.md`](goal-11/0-plan.md) records the completed
-  schema/ident-as-information correction and its real PostgreSQL evidence.
-- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the semantic-foundation milestone.
-- [`goal-1/SEMANTICS.md`](goal-1/SEMANTICS.md) is the native semantic contract now implemented by the kernel in [`src/`](src/) and checked in [`tests/`](tests/).
-- [`goal-2/0-plan.md`](goal-2/0-plan.md) records the completed single-process Rust transactional kernel and its deliberate boundaries.
-- [`goal-15/OPERATIONS.md`](goal-15/OPERATIONS.md) is the current deployment,
-  backup/restore, GC, security, and excision contract. The Goal 8 runbook is a
-  historical prototype record.
-- [`goal-8/COMPATIBILITY_AND_SECURITY.md`](goal-8/COMPATIBILITY_AND_SECURITY.md)
-  states the durable compatibility and authority boundaries.
+- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the objective, current baseline,
+  and remaining stages; [`0-loop.md`](goal-0/0-loop.md) guides execution and
+  [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
+- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: restore and verify
+  the runnable baseline. Goal 0 scaffolds and executes each following child,
+  reconciling results until the overall objective is complete.
+- [`goal-archive/`](goal-archive/README.md) indexes the original goals 0–8 in
+  A1 and corrective goals 9–17 in A2. Their completion labels are historical.
+- [The corrective evidence ledger](goal-archive/A2/goal-9/EVIDENCE_LEDGER.md)
+  maps prior repairs and unresolved questions to the docs and recovered source.
+- [The operational contract](goal-archive/A2/goal-15/OPERATIONS.md) and
+  [tiered writer architecture](goal-archive/A2/goal-16/ARCHITECTURE.md) retain
+  detailed implementation evidence; check them against current code.
 - [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
   Transactor reference corpus.
 - [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference

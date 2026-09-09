@@ -1,12 +1,23 @@
-# Goal 1 Working Loop
+# Goal 1 Execution Loop
 
-1. Read `goal-1/0-plan.md` and reconcile it with the actual semantic documents, `1.0.7705` evidence, existing decision records, model code, and test results.
-2. Select the first unfinished stage or the earliest unsupported rule within it.
-3. Read the relevant `datomic_pro_docs` files first, then trace the corresponding path through `1.0.7705`, including names, type boundaries, representations, algorithms, and performance-oriented structure.
-4. State the rule in implementation-independent language, classify its authority, identify observable consequences, and map the recovered implementation to its closest idiomatic Rust form. Make adaptations and unavoidable project decisions explicit.
-5. Encode the rule in the simplest useful artifact: a normative example, decision record, machine-readable fixture, property, or small reference-model behavior. Avoid production optimization and PostgreSQL layout work in this goal.
-6. Run the relevant checks, including permutations where transaction order-independence matters and boundary/type combinations where equality or ordering matters.
-7. Fold material findings, changed assumptions, resolved ambiguities, and truthful stage status back into `goal-1/0-plan.md`; keep detailed evidence in the supporting artifacts rather than bloating the plan.
-8. Continue until the foundation exit condition is met. Before ending mid-goal, record a concise continuation note naming the next unsupported rule or failing fixture.
-
-Prefer semantic closure and executable evidence over broad commentary. Neither discard recovered implementation details as merely incidental nor copy JVM-specific machinery mechanically: understand the role, preserve it by default, and document why a Rust adaptation is better. Never claim a rule is settled when the sources or tests still disagree.
+1. Read this goal's `0-plan.md` and the current `goal-0/0-plan.md`. Reconcile
+   the baseline with actual code and results; archived evidence is context.
+2. Select the first unfinished stage and take the action most directly
+   advancing its outcome. Begin with the actual build failure, not another
+   broad review. Use relevant docs and recovered source when semantics matter.
+3. Implement a coherent repair and run checks suited to that boundary. Preserve
+   existing behavior, migrations, and unrelated edits. Establish the public
+   application workflow as soon as its prerequisites work.
+4. Prove PostgreSQL tests execute on disposable fixtures. Distinguish failures,
+   missing prerequisites, and tests that did not run. Repair baseline defects;
+   retain concrete later-stage failures and their parent ownership without
+   weakening assertions or concealing limitations.
+5. Record only material findings, decisions, and stage status in `0-plan.md`.
+   Continue through this goal's stages, revising tactics from current evidence.
+6. When the exit condition is met, update Goal 0's Stage 1 and remaining context,
+   then return to `goal-0/0-loop.md` to scaffold/resume Goal 2 and continue toward
+   the full objective. Do not create sub-goals beneath Goal 1.
+7. At an unavoidable session boundary, leave both plans with the active stage,
+   last verified result, concrete remaining issue, and next useful action.
+   Report a blocker plainly if progress requires unavailable information or
+   authority; otherwise continue within the authorized work.

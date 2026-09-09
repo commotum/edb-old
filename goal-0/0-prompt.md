@@ -1,13 +1,35 @@
 # Goal 0 Continuation Prompt
 
 ```text
-Run the parent execution loop for the native Rust Datomic-inspired database described in /home/jake/Developer/atomic/goal-0/0-plan.md, following /home/jake/Developer/atomic/goal-0/0-loop.md.
+Finish the existing native Rust/PostgreSQL Datomic-inspired database using
+/home/jake/Developer/atomic/goal-0/0-plan.md and
+/home/jake/Developer/atomic/goal-0/0-loop.md.
 
-Goal 0 has been reopened by the source-backed audit in /home/jake/Developer/atomic/goal-9/. Resume that corrective parent first; historical child completion labels are not acceptance evidence.
+Preserve Datomic's central information model: immutable database values and
+facts, declarative serialized transactions, strong identity, schema as data,
+history/time views, peer-local query and navigation, and reliable operations.
+Use /home/jake/Developer/atomic/datomic_pro_docs as semantic authority and
+/home/jake/Developer/atomic/1.0.7705 as architectural and algorithmic evidence.
+Use Rust and PostgreSQL directly; JVM/wire compatibility, other stores, and
+exhaustive decompilation equivalence are not objectives.
 
-Preserve the semantics and key benefits expressed by datomic_pro_docs. Treat 1.0.7705 as the default architectural and algorithmic blueprint: study and map its class/namespace boundaries, representations, data flow, algorithms, caching, concurrency, and performance choices, and match them wherever they remain sound. Translate idiomatically into Rust and deviate only where documented semantics, PostgreSQL, safety, or a clearly better Rust design justifies it; record significant deviations. PostgreSQL is the only storage system, so use it directly and do not build generic backend portability. Exact JVM/Clojure API, existing-database, wire-format, or byte-format compatibility is not required, but those source representations remain important design evidence rather than material to discard.
+Run Goal 0 as the parent loop. Sync its plan with actual code and tests, select
+the first unfinished stage, and use its matching /home/jake/Developer/atomic/goal-N
+folder (Stages 1–6 map to Goals 1–6). Use $scaffold-goal to create a missing
+child's 0-plan.md, 0-loop.md, and 0-prompt.md; otherwise reconcile and resume
+the existing child without replacing its work. Goal 1 is already scaffolded.
 
-Sync Goal 0 with the actual repository, child plans, and evidence. Find the first parent stage whose completion signal is not established. If its matching goal-N scaffold is missing, use $scaffold-goal to create it; if it exists, reconcile and resume it without overwriting it. Execute that child goal through its full exit condition, verify the risky boundaries with real evidence, update both plans, then return to Goal 0 and revise unfinished stages as new facts warrant. Repeat this scaffold-or-resume, execute, verify, fold-back cycle in dependency order. Keep one active child and never treat scaffold creation as stage completion.
+Execute the child through its observable completion signal using best judgment.
+Preserve completed repairs, finish partial implementations, and exercise the
+application workflow throughout. Prove PostgreSQL checks run and measure
+claimed scalability. Archived A1/A2 goals are evidence, not active instructions.
 
-Do not stop after scaffolding or after completing one child while another stage can safely proceed. When all stages are marked complete, verify the integrated Goal 0 success condition and reopen the owning child for any gap. Continue until the original objective is genuinely achieved; stop earlier only for a concrete blocker or required authority, and report uncertainty plainly.
+Fold material decisions, verified results, and status into the child and parent
+plans. Return to Goal 0, reconcile the remaining stages, then scaffold or resume
+and execute the next unfinished child. Repeat until the original objective and
+integrated acceptance are established; a scaffold or completed child is not
+the parent's finish line. Reopen the owning child if final checks reveal a gap.
+Keep one child active, leave a concise continuation note at session boundaries,
+and report blockers or uncertainty plainly without hiding core gaps as scope
+exclusions. Do not create recursive goal hierarchies or another corrective parent.
 ```

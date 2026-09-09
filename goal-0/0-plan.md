@@ -1,219 +1,236 @@
-# Goal 0 — Native Datomic-Inspired Database
+# Goal 0 — Finish the Native Datomic Database
 
 ## Objective
 
-Build a production-quality database in Rust that preserves the central benefits and stated semantics described by `datomic_pro_docs`: immutable datoms and database values, declarative serialized transactions, durable history and time views, local peer query, useful ordered indexes, strong identity, and operationally sound durability. Reconstruct `1.0.7705` as faithfully as practical at the level of architecture, data flow, algorithms, invariants, and performance choices, translating it idiomatically into Rust rather than inheriting its JVM or Clojure runtime.
+Finish a usable, production-quality Rust database backed only by PostgreSQL
+that preserves Datomic's central benefits: immutable facts and database values,
+declarative atomic transactions in one authoritative order, strong identity,
+schema as information, accessible history and time views, local peer query and
+graph navigation, and reliable recovery and operation. Complete the existing
+implementation rather than restart it.
 
-PostgreSQL is the only storage system this project will support. The design should use PostgreSQL directly and well; portability to other storage backends is not an objective.
-
-## Corrective status — reopened 2026-09-03
-
-Goal 0 is **not achieved**. A source-backed acceptance audit found that several
-child goals established useful prototypes but weakened or missed the original
-completion conditions. In particular: entity and transaction identity can
-alias; a schema alteration can acknowledge state that recovery rejects;
-schema/idents are not authoritative datoms; the peer/index path eagerly
-materializes and rebuilds whole databases; the fenced service, peer writes,
-and persisted functions are disconnected write paths; temporal query
-expressions can observe a different database value from their patterns; and
-several lifecycle guarantees are either bypassable or not production-bounded.
-
-`goal-9/` is the corrective parent loop. Its evidence ledger distinguishes
-documented Datomic semantics, recovered `1.0.7705` implementation evidence,
-and PostgreSQL/Rust-specific safety requirements. The historical descriptions
-below remain useful records of what was built, but every stage status is
-reopened until the matching `goal-9` repair stage and the final integrated
-acceptance gate demonstrate the original outcome without narrowing it.
-
-Goals 10 through 16 have since closed identity/successor validity,
-schema/ident authority, competing write paths, transaction time,
-acknowledgement, controlled behavior, verified durable bases, lazy peer/index
-internals, exact query-source propagation, PostgreSQL lifecycle safety, and the
-tiered production writer with real fault/restart evidence. Goal 17's native
-connection/API boundary is now the first unfinished corrective child. A renewed public-boundary audit found that
-the default peer still materializes the eager oracle, peer reports are
-incomplete, reverse/time-point cursors and reference-shaped tuple transaction
-inputs are missing, and default query controls impose undocumented ceilings.
-Goals 17–19 own those repairs; Goal 20 owns integrated acceptance.
+Use `datomic_pro_docs/` to determine the intended behavior and
+`1.0.7705/` to understand the architecture, algorithms, and performance choices
+that make it practical. Translate that design thoughtfully into Rust and
+PostgreSQL. Success is a coherent working database, not exhaustive equivalence
+to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Constraints
 
-- Implement the system and its public/runtime-facing components in Rust; do not require a JVM or Clojure.
-- Treat `datomic_pro_docs` as the semantic authority and `1.0.7705` as the default architectural and algorithmic blueprint. Study its namespaces, class and type boundaries, data representations, control flow, caches, concurrency choices, and storage/index/query algorithms for both intent and performance implications.
-- Preserve recognizable implementation structure and behavior from `1.0.7705` wherever it remains sound in Rust and PostgreSQL. Deviate deliberately only when required by documented semantics or when a direct translation would add JVM/Clojure-specific machinery, obscure safety, or be materially less idiomatic or efficient in Rust.
-- Record significant deviations and their evidence. Resolve conflicts in favor of the documented model unless evidence justifies an explicit project decision.
-- Do not require compatibility with, or the ability to open, existing Datomic databases.
-- Support PostgreSQL only. Do not create a generic storage backend layer or spend effort preserving hypothetical backend portability.
-- Preserve the information model, observable guarantees, and useful internal design insight. Java/Clojure names, types, protocols, and serialized shapes are evidence to study and map, even when the final Rust API or byte encoding is not compatibility-identical.
-- Keep the authoritative write path small, deterministic, serialized, recoverable, and testable.
-- Keep query work and immutable-data caching at peers so reads can scale independently of the transactor.
-- Prefer explicit, versioned native formats and deterministic sandboxing for persisted behavior.
+- Rust runtime, PostgreSQL storage only. Existing Datomic database formats,
+  JVM/Clojure execution, wire compatibility, and other storage backends are
+  outside the objective.
+- Documentation governs semantics. Recovered source supplies implementation
+  evidence and resolves detail; investigate significant disagreements and
+  record deliberate native differences. Preserve useful recovered designs
+  without making exact classes, tree depth, compiler output, or internal error
+  precedence requirements in themselves.
+- Preserve immutable complete database values, unordered transaction meaning,
+  schema/ident authority, exact snapshot propagation, and one serialized fenced
+  writer. Persisted behavior must remain useful, deterministic, and controlled.
+- Keep queries and immutable caches at peers. Ordinary reads, writer state,
+  and localized updates must work with databases larger than memory through
+  durable indexes and bounded recent state. Measure costs against workload and
+  selectivity; do not demand constant work for broad scans or restrictive filters.
+- Preserve acknowledged commits, explicit unknown outcomes, safe retry,
+  failover, and versioned durable meaning. Respect existing data and applied
+  migrations; make compatibility boundaries explicit.
+- Authenticate ordinary root adoption under a trusted, restricted indexer
+  model. Reserve full tree-versus-log equivalence checks for deep verification;
+  do not require a new proof system for lazy opens.
+- Treat operational limits as explicit policy. Preserve documented semantics
+  such as Pull's default cardinality-many limit. Allow inherently broad work
+  such as backup, excision, and index creation to have measured, documented
+  costs. Preserve immutable captured values without inventing an exact
+  cross-rebuild retained-history promise for `noHistory`.
+- Verify risky boundaries with real PostgreSQL and relevant failures. A test
+  that returns without database configuration is not integration evidence.
+  Use targeted source/runtime witnesses; global AOT equivalence and complete
+  dormant-branch coverage are not prerequisites.
 
-## Architectural destination
+## Starting point — 2026-09-08
 
-- **Value and datom model:** canonical native types, entity and transaction identifiers, total value ordering, immutable datoms, schema-as-data, and versioned encoding.
-- **PostgreSQL storage:** a concrete schema for immutable blocks, the transaction log, database roots, leader epochs, idempotency records, indexing progress, backup metadata, and atomic publication through PostgreSQL transactions and conditional updates.
-- **Transactor:** a deterministic state machine that resolves identity, expands transaction data and functions, validates the complete proposed information set, derives datoms and index roots, commits once, and emits transaction reports.
-- **Indexes:** EAVT, AEVT, AVET, VAET, history, and a recent transaction layer represented by immutable persistent structures with background consolidation.
-- **Peer:** immutable database snapshots, PostgreSQL-backed synchronization, permanent-safe caching of immutable data, local index access, local query and pull, and transaction submission.
-- **Query and pull:** native Datalog evaluation with set semantics, joins, rules, recursion, negation, aggregates, predicates, time views, and graph projection.
-- **Function runtime:** built-ins plus deterministic, resource-bounded persisted behavior through a versioned WASM ABI or comparably constrained DSL; no ambient filesystem, network, clock, or randomness.
-- **Operations:** fenced transactor failover, restart recovery, backups, restore verification, observability, garbage collection, excision, schema/index evolution, and structured errors.
+**Status:** Open; Stage 1 is the first unfinished stage. This is a fresh
+strategy over the existing code, not a claim that historical repairs vanished.
 
-## Execution model
+- The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
+  goals 9–17 are in `goal-archive/A2/`. Their plans, prompts, and completion
+  labels are historical evidence, not active instructions. This plan and its
+  loop replace both parent loops and their uncreated Goals 18–20.
+- The code already includes a substantial semantic kernel, durable log,
+  persistent trees, bounded recent state, tiered writer, exact query/pull
+  database values, controlled programs, fencing, and lifecycle tooling.
+  Corrective Goals 10–16 record focused PostgreSQL and failure evidence.
+- The review at code commit `19b799d` attempted
+  `cargo test --offline --all-targets --no-fail-fast`; compilation failed because
+  a `TieredReadCore` initializer in `src/peer.rs` omitted `lineage_id`. No tests
+  executed in that review. Recheck current code before acting.
+- The former Goal 17 is partly implemented beyond its written status:
+  time-point resolution, raw-boundary normalization, bidirectional cursors,
+  a connection facade, and complete report types exist with test fixtures.
+  Finish and verify these pieces rather than build them again.
+- Static review found catch-up without report enqueueing, fallible report
+  adoption after successful commit when ticket waits are out of order,
+  connection construction coupled to service startup, eager peer fallbacks,
+  and missing background/specialized synchronization at the public boundary.
+  These are investigation targets, not newly reproduced runtime failures.
+- Unresolved transaction tuple references, chainable native speculative
+  values, default query/pull ceilings, API omissions, deep backup/archive
+  semantic checks, and integrated production evidence remain.
+- The newer decompilation is a sufficient source-study corpus. It is not a
+  standalone recovered runtime. Consult the archived evidence ledger and
+  relevant source directly; restore a narrow oracle only for a consequential
+  question that needs executable reference evidence.
 
-Goal 0 is the persistent parent loop, not a direct implementation stage. For each first unfinished numbered stage, it owns this cycle:
+## Parent and child execution
 
-1. Reconcile the parent plan and repository with actual artifacts, tests, source evidence, and completed child-goal findings.
-2. Create the matching `goal-N/` scaffold with `$scaffold-goal` if it does not exist, or reconcile and resume it if it does. A child scaffold contains `0-plan.md`, `0-loop.md`, and `0-prompt.md` and inherits this objective and all applicable constraints.
-3. Execute that child goal through its observable completion signal. Creating its scaffold, writing a plan, or completing only an internal stage does not complete the parent stage.
-4. Fold material evidence, decisions, deviations, limitations, and truthful status into both the child plan and this plan.
-5. Return to Goal 0, reread the whole parent plan, and revise unfinished stages when new evidence changes their best boundaries or acceptance criteria; preserve the original objective and do not renumber completed stages.
-6. Repeat with the new first unfinished stage until every stage and the Goal 0 success condition are verified.
+Goal 0 owns the overall objective and continuation loop. Each numbered stage
+maps to the active repository folder `goal-N/`: Stage 1 to `goal-1/`, through
+Stage 6 to `goal-6/`. These names are distinct from the archived goal passes.
 
-Only one child goal is active at a time. If its scaffold already exists but is incomplete, continue it rather than replacing it or creating the following scaffold. If blocked, record the concrete blocker in both plans and stop truthfully instead of advancing the parent stage.
+For the first unfinished stage, use `$scaffold-goal` to create its three-file
+scaffold if absent, or reconcile and resume the existing child if present.
+Execute the child through its completion signal, fold material evidence and
+status into this plan, then return to the parent and repeat for the next stage.
+Creating a scaffold does not complete a stage and is not a stopping point when
+running the parent continuation prompt.
+
+Keep one child as the active focus, with integration checks throughout. Fix
+necessary prerequisites across stage boundaries without manufacturing new
+goals. Revise unfinished stages and their child plans when evidence warrants;
+preserve established child identities and completed work. Child requirements
+must serve the parent objective and must not reintroduce exhaustive proof gates.
+After all children complete, verify the overall success condition and return
+any discovered gap to its owning child before declaring Goal 0 complete.
 
 ## Stages
 
-### 1. Semantic foundation
+### 1. Restore a trustworthy runnable baseline
 
-**Status:** Core corrective acceptance established 2026-09-03 by Goals 10 and
-11. Identity namespaces/frontiers, tuple schema rules, structural ordering, exact native
-genesis, schema/idents as ordinary information, current-basis temporal schema,
-and transaction-time representation now have source-backed executable and real
-PostgreSQL/restart evidence. Goal 18 still owns transaction-input tuple refs;
-final integrated Goal 0 acceptance remains open.
+**Status:** Pending execution; [Goal 1](../goal-1/0-plan.md) is scaffolded.
 
-**Outcome:** A precise, testable native contract for values, datoms, schema, identity, transactions, database views, errors, and ordering, including explicit decisions for behavior the source material leaves ambiguous.
+**Outcome:** The current implementation builds, its real failures are known,
+and an ordinary application workflow provides a continuing integration check.
 
-**Focus:** Extract normative behavior from `datomic_pro_docs`; map the corresponding types, namespaces, data flow, algorithms, and edge cases in `1.0.7705`; define canonical Rust-facing semantics, encodings, invariants, and conformance fixtures; document where an idiomatic Rust translation preserves or intentionally changes the recovered structure.
+**Focus:** Reconcile the partial connection changes with actual code; fix the
+build; run appropriate existing tests with explicit PostgreSQL execution;
+establish a small schema/transact/query/pull/history/reopen workflow. Record
+only material failures and evidence, retaining working prior repairs.
 
-**Completion signal:** The core semantic specification is internally consistent, disputed cases have recorded decisions, and executable fixtures or a minimal reference model can distinguish conforming from nonconforming behavior.
+**Completion signal:** The build and relevant baseline tests pass, the
+application workflow runs against disposable PostgreSQL, and remaining gaps
+have concrete locations and ownership in the stages below. Do not require
+every later feature to be complete before banking this baseline.
 
-### 2. Single-process transactional kernel
+### 2. Complete the native connection and observation model
 
-**Status:** Eager-kernel corrective acceptance established 2026-09-03 by Goals 10 and 11.
-The pure kernel now validates complete successors, uses collision-free issued
-identity and structural normalization, lowers schema to ordinary history with
-material recovered hooks, and round-trips every accepted transition through
-the same recovery boundary. Goal 16 supplies the completed native production
-assessor; Goal 18 owns
-the still-unrepresentable tuple-ref inputs and chainable native speculative
-values.
+**Status:** Pending; substantial implementation already exists.
 
-**Outcome:** A correct in-memory database kernel can apply complete unordered transactions to immutable database values.
+**Outcome:** Applications connect, submit transactions, and observe exact
+immutable native values through a coherent API, with reads independent of
+writer availability and lifetime.
 
-**Focus:** Datoms and indexes; transaction expansion; tempids and lookup refs; uniqueness and upsert; cardinality; CAS and retractions; schema enforcement; transaction functions; history; and pure `with` behavior.
+**Focus:** Separate connection attachment from embedded service ownership;
+finish ordered background advancement, complete opt-in reports, and durable
+success/unknown handling independent of ticket wait order. Complete native
+db/sync defaults, raw forward/reverse traversal, T/Tx/instant views, and
+transaction/index/schema/excision synchronization. Make eager oracle/admin
+access explicit. Choose the smallest concrete deployment and delivery design
+that supports independent peers and the single writer.
 
-**Completion signal:** The kernel passes the semantic conformance corpus, property tests preserve its invariants, and the same input database and transaction always produce the same result.
+**Completion signal:** Own and external writes yield complete ordered reports;
+concurrent submissions, catch-up, reconnect, and writer replacement preserve
+exact old values and acknowledgement semantics. Native cursors and time views
+match semantic fixtures with measured lazy access. An ordinary application
+path does not materialize the eager database or require ownership of the writer.
 
-### 3. PostgreSQL durability and recovery
+### 3. Close transaction and speculative-value semantics
 
-**Status:** Corrective acceptance established 2026-09-03 by Goals 10–12.
-PostgreSQL publication, durable idempotency, exact kernel recovery,
-database-bound fencing, acknowledged/unknown decisions, authoritative state
-commitments, coherent-base rejection, verified-base adoption, and exact log
-tail replay pass real crash/restart tests. Eager base representation and
-full-state commitment cost remain explicitly owned by Goal 13.
+**Status:** Pending.
 
-**Outcome:** The kernel commits durable database history exclusively through PostgreSQL and reconstructs correct state after clean or abrupt restart.
+**Outcome:** The native API expresses the documented core transaction inputs
+and supports pure, chainable speculative database successors.
 
-**Focus:** Concrete SQL schema and migrations; immutable records or blocks; transaction log; root publication; checksums; transaction idempotency; isolation and locking choices; atomic conditional commit; indexing checkpoints; corruption detection; and recovery.
+**Focus:** Reference-shaped tuple slots and lookup keys, tempid/upsert
+resolution, native `with`, complete successor validation, and controlled
+function/predicate composition. Reuse existing semantic access and tiered
+assessment. Version request/program changes where required, keeping stored
+values distinct from unresolved transaction input.
 
-**Completion signal:** Acknowledged commits survive injected crashes, ambiguous retries cannot double-commit, failed publications are invisible, and recovery reproduces the expected basis and indexes.
+**Completion signal:** Source-backed fixtures and eager/native differentials
+cover legal and invalid reference forms, successive speculative transactions,
+schema changes, and programs. Durable submission, retry, and recovery preserve
+the same accepted facts and identity without full-database reconstruction.
 
-### 4. Index and peer read architecture
+### 4. Finish useful query, pull, and history access
 
-**Status:** Internal architecture acceptance established 2026-09-03 by Goal
-13. Production peer values now use canonical shallow immutable trees, a persistent bounded
-recent tier, affected-range root-last consolidation, lazy cursors, byte-bounded
-shared caches, atomic shared-connection advancement, immutable old snapshots,
-and independent physical root revisions. Focused real-PostgreSQL concurrency,
-corruption, same-basis repair, and actual-restart witnesses pass. The eager
-`Database` remains an oracle/compatibility path; Goal 14 moves query/pull/entity
-consumers to the lazy value and Goal 16 has removed it from the production writer.
-Goal 17 still must make that native value the ordinary public `db`/`sync`
-result, complete transaction reports, and add lazy reverse/time-view traversal.
-Goal 16's 128-commit live witness additionally proves the writer retains no
-eager current/history value and cold-opens the authenticated native root with
-an exact streamed tail; this stage remains only public-API incomplete.
+**Status:** Pending.
 
-**Outcome:** Independent Rust peers maintain immutable database snapshots and answer indexed reads locally while synchronizing monotonically through PostgreSQL.
+**Outcome:** Local queries and navigation preserve exact snapshot semantics,
+have no accidental finite language limits, and expose a truthful useful surface.
 
-**Focus:** EAVT, AEVT, AVET, VAET and history access; persistent and recent index layers; immutable segment caching; snapshot lifecycle; basis synchronization; `as-of`, `since`, and history views; transaction reports; and background consolidation.
+**Focus:** Explicit resource controls, stack-safe unlimited pull recursion,
+accessible log history, and remaining query/pull APIs. Assess nested queries,
+return maps, pull transforms, lazy result projection, index-pull, fulltext,
+random aggregates, and transaction hints against the objective and source.
+Implement core and practical low-machinery features; justify specialized
+omissions individually. Deterministic persisted execution does not by itself
+forbid randomness in local read queries. Lazy result projection need not imply
+a wholly streaming Datalog evaluator.
 
-**Completion signal:** Multiple peers can lag, synchronize to requested transactions without gaps, retain valid old snapshots, and return identical indexed results across restart and consolidation.
+**Completion signal:** Large-result/deep-navigation fixtures work absent
+explicit limits; documented limits remain correct. Implemented features have
+direct semantic checks and an application example. Every material remaining
+omission is identified with its consequence; none removes a central benefit
+or is hidden behind a parity claim.
 
-### 5. Query, pull, and native API
+### 5. Establish operational integrity and recovery
 
-**Status:** Implemented-subset acceptance established 2026-09-03 by Goal 14. Exact
-eager/native database values now propagate through patterns, helpers,
-extensions, invocation-scoped rules, lookup refs, pull, and entities. Claimed
-primitive/aggregate/pull behavior has source-backed fixtures; generated
-optimized/scan and eager/native PostgreSQL differentials pass without peer
-compatibility materialization. Goal 19 owns undocumented default limits and the
-source-backed classification or implementation of the remaining query/pull
-surface; those gaps are not counted as implemented.
+**Status:** Pending; retain the substantial existing lifecycle implementation.
 
-**Outcome:** Applications can use an ergonomic Rust API to transact, navigate entities, pull graphs, and run the documented Datalog model locally at peers.
+**Outcome:** Operators can protect, recover, upgrade, inspect, reclaim, and
+excise the database under an explicit and tested trust and retention model.
 
-**Focus:** Query inputs and relations; joins; rules and fixed-point recursion; negation and disjunction; predicates and functions; aggregates; bag behavior around `with`; pull recursion and components; cancellation; limits; and explainable execution.
+**Focus:** Deep semantic comparison of backup and request-archive trees with
+their authoritative log points; restore/retry correctness; root and generation
+lifetimes; migration/runtime authority; secure transport; excision completion
+and external retention limits. Revisit existing code only where fresh evidence
+shows a gap. Document costs of broad administrative operations.
 
-**Completion signal:** The supported query and pull surface passes semantic fixtures and differential tests against the simple reference evaluator, with no promised result ordering unless explicitly requested.
+**Completion signal:** Meaningful corruption, interrupted backup/restore,
+restart, GC/pin, upgrade, and excision witnesses pass on PostgreSQL. Deep checks
+detect internally consistent false derived trees; normal trusted-root opens
+remain lazy. Operator procedures state supported guarantees and limitations.
 
-### 6. Controlled programmability
+### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Corrective acceptance established 2026-09-03 by Goal 12. Temporal
-`:db/fn` bindings, immutable cached program content, structured bounded
-control/data/query forms, recursive same-db-before expansion, assessed
-attribute predicates, complete db-after entity predicates, typed cancellation,
-and shared resource accounting all run through the fenced service. The compact
-IR remains an intentional sufficient subset rather than a JVM language port.
+**Status:** Pending; integration work begins in Stage 1 and continues throughout.
 
-**Outcome:** Custom transaction and query behavior is expressive enough for application invariants without compromising determinism or transactor safety.
+**Outcome:** One reproducible deployment and acceptance workflow demonstrates
+the original database objective and a measured operating envelope.
 
-**Focus:** Native built-ins; process-local Rust query extensions; sandboxed persisted functions; db-before and db-after evaluation rules; versioned ABI; resource metering; cancellation; deployment; and reproducibility.
+**Focus:** Independent peers, serialized concurrent writes, representative
+queries and programs, data/history larger than caches, consolidation, abrupt
+process/server failures, failover, recovery, and operational procedures.
+Provision isolated fixtures and prove tests execute. Measure memory, range I/O,
+recovery latency, and throughput against declared workload and resource sizes;
+fix discovered defects directly rather than creating another corrective parent.
 
-**Completion signal:** Persisted functions execute identically across nodes and restarts, reject forbidden effects, obey resource limits, and cannot bypass transaction validation.
+**Completion signal:** The coherent application/deployment workflow and
+risk-appropriate integrated tests pass; retained snapshots and committed history
+remain correct under failure; measurements support the claimed scale. Current
+API documentation and run instructions describe the actual supported system.
 
-### 7. Availability and production transaction service
+## Success and continuation
 
-**Status:** Service-internal corrective acceptance established 2026-09-03 by Goal 12. Ordinary
-requests no longer require basis/time; one database-bound fenced worker owns
-serialization, durable decisions, exact assessed reports, nonblocking lossless
-report delivery, bounded admission, process-fault handling, and standby
-takeover. Real concurrent, unknown/retry, process-death, and failover tests
-pass without an unfenced application publication API. Goal 16 now establishes
-unknown-outcome observer reconciliation and bounded tiered writer residency;
-Goal 17 owns the single application connection and complete peer report boundary.
+Complete when the Rust transactor and independent peers, backed only by
+PostgreSQL, deliver the core information model as one usable, tested,
+recoverable system, with measured operational behavior and intentional,
+documented differences from Datomic. No known core correctness or usability
+failure may be relabeled as a non-core omission to close the goal.
 
-**Outcome:** The serialized write service remains correct through concurrency, overload, timeout, process failure, and leader replacement.
-
-**Focus:** Request queues; backpressure; structured anomalies; unknown outcomes; durable idempotency keys; transaction reports; leader election; monotonically increasing epochs; fencing at publication; standby catch-up; and failure injection.
-
-**Completion signal:** At most one leader epoch can publish, failover never forks history, retry behavior is explicit, and stress/fault tests preserve serializable outcomes.
-
-### 8. Lifecycle and operational completion
-
-**Status:** Corrective acceptance established 2026-09-03 by Goal 15. Explicit
-migration/runtime authority, verified connection policy, coherent scoped
-inspection, differential root-last backup/exact restore, exact derived-root and
-generation collection, and source-faithful A=15 excision pass real PostgreSQL
-fault/restart tests. `goal-15/OPERATIONS.md` records the native and deployment
-limits. Goal 20 still owns the one production-shaped all-system gate.
-
-**Outcome:** The system can be operated, protected, upgraded, diagnosed, and retired responsibly in production.
-
-**Focus:** Backup and point-in-time recovery; restore verification; metrics and tracing; consistency inspection; capacity controls; garbage collection; privacy-oriented excision and cache invalidation; migrations; compatibility policy; security; and operator documentation.
-
-**Completion signal:** Rehearsed operational procedures meet declared recovery and privacy guarantees, long-running workloads remain bounded and observable, and the full acceptance suite passes in a production-shaped deployment.
-
-## Success condition
-
-Goal 0 is complete when the Rust transactor and peers, backed only by PostgreSQL, deliver the documented core benefits as one coherent, tested, recoverable system; the major guarantees hold under concurrency and injected failure; and remaining differences from Datomic are intentional and documented rather than accidental.
-
-**Status:** Reopened. The prior 102-pass headline can also be produced with no
-PostgreSQL process because integration tests return successfully when their
-environment is absent. `goal-9/` owns repair and a new acceptance gate that
-must prove the coherent original objective, including explicit PostgreSQL
-execution, long-history behavior, and source-witness semantic fixtures.
+**Next action:** Execute `goal-1/`: recheck the missing `lineage_id` initializer
+and current build, then establish the Stage 1 baseline and investigate the
+connection/report issues. Fold completion back here and scaffold/resume Goal 2.
+The scaffold alone completes no implementation stage. Keep one concise
+continuation note here identifying the active child when execution stops.

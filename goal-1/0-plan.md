@@ -1,93 +1,140 @@
-# Goal 1 — Semantic Foundation
+# Goal 1 — Restore a Trustworthy Runnable Baseline
 
 ## Objective
 
-Establish the precise, executable semantic foundation for the native Rust database: define what values, datoms, schemas, identities, transactions, database views, and failures mean before optimizing or making them durable. Preserve the spirit and stated behavior of `datomic_pro_docs`, and reconstruct the corresponding design in `1.0.7705` as faithfully as practical, translating it idiomatically rather than mechanically into Rust.
+Establish a working, evidence-backed baseline for the existing Rust/PostgreSQL
+database: restore compilation, verify the implemented core against real
+PostgreSQL, and provide a small repeatable application workflow. Identify
+remaining defects precisely so the next stages can finish the native database
+without restarting completed work or mistaking skipped tests for verification.
 
-This goal realizes Stage 1 of `goal-0/0-plan.md` and must leave a firm contract for the single-process transactional kernel that follows.
+This realizes Stage 1 of [Goal 0](../goal-0/0-plan.md). Goal 0 remains the
+authority for the full database objective and subsequent child goals.
 
 ## Constraints
 
-- `datomic_pro_docs` is the primary semantic authority; cite the relevant local source for material rules.
-- `1.0.7705` is the default implementation blueprint and secondary behavioral witness. Its Java/Clojure names, types, protocols, encodings, boundaries, and control flow must be studied and mapped because they reveal intended architecture and performance choices.
-- Preserve recovered structures and algorithms when they remain sound. Exact Java types, Clojure evaluation machinery, Fressian/Artemis bytes, and public API compatibility are not goals in themselves, but replacement designs must be justified rather than assumed.
-- Prefer the closest clear, idiomatic Rust equivalent. Deviate when direct reproduction would add needless JVM/Clojure machinery, conflict with documented behavior, weaken safety, or miss a concrete PostgreSQL/Rust advantage; record significant deviations and rationale.
-- The target runtime is Rust and the eventual durable store is PostgreSQL only, but this goal must define semantics independently from SQL layout or performance optimization.
-- Existing Datomic databases do not need to open in the new system.
-- Transactions are declarative, semantically unordered information sets evaluated against an immutable `db-before`; all-or-nothing validation concerns the complete proposed result.
-- Preserve durable history, database-value immutability, strong identity, monotonic transaction order, peer-local interpretation, and explicit time views.
-- Resolve under-specified behavior deliberately, version decisions that affect persistent meaning, and avoid accidental dependence on Rust container iteration order or PostgreSQL collation.
+- Inherit Goal 0's Rust/PostgreSQL scope, Datomic information model, integrity
+  guarantees, and proportionate verification requirements.
+- Use `datomic_pro_docs/` as semantic authority and relevant `1.0.7705/` code
+  as design evidence. Consult `goal-archive/` selectively as historical context;
+  archived continuation prompts and completion labels do not govern this work.
+- Preserve existing implementation, data, applied migrations, and unrelated
+  changes. Repair actual failures with the smallest coherent implementation
+  changes; do not replace partial features merely because their plans are stale.
+- Use disposable PostgreSQL fixtures for integration and failure checks. Prove
+  which tests executed, and distinguish skipped prerequisites from passes.
+- Exercise the supported public application path. Do not hide an API failure
+  behind direct SQL, private test helpers, or eager oracle materialization.
+  Explicit fixture provisioning is separate from application behavior.
+- Fix defects that prevent the baseline workflow or invalidate its guarantees.
+  Record broader connection, transaction, query, and operational work under the
+  owning parent stage. Do not delete or weaken failing tests to claim a pass,
+  and do not require every future feature to finish this baseline milestone.
+- Keep evidence and continuation notes concise. No global decompiler proof,
+  mandatory broad benchmark campaign, or additional child-goal hierarchy is
+  required for this goal.
 
-## Known context
+## Known context — 2026-09-08
 
-- The documented value set, cardinality, uniqueness, upsert, tuples, schema evolution, transaction forms, `with`, history, `as-of`, `since`, pull, and query behavior provide most of the necessary contract.
-- The highest-risk open semantics include cross-type total ordering, floating-point normalization, conflicting same-transaction assertions, schema-plus-data transactions, composite-tuple upsert timing, and error precedence for unordered invalid input.
-- A simple model and durable fixture corpus are more valuable here than production indexes, distributed services, or premature APIs.
+**Status:** Scaffolded; execution has not begun.
+
+- The review at code commit `19b799d` attempted
+  `cargo test --offline --all-targets --no-fail-fast`. Compilation failed in
+  `src/peer.rs` because one `TieredReadCore` initializer omitted `lineage_id`;
+  no tests executed. Recheck this against the current tree before repairing it.
+- Persistent indexes, recent tiers, a tiered writer, local query/pull, programs,
+  durable publication, and operational tooling already exist. Archived Goals
+  10–16 record focused PostgreSQL/fault evidence, not a fresh passing HEAD.
+- The former Goal 17 added native time points, raw-boundary normalization,
+  reverse cursors, a connection facade, and report types beyond its written
+  status. Existing fixtures should be reused and checked.
+- Static review identified missing catch-up reports, report-gap errors after
+  committed submissions when tickets are waited out of order, service-owned
+  connection startup, eager peer fallbacks, and missing background/specialized
+  synchronization. These are hypotheses to confirm against current code and
+  tests; parent Stage 2 owns full connection/observation closure.
+- The eventual baseline workflow covers schema installation, ordinary
+  transactions, query/pull, history, immutable old values, and reopen. It should
+  remain useful as a regression check during later children.
 
 ## Stages
 
-### 1. Evidence map and decision discipline
+### 1. Restore the build and reconcile partial implementation
 
-**Status:** Complete. `SEMANTICS.md` maps each foundation area to its documentation, recovered implementation path, native artifact, and translation rule.
+**Status:** Pending.
 
-**Outcome:** Every semantic area has an identified source of truth and a consistent method for handling omissions or conflicts.
+**Outcome:** The current library, tests, and relevant application targets build,
+with partial features and the first actual failures understood.
 
-**Focus:** Map `datomic_pro_docs` sections to the reconstructed capabilities; trace the corresponding types, names, boundaries, representations, concepts, and algorithms in `1.0.7705`; classify rules and design choices as documented, faithfully translated, idiomatically adapted, inferred, or newly decided; establish a compact decision-record format.
+**Focus:** Inspect the current worktree and lineage propagation, repair the
+missing initializer or its current equivalent, and resolve related compilation
+failures. Check existing pure semantic and native cursor/time fixtures without
+assuming historical completion labels still apply.
 
-**Completion signal:** The semantic inventory covers all foundation areas, high-risk ambiguities are listed, and contributors can trace material rules to evidence or an explicit project decision.
+**Completion signal:** Relevant targets compile and the pure baseline checks
+pass. Any separate feature failures are recorded with exact evidence and the
+owning parent stage; the record does not imply the whole suite is green.
 
-### 2. Canonical values, identifiers, and datoms
+### 2. Establish actual PostgreSQL baseline evidence
 
-**Status:** Complete. `src/value.rs`, `src/datom.rs`, and their law/edge-case tests define all supported variants, comparison, stored equality, tuple nils, index order, limits, and float decisions.
+**Status:** Pending.
 
-**Outcome:** The system has a stable logical vocabulary with deterministic equality, hashing, comparison, and representation rules.
+**Outcome:** The implemented durable and native read paths have reproducible
+integration evidence, and concrete regressions are distinguished from missing
+configuration or fixture interference.
 
-**Focus:** Supported scalar and reference types; entity and transaction IDs; instants; UUIDs; keywords and symbols if retained; strings, bytes, integers, floats, decimals, big integers, tuples and null tuple elements; datom fields; assertion/retraction polarity; type ranking; numeric cross-type comparison; NaN and signed-zero policy; and version boundaries for persisted meaning.
+**Focus:** Provision or reuse an explicitly disposable, migrated PostgreSQL
+fixture; run relevant existing durability, native peer/cursor, and service
+checks. Investigate connection/report findings with focused witnesses. Repair
+baseline regressions and preserve unresolved later-stage witnesses with clear
+ownership. Use failure/restart checks where the repaired boundary warrants them.
 
-**Completion signal:** Normative examples and executable tests define equality and total ordering for every supported value pair, datom construction is unambiguous, and no result depends on host-language or database collation accidents.
+**Completion signal:** Selected baseline integration checks actually execute
+and pass on a recorded PostgreSQL configuration. Results identify executed,
+failed, skipped, and unrun checks honestly. Remaining feature failures are
+reproducible or explicitly bounded static findings, not silently excluded.
 
-### 3. Schema, identity, and entity semantics
+### 3. Establish the continuing application workflow
 
-**Status:** Complete. `src/schema.rs`, schema-change validation, identity resolution, composite derivation, and conformance fixtures cover the transition-critical rules; `SEMANTICS.md` fixes the remaining schema-evolution contract for the later schema-as-data implementation.
+**Status:** Pending.
 
-**Outcome:** Schema-as-data and entity identity have complete rules for both ordinary use and evolution.
+**Outcome:** A small executable workflow demonstrates the existing database
+through its public Rust API and remains available for later integration work.
 
-**Focus:** Attribute definitions; cardinality; uniqueness and identity; lookup refs; idents and aliases; tempids; upsert unification; references and components; tuples and derived composite tuples; attribute and entity predicates; schema changes; no-history; indexing flags; discontinuation; and validation timing.
+**Focus:** Schema as data, ordinary transaction submission, native database
+capture, local query and pull, historical information, immutable old values,
+and reconnect/reopen of committed state. Use a simple supported workload;
+repair prerequisites without completing every Stage 2 feature. Make setup and
+execution easy to repeat and keep the example separate from privileged fixtures.
 
-**Completion signal:** Fixtures cover legal and illegal schema states, identity resolution and conflicts, schema evolution, same-transaction schema/data cases, and composite identity behavior with deterministic outcomes.
+**Completion signal:** The workflow runs against disposable PostgreSQL and
+demonstrates expected facts, identities, temporal results, and persistence after
+reopen. It exposes any temporary API limitations explicitly and does not use an
+eager or privileged bypass to manufacture success.
 
-### 4. Declarative transaction semantics
+### 4. Reconcile the baseline and return to Goal 0
 
-**Status:** Complete. `Database::with` is the small pure reference transition. Conformance fixtures cover order independence, atomic failure, lookup timing, tempids/upsert, collisions, redundancy, CAS, replacements, components, composites, entity ensures, and transaction reification.
+**Status:** Pending.
 
-**Outcome:** Every supported transaction form reduces to a deterministic proposed information set and either produces one immutable successor database or fails atomically.
+**Outcome:** Goal 0 has an accurate runnable starting point, preserved evidence,
+and a concrete next child to execute.
 
-**Focus:** List and map forms; nested entities; add and retract; retract-entity; CAS; tempid allocation; lookup timing; redundancy elimination; cardinality-one replacement; transaction entities and monotonic instants; db-before transaction functions; db-after entity validation; same-EAV add/retract; collisions; and deterministic error selection.
+**Focus:** Confirm the affected checks and workflow, record material changes
+and limitations, and assign remaining issues to Goal 0's existing stages.
+Update parent Stage 1 only when its completion signal is met; preserve known
+unresolved tests and avoid broad completion claims.
 
-**Completion signal:** A compact reference transition model passes examples and properties for atomicity, semantic order-independence, identity unification, constraint enforcement, reified transactions, and all recorded collision decisions.
+**Completion signal:** Build, selected baseline checks, and the public workflow
+pass; the parent records what was verified and what remains. Return to Goal 0
+to scaffold or resume Goal 2 and continue the parent loop.
 
-### 5. Database values, time, and read semantics
+## Exit and next action
 
-**Status:** Complete at the foundation boundary. `View` fixtures distinguish current, as-of, since, and history; `SEMANTICS.md` fixes entity, query, and pull behavior for the later evaluator milestone without pretending those production evaluators exist now.
+Goal 1 completes when the current implementation builds, the relevant baseline
+tests and public workflow run successfully on real PostgreSQL, and remaining
+gaps have concrete evidence and ownership in Goal 0. This does not establish
+production readiness or completion of later features.
 
-**Outcome:** Immutable snapshots and their observable read views are precisely defined for later peer, index, query, and pull implementations.
-
-**Focus:** Basis and total transaction order; current and historical datoms; `as-of`, `since`, history, and filtered views; interaction with current schema; entity lookup; index membership and ordering; query relation set semantics; `with` bag behavior; pull omission, recursion, components, and cycles; and snapshot validity boundaries such as future excision.
-
-**Completion signal:** Fixtures distinguish each view and its compositions, specify snapshot/entity/pull behavior, and define the contracts later indexes and query evaluators must preserve without prescribing their optimized implementation.
-
-### 6. Errors and conformance corpus
-
-**Status:** Complete. `SemanticError` supplies stable categories/codes/details, deterministic validation selects the same error across input permutations, and the Rust test corpus is the executable acceptance boundary for Goal 0 Stage 2.
-
-**Outcome:** The foundation is consumable as a stable contract by the transactional-kernel milestone.
-
-**Focus:** Structured error categories and details; incorrect input, conflict, busy, unavailable, interrupted, fault, and unknown-outcome distinctions; deterministic validation reporting; machine-readable fixtures; reference-model traces; property generators; expected-success and expected-failure cases; and documentation of deliberate differences.
-
-**Completion signal:** The corpus runs automatically, covers each normative rule and ambiguity decision, produces reproducible results, and provides a clear acceptance boundary for Goal 0 Stage 2.
-
-## Foundation exit condition
-
-Goal 1 is complete when a new implementation can be judged for semantic correctness without consulting hidden JVM behavior: the native contract is traceable to the documentation, ambiguous cases have explicit decisions, and an executable model or fixtures verify the complete transition from `db-before` plus transaction to either `db-after` plus report or a structured atomic failure.
-
-**Status:** Achieved on 2026-09-02. The authoritative artifacts are `SEMANTICS.md`, `src/`, and `tests/semantic_conformance.rs`. This completion claims the semantic foundation only; the EDN/API parser, full query and pull evaluators, persisted function runtime, production indexes, PostgreSQL durability, and services remain in their existing Goal 0 stages.
+**Next action:** Inspect the current `TieredReadCore` initialization paths and
+recheck compilation; repair the observed failure while preserving database
+lineage identity, then run the relevant existing checks.

@@ -1,9 +1,27 @@
 # Goal 1 Continuation Prompt
 
 ```text
-Continue Goal 1, the semantic foundation for the native Rust Datomic-inspired database, using /home/jake/Developer/atomic/goal-1/0-plan.md and /home/jake/Developer/atomic/goal-1/0-loop.md.
+Execute Goal 1, Restore a Trustworthy Runnable Baseline, using
+/home/jake/Developer/atomic/goal-1/0-plan.md and
+/home/jake/Developer/atomic/goal-1/0-loop.md.
+Its parent objective is /home/jake/Developer/atomic/goal-0/0-plan.md.
 
-Treat datomic_pro_docs as the semantic authority and 1.0.7705 as the default implementation blueprint and secondary behavioral witness. Trace its Java/Clojure names, types, representations, boundaries, algorithms, caches, and control flow, then preserve them wherever they remain sound through the closest idiomatic Rust design. Do not discard them merely because exact JVM, existing-database, wire-format, or byte-format compatibility is unnecessary. Deviate only for documented semantics, safety, needless JVM/Clojure machinery, or a concrete Rust/PostgreSQL advantage, and record significant rationale. Preserve immutable datoms and database values, declarative unordered atomic transactions, identity, history, time views, and peer-observable semantics. Avoid speculative storage abstraction; the eventual storage is PostgreSQL only, while this goal remains about semantics rather than SQL layout.
+Restore and verify the existing Rust/PostgreSQL Datomic-inspired database
+baseline. Sync the plan with current code, repair actual build failures,
+establish non-skipping PostgreSQL evidence, and provide a repeatable public
+schema/transact/query/pull/history/reopen workflow. Preserve completed work,
+immutable values, lineage, durable semantics, and applied migrations.
+Use datomic_pro_docs as semantic authority and 1.0.7705 as design evidence;
+the archived goals are historical context, not active instructions.
 
-Sync the plan with current artifacts and evidence, advance the first unfinished semantic stage, encode material rules and decisions in executable fixtures or the minimal reference model, verify them, and fold findings and status back into the plan so work remains resumable. Use best judgment and complete the foundation exit condition; report unresolved ambiguity or blockers plainly.
+Work through the stages using best judgment. Fix baseline prerequisites,
+retain meaningful failing witnesses, and assign broader gaps to their parent
+stages without claiming they passed or weakening the original objective.
+Fold material results and a concise continuation note into the plan.
+
+Complete only when the build, relevant baseline tests, and real PostgreSQL
+application workflow pass with honest remaining-gap ownership. Then update
+Goal 0 and follow /home/jake/Developer/atomic/goal-0/0-loop.md to scaffold or
+resume Goal 2 and continue the parent cycle toward overall completion.
+Report blockers or uncertainty plainly; a scaffold is not an executed stage.
 ```

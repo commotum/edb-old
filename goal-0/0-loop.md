@@ -1,22 +1,36 @@
-# Goal 0 Working Loop
+# Goal 0 Execution Loop
 
-Goal 0 is currently reopened. Execute the corrective parent at
-`goal-9/0-plan.md` and `goal-9/0-loop.md`; do not treat the historical
-`goal-1/` through `goal-8/` completion labels as current acceptance evidence.
-When Goal 9 completes, fold its integrated evidence back here and reassess the
-original success condition.
+1. Read `0-plan.md` and reconcile the active stage with current code, actual
+   test execution, and material results. Consult relevant archived evidence
+   selectively; archived loops and completion labels are not active policy.
+2. Select the first unfinished stage and its matching repository `goal-N/`
+   child. If absent, use `$scaffold-goal` to create `0-plan.md`, `0-loop.md`,
+   and `0-prompt.md` for that stage, inheriting the parent objective and
+   constraints. If present, reconcile and resume it without overwriting work.
+   Keep the current child active until its outcome is established; scaffolding
+   alone is not completion or a reason to end parent execution.
+3. Execute the child's loop using current evidence and best judgment. Use the
+   local Datomic docs for semantics and relevant recovered 1.0.7705 paths for
+   design. Exercise the ordinary application workflow throughout; do not defer
+   integration until the last stage. Fix necessary prerequisites across stage
+   boundaries while retaining one clear active focus.
+4. Verify in proportion to risk: focused semantic/differential tests, real
+   PostgreSQL, failure/restart checks, or measured workload costs. Confirm that
+   integration tests actually execute. Rerun or broaden checks when a change,
+   failure, or unresolved concern warrants it, not to accumulate passing totals.
+5. Record material findings and evidence in the child plan. Once its completion
+   signal is established, update the matching stage in this parent plan with
+   the outcome, significant deviations, and validation limits. Reconcile the
+   remaining stages against what was learned without weakening the objective.
+6. Return to Step 1 and scaffold or resume the next unfinished child. Continue
+   this cycle through all stages; do not stop after a child completes. Avoid
+   recursive goal hierarchies or new corrective parents. Before final closure,
+   compare the integrated system with the original objective and meaningful
+   guarantees. Reopen the owning child for any unmet core outcome and repeat.
+7. At an unavoidable session boundary, update both plans with the active child,
+   last verified result, concrete remaining failure, and next useful action.
+   Report a blocker plainly when further work requires unavailable information
+   or authority; otherwise continue within the authorized objective.
 
-1. Read `goal-0/0-plan.md` and reconcile every status and assumption with the repository, child-goal plans, tests, recorded decisions, `datomic_pro_docs`, and relevant `1.0.7705` evidence.
-2. Select the first parent stage whose completion signal is not actually established. Never skip an incomplete or blocked stage merely because a later scaffold exists.
-3. Map that stage to `goal-N/`, where `N` is its stable parent-stage number.
-   - If the folder is missing, use `$scaffold-goal` to create exactly `0-plan.md`, `0-loop.md`, and `0-prompt.md`. Derive the child objective, constraints, known context, broad stages, and exit condition from the full current parent plan and accumulated evidence.
-   - If the folder exists, preserve it, reconcile its claims with reality, and resume its first unfinished child stage. Do not regenerate it or create `goal-(N+1)`.
-4. Execute the child goal, following its plan and loop, until its full exit condition is demonstrated. Trace the relevant `1.0.7705` types, representations, control flow, caches, concurrency, and algorithms before fixing each important design; use `datomic_pro_docs` as semantic authority and the completed earlier goals as executable boundaries.
-5. Confirm the child outcome with checks proportionate to its risks: semantic fixtures, unit/property/differential tests, real PostgreSQL integration, concurrency, restart, process failure, corruption injection, or measured performance evidence as applicable. A scaffold or plausible implementation is not completion.
-6. Record material findings, deliberate decisions, PostgreSQL assumptions, limitations, and significant source deviations in the child plan. Mark the child complete only when its stated exit condition is met.
-7. Return to `goal-0/0-plan.md` immediately after the child completes. Update the matching parent-stage status with concise evidence, then reread and revise all unfinished parent stages whose boundaries, dependencies, or completion signals should change in light of what was learned. Preserve the original objective and completed stage numbering.
-8. Start the loop again at step 1 and create or resume the new first unfinished child goal. Do not stop merely because one child completed while another parent stage can safely proceed.
-9. When all numbered stages appear complete, verify the Goal 0 success condition across the integrated system rather than trusting child statuses. Record and repair any gap through the owning child goal; finish only when the overall condition is observed.
-10. If a genuine blocker prevents further safe work, record it and the next unblocking action in both the active child and parent plans. Otherwise, before any unavoidable session boundary, leave a concise continuation note identifying the active child, first unfinished behavior, current evidence, and next state-changing action.
-
-Prioritize working, verified system increments over scaffold production, framework-building, or speculative abstraction. Keep one active child, match every completion claim to observed behavior, and report blockers or uncertainty plainly.
+Preserve working code and data. Prefer direct repairs and useful conformance
+examples over exhaustive decompilation proofs, repeated audits, or status churn.
