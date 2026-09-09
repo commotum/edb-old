@@ -1773,10 +1773,30 @@ pub fn merge_tree(
     edits: &TreeMergeEdits,
     config: &TreeConfig,
 ) -> Result<TreeMerge, SemanticError> {
+    merge_tree_with_boundary_loader(descriptor, old_nodes, edits, config, &mut |hash| {
+        Err(fault(
+            "tree/missing-node",
+            format!("tree content {} is missing", short_hash(hash)),
+        ))
+    })
+}
+
+/// Native merges preload semantic edit paths, but packing can expose an old
+/// interior leaf as a new directory boundary. Resolve those additional nodes
+/// only when the merge actually needs them, with the same hash/kind/edge checks
+/// as preloaded content. No-history discovery still uses the prepared edit-path
+/// set; the native caller coordinates that pass before entering this merge.
+pub(crate) fn merge_tree_with_boundary_loader(
+    descriptor: &TreeDescriptor,
+    old_nodes: &TreeNodeSet,
+    edits: &TreeMergeEdits,
+    config: &TreeConfig,
+    load_boundary: &mut dyn FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+) -> Result<TreeMerge, SemanticError> {
     config.validate()?;
     validate_merge_edits(descriptor.order, descriptor.history, edits)?;
 
-    let mut context = MergeContext::new(old_nodes);
+    let mut context = MergeContext::new(old_nodes, load_boundary);
     let old_root = context.load_root(descriptor)?;
     context.retirement_candidates.insert(descriptor.root_hash);
     let removals = combined_removals(edits, descriptor.order)?;
@@ -2395,6 +2415,8 @@ impl MergeChild {
 
 struct MergeContext<'a> {
     old_nodes: &'a TreeNodeSet,
+    load_boundary: &'a mut dyn FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+    resolved_old_nodes: TreeNodeSet,
     new_nodes: TreeNodeSet,
     loaded_old: HashSet<Digest>,
     retirement_candidates: HashSet<Digest>,
@@ -2403,15 +2425,24 @@ struct MergeContext<'a> {
 }
 
 impl<'a> MergeContext<'a> {
-    fn new(old_nodes: &'a TreeNodeSet) -> Self {
+    fn new(
+        old_nodes: &'a TreeNodeSet,
+        load_boundary: &'a mut dyn FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+    ) -> Self {
         Self {
             old_nodes,
+            load_boundary,
+            resolved_old_nodes: TreeNodeSet::default(),
             new_nodes: TreeNodeSet::default(),
             loaded_old: HashSet::new(),
             retirement_candidates: HashSet::new(),
             output_nodes: HashSet::new(),
             stats: TreeMergeStats::default(),
         }
+    }
+
+    fn old_node(&self, hash: &Digest) -> Option<&[u8]> {
+        self.old_nodes.get(hash).or_else(|| self.resolved_old_nodes.get(hash))
     }
 
     fn load_root(&mut self, descriptor: &TreeDescriptor) -> Result<RootNode, SemanticError> {
@@ -2473,12 +2504,11 @@ impl<'a> MergeContext<'a> {
     fn load_node(&mut self, hash: &Digest, kind: MergeNodeKind) -> Result<TreeNode, SemanticError> {
         let from_new = self.new_nodes.get(hash).is_some();
         if !from_new {
-            let byte_count = self.old_nodes.get(hash).map(<[u8]>::len).ok_or_else(|| {
-                fault(
-                    "tree/missing-node",
-                    format!("tree content {} is missing", short_hash(hash)),
-                )
-            })?;
+            if self.old_node(hash).is_none() {
+                let bytes = (self.load_boundary)(hash)?;
+                self.resolved_old_nodes.insert_known(*hash, bytes)?;
+            }
+            let byte_count = self.old_node(hash).expect("old node was resolved").len();
             if self.loaded_old.insert(*hash) {
                 match kind {
                     MergeNodeKind::Leaf => {
@@ -2498,7 +2528,7 @@ impl<'a> MergeContext<'a> {
         let bytes = self
             .new_nodes
             .get(hash)
-            .or_else(|| self.old_nodes.get(hash))
+            .or_else(|| self.old_node(hash))
             .expect("tree node existence was checked");
         decode_tree_node(hash, bytes)
     }
@@ -2509,7 +2539,7 @@ impl<'a> MergeContext<'a> {
         kind: MergeNodeKind,
     ) -> Result<Digest, SemanticError> {
         let hash = sha256(&bytes);
-        if let Some(existing) = self.old_nodes.get(&hash) {
+        if let Some(existing) = self.old_node(&hash) {
             if existing != bytes {
                 return Err(fault(
                     "tree/content-hash-collision",

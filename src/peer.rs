@@ -5,7 +5,7 @@ use crate::operations::tree_manifest_advisory_key;
 use crate::persistent_tree::{
     ChildRef, DirectoryNode, LeafSegment, RootNode, TreeBuildStats, TreeConfig, TreeMergeEdits,
     TreeNode, TreeNodeSet, TreeRangeResult, TreeReadStats, TreeSeekResult, build_tree,
-    decode_tree_node, discover_merge_no_history_pairs, merge_tree,
+    decode_tree_node, discover_merge_no_history_pairs, merge_tree_with_boundary_loader,
 };
 use crate::postgres::{
     is_postgres_connection_error, postgres_error, read_authenticated_log_range, recover_to,
@@ -28,6 +28,9 @@ use crate::{
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
 use postgres::{Client, GenericClient};
+#[cfg(test)]
+#[path = "peer_merge_preload_tests.rs"]
+mod merge_preload_tests;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2340,7 +2343,7 @@ fn build_incremental_native(
             };
             canonicalize_merge_edits(&mut edits, order);
             preload_merge_paths(store, &old.descriptor, &edits, &mut old_cache)?;
-            let merged = merge_tree(&old.descriptor, &old_cache, &edits, config)?;
+            let merged = merge_native_tree(store, &old.descriptor, &old_cache, &edits, config)?;
             let root_bytes = merged
                 .new_nodes
                 .get(&merged.descriptor.root_hash)
@@ -2548,7 +2551,7 @@ fn build_avet_projection_step(
     let mut reused_subtrees = 0_u64;
     if !chunk_datoms.is_empty() {
         preload_merge_paths(store, &target.descriptor, &edits, &mut old_cache)?;
-        let merged = merge_tree(&target.descriptor, &old_cache, &edits, config)?;
+        let merged = merge_native_tree(store, &target.descriptor, &old_cache, &edits, config)?;
         let root_bytes = merged
             .new_nodes
             .get(&merged.descriptor.root_hash)
@@ -3861,6 +3864,23 @@ fn derive_metadata_from_store(
         load_old_tree_node(store, &mut cache, hash).map(Arc::new)
     })?;
     Ok((metadata, cache))
+}
+
+fn merge_native_tree(
+    store: &mut PostgresTreeStore,
+    descriptor: &crate::persistent_tree::TreeDescriptor,
+    preloaded: &TreeNodeSet,
+    edits: &TreeMergeEdits,
+    config: &TreeConfig,
+) -> Result<crate::persistent_tree::TreeMerge, SemanticError> {
+    merge_tree_with_boundary_loader(descriptor, preloaded, edits, config, &mut |hash| {
+        store.load_node(*hash)?.ok_or_else(|| {
+            fault(
+                "index/missing-tree-node",
+                "published tree boundary references missing immutable content",
+            )
+        })
+    })
 }
 
 fn preload_merge_paths(
