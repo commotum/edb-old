@@ -72,7 +72,7 @@ fn submit_confirmed(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err(format!("request {} remains unresolved at reconciliation deadline; preserve its identity before resuming", request.request_key).into());
+            return Err("request remains unresolved at reconciliation deadline; preserve its identity before resuming".into());
         }
         let timeout = if attempts == 0 {
             first_timeout.unwrap_or(WAIT)
@@ -116,9 +116,8 @@ fn submit_confirmed(
                     return Err(error.into());
                 }
                 emit(format!(
-                    "RETRY pid={} request={} attempt={attempts} category={:?} code={code} remaining_ms={} stats={stats:?}",
+                    "RETRY pid={} attempt={attempts} category={:?} code={code} remaining_ms={} stats={stats:?}",
                     std::process::id(),
-                    request.request_key,
                     error.category,
                     deadline
                         .saturating_duration_since(Instant::now())

@@ -50,7 +50,7 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage6 is active after repairing scaled background indexing. This is a fresh
+**Status:** Open; Stage5 is reopened by scaled backup/replay cost. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -132,8 +132,13 @@ every later feature to be complete before banking this baseline.
 
 ### 2. Complete the native connection and observation model
 
-**Status:** Complete again; [Goal2](../goal-2/0-plan.md) records authenticated lazy
-boundary loading and finite background scheduling, preserving connection work.
+**Status:** Complete again; [Goal2](../goal-2/0-plan.md) records weak read-core reuse
+after ambiguous outcome/reconnect:24retries/8reconnects retain3PG sessions, then
+release read/pin lanes when receipts drop. Immutable receipts survive reduced
+writer limits without admitting over-cap work. Original failures and targeted
+archive/restore/excision checks pass. Preserve its verified authenticated lazy
+boundary loading and finite background scheduling. Final PostgreSQL-configured
+library passes266/1intentional ignore; all7targeted safety cases and clippy pass.
 
 The retained98100-record failure now consolidates to indexrevision622/basis982
 without changing the transaction head/hash. Boundary/retraction matrices and
@@ -241,8 +246,9 @@ or is hidden behind a parity claim.
 
 ### 5. Establish operational integrity and recovery
 
-**Status:** Complete again; [Goal 5](../goal-5/0-plan.md) records the repaired
-ordinary-GC liveness gap and current25 operational evidence.
+**Status:** Reopened; [Goal5](../goal-5/0-plan.md) owns unnecessary initial backup
+replay and quadratic eager validators/history replay exposed on the successful
+100k workload. Preserve the repaired ordinary-GC liveness and current25 evidence.
 
 Integrated testing found that active-generation receipt bases pin the oldest
 physical publication and prevent later prefix-ordered retirement indefinitely.
@@ -281,8 +287,10 @@ remain lazy. Operator procedures state supported guarantees and limitations.
 
 ### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Active; [Goal6](../goal-6/0-plan.md) resumes the scaled workflow with
-current repaired binaries in a fresh isolated schema. Earlier failed data stays.
+**Status:** Paused for Goal5's operational-scale repair. [Goal6](../goal-6/0-plan.md)
+has passed the100k independent-peer deployment and writer SIGKILL/replacement.
+First backup was incomplete after520s and deliberately stopped with source and
+partial repository preserved; remaining backup/restore/server-crash/GC must pass.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -307,7 +315,7 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-09:** Goal6 is the only active child again.
+**Continuation checkpoint — 2026-09-09:** Goal5 is the only active child again.
 Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
 successors and dependency retention. Goal 4 read-depth/history/composition APIs
 and public workflow pass. Goal5 closes semantic backup verification, versioned
@@ -317,6 +325,13 @@ The GC/commitment SQL batching and retry repairs pass focused live checks.
 The next100k run reached head982/98100records but exposed a missing interior
 boundary preload and unconditional scheduling loop. Both are now repaired;
 normal consolidation of the retained failure and relevant live regressions pass.
-The fresh100k run uses `atomic_goal6_scale.goal6_acceptance_20260909_b`; follow it
-through scaled deployment/recovery/maintenance. Neither failed100k run is acceptance.
+The fresh100k run passes in `atomic_goal6_scale.goal6_acceptance_20260909_b`,
+basis1002,773.913s import/129.213records/s with measured cache/RSS and zero eager
+loads; actual writer SIGKILL/fenced replay passes. The new exact-receipt cache/
+session reuse regression is repaired without weakening writer-admission limits.
+Repair unnecessary first-backup replay and quadratic eager invariants/history
+replay, preserving deep validation; then continue this same dataset through
+portable operations, dedicatedserver crash and reclamation on current binaries.
+The broad configured library before this newest repair passes.
+Neither failed100k run is acceptance.
 No overall production outcome has yet been claimed.

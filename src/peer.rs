@@ -6196,6 +6196,56 @@ pub(crate) struct TieredSnapshot {
     state: Arc<TieredState>,
 }
 
+/// Reusable native I/O/cache resources without a retained database endpoint.
+/// Keeping this handle does not keep a root pin, recent tail, or writer admission.
+#[derive(Clone)]
+pub(crate) struct TieredReadHandle {
+    core: Arc<TieredReadCore>,
+}
+
+/// Receipt-cache anchor that lives only while a caller retains any value (or
+/// another read handle) sharing the core, independent of the newest receipt.
+#[derive(Clone)]
+pub(crate) struct WeakTieredReadHandle {
+    core: std::sync::Weak<TieredReadCore>,
+}
+
+impl TieredReadHandle {
+    pub(crate) fn lineage_id(&self) -> &str {
+        &self.core.lineage_id
+    }
+
+    pub(crate) fn downgrade(&self) -> WeakTieredReadHandle {
+        WeakTieredReadHandle {
+            core: Arc::downgrade(&self.core),
+        }
+    }
+
+    /// Read an exact committed value with the same authority/pin checks as a
+    /// snapshot rebase. This cannot admit the value as live writer state.
+    pub(crate) fn open_exact(
+        &self,
+        database_id: &str,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+    ) -> Result<(TieredSnapshot, ExactOpenStats), SemanticError> {
+        TieredSnapshot::open_exact_on_core(
+            &self.core,
+            database_id,
+            endpoint,
+            required_manifest,
+            ExactOpenPurpose::ImmutableRead,
+            0,
+        )
+    }
+}
+
+impl WeakTieredReadHandle {
+    pub(crate) fn upgrade(&self) -> Option<TieredReadHandle> {
+        self.core.upgrade().map(|core| TieredReadHandle { core })
+    }
+}
+
 /// Public peer snapshot. Native information is held by `TieredSnapshot`, while
 /// the eager oracle cache remains an explicit compatibility-only attachment.
 #[derive(Clone)]
@@ -6876,6 +6926,12 @@ impl Drop for PeerIndexCursor {
 }
 
 impl TieredSnapshot {
+    pub(crate) fn read_handle(&self) -> TieredReadHandle {
+        TieredReadHandle {
+            core: Arc::clone(&self.core),
+        }
+    }
+
     /// Fetch authenticated immutable code; release the I/O lane before any
     /// interpreter runs and recursively opens native read cursors.
     pub(crate) fn resolve_program(
@@ -7079,50 +7135,66 @@ impl TieredSnapshot {
         required_manifest: Option<Digest>,
         purpose: ExactOpenPurpose,
     ) -> Result<(Self, ExactOpenStats), SemanticError> {
-        if self.core.database_id != database_id {
+        Self::open_exact_on_core(
+            &self.core,
+            database_id,
+            endpoint,
+            required_manifest,
+            purpose,
+            self.state.generation.saturating_add(1),
+        )
+    }
+
+    fn open_exact_on_core(
+        core: &Arc<TieredReadCore>,
+        database_id: &str,
+        endpoint: ExactEndpoint,
+        required_manifest: Option<Digest>,
+        purpose: ExactOpenPurpose,
+        local_generation: u64,
+    ) -> Result<(Self, ExactOpenStats), SemanticError> {
+        if core.database_id != database_id {
             return Err(fault(
                 "peer/shared-core-database-mismatch",
                 "an exact native value cannot reuse another database's read core",
             ));
         }
         let endpoint = endpoint.validate()?;
-        self.core.root_pins.ensure()?;
+        core.root_pins.ensure()?;
         let required_generation_pin = required_manifest
-            .map(|_| self.core.root_pins.acquire_generation(endpoint.generation))
+            .map(|_| core.root_pins.acquire_generation(endpoint.generation))
             .transpose()?;
         let required_root_pin = required_manifest
-            .map(|hash| self.core.root_pins.acquire_manifest(hash, false))
+            .map(|hash| core.root_pins.acquire_manifest(hash, false))
             .transpose()?;
-        let mut io = lock(&self.core.io);
+        let mut io = lock(&core.io);
+        if io.client.is_closed() {
+            reconnect_peer_io(core, &mut io)?;
+        }
         let scan = {
             let PeerIo { client, tree_cache } = &mut *io;
             scan_latest_tree_base(
                 client,
-                &self.core.database_id,
+                &core.database_id,
                 endpoint.basis_t,
                 endpoint.generation,
                 required_manifest,
-                &self.core.load_counters,
+                &core.load_counters,
                 tree_cache,
             )?
         };
         let (base, scan_stats) = exact_tree_selection(scan, required_manifest)?;
         let generation_pin = match required_generation_pin {
             Some(pin) => pin,
-            None => self
-                .core
-                .root_pins
-                .acquire_generation(endpoint.generation)?,
+            None => core.root_pins.acquire_generation(endpoint.generation)?,
         };
         let root_pin = match required_root_pin {
             Some(pin) => Some(pin),
-            None => self
-                .core
+            None => core
                 .root_pins
                 .acquire(Some(&base))
                 .map_err(|error| exact_pin_error(error, required_manifest))?,
         };
-        let local_generation = self.state.generation.saturating_add(1);
         let (state, tail_transactions, tail_range_reads) = {
             let PeerIo {
                 client, tree_cache, ..
@@ -7130,15 +7202,15 @@ impl TieredSnapshot {
             build_exact_tiered_state(
                 client,
                 ExactTieredBuild {
-                    database_id: &self.core.database_id,
+                    database_id: &core.database_id,
                     endpoint,
                     base,
                     generation_pin,
                     root_pin,
-                    recent_limits: self.core.recent_limits,
+                    recent_limits: core.recent_limits,
                     purpose,
                     local_generation,
-                    counters: &self.core.load_counters,
+                    counters: &core.load_counters,
                 },
                 tree_cache,
             )?
@@ -7146,7 +7218,7 @@ impl TieredSnapshot {
         let stats = exact_open_stats(&state, scan_stats, tail_transactions, tail_range_reads)?;
         Ok((
             Self {
-                core: Arc::clone(&self.core),
+                core: Arc::clone(core),
                 state: Arc::new(state),
             },
             stats,

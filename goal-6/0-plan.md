@@ -37,8 +37,9 @@ a new parent or a reason to create another goal hierarchy.
 
 ### 1. Exercise and measure the deployed application
 
-**Status:** Active again. Goal2 repaired and verified finite scheduling and
-authenticated deferred boundary loading; a fresh100k run is executing below.
+**Status:** Complete scaled deployment measurement. Goal2 receipt-reuse repair
+and focused actual PostgreSQL checks now pass; Stage2 resumes on rebuilt binaries.
+See exact results below; no unrelated import repeat is needed for this repair.
 
 **Outcome:** A reproducible independent writer/peer workload demonstrates useful
 transactions, query/Pull, identity/programs/history and bounded ordinary state
@@ -55,7 +56,8 @@ and any bottlenecks without substituting timing assertions for correctness.
 
 ### 2. Recover the same information through failure and maintenance
 
-**Status:** Pending.
+**Status:** Paused for owning Goal5's backup/replay-scale repair. Successful
+100k source and independent dedicatedserver55434 restore schema are preserved.
 
 **Outcome:** The measured database survives abrupt writer/server interruption,
 replacement and operational recovery without forks, missing commits or changed
@@ -208,7 +210,12 @@ indexes subthreshold tails while still finishing finite physical maintenance.
 
 Fresh repaired optimized run: database`scale-workflow-361523-1788975974408163506`
 in catalog`atomic_goal6_scale`, isolated SQL schema`goal6_acceptance_20260909_b`,
-parent361523/writer361545/peers361565,361567. This is the only active child.
+parent361523/writer361545/peers361565,361567. Actual live library testing then
+exposed a separate exact-receipt resource-reuse regression (correct values but
+one new read cache/session per retained retry after ambiguous commit/reconnect).
+Goal2 owns that repair; this measurement continues without release rebuild or
+fixture mutation. Current repair binaries must exercise scaled receipt recovery
+afterward; unrelated import progress need not be thrown away.
 The isolation preserves all failed fixtures and keeps final GC counts scoped
 to this installation alone. Do not GC or restart its source during import.
 
@@ -218,3 +225,67 @@ immediate PostgreSQL crash recovery. Run source GC only after portable workflow
 checks its unchanged fingerprint. GC is global to the source installation schema;
 the fresh schema contains only this final workload, not earlier failed runs.
 Preserve all data; no source reset or cleanup is required.
+
+## Successful scaled deployment — 2026-09-09
+
+The fresh optimized driver exits0/PASS atbasis1002, database
+`scale-workflow-361523-1788975974408163506`, source schema
+`atomic_goal6_scale.goal6_acceptance_20260909_b`. It imports100000records in
+1000transactions from two independent submitting peers:400000business facts,
+25600000UTF8 payload bytes,1001log rows/38140841canonical payload bytes before
+the final controlled update. Import773.913s =129.213records/s. Per-peer100record
+batch latency p50=1.585/1.567s, p95=2.147/2.150s, p99=2.304/2.280s. No import
+unknown outcomes, duplicate receipts, full admissions, failed jobs or backpressure
+stalls. This is a local workload observation, not a universal SLA.
+
+Writer100ms-sampled RSS peak60301312bytes, recent accounted peak2593158bytes,
+combined indexing/recent pressure peak2446572bytes, node-cache peak4158506bytes
+under4MiB. Final reported VmHWM is58810368bytes; report the larger observed
+periodic RSS as well, without treating either as an allocator or strict peak bound.
+Long-lived peer VmHWM22437888/22396928bytes, cache peaks1047625/1048439bytes under
+1MiB, thousands of actual evictions. All ordinary eager counters stay0.
+Physical publication revision68 coversbasis991; scheduler134completed jobs counts
+publication plus maintenance completion, not134different index epochs.
+Read-only SQL confirms68physical publications, a complete1430-node live closure
+with167521776payload bytes (greater than measured ordinary process memory), and
+schema25. Final headhash`48554c0fade3c85f93f6fc73e606c64f918183b9d2b76c4b594600e2d87d53bf`,
+generation1/basis1002; no active writer lease remains.
+
+Selective query atbasis1001: cold8.322ms/warm7.332ms, both4SQL node reads and
+435017payload bytes. Atbasis1002:7.932/6.720ms, same I/O. The deliberately small
+1MiB cache churns this query's combined index working set; **do not claim warm
+reads hit cache or improve I/O**. Work is selective, not a full database scan.
+
+Persisted balance update, pure speculation, as-of/history, exact schema/old
+values and peer-held early/late values pass. Actual writer361545 SIGKILL is
+followed by fenced replacement in5.174s; same request replays once atbasis1002,
+no duplicate head advancement. Recovery loads11tail transactions inone range
+frombase991 with0eager database/history state; replacement RSS~16.4MB. All peers
+and writers then stop and independent native reopen passes.
+
+Environment: PostgreSQL15.11, fsync/synchronous_commit/full_page_writes allon,
+shared_buffers128MB; Ryzen Threadripper2950X/16cores32threads, LinuxMemTotal
+131773760KiB, localNVMe. Other focused regression/build activity shared the host;
+this is not an isolated hardware comparison. Dataset exceeds declared cache/
+recent budgets, not physical machine RAM. This driver used verified indexing
+repairs but preceded the newly found weak receipt-core repair; current rebuilt
+operations/restart checks must verify that independent recovery path on this
+same dataset. Backups, server crash and GC are not yet accepted at this scale.
+
+## Scaled operations in progress — 2026-09-09
+
+Goal2's weak receipt-core repair and7targeted actual PostgreSQL safety checks
+pass; current optimized operations/restart/GC examples rebuilt after final
+lineage-filter ordering. Operations driver is running on the successful source,
+restoring into `atomic_goal6_restore.goal6_acceptance_20260909_b` on dedicated
+server55434. Private retained repository:`/tmp/atomic-operations-QRpT5i`.
+First source-native phase passes1.083s, open112ms, VmHWM/RSS13144KiB,0eager;
+complete current401150 and history401152 fingerprints are
+`ee6bfab74da07b3013f9b2a7ba14735a78945b359906415a27e03daf9d7affed` and
+`76a6fb1ac1a156188d5db5c419c110de0444a1b33288e28448c9c285daf93d30`.
+It reads430cursor SQL nodes/77884081payload bytes with256KiB cache; these are
+broad full-current/history scans, not the selective query's one examined datom.
+Backup-first was deliberately interrupted after520s, CPU99.5%, RSS248864KiB.
+Owned child382911 receivedSIGTERM and parent382869 exited1; partial repository
+is retained, source unchanged. Goal5 owns unnecessary initial capture replay
+and quadratic eager invariants/history replay. No portable completion is claimed.

@@ -1371,7 +1371,10 @@ impl Database {
     /// Rebuild one already-assessed committed successor from its material
     /// transaction record. Persistence uses this path during recovery; it
     /// deliberately does not rerun transaction functions, tempid resolution,
-    /// or any other request-time behavior.
+    /// or any other request-time behavior. The predecessor is a validated
+    /// native value. This checks every new semantic input; independent full
+    /// cache/root/history audits belong at explicit recovery endpoints, via
+    /// `validate_invariants`, rather than at each intermediate prefix.
     pub(crate) fn apply_committed(
         &self,
         transaction: &crate::DurableTransaction,
@@ -1459,6 +1462,7 @@ impl Database {
         }
 
         let mut logical = Vec::with_capacity(transaction.tx_data.len());
+        let mut seen = StoredFactIndex::default();
         for datom in &transaction.tx_data {
             if datom.tx != tx {
                 return Err(SemanticError::new(
@@ -1469,17 +1473,14 @@ impl Database {
             }
             let attribute = self.schema.attribute(datom.attribute)?;
             self.schema.validate_value(attribute, &datom.value)?;
-            if logical.iter().any(|prior: &LogicalDatom| {
-                prior.entity == datom.entity
-                    && prior.attribute == datom.attribute
-                    && prior.value.stored_eq(&datom.value)
-            }) {
+            if seen.contains(datom.entity, datom.attribute, &datom.value) {
                 return Err(SemanticError::new(
                     ErrorCategory::Fault,
                     "recovery/duplicate-datom",
                     "committed transaction contains duplicate or contradictory datoms",
                 ));
             }
+            seen.insert(datom.entity, datom.attribute, &datom.value, logical.len());
             logical.push(LogicalDatom {
                 entity: datom.entity,
                 attribute: datom.attribute,
@@ -1487,6 +1488,7 @@ impl Database {
                 added: datom.added,
             });
         }
+        drop(seen);
 
         // Hook assertions are transaction events, not merely current facts.
         // Validate them before the materiality check so malformed explicit
@@ -1506,8 +1508,9 @@ impl Database {
             &transaction.tx_data,
             tx_instant,
         )?;
+        let before_index = StoredFactIndex::from_current(&self.current);
         for datom in &transaction.tx_data {
-            let existed = contains_fact(&self.current, datom.entity, datom.attribute, &datom.value);
+            let existed = before_index.contains(datom.entity, datom.attribute, &datom.value);
             if existed == datom.added
                 && !(allow_dangling_retractions && !datom.added && !existed)
                 && !(datom.added && datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32)
@@ -1519,6 +1522,7 @@ impl Database {
                 ));
             }
         }
+        drop(before_index);
 
         let mut final_current = apply_logical(&self.current, &logical, tx);
         validate_excision_requests(&final_current)?;
@@ -1560,6 +1564,24 @@ impl Database {
         }
         validate_cardinality(&derived_schema, &final_current)?;
         validate_uniqueness(&derived_schema, &final_current)?;
+        if derived_schema.as_ref() != self.schema.as_ref() {
+            // Prior values were validated under the predecessor schema. A
+            // schema transition must additionally validate all retained values
+            // under its successor (including affected tuple definitions).
+            for fact in &final_current {
+                let attribute = derived_schema.attribute(fact.attribute)?;
+                derived_schema.validate_value(attribute, &fact.value)?;
+            }
+        }
+        // A validated predecessor already establishes these bounds for its
+        // immutable genesis/history. Check every new stored datum here, even
+        // a dangling excision retraction; this is input validation, not an
+        // optional internal consistency audit. The enclosing tx identity and
+        // positive contiguous basis were checked above.
+        for datom in &transaction.tx_data {
+            validate_stored_entity(datom.entity, transaction.eidx_frontier, t)?;
+            validate_stored_value(&datom.value, transaction.eidx_frontier, t)?;
+        }
         final_current.sort_by(compare_current);
 
         let mut db_after = self.clone();
@@ -1580,7 +1602,14 @@ impl Database {
             self.semantic_state.advance(self, &transaction.tx_data)?;
         db_after.semantic_state = semantic_state;
         db_after.semantic_commitment_work = semantic_commitment_work;
-        db_after.validate_invariants()?;
+        // The predecessor is an already validated native value, and every
+        // newly admitted datum and semantic transition has been checked above.
+        // Derived indexes/schema/idents and the incremental commitment are
+        // trusted constructor outputs. Independently rebuilding all of them
+        // and replaying all history after EACH prefix would turn an ordered
+        // recovery into repeated full database audits. Explicit deep-recovery
+        // boundaries call the unchanged public `validate_invariants` audit;
+        // callers also retain their authoritative state/hash comparisons.
         Ok(db_after)
     }
 
@@ -3035,47 +3064,53 @@ fn derive_composites(
 }
 
 fn apply_logical(current: &[CurrentFact], datoms: &[LogicalDatom], tx: u64) -> Vec<CurrentFact> {
-    let mut result = current.to_vec();
+    let mut index = StoredFactIndex::from_current(current);
+    let mut result: Vec<_> = current.iter().cloned().map(Some).collect();
     for datom in datoms.iter().filter(|datom| !datom.added) {
-        result.retain(|fact| {
-            !(fact.entity == datom.entity
-                && fact.attribute == datom.attribute
-                && fact.value.stored_eq(&datom.value))
-        });
+        for position in index.remove(datom.entity, datom.attribute, &datom.value) {
+            result[position] = None;
+        }
     }
     for datom in datoms.iter().filter(|datom| datom.added) {
-        if let Some(current) = result.iter_mut().find(|fact| {
-            fact.entity == datom.entity
-                && fact.attribute == datom.attribute
-                && fact.value.stored_eq(&datom.value)
-        }) {
+        if let Some(position) = index.first(datom.entity, datom.attribute, &datom.value) {
             // Attribute-alter hooks are deliberately non-redundant events.
             // The current logical coordinate follows the newest such event,
             // while history retains every immutable hook assertion.
             if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
-                current.tx = tx;
+                result[position]
+                    .as_mut()
+                    .expect("indexed fact is present")
+                    .tx = tx;
             }
         } else {
-            result.push(CurrentFact {
+            index.insert(datom.entity, datom.attribute, &datom.value, result.len());
+            result.push(Some(CurrentFact {
                 entity: datom.entity,
                 attribute: datom.attribute,
                 value: datom.value.clone(),
                 tx,
-            });
+            }));
         }
     }
-    result
+    result.into_iter().flatten().collect()
 }
 
 fn validate_cardinality(schema: &Schema, facts: &[CurrentFact]) -> Result<(), SemanticError> {
-    for (index, left) in facts.iter().enumerate() {
+    let mut seen = BTreeSet::new();
+    let duplicate_coordinates: BTreeSet<_> = facts
+        .iter()
+        .filter_map(|fact| {
+            let coordinate = (fact.entity, fact.attribute);
+            (!seen.insert(coordinate)).then_some(coordinate)
+        })
+        .collect();
+    // Retain the original traversal/error precedence, including unknown schema
+    // attributes before or after the first conflicting coordinate.
+    for left in facts {
         if schema.attribute(left.attribute)?.cardinality != Cardinality::One {
             continue;
         }
-        if facts[index + 1..]
-            .iter()
-            .any(|right| left.entity == right.entity && left.attribute == right.attribute)
-        {
+        if duplicate_coordinates.contains(&(left.entity, left.attribute)) {
             return Err(SemanticError::conflict(
                 "transaction/cardinality-one-conflict",
                 "resulting database has multiple cardinality-one values",
@@ -3086,7 +3121,22 @@ fn validate_cardinality(schema: &Schema, facts: &[CurrentFact]) -> Result<(), Se
 }
 
 fn validate_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), SemanticError> {
-    for (index, left) in facts.iter().enumerate() {
+    let unique_attributes: BTreeSet<_> = schema
+        .attributes()
+        .filter(|attribute| attribute.unique.is_some())
+        .map(|attribute| attribute.id)
+        .collect();
+    let mut holders = BTreeMap::new();
+    for fact in facts
+        .iter()
+        .filter(|fact| unique_attributes.contains(&fact.attribute))
+    {
+        let (first, multiple) = holders
+            .entry((fact.attribute, IndexValue(&fact.value)))
+            .or_insert((fact.entity, false));
+        *multiple |= *first != fact.entity;
+    }
+    for left in facts {
         let attribute = schema.attribute(left.attribute)?;
         if attribute.unique.is_none() {
             continue;
@@ -3097,11 +3147,7 @@ fn validate_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), Sem
                 "NaN cannot participate in uniqueness",
             ));
         }
-        if facts[index + 1..].iter().any(|right| {
-            left.attribute == right.attribute
-                && left.entity != right.entity
-                && left.value.index_cmp(&right.value).is_eq()
-        }) {
+        if holders[&(left.attribute, IndexValue(&left.value))].1 {
             return Err(SemanticError::conflict(
                 "transaction/unique-conflict",
                 "resulting database has multiple holders of a unique value",
@@ -3207,15 +3253,16 @@ fn validate_uniqueness_for_attribute(
     facts: &[CurrentFact],
     attribute: u32,
 ) -> Result<(), SemanticError> {
-    for (index, left) in facts.iter().enumerate() {
+    let mut holders = BTreeMap::new();
+    for left in facts {
         if left.attribute != attribute {
             continue;
         }
-        if facts[index + 1..].iter().any(|right| {
-            right.attribute == attribute
-                && left.entity != right.entity
-                && left.value.index_cmp(&right.value).is_eq()
-        }) {
+        if *holders
+            .entry(IndexValue(&left.value))
+            .or_insert(left.entity)
+            != left.entity
+        {
             return Err(SemanticError::conflict(
                 "schema/unique-change-conflict",
                 "current values must be unique before adding uniqueness",
@@ -3286,11 +3333,13 @@ fn material_changes(
     logical: &[LogicalDatom],
     tx: u64,
 ) -> Vec<Datom> {
+    let before_index = StoredFactIndex::from_current(before);
+    let after_index = StoredFactIndex::from_current(after);
     logical
         .iter()
         .filter(|datom| {
-            let existed_before = contains_fact(before, datom.entity, datom.attribute, &datom.value);
-            let exists_after = contains_fact(after, datom.entity, datom.attribute, &datom.value);
+            let existed_before = before_index.contains(datom.entity, datom.attribute, &datom.value);
+            let exists_after = after_index.contains(datom.entity, datom.attribute, &datom.value);
             if datom.added {
                 (datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32 || !existed_before)
                     && exists_after
@@ -3401,35 +3450,147 @@ fn facts_as_datoms(facts: &[CurrentFact]) -> Vec<Datom> {
         .collect()
 }
 
+/// A borrowed key with the same logical equality as the value indexes. Stored
+/// equality cannot itself implement `Ord`: two decimal scales differ, but each
+/// can compare stored-equal to a non-decimal number of the same logical value.
+#[derive(Clone, Copy)]
+struct IndexValue<'a>(&'a Value);
+
+impl PartialEq for IndexValue<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other).is_eq()
+    }
+}
+
+impl Eq for IndexValue<'_> {}
+
+impl PartialOrd for IndexValue<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for IndexValue<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.0.index_cmp(other.0)
+    }
+}
+
+type StoredFactKey<'a> = (u64, u32, IndexValue<'a>, Option<i64>);
+
+/// Index original positions, rather than rebuilding facts in key order. This
+/// preserves the first stored representation and survivor/insertion order of
+/// the simple replay oracle, including redundant adds and alteration hooks.
+#[derive(Default)]
+struct StoredFactIndex<'a> {
+    positions: BTreeMap<StoredFactKey<'a>, Vec<usize>>,
+}
+
+impl<'a> StoredFactIndex<'a> {
+    fn scale(value: &Value) -> Option<i64> {
+        match value {
+            Value::BigDec(value) => Some(value.fractional_digit_count()),
+            _ => None,
+        }
+    }
+
+    fn from_current(facts: &'a [CurrentFact]) -> Self {
+        let mut index = Self::default();
+        for (position, fact) in facts.iter().enumerate() {
+            index.insert(fact.entity, fact.attribute, &fact.value, position);
+        }
+        index
+    }
+
+    fn insert(&mut self, entity: u64, attribute: u32, value: &'a Value, position: usize) {
+        self.positions
+            .entry((entity, attribute, IndexValue(value), Self::scale(value)))
+            .or_default()
+            .push(position);
+    }
+
+    fn contains(&self, entity: u64, attribute: u32, value: &Value) -> bool {
+        self.first(entity, attribute, value).is_some()
+    }
+
+    fn first(&self, entity: u64, attribute: u32, value: &Value) -> Option<usize> {
+        let logical = IndexValue(value);
+        if let Some(scale) = Self::scale(value) {
+            [None, Some(scale)]
+                .into_iter()
+                .filter_map(|scale| {
+                    self.positions
+                        .get(&(entity, attribute, logical, scale))
+                        .and_then(|positions| positions.first().copied())
+                })
+                .min()
+        } else {
+            // Non-decimal numbers match every decimal scale in the logical
+            // group. Schema-valid scalar attributes have a fixed value type;
+            // the range also preserves the old behavior for malformed inputs.
+            self.positions
+                .range(
+                    (entity, attribute, logical, None)
+                        ..=(entity, attribute, logical, Some(i64::MAX)),
+                )
+                .filter_map(|(_, positions)| positions.first().copied())
+                .min()
+        }
+    }
+
+    fn remove(&mut self, entity: u64, attribute: u32, value: &'a Value) -> Vec<usize> {
+        let logical = IndexValue(value);
+        if let Some(scale) = Self::scale(value) {
+            [None, Some(scale)]
+                .into_iter()
+                .filter_map(|scale| self.positions.remove(&(entity, attribute, logical, scale)))
+                .flatten()
+                .collect()
+        } else {
+            let keys: Vec<_> = self
+                .positions
+                .range(
+                    (entity, attribute, logical, None)
+                        ..=(entity, attribute, logical, Some(i64::MAX)),
+                )
+                .map(|(key, _)| *key)
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| self.positions.remove(&key))
+                .flatten()
+                .collect()
+        }
+    }
+}
+
 fn replay<'a>(datoms: impl Iterator<Item = &'a Datom>) -> Vec<CurrentFact> {
-    let mut result = Vec::<CurrentFact>::new();
+    let mut index = StoredFactIndex::default();
+    let mut result = Vec::<Option<CurrentFact>>::new();
     for datom in datoms {
         if datom.added {
-            if let Some(current) = result.iter_mut().find(|fact| {
-                fact.entity == datom.entity
-                    && fact.attribute == datom.attribute
-                    && fact.value.stored_eq(&datom.value)
-            }) {
+            if let Some(position) = index.first(datom.entity, datom.attribute, &datom.value) {
                 if u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
-                    current.tx = datom.tx;
+                    result[position]
+                        .as_mut()
+                        .expect("indexed fact is present")
+                        .tx = datom.tx;
                 }
             } else {
-                result.push(CurrentFact {
+                index.insert(datom.entity, datom.attribute, &datom.value, result.len());
+                result.push(Some(CurrentFact {
                     entity: datom.entity,
                     attribute: datom.attribute,
                     value: datom.value.clone(),
                     tx: datom.tx,
-                });
+                }));
             }
         } else {
-            result.retain(|fact| {
-                !(fact.entity == datom.entity
-                    && fact.attribute == datom.attribute
-                    && fact.value.stored_eq(&datom.value))
-            });
+            for position in index.remove(datom.entity, datom.attribute, &datom.value) {
+                result[position] = None;
+            }
         }
     }
-    result
+    result.into_iter().flatten().collect()
 }
 
 fn validate_stored_entity(entity: u64, frontier: u64, basis_t: u64) -> Result<(), SemanticError> {
@@ -3578,6 +3739,621 @@ impl UnionFind {
                 (right, left)
             };
             self.parent[high] = low;
+        }
+    }
+}
+
+#[cfg(test)]
+mod indexed_validation_tests {
+    use super::*;
+    use crate::{Attribute, DurableTransaction, Keyword};
+    use std::str::FromStr;
+    use std::time::Instant;
+
+    fn linear_replay(datoms: &[Datom]) -> Vec<CurrentFact> {
+        let mut result = Vec::<CurrentFact>::new();
+        for datom in datoms {
+            if datom.added {
+                if let Some(fact) = result.iter_mut().find(|fact| {
+                    fact.entity == datom.entity
+                        && fact.attribute == datom.attribute
+                        && fact.value.stored_eq(&datom.value)
+                }) {
+                    if datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32 {
+                        fact.tx = datom.tx;
+                    }
+                } else {
+                    result.push(CurrentFact {
+                        entity: datom.entity,
+                        attribute: datom.attribute,
+                        value: datom.value.clone(),
+                        tx: datom.tx,
+                    });
+                }
+            } else {
+                result.retain(|fact| {
+                    !(fact.entity == datom.entity
+                        && fact.attribute == datom.attribute
+                        && fact.value.stored_eq(&datom.value))
+                });
+            }
+        }
+        result
+    }
+
+    fn assert_exact_facts(left: &[CurrentFact], right: &[CurrentFact]) {
+        assert_eq!(left.len(), right.len());
+        for (left, right) in left.iter().zip(right) {
+            assert_eq!(
+                (left.entity, left.attribute, left.tx),
+                (right.entity, right.attribute, right.tx)
+            );
+            assert_eq!(
+                crate::encoding::encode_canonical_value(&left.value).unwrap(),
+                crate::encoding::encode_canonical_value(&right.value).unwrap(),
+                "first stored representation must survive logical equivalence"
+            );
+        }
+    }
+
+    fn values() -> Vec<Value> {
+        let decimal = |text| Value::BigDec(bigdecimal::BigDecimal::from_str(text).unwrap());
+        vec![
+            decimal("1.0"),
+            decimal("1.00"),
+            decimal("1"),
+            decimal("0.0"),
+            Value::Long(1),
+            Value::Long(0),
+            Value::Ref(1),
+            Value::Float(1.0),
+            Value::Double(1.0),
+            Value::Double(-0.0),
+            Value::Double(f64::from_bits(0x7ff8_0000_0000_0001)),
+            Value::Double(f64::from_bits(0x7ff8_0000_0000_0002)),
+            Value::Float(f32::NAN),
+            Value::Double(f64::INFINITY),
+            Value::Tuple(vec![Some(decimal("1.0")), None]),
+            Value::Tuple(vec![Some(decimal("1.00")), None]),
+            Value::String("one".into()),
+        ]
+    }
+
+    #[test]
+    fn indexed_replay_and_logical_apply_match_linear_stored_semantics() {
+        let values = values();
+        let mut random = 0x93d2_0e5f_3284_a671_u64;
+        for case in 0..256 {
+            let mut datoms = Vec::new();
+            for position in 0..96 {
+                random = random
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                datoms.push(Datom {
+                    entity: (random >> 40) % 4,
+                    attribute: if position % 4 == 0 {
+                        crate::DB_ALTER_ATTRIBUTE as u32
+                    } else {
+                        1_000 + ((random >> 28) % 2) as u32
+                    },
+                    value: values[((random >> 8) as usize) % values.len()].clone(),
+                    tx: position as u64,
+                    added: random >> 63 != 0,
+                });
+            }
+            assert_exact_facts(&replay(datoms.iter()), &linear_replay(&datoms));
+
+            let initial = linear_replay(&datoms[..32]);
+            let logical: Vec<_> = datoms[32..]
+                .iter()
+                .map(|datom| LogicalDatom {
+                    entity: datom.entity,
+                    attribute: datom.attribute,
+                    value: datom.value.clone(),
+                    added: datom.added,
+                })
+                .collect();
+            // Apply logical changes in transaction order: all retractions,
+            // then additions. The initial stream reproduces current order.
+            let mut ordered = facts_as_datoms(&initial);
+            for added in [false, true] {
+                ordered.extend(
+                    logical
+                        .iter()
+                        .filter(|datom| datom.added == added)
+                        .map(|datom| Datom {
+                            entity: datom.entity,
+                            attribute: datom.attribute,
+                            value: datom.value.clone(),
+                            tx: 10_000 + case,
+                            added,
+                        }),
+                );
+            }
+            assert_exact_facts(
+                &apply_logical(&initial, &logical, 10_000 + case),
+                &linear_replay(&ordered),
+            );
+        }
+    }
+
+    fn linear_cardinality(schema: &Schema, facts: &[CurrentFact]) -> Result<(), SemanticError> {
+        for (index, left) in facts.iter().enumerate() {
+            if schema.attribute(left.attribute)?.cardinality == Cardinality::One
+                && facts[index + 1..]
+                    .iter()
+                    .any(|right| left.entity == right.entity && left.attribute == right.attribute)
+            {
+                return Err(SemanticError::conflict(
+                    "transaction/cardinality-one-conflict",
+                    "resulting database has multiple cardinality-one values",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn linear_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), SemanticError> {
+        for (index, left) in facts.iter().enumerate() {
+            if schema.attribute(left.attribute)?.unique.is_none() {
+                continue;
+            }
+            if left.value.is_nan() {
+                return Err(SemanticError::incorrect(
+                    "transaction/nan-cannot-identify",
+                    "NaN cannot participate in uniqueness",
+                ));
+            }
+            if facts[index + 1..].iter().any(|right| {
+                left.attribute == right.attribute
+                    && left.entity != right.entity
+                    && left.value.index_cmp(&right.value).is_eq()
+            }) {
+                return Err(SemanticError::conflict(
+                    "transaction/unique-conflict",
+                    "resulting database has multiple holders of a unique value",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn indexed_constraint_checks_preserve_exact_error_precedence() {
+        let mut schema = Schema::new();
+        for (id, cardinality, unique) in [
+            (1_000, Cardinality::One, None),
+            (1_001, Cardinality::One, Some(Unique::Value)),
+            (1_002, Cardinality::Many, None),
+        ] {
+            let mut attribute = Attribute::new(
+                id,
+                Keyword::new("indexed-test", format!("a-{id}")),
+                ValueType::Double,
+                cardinality,
+            );
+            attribute.unique = unique;
+            schema.install(attribute).unwrap();
+        }
+        let values = values();
+        let mut random = 0xe373_bc92_d740_9581_u64;
+        for _ in 0..512 {
+            let facts: Vec<_> = (0..24)
+                .map(|_| {
+                    random = random
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(1);
+                    CurrentFact {
+                        entity: (random >> 40) % 8,
+                        attribute: 1_000 + ((random >> 28) % 4) as u32,
+                        value: values[((random >> 8) as usize) % values.len()].clone(),
+                        tx: 1,
+                    }
+                })
+                .collect();
+            assert_eq!(
+                validate_cardinality(&schema, &facts),
+                linear_cardinality(&schema, &facts)
+            );
+            assert_eq!(
+                validate_uniqueness(&schema, &facts),
+                linear_uniqueness(&schema, &facts)
+            );
+        }
+    }
+
+    #[test]
+    fn committed_indexed_checks_reject_duplicate_contradictory_and_nonmaterial_datoms() {
+        let before = Database::bootstrap().unwrap();
+        let first = before
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("subject".into()),
+                    attribute: crate::DB_DOC as u32,
+                    value: Value::String("first".into()).into(),
+                }],
+                100,
+            )
+            .unwrap();
+        let durable = |report: &TxReport| DurableTransaction {
+            database_id: "indexed-recovery-test".into(),
+            basis_t: report.db_after.basis_t(),
+            previous_hash: [0; 32],
+            eidx_frontier: report.db_after.eidx_frontier(),
+            tempids: report.tempids.clone(),
+            tx_data: report.tx_data.clone(),
+        };
+        let first_envelope = durable(&first);
+        let fact = first_envelope
+            .tx_data
+            .iter()
+            .find(|datom| datom.attribute == crate::DB_DOC as u32)
+            .unwrap();
+        for added in [true, false] {
+            let mut invalid = first_envelope.clone();
+            let mut duplicate = fact.clone();
+            duplicate.added = added;
+            invalid.tx_data.push(duplicate);
+            assert_eq!(
+                before.apply_committed(&invalid).unwrap_err().code,
+                "recovery/duplicate-datom"
+            );
+        }
+        let recovered = before.apply_committed(&first_envelope).unwrap();
+        let second = recovered.with(&[], 200).unwrap();
+        let mut nonmaterial = durable(&second);
+        let mut duplicate = fact.clone();
+        duplicate.tx = t_to_tx(second.db_after.basis_t()).unwrap();
+        nonmaterial.tx_data.push(duplicate);
+        assert_eq!(
+            recovered.apply_committed(&nonmaterial).unwrap_err().code,
+            "recovery/nonmaterial-datom"
+        );
+        recovered.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn indexed_helpers_measure_growth_against_the_linear_oracle() {
+        let mut schema = Schema::new();
+        schema
+            .install(
+                Attribute::new(
+                    1_000,
+                    Keyword::new("indexed-test", "identity"),
+                    ValueType::Long,
+                    Cardinality::One,
+                )
+                .unique(Unique::Value),
+            )
+            .unwrap();
+        for count in [1_000, 4_000] {
+            let datoms: Vec<_> = (0..count)
+                .map(|index| Datom {
+                    entity: index as u64,
+                    attribute: 1_000,
+                    value: Value::Long(index as i64),
+                    tx: 1,
+                    added: true,
+                })
+                .collect();
+            let start = Instant::now();
+            let expected = linear_replay(&datoms);
+            linear_cardinality(&schema, &expected).unwrap();
+            linear_uniqueness(&schema, &expected).unwrap();
+            let linear = start.elapsed();
+            let start = Instant::now();
+            let actual = replay(datoms.iter());
+            validate_cardinality(&schema, &actual).unwrap();
+            validate_uniqueness(&schema, &actual).unwrap();
+            let indexed = start.elapsed();
+            assert_exact_facts(&actual, &expected);
+            eprintln!("indexed_helper_scale facts={count} linear={linear:?} indexed={indexed:?}");
+        }
+    }
+
+    #[test]
+    fn committed_transition_rejects_invalid_inputs_without_a_full_audit() {
+        let mut schema = Schema::new();
+        for attribute in [
+            Attribute::new(
+                1_000,
+                Keyword::new("replay-check", "one"),
+                ValueType::Long,
+                Cardinality::One,
+            ),
+            Attribute::new(
+                1_001,
+                Keyword::new("replay-check", "unique"),
+                ValueType::String,
+                Cardinality::One,
+            )
+            .unique(Unique::Value),
+            Attribute::new(
+                1_002,
+                Keyword::new("replay-check", "ref"),
+                ValueType::Ref,
+                Cardinality::Many,
+            ),
+            Attribute::new(
+                1_003,
+                Keyword::new("replay-check", "tuple"),
+                ValueType::Tuple,
+                Cardinality::Many,
+            )
+            .tuple(TupleSpec::Homogeneous(ValueType::Ref)),
+        ] {
+            schema.install(attribute).unwrap();
+        }
+        let before = Database::new(schema).unwrap();
+        let ops: Vec<_> = [
+            (1_000, Value::Long(7)),
+            (1_001, Value::String("key".into())),
+            (1_002, Value::Ref(crate::DB_PART_DB)),
+            (
+                1_003,
+                Value::Tuple(vec![Some(Value::Ref(crate::DB_PART_DB)), None]),
+            ),
+        ]
+        .into_iter()
+        .map(|(attribute, value)| TxOp::Add {
+            entity: EntityRef::Temp("subject".into()),
+            attribute,
+            value: value.into(),
+        })
+        .collect();
+        let report = before.with(&ops, 100).unwrap();
+        let envelope = DurableTransaction {
+            database_id: "replay-validation-test".into(),
+            basis_t: report.db_after.basis_t(),
+            previous_hash: [0; 32],
+            eidx_frontier: report.db_after.eidx_frontier(),
+            tempids: report.tempids.clone(),
+            tx_data: report.tx_data.clone(),
+        };
+        let unissued = make_eid(USER_PARTITION, envelope.eidx_frontier).unwrap();
+        let future_tx = t_to_tx(envelope.basis_t + 1).unwrap();
+        for (attribute, value, error) in [
+            (
+                1_000,
+                Value::String("wrong type".into()),
+                "transaction/value-type",
+            ),
+            (
+                1_002,
+                Value::Ref(unissued),
+                "kernel/unissued-stored-entity-id",
+            ),
+            (
+                1_002,
+                Value::Ref(future_tx),
+                "kernel/stored-transaction-out-of-range",
+            ),
+            (
+                1_003,
+                Value::Tuple(vec![Some(Value::Ref(unissued)), None]),
+                "kernel/unissued-stored-entity-id",
+            ),
+        ] {
+            let mut invalid = envelope.clone();
+            invalid
+                .tx_data
+                .iter_mut()
+                .find(|datom| datom.attribute == attribute)
+                .unwrap()
+                .value = value;
+            assert_eq!(before.apply_committed(&invalid).unwrap_err().code, error);
+        }
+        for (entity, error) in [
+            (unissued, "kernel/unissued-stored-entity-id"),
+            (future_tx, "kernel/stored-transaction-out-of-range"),
+            (u64::MAX, "kernel/invalid-stored-entity-id"),
+        ] {
+            let mut invalid = envelope.clone();
+            invalid
+                .tx_data
+                .iter_mut()
+                .find(|datom| datom.attribute == 1_000)
+                .unwrap()
+                .entity = entity;
+            assert_eq!(before.apply_committed(&invalid).unwrap_err().code, error);
+        }
+        let mut invalid = envelope.clone();
+        invalid.eidx_frontier += 1;
+        assert_eq!(
+            before.apply_committed(&invalid).unwrap_err().code,
+            "recovery/eidx-frontier-mismatch"
+        );
+        let mut invalid = envelope.clone();
+        let mut extra = invalid
+            .tx_data
+            .iter()
+            .find(|datom| datom.attribute == 1_000)
+            .unwrap()
+            .clone();
+        extra.value = Value::Long(8);
+        invalid.tx_data.push(extra);
+        assert_eq!(
+            before.apply_committed(&invalid).unwrap_err().code,
+            "transaction/cardinality-one-conflict"
+        );
+        let mut invalid = envelope.clone();
+        let mut extra = invalid
+            .tx_data
+            .iter()
+            .find(|datom| datom.attribute == 1_001)
+            .unwrap()
+            .clone();
+        extra.entity = crate::DB_PART_DB;
+        invalid.tx_data.push(extra);
+        assert_eq!(
+            before.apply_committed(&invalid).unwrap_err().code,
+            "transaction/unique-conflict"
+        );
+        before
+            .apply_committed(&envelope)
+            .unwrap()
+            .validate_invariants()
+            .unwrap();
+    }
+
+    #[test]
+    fn explicit_audit_still_rejects_independently_corrupted_caches_and_roots() {
+        let before = Database::bootstrap().unwrap();
+        let after = before
+            .with(
+                &[
+                    TxOp::Add {
+                        entity: EntityRef::Temp("subject".into()),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(Keyword::new("audit", "subject")).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("subject".into()),
+                        attribute: crate::DB_DOC as u32,
+                        value: Value::String("documentation".into()).into(),
+                    },
+                ],
+                100,
+            )
+            .unwrap()
+            .db_after;
+        let mut corrupt = after.clone();
+        corrupt.schema = Arc::new(Schema::new());
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/derived-schema-divergence"
+        );
+        let mut corrupt = after.clone();
+        corrupt.idents = Arc::clone(&before.idents);
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/derived-schema-divergence"
+        );
+        let mut corrupt = after.clone();
+        corrupt.semantic_state = before.semantic_state.clone();
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/semantic-commitment-divergence"
+        );
+        let mut corrupt = after.clone();
+        corrupt.current_indexes = before.current_indexes.clone();
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/current-index-divergence"
+        );
+        let mut corrupt = after.clone();
+        corrupt.history_indexes = before.history_indexes.clone();
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/history-index-divergence"
+        );
+        let mut corrupt = after.clone();
+        let mut history = corrupt.history.to_vec();
+        history.push(Arc::from([]));
+        corrupt.history = history.into();
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/history-basis-divergence"
+        );
+        let mut corrupt = after.clone();
+        let mut current = corrupt.current.to_vec();
+        current
+            .iter_mut()
+            .find(|fact| {
+                fact.attribute == crate::DB_DOC as u32
+                    && fact.value == Value::String("documentation".into())
+            })
+            .unwrap()
+            .tx = t_to_tx(after.basis_t() + 1).unwrap();
+        let current_datoms = facts_as_datoms(&current);
+        corrupt.semantic_state = SemanticStateCommitment::from_current(&current_datoms).unwrap();
+        corrupt.current_indexes = IndexRoots::build(&corrupt.schema, current_datoms);
+        corrupt.current = current.into();
+        assert_eq!(
+            corrupt.validate_invariants().unwrap_err().code,
+            "kernel/history-current-divergence"
+        );
+        after.validate_invariants().unwrap();
+    }
+
+    #[test]
+    fn committed_replay_measures_endpoint_audit_against_every_prefix_audit() {
+        let mut schema = Schema::new();
+        schema
+            .install(
+                Attribute::new(
+                    1_000,
+                    Keyword::new("replay-check", "value"),
+                    ValueType::Long,
+                    Cardinality::One,
+                )
+                .unique(Unique::Value),
+            )
+            .unwrap();
+        let initial = Database::new(schema).unwrap();
+        for count in [500, 2_000] {
+            let mut basis = initial.basis_t();
+            let mut frontier = initial.eidx_frontier();
+            let transactions: Vec<_> = (0..20)
+                .map(|batch| {
+                    basis += 1;
+                    let tx = t_to_tx(basis).unwrap();
+                    let mut tempids = BTreeMap::new();
+                    let mut tx_data = vec![Datom {
+                        entity: tx,
+                        attribute: DB_TX_INSTANT as u32,
+                        value: Value::Instant(basis as i64),
+                        tx,
+                        added: true,
+                    }];
+                    for item in 0..count / 20 {
+                        let entity = make_eid(USER_PARTITION, frontier).unwrap();
+                        frontier += 1;
+                        tempids.insert(format!("subject-{item}"), entity);
+                        tx_data.push(Datom {
+                            entity,
+                            attribute: 1_000,
+                            value: Value::Long((batch * (count / 20) + item) as i64),
+                            tx,
+                            added: true,
+                        });
+                    }
+                    tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+                    DurableTransaction {
+                        database_id: "replay-audit-measurement".into(),
+                        basis_t: basis,
+                        previous_hash: [0; 32],
+                        eidx_frontier: frontier,
+                        tempids,
+                        tx_data,
+                    }
+                })
+                .collect();
+            let start = Instant::now();
+            let mut prefix_audited = initial.clone();
+            let mut state_hashes = Vec::new();
+            for transaction in &transactions {
+                prefix_audited = prefix_audited.apply_committed(transaction).unwrap();
+                prefix_audited.validate_invariants().unwrap();
+                state_hashes
+                    .push(crate::state_commitment::checkpoint_state_hash(&prefix_audited).unwrap());
+            }
+            let prefix_elapsed = start.elapsed();
+            let start = Instant::now();
+            let mut endpoint_audited = initial.clone();
+            for (transaction, expected_hash) in transactions.iter().zip(&state_hashes) {
+                endpoint_audited = endpoint_audited.apply_committed(transaction).unwrap();
+                assert_eq!(
+                    crate::state_commitment::checkpoint_state_hash(&endpoint_audited).unwrap(),
+                    *expected_hash
+                );
+            }
+            endpoint_audited.validate_invariants().unwrap();
+            let endpoint_elapsed = start.elapsed();
+            assert!(endpoint_audited.same_information_as(&prefix_audited));
+            eprintln!(
+                "committed_replay_scale facts={count} transactions=20 every_prefix_audit={prefix_elapsed:?} endpoint_audit={endpoint_elapsed:?}"
+            );
         }
     }
 }

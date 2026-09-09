@@ -69,8 +69,9 @@ unknown/rejected outcomes; secure deployment instructions match tested APIs.
 
 ### 3. Verify lifecycle operations as one recoverable workflow
 
-**Status:** Complete after reopening. Ordinary receipt-preserving publication
-conversion, interrupted lifecycle recovery and actual reclamation now pass.
+**Status:** Reopened for operational replay scalability. Preserve completed
+receipt-preserving GC and lifecycle repairs; the first100k backup exposed
+unnecessary initial replay plus quadratic eager invariant/replay algorithms.
 
 **Outcome:** Backup, restore, upgrade, inspection, retention/GC and excision work
 together without losing acknowledged history, receipts or live captured values.
@@ -86,8 +87,8 @@ are measured or explicitly unmeasured, with actionable operator procedures.
 
 ### 4. Return operational acceptance to the parent
 
-**Status:** Complete. The repaired public GC workflow and current25 lifecycle,
-upgrade, authority and integrity checks establish renewed operational closure.
+**Status:** Pending renewed scaled operational closure. Existing GC/current25
+lifecycle, upgrade, authority and integrity evidence remains valid.
 
 **Outcome:** Goal 0 can proceed to realistic integrated load/failure acceptance.
 
@@ -100,10 +101,57 @@ executed. This child is not the parent's finish line.
 
 ## Continuation
 
-Return to Goal0 and resume existing Goal6 with current25 optimized binaries.
-Measure the cache-exceeding workload and its backup/recovery/GC costs; this
-child's small operational witnesses do not complete the parent. Preserve all
-repairs and use fresh SQL catalogs, not the damaged historical version23 catalog.
+This is the only active child; Goal6's100k deployment passed but portable
+operations paused on the measured backup bottleneck. Repair copy/deep boundaries
+and quadratic eager replay while preserving explicit deep validation, then
+return to Goal0→Goal6 on the same successful data. Preserve schema25 and all
+earlier repairs; never migrate the damaged historical version23 catalog.
+
+## Scaled backup/replay reopening — 2026-09-09
+
+Current100k source:`atomic_goal6_scale.goal6_acceptance_20260909_b`, database
+`scale-workflow-361523-1788975974408163506`, head1002/hash
+`48554c0fade3c85f93f6fc73e606c64f918183b9d2b76c4b594600e2d87d53bf`.
+Native full current/history fingerprints pass1.083s/13144KiB,0eager. First
+backup was deliberately interrupted after520seconds, CPU99.5%, RSS248864KiB,
+before completing its first phase. This is an incomplete baseline/lower bound,
+not a completed time or timeout SLA. Owned child382911 receivedSIGTERM; parent
+382869 exited1 and the partial private repository`/tmp/atomic-operations-QRpT5i`
+is retained. No source rows were changed or backup files deleted.
+
+Concrete causes: first capture sets `reconstructed=Some(genesis)` while ordinary
+incremental capture does not replay. `Database::apply_committed` reconstructs
+indexes/history and invokes full invariants for every transaction. Cardinality,
+uniqueness, logical application and history replay use repeated linear/pairwise
+scans; invariant validation also rebuilds commitments/indexes. Merely removing
+capture replay would leave deep verification and restore with the same problem.
+
+Repair direction: ordinary backup copies authenticated immutable content,
+preserving canonical bytes, chain/membership/frontier/endpoint, exact receipt
+and program closures, pins and children-before-root publication. Explicit deep
+verification/restore retain semantic log/tree comparisons. This intentionally
+moves semantic-log rejection from first copy to verification/restore, matching
+the local backup docs and recovered`peer/src-clj/datomic/backup.clj` copy design;
+test and document this boundary, not claim an unchanged guarantee. Replace
+quadratic eager validation/replay with indexed/sorted equivalents preserving
+stored-vs-index equality, alteration-hook timestamps and all invariants.
+
+Initial capture copy-boundary regression passes on actual PostgreSQL3.50s:
+hash-valid false semantic state copies/presence-checks but deep verification
+and restore reject before target activation; damaged content/request digests
+still reject during copy. All11backup units pass, including legacy alias/
+tempid normalization and locally valid but semantically false frontier rejection.
+Review also found unchanged-root retry automatically deep-replays the backup;
+replace that overstrict repeated proof with full physical/content/structural
+authentication and exact captured logical-point equality, retaining explicit
+semantic verification and restore checks. This follow-up is in progress.
+
+One attempted fresh measurement was invalid: a release build collided with
+in-progress eager-helper declarations and failed; the command then inadvertently
+started the older binary. It was stopped promptly (owned PID392372), and no
+performance or correctness result is counted. Its partial private repository
+`/tmp/atomic-copy-measurement.bqP2eC` is retained. Build success must gate the
+next run; source head/hash remain unchanged and no measurement is running now.
 
 ## Integration checkpoint — 2026-09-09
 

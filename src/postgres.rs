@@ -2,7 +2,9 @@ use crate::database_value::{TransactionReadContext, TransactionReadWork};
 use crate::log_generation::{
     LineageTransactionContent, generation_transaction_hash, request_key_hash,
 };
-use crate::peer::{ExactEndpoint, TieredSnapshot};
+use crate::peer::{
+    ExactEndpoint, ExactOpenStats, TieredReadHandle, TieredSnapshot, WeakTieredReadHandle,
+};
 use crate::persistent_commitment::{
     PersistentCommitmentCoordinate, advance_persistent_commitment, exact_semantic_changes,
     load_persistent_coordinate, record_persistent_coordinate,
@@ -2190,6 +2192,9 @@ pub struct PostgresStore {
     client: Client,
     connection: Option<PostgresConnectionConfig>,
     current: BTreeMap<String, WriterState>,
+    /// Reuse immutable receipt I/O independently of admitted writer state.
+    /// Weak core ownership retains neither a historical endpoint nor its pins.
+    receipt_read_cores: BTreeMap<String, WeakTieredReadHandle>,
     program_cache: SharedProgramCache,
     capacity_limits: CapacityLimits,
     writer_recent_limits: RecentLimits,
@@ -2213,6 +2218,7 @@ impl PostgresStore {
             client,
             connection: Some(connection),
             current: BTreeMap::new(),
+            receipt_read_cores: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
             writer_recent_limits: RecentLimits::default(),
@@ -2228,6 +2234,7 @@ impl PostgresStore {
             client,
             connection: None,
             current: BTreeMap::new(),
+            receipt_read_cores: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
             writer_recent_limits: RecentLimits::default(),
@@ -2367,6 +2374,18 @@ impl PostgresStore {
 
     pub(crate) fn program_cache_handle(&self) -> SharedProgramCache {
         Arc::clone(&self.program_cache)
+    }
+
+    fn remember_receipt_read_core(&mut self, database_id: &str, core: WeakTieredReadHandle) {
+        // Expired receipts must not leave an unbounded catalog of dead weak
+        // entries. Live entries are proportional to independently retained
+        // database cores; ordinary same-database commits do not walk the map.
+        if self.receipt_read_cores.len() >= 64 && !self.receipt_read_cores.contains_key(database_id)
+        {
+            self.receipt_read_cores
+                .retain(|_, core| core.upgrade().is_some());
+        }
+        self.receipt_read_cores.insert(database_id.to_owned(), core);
     }
 
     /// Read-only runtime compatibility gate. Schema installation is an
@@ -2984,7 +3003,6 @@ impl PostgresStore {
             )
         })?;
         let cached = self.current.get(database_id).cloned();
-        let shared_snapshot = cached.as_ref().map(|state| state.database.clone());
         let mut transaction = self
             .client
             .transaction()
@@ -3011,6 +3029,13 @@ impl PostgresStore {
         let head_hash = digest(head.get::<_, Vec<u8>>(1), "head transaction hash")?;
         let generation = pg_basis(head.get(2), "head log generation")?;
         let lineage_id: String = head.get(3);
+        let cached =
+            cached.filter(|state| state.database.read_handle().lineage_id() == lineage_id.as_str());
+        let shared_read_core = cached
+            .as_ref()
+            .map(|state| state.database.read_handle())
+            .or_else(|| self.receipt_read_cores.get(database_id)?.upgrade())
+            .filter(|core| core.lineage_id() == lineage_id.as_str());
         let generation_sql = sql_basis(generation)?;
         let head_commitment =
             load_persistent_coordinate(&mut transaction, database_id, generation, head_basis)?
@@ -3067,8 +3092,9 @@ impl PostgresStore {
             self.capacity_limits.writer_tree_cache_entries,
             self.capacity_limits.writer_tree_cache_bytes,
             self.writer_recent_limits,
-            shared_snapshot.as_ref(),
+            shared_read_core.as_ref(),
         )?;
+        let receipt_read_core = replay_state.database.read_handle().downgrade();
         let live_head_state = if basis == head_basis && hash == head_hash {
             select_freshest_head_writer_state(cached, replay_state, &head_commitment)?
         } else {
@@ -3077,6 +3103,7 @@ impl PostgresStore {
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/request-outcome-commit", error))?;
+        self.remember_receipt_read_core(database_id, receipt_read_core);
         if let Some(live_head_state) = live_head_state {
             self.current.insert(database_id.to_owned(), live_head_state);
         }
@@ -3327,6 +3354,13 @@ impl PostgresStore {
         let log_generation_i64: i64 = head.get(2);
         let log_generation = pg_basis(log_generation_i64, "head log generation")?;
         let lineage_id: String = head.get(3);
+        let cached =
+            cached.filter(|state| state.database.read_handle().lineage_id() == lineage_id.as_str());
+        let shared_read_core = cached
+            .as_ref()
+            .map(|state| state.database.read_handle())
+            .or_else(|| self.receipt_read_cores.get(database_id)?.upgrade())
+            .filter(|core| core.lineage_id() == lineage_id.as_str());
         let idem_key_hash = request_key_hash(&lineage_id, request_key)?;
         let head_commitment =
             load_persistent_coordinate(&mut transaction, database_id, log_generation, head_basis)?
@@ -3388,8 +3422,9 @@ impl PostgresStore {
                 self.capacity_limits.writer_tree_cache_entries,
                 self.capacity_limits.writer_tree_cache_bytes,
                 self.writer_recent_limits,
-                cached.as_ref().map(|state| &state.database),
+                shared_read_core.as_ref(),
             )?;
+            let receipt_read_core = replay_state.database.read_handle().downgrade();
             let live_head_state = if basis == head_basis && hash == head_hash {
                 select_freshest_head_writer_state(cached, replay_state, &head_commitment)?
             } else {
@@ -3411,6 +3446,7 @@ impl PostgresStore {
                     "injected acknowledgment loss after idempotent outcome read",
                 ));
             }
+            self.remember_receipt_read_core(database_id, receipt_read_core);
             if let Some(live_head_state) = live_head_state {
                 self.current.insert(database_id.to_owned(), live_head_state);
             }
@@ -3832,6 +3868,10 @@ impl PostgresStore {
                 "injected acknowledgment loss after PostgreSQL commit",
             ));
         }
+        self.remember_receipt_read_core(
+            database_id,
+            next_writer.database.read_handle().downgrade(),
+        );
         self.current.insert(database_id.to_owned(), next_writer);
         Ok(receipt)
     }
@@ -4407,7 +4447,15 @@ fn open_exact_state(
             recent_limits,
         )?,
     };
-    if database.endpoint() != endpoint {
+    finish_exact_state(commitment, database, opened)
+}
+
+fn finish_exact_state(
+    commitment: PersistentCommitmentCoordinate,
+    database: TieredSnapshot,
+    opened: ExactOpenStats,
+) -> Result<WriterState, SemanticError> {
+    if database.endpoint() != exact_endpoint(&commitment) {
         return Err(fault(
             "postgres/native-open-endpoint",
             "the native writer opened a value at the wrong logical endpoint",
@@ -4435,7 +4483,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
     cache_entries: usize,
     cache_bytes: usize,
     recent_limits: RecentLimits,
-    shared_snapshot: Option<&TieredSnapshot>,
+    shared_read_core: Option<&TieredReadHandle>,
 ) -> Result<(CommitReceipt, WriterState), SemanticError> {
     if !matches!(request_kind, 1 | 2) {
         return Err(fault(
@@ -4497,17 +4545,23 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
     } else {
         None
     };
-    let before_state = open_exact_state(
-        connection,
-        database_id,
-        before,
-        required_manifest,
-        cache_entries,
-        cache_bytes,
-        recent_limits,
-        shared_snapshot,
-        false,
-    )?;
+    let before_state = if let Some(core) = shared_read_core {
+        let (database, opened) =
+            core.open_exact(database_id, exact_endpoint(&before), required_manifest)?;
+        finish_exact_state(before, database, opened)?
+    } else {
+        open_exact_state(
+            connection,
+            database_id,
+            before,
+            required_manifest,
+            cache_entries,
+            cache_bytes,
+            recent_limits,
+            None,
+            false,
+        )?
+    };
     let mut transactions = read_authenticated_log_range(
         client,
         database_id,

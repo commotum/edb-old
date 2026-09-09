@@ -77,9 +77,10 @@ frontier and timeout. Cursor/time differentials and measured lazy accesses pass.
 
 ### 4. Integrate and return to Goal 0
 
-**Status:** Complete again. Existing independent-process/connection acceptance
-and renewed live indexing regressions pass. Return to Goal0 and resume Goal6;
-Goals3–5 remain complete.
+**Status:** Complete again. Exact-receipt weak read-core reuse now passes the
+original failures, measured resource regression and targeted admission/archive/
+excision checks. Preserve completed indexing/connection repairs; resume Goal6's
+portable acceptance on the successful100k dataset. Goals3–5 remain complete.
 
 **Outcome:** A documented application/deployment workflow exercises the completed
 connection model, and Goal 0 accurately selects the next unfinished stage.
@@ -92,6 +93,42 @@ recovery or writer ownership; parent Stage2 updated, then the first unfinished
 parent stage resumed (currently6; do not recreate completed Goals3–5).
 
 ## Reopened by scaled integration — 2026-09-09
+
+Latest owning gap: a fully configured live library run has263pass/2fail/1ignored
+(183.48s). Both failures require exact replay to share its existing native read
+core: `postgres_internal_tests::private_publication_faults_are_invisible_and_unknown_outcome_resolves_once`
+and `service::tests::unknown_outcome_reconciliation_notifies_once_only_for_a_durable_decision`.
+Facts, bases and tempids match, but this is not merely an overstrict identity
+assertion: `select_freshest_head_writer_state` now keeps only previously admitted
+exact-head state. After an uncertain commit/reconnect clears it, each resolution
+opens another PeerIo/cache/pin manager and retains no reusable anchor. Retained
+receipts therefore multiply these resources. Separate reusable immutable read
+core ownership from writer admission; do not restore the unsafe promotion of
+receipt tails past lowered writer limits or make known commits fail on capacity.
+Failed live fixtures remain in `atomic_goal5_refs.goal6_library_current_20260909_b`.
+This scoped repair and its focused live checks now pass; Goal6 resumes below.
+
+Repair implemented: a per-database weak pointer anchors only TieredReadCore,
+not a snapshot/tail or writer admission. It upgrades while any retained value
+shares the core, even if the newest receipt was dropped. Both exact resolve and
+replay select cores only after filtering against the freshly locked lineage;
+exact manifest/generation pins and immutable reconstruction remain unchanged.
+New writer state still passes its separate current capacity policy. Dead weak
+entries are pruned rather than accumulating one forever for every old database.
+
+Original2failure fixtures pass unchanged7.48s. New actual PostgreSQL regression
+passes2.80s:24retries and8reconnects hold3sessions (store/read/pin), cache atmost
+8entries/65536bytes, newest receipt dropped while first retained; dropping all
+receipts releases read/pin lanes and leaves1store session. A known receipt with
+more than1recent datom reconstructs after lowering hard_datoms to1; no writer
+state is installed and a new write still fails capacity with unchanged head.
+Current cross-target lower-limit1/1, unread-report pin1/1, archive-conversion
+lifecycle2/2, two-restore exact-receipt chain1/1 and old-peer excision1/1 pass.
+Final same-basis lineage-local restore also passes, making7/7selected safety
+fixtures. Final configured library passes266/0failed/1intentional worker ignore
+in181.73s in `atomic_goal5_refs.goal2_receipt_full_20260909_d`; both original
+failures and the new measured resource test pass. Current lib/tests clippy6.67s
+and formatting pass. Reopen only for a later actual owning gap.
 
 Goal6 paused while this child owned the repair. The schema25
 100k attempt reached acknowledged head982 (98100 imported records), hash
@@ -142,6 +179,13 @@ incremental consolidation3/3, AVET2/2, stored-value2/2, decimal decode1/1 pass
 multi-batch maintenance, subthreshold writes/restart and threshold resumption.
 Focused clippy passes5.53s. Goal6 must still finish a fresh100k deployment and
 its portable operations/crash/GC; neither earlier failed run is acceptance.
+
+Current-schema25 debug application workflows also pass: native database
+`workflow-361208-1788975969001671979` at t3 exercises programs/tuplelookup,
+query/Pull/log/indexpull/history/speculation and offline reopen; independent
+writer/two-peer `process-workflow-361907-1788975989584408328` at t3 verifies
+complete reports, exact retries and old/offline values. Both use isolated
+`atomic_goal5_ops.goal6_workflow_current_20260909_b`.
 
 ## Verified changes — 2026-09-08
 
@@ -272,8 +316,9 @@ Additional executed evidence (same disposable PostgreSQL 15.11 fixtures):
 
 ## Continuation
 
-**Child complete again; parent continues with Goal6.** The later scaled
-indexing failures are repaired with direct and live regression evidence above.
+**Child complete again; Goal6 resumes scaled operations.** Receipt read-core
+reuse and earlier scaled indexing failures are repaired with direct and live
+regression evidence above. Broad current PostgreSQL-configured library passes.
 The earlier broader `postgres_peer` rerun passed19/19,435.98s. Reopen this child
 for an owning later failure, preserving all repairs and completed Goals3–5.
 No overall production/scale acceptance is claimed. PostgreSQL restart checks use

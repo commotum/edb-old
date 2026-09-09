@@ -96,6 +96,14 @@ and a root becomes visible only after referenced objects are durable.
 Repositories are permission-private, not encrypted by Atomic. Encrypt media
 and control copied backups under your retention policy.
 
+Backup capture authenticates and copies immutable objects and linked
+coordinates without replaying transaction semantics. Hash-valid content
+can still contain a false state or transition claim. Run deep verification to
+establish semantic consistency; restore performs it before activation. Copy
+success alone is not a semantic integrity claim. Canonical encoding, hashes,
+chain/membership, receipt/program closure and durable root publication remain
+checked during copying.
+
 Use `list_backup_points` and exact `(log_generation, basis_t)` overloads when
 different physical generations share a logical basis. Presence checks verify
 reachability; deep verification reads/authenticates content and reconstructs

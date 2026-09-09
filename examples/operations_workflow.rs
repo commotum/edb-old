@@ -99,6 +99,7 @@ fn main() -> Result<()> {
 }
 
 fn child(phase: &str, directory: &Path, expected: &Fields) -> Result<Fields> {
+    println!("operations_phase_start={phase}");
     let mut command = Command::new(std::env::current_exe()?);
     command
         .env("ATOMIC_OPS_PHASE", phase)

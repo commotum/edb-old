@@ -7,6 +7,16 @@
 //! timeline on restore. A missing tree is valid and restores by replaying the
 //! authoritative log; physical indexes never become backup authority.
 //!
+//! Capture authenticates immutable envelopes, their linked coordinates and
+//! reachable content without replaying every database prefix. A hash-valid
+//! log can still make false semantic claims: semantic verification and restore
+//! replay it and check each state commitment. Presence-only verification does
+//! not make that semantic proof; deep verification also compares every tree.
+//! Reusing an already-published point authenticates its complete physical
+//! object graph and exact logical coordinates, without semantic replay.
+//! Repairing a damaged source request-base accelerator can still require
+//! administrative log recovery before its exact portable copy is emitted.
+//!
 //! Live generation-zero envelopes still contain PostgreSQL catalog names.
 //! Backup canonicalizes those carriers onto the database's immutable random
 //! lineage, so rename does not recopy history or change a point root. Program
@@ -247,6 +257,10 @@ impl PortableBackup {
         })
     }
 
+    /// Copy an authenticated immutable information point. Ordinary capture
+    /// and existing-point authentication do not replay transaction semantics;
+    /// damaged source request-base accelerators can require recovery. Use deep
+    /// verification to prove semantics; restore does so before activation.
     pub fn backup_database(
         &mut self,
         database_id: &str,
@@ -450,14 +464,11 @@ impl PortableBackup {
             .as_ref()
             .map_or(genesis_hash, |parent| parent.manifest.request_head_hash);
         let mut temporal_programs = BTreeSet::new();
-        let mut reconstructed = if parent.is_none() {
+        if parent.is_none() {
             for datom in &decoded_genesis {
                 collect_function_hashes(&datom.value, &mut temporal_programs);
             }
-            Some(genesis_database)
-        } else {
-            None
-        };
+        }
         let start_basis_sql = i64::try_from(start_basis).map_err(|_| {
             fault(
                 "backup/basis-overflow",
@@ -488,7 +499,6 @@ impl PortableBackup {
             portable_previous,
             request_previous,
             prior_frontier,
-            &mut reconstructed,
             &mut temporal_programs,
             &mut publisher,
         )?;
@@ -496,15 +506,6 @@ impl PortableBackup {
             return Err(fault(
                 "backup/head-mismatch",
                 "head does not match snapshot chain",
-            ));
-        }
-        if reconstructed
-            .as_ref()
-            .is_some_and(|database| database.basis_t() != basis)
-        {
-            return Err(fault(
-                "backup/basis-mismatch",
-                "semantically reconstructed snapshot does not reach its observed head",
             ));
         }
         let completed_excision_head_hash = capture_completed_excisions(
@@ -570,9 +571,9 @@ impl PortableBackup {
 
         // A backup point is a logical (lineage, t), not whichever replaceable
         // physical index revision happened to be current during this retry.
-        // Goal 13 deliberately permits a repaired tree to be republished at
-        // the same logical basis. If a root already exists, authenticate it
-        // and prove the live snapshot has the same transaction information
+        // A repaired tree can be republished at the same logical basis. If a
+        // root already exists, authenticate it and prove the live snapshot
+        // has the same transaction information
         // before reusing it. This check precedes physical-tree capture so a
         // harmless repair does not even leave an unreferenced backup object.
         if let Some(mut point) = reusable_existing_point(directory, &manifest)? {
@@ -620,7 +621,7 @@ impl PortableBackup {
         if let Err(error) = publish_exact(&snapshot_path, &encoded, publication_fault) {
             // A concurrent backup may have won publication with another
             // valid physical revision for this same logical point. Resolve
-            // that race by the same semantic proof used by an ordinary
+            // that race by the same full object authentication used by an ordinary
             // retry, never by replacing its root.
             if error.category != ErrorCategory::Interrupted {
                 match reusable_existing_point(directory, &manifest) {
@@ -921,6 +922,10 @@ impl PortableBackup {
                 verify_tree_presence(directory, &manifest, &log, &tree)?;
             }
         }
+        // Transitions check immutable input semantics and each recorded
+        // commitment above. Audit the derived caches/history once at this
+        // explicit recovery endpoint instead of rebuilding every prefix.
+        database.validate_invariants()?;
         Ok(BackupVerification {
             point: BackupPoint {
                 lineage_id: manifest.lineage_id.clone(),
@@ -2120,6 +2125,7 @@ fn stage_restore_semantic_coordinates(
             crate::postgres::postgres_error("backup/restore-semantic-commit", error)
         })?;
     }
+    database.validate_invariants()?;
     Ok(())
 }
 
@@ -2596,7 +2602,6 @@ fn capture_log_tail<C: postgres::GenericClient>(
     mut portable_previous: Digest,
     mut request_previous: Digest,
     mut prior_frontier: u64,
-    reconstructed: &mut Option<Database>,
     temporal_programs: &mut BTreeSet<Digest>,
     publisher: &mut ObjectPublisher<'_>,
 ) -> Result<CapturedLogTail, SemanticError> {
@@ -2651,6 +2656,9 @@ fn capture_log_tail<C: postgres::GenericClient>(
             // Legacy ATIM values contain mutable catalog identity and caller
             // tempid spellings. Convert their immutable information into ATLC;
             // receipt names move to the request record where they belong.
+            // This per-record normalization changes neither datoms nor their
+            // state commitment. Exact frontier advancement and state semantics
+            // are proved by verification/restore, not by the copy operation.
             let content =
                 LineageTransactionContent::from_transaction(lineage_id, prior_frontier, &source)?;
             let content_payload = content.encode()?;
@@ -2669,16 +2677,6 @@ fn capture_log_tail<C: postgres::GenericClient>(
             let portable_hash = sha256(&membership_payload);
             for datom in &portable.tx_data {
                 collect_function_hashes(&datom.value, temporal_programs);
-            }
-            if let Some(database) = reconstructed.take() {
-                let database = database.apply_committed(&portable)?;
-                if checkpoint_state_hash(&database)? != state_hash {
-                    return Err(fault(
-                        "backup/state-commitment",
-                        format!("legacy transaction {basis} has an invalid state commitment"),
-                    ));
-                }
-                *reconstructed = Some(database);
             }
             let request = BackupRequestRecord {
                 lineage_id: lineage_id.to_owned(),
@@ -2846,20 +2844,6 @@ fn capture_log_tail<C: postgres::GenericClient>(
             let transaction = content.to_transaction(stored_previous);
             for datom in &transaction.tx_data {
                 collect_function_hashes(&datom.value, temporal_programs);
-            }
-            if let Some(database) = reconstructed.take() {
-                let database = if request_kind_i16 == 0 {
-                    database.apply_excised_committed(&transaction)?
-                } else {
-                    database.apply_committed(&transaction)?
-                };
-                if checkpoint_state_hash(&database)? != state_hash {
-                    return Err(fault(
-                        "backup/state-commitment",
-                        format!("generation transaction {basis} has an invalid state commitment"),
-                    ));
-                }
-                *reconstructed = Some(database);
             }
             let (receipt_key, receipt) = receipt_tempids
                 .remove(&basis)
@@ -4687,6 +4671,51 @@ fn verify_tree_backup(
     Ok(objects_read)
 }
 
+/// Authenticate the entire physical graph without collecting its datoms or
+/// claiming agreement with semantic replay. Unlike presence checking this
+/// reads every leaf and verifies descriptor counts, routing and ordering.
+fn verify_tree_structure(
+    directory: &Path,
+    backup: &Manifest,
+    log: &LoadedBackupLog,
+    tree: &TreeBackup,
+) -> Result<(), SemanticError> {
+    let manifest = decode_bound_tree_manifest(directory, backup, log, tree, None)?;
+    let mut legacy_reachable = tree.legacy_node_hashes.as_ref().map(|_| BTreeSet::new());
+    for root in &manifest.trees {
+        let validated = persistent_tree::validate_tree_streaming(&root.descriptor, |hash| {
+            read_backup_tree_node(directory, root, *hash)
+        })?;
+        if let Some(reachable) = &mut legacy_reachable {
+            reachable.extend(validated.node_hashes);
+        }
+    }
+    if let (Some(expected), Some(reachable)) = (&tree.legacy_node_hashes, legacy_reachable)
+        && expected.as_slice() != reachable.into_iter().collect::<Vec<_>>()
+    {
+        return Err(fault(
+            "backup/tree-node-set",
+            "legacy tree node list is not its exact reachable closure",
+        ));
+    }
+    Ok(())
+}
+
+fn read_backup_tree_node(
+    directory: &Path,
+    root: &crate::ManifestTree,
+    hash: Digest,
+) -> Result<Vec<u8>, SemanticError> {
+    let payload = read_object(directory, hash)?;
+    if hash == root.descriptor.root_hash && payload.len() as u64 != root.root_bytes {
+        return Err(fault(
+            "backup/tree-root-bytes",
+            "backed-up tree root size disagrees with its manifest",
+        ));
+    }
+    Ok(payload)
+}
+
 /// Payload memory remains one node at a time; datoms for one index are
 /// materialized for exact comparison. The structural walk authenticates
 /// ordering/routing while the loader collects only reachable leaf contents.
@@ -4696,13 +4725,7 @@ fn read_validated_backup_tree(
 ) -> Result<(Vec<crate::Datom>, persistent_tree::StreamingTreeValidation), SemanticError> {
     let mut datoms = Vec::new();
     let validated = persistent_tree::validate_tree_streaming(&root.descriptor, |hash| {
-        let payload = read_object(directory, *hash)?;
-        if *hash == root.descriptor.root_hash && payload.len() as u64 != root.root_bytes {
-            return Err(fault(
-                "backup/tree-root-bytes",
-                "backed-up tree root size disagrees with its manifest",
-            ));
-        }
+        let payload = read_backup_tree_node(directory, root, *hash)?;
         if let persistent_tree::TreeNode::Leaf(leaf) =
             persistent_tree::decode_tree_node(hash, &payload)?
         {
@@ -6085,18 +6108,51 @@ fn reusable_existing_point(
         Err(error) => return Err(io_error("backup/root-metadata")(error)),
     }
 
-    let verified = PortableBackup::verify_backup_point(
-        directory,
-        candidate.basis,
-        candidate.log_generation,
-        true,
-    )?;
     let (existing, manifest_hash) =
         load_manifest_generation(directory, candidate.basis, candidate.log_generation)?;
-    if manifest_hash != verified.point.manifest_hash {
+    verify_claim(directory, &existing)?;
+    let genesis = read_object(directory, existing.genesis_hash)?;
+    let decoded_genesis = decode_genesis(&genesis)?;
+    if encode_genesis(&decoded_genesis)? != genesis {
+        return Err(fault(
+            "backup/genesis-corrupt",
+            "backup genesis is not canonically encoded",
+        ));
+    }
+    let log = load_backup_log(directory, &existing)?;
+    let (head_hash, head_state_hash) = match log.entries.last() {
+        Some(entry) => (entry.transaction_hash, entry.legacy_state_hash),
+        None => (
+            existing.genesis_hash,
+            Some(checkpoint_state_hash(&Database::from_genesis(
+                decoded_genesis,
+            )?)?),
+        ),
+    };
+    if head_hash != existing.head_transaction_hash
+        || (existing.version == VERSION && head_state_hash != Some(existing.head_state_hash))
+    {
+        return Err(fault(
+            "backup/basis-mismatch",
+            "backup endpoint root disagrees with its authenticated log coordinate",
+        ));
+    }
+    load_completed_excisions(directory, &existing)?;
+    // Despite its historical name this helper reads and authenticates every
+    // temporal/transitive program payload, not merely its file's presence.
+    verify_program_presence(directory, &existing, &log)?;
+    if let Some(tree) = &existing.tree {
+        verify_tree_structure(directory, &existing, &log, tree)?;
+    }
+    for tree in request_base_trees(&log) {
+        verify_tree_structure(directory, &existing, &log, &tree)?;
+    }
+    let (_, observed_hash) =
+        load_manifest_generation(directory, candidate.basis, candidate.log_generation)?;
+    if manifest_hash != observed_hash {
         return Err(fault(
             "backup/root-changed",
-            "published backup root changed while it was being verified",
+            "published backup root changed while its object graph was being authenticated",
         ));
     }
     let same_logical_point = existing.lineage_id == candidate.lineage_id
@@ -7294,6 +7350,136 @@ mod tests {
             decode_backup_membership(&encoded, record.log_generation).unwrap(),
             record
         );
+    }
+
+    #[test]
+    fn portable_legacy_normalization_preserves_state_and_deep_frontier_validation() {
+        use crate::{DB_IDENT, EntityRef, Keyword, Schema, TxOp, Value};
+
+        let lineage = "12345678-1234-4abc-8def-123456789abc";
+        let before = Database::new(Schema::new()).unwrap();
+        let report = before
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("private-caller-spelling".into()),
+                    attribute: DB_IDENT as u32,
+                    value: Value::Keyword(Keyword::new("fixture", "legacy")).into(),
+                }],
+                1000,
+            )
+            .unwrap();
+        let genesis = encode_genesis(before.genesis_datoms()).unwrap();
+        let genesis_hash = sha256(&genesis);
+        let state_hash = checkpoint_state_hash(&report.db_after).unwrap();
+
+        for extra_frontier in [0, 1] {
+            let source = DurableTransaction {
+                database_id: "mutable-legacy-alias".into(),
+                basis_t: report.db_after.basis_t(),
+                previous_hash: genesis_hash,
+                eidx_frontier: report.db_after.eidx_frontier() + extra_frontier,
+                tempids: report.tempids.clone(),
+                tx_data: report.tx_data.clone(),
+            };
+            let source = decode_transaction(&crate::encode_transaction(&source).unwrap()).unwrap();
+            // This is the same local normalization used by generation-zero
+            // capture. It authenticates shape without replaying db-before.
+            let content = LineageTransactionContent::from_transaction(
+                lineage,
+                before.eidx_frontier(),
+                &source,
+            )
+            .unwrap();
+            let content_payload = content.encode().unwrap();
+            for private in ["mutable-legacy-alias", "private-caller-spelling"] {
+                assert!(
+                    !content_payload
+                        .windows(private.len())
+                        .any(|bytes| bytes == private.as_bytes())
+                );
+            }
+            let membership = BackupMembershipRecord {
+                lineage_id: lineage.into(),
+                log_generation: 0,
+                basis: source.basis_t,
+                previous_hash: genesis_hash,
+                content_hash: sha256(&content_payload),
+                state_hash,
+                eidx_frontier: content.eidx_frontier,
+            };
+            let membership_payload = encode_backup_membership(&membership).unwrap();
+            let membership_hash = sha256(&membership_payload);
+            let request = BackupRequestRecord {
+                lineage_id: lineage.into(),
+                log_generation: 0,
+                basis: source.basis_t,
+                transaction_hash: membership_hash,
+                previous_hash: genesis_hash,
+                request_key_hash: request_key_hash(lineage, "legacy-request").unwrap(),
+                digest: sha256(b"legacy-request-digest"),
+                request_kind: 1,
+                base_manifest_hash: None,
+                receipt_tempids: source.tempids,
+            };
+            let request_payload = encode_request_record(&request).unwrap();
+            let manifest = Manifest {
+                version: VERSION,
+                lineage_id: lineage.into(),
+                log_generation: 0,
+                basis: source.basis_t,
+                genesis_hash,
+                head_transaction_hash: membership_hash,
+                head_state_hash: state_hash,
+                request_head_hash: sha256(&request_payload),
+                completed_excision_head_hash: genesis_hash,
+                transactions: Vec::new(),
+                state_hashes: Vec::new(),
+                requests: Vec::new(),
+                programs: Vec::new(),
+                tree: None,
+            };
+            let directory = temporary_directory("legacy-copy-frontier");
+            let _guard = prepare_directory(&directory).unwrap();
+            ensure_claim(
+                &directory,
+                &BackupClaim {
+                    lineage_id: lineage.into(),
+                    genesis_hash,
+                },
+            )
+            .unwrap();
+            let mut publisher = ObjectPublisher::new(&directory, BackupFault::None);
+            publisher.publish(genesis_hash, &genesis).unwrap();
+            publisher
+                .publish(membership.content_hash, &content_payload)
+                .unwrap();
+            publisher
+                .publish(membership_hash, &membership_payload)
+                .unwrap();
+            publisher
+                .publish(manifest.request_head_hash, &request_payload)
+                .unwrap();
+            publish_exact(
+                &snapshot_path(&directory, manifest.basis, 0),
+                &encode_manifest(&manifest).unwrap(),
+                PublishFault::None,
+            )
+            .unwrap();
+            PortableBackup::verify_backup_presence(&directory, manifest.basis).unwrap();
+            let verified = PortableBackup::verify_backup(&directory, manifest.basis, true);
+            if extra_frontier == 0 {
+                assert_eq!(
+                    checkpoint_state_hash(&verified.unwrap().database).unwrap(),
+                    state_hash
+                );
+            } else {
+                assert_eq!(
+                    verified.unwrap_err().code,
+                    "recovery/eidx-frontier-mismatch"
+                );
+            }
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]

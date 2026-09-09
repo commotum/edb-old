@@ -1102,6 +1102,186 @@ fn private_publication_faults_are_invisible_and_unknown_outcome_resolves_once() 
 }
 
 #[test]
+fn retained_receipt_cores_survive_reconnect_without_retaining_writer_state() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("weak_receipt_core");
+    let application = unique("receipt_core");
+    let pin_application = format!(
+        "atomic-pin-{}",
+        sha256(database_id.as_bytes())[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
+    let tagged_connection =
+        if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+            format!(
+                "{connection}{}application_name={application}",
+                if connection.contains('?') { '&' } else { '?' }
+            )
+        } else {
+            format!("{connection} application_name={application}")
+        };
+    let mut store = migrated_store(&tagged_connection);
+    store
+        .set_capacity_limits(CapacityLimits {
+            writer_tree_cache_entries: 8,
+            writer_tree_cache_bytes: 64 * 1024,
+            ..CapacityLimits::default()
+        })
+        .unwrap();
+    store.create_database(&database_id, schema()).unwrap();
+    publish_native_base(&tagged_connection, &database_id);
+    let operations = add_item("known-committed", 17);
+    let ambiguous = store
+        .transact_with_fault(
+            &database_id,
+            "receipt-reuse",
+            1,
+            &operations,
+            1_000,
+            CommitFault::AfterCommitBeforeResponse,
+        )
+        .unwrap_err();
+    assert_eq!(ambiguous.category, ErrorCategory::UnknownOutcome);
+    store.reconnect().unwrap();
+    // A cold immutable receipt must remain reconstructable even when its
+    // committed recent tail is larger than the new writer-admission bound.
+    store
+        .set_writer_recent_limits(crate::recent::RecentLimits {
+            soft_datoms: 1,
+            soft_bytes: u64::MAX - 1,
+            hard_datoms: 1,
+            hard_bytes: u64::MAX,
+        })
+        .unwrap();
+    let first = store
+        .resolve_request_outcome(&database_id, "receipt-reuse")
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.basis_t, 2);
+    let entity = first.tempids["item"];
+    assert_eq!(
+        first.database.values(entity, ITEM_COUNT).unwrap(),
+        [Value::Long(17)]
+    );
+    assert!(
+        first
+            .db_before
+            .values(entity, ITEM_COUNT)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(first.tx_data.len() > 1);
+    assert_eq!(
+        store
+            .writer_residency_stats(&database_id)
+            .publication_revision,
+        0
+    );
+
+    let mut observer = Client::connect(&connection, NoTls).unwrap();
+    let backend_count = |observer: &mut Client| -> i64 {
+        observer
+            .query_one(
+                "SELECT count(*) FROM pg_stat_activity \
+                 WHERE datname = current_database() AND application_name IN ($1, $2) \
+                   AND backend_type = 'client backend'",
+                &[&application, &pin_application],
+            )
+            .unwrap()
+            .get(0)
+    };
+    let await_backend_bound = |observer: &mut Client, maximum: i64| -> i64 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let count = backend_count(observer);
+            if count <= maximum {
+                return count;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "retained receipts use {count} PostgreSQL backends, expected at most {maximum}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    };
+    // One store session plus one shared read lane and one pin-manager lane.
+    let initial_backends = await_backend_bound(&mut observer, 3);
+    assert_eq!(initial_backends, 3);
+    for attempt in 0..24 {
+        if attempt % 3 == 0 {
+            store.reconnect().unwrap();
+        }
+        let latest = store
+            .transact_with_fault(
+                &database_id,
+                "receipt-reuse",
+                1,
+                &operations,
+                1_000,
+                CommitFault::None,
+            )
+            .unwrap();
+        assert!(latest.replayed);
+        assert_eq!(latest.tx_hash, first.tx_hash);
+        assert_eq!(latest.tempids, first.tempids);
+        assert_eq!(latest.tx_data, first.tx_data);
+        assert_database_values_eq(&latest.db_before, &first.db_before);
+        assert_database_values_eq(&latest.database, &first.database);
+        assert!(latest.database.shares_tiered_read_core(&first.database));
+        let snapshot = latest.database.native_tiered_snapshot().unwrap();
+        let cache = snapshot.tree_cache_stats();
+        assert!(cache.current_entries <= 8);
+        assert!(cache.current_bytes <= 64 * 1024);
+        assert!(cache.peak_entries <= 8);
+        assert!(cache.peak_bytes <= 64 * 1024);
+        assert!(snapshot.recent_stats().datoms > 1);
+        assert_eq!(
+            store
+                .writer_residency_stats(&database_id)
+                .publication_revision,
+            0
+        );
+        drop(snapshot);
+        // Drop the latest returned state while the FIRST receipt still owns
+        // the core. A weak pointer to only the latest state would fail here.
+        drop(latest);
+        assert_eq!(
+            await_backend_bound(&mut observer, initial_backends),
+            initial_backends
+        );
+    }
+    let rejected = store
+        .transact_with_fault(
+            &database_id,
+            "new-over-lowered-limit",
+            2,
+            &add_item("not-admitted", 99),
+            2_000,
+            CommitFault::None,
+        )
+        .unwrap_err();
+    assert_eq!(rejected.code, "recent/hard-capacity");
+    assert_eq!(store.recover(&database_id).unwrap().basis_t(), 2);
+    assert_eq!(
+        first.database.values(entity, ITEM_COUNT).unwrap(),
+        [Value::Long(17)]
+    );
+    drop(first);
+    assert_eq!(
+        await_backend_bound(&mut observer, 1),
+        1,
+        "weak reuse must not retain a read lane, endpoint, or pins after all receipts drop"
+    );
+    eprintln!(
+        "receipt-core witness: 24 retries, 8 reconnects, {initial_backends} live PostgreSQL sessions with receipt retained, 1 store session after receipt drop; cache <=8 entries/65536 bytes"
+    );
+}
+
+#[test]
 fn lower_recent_limits_preserve_exact_retry_and_the_fresher_live_head() {
     let Some(connection) = connection() else {
         return;
