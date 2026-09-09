@@ -16,13 +16,25 @@
    Document actual query/storage dependence, not just local `db()` capture or
    cursor node counts. Preserve live report-queue semantics and distinguish them
    from the later checkpointed durable consumer.
+   Reuse pure-model comparisons and fault hooks; preserve a seed/replay trace for
+   generated checks used here. Small clock/transport seams may support changed
+   lifecycle code, without requiring a simulator or replacing PostgreSQL checks.
+   In Stage 4, pass one captured native value through a calculation accepting
+   `&DatabaseValue`, using query and entity navigation; run the same function on
+   a complete in-memory `Database` fixture and re-run against the retained native
+   value after later commits. Use existing construction/`with` APIs; keep real deployment
+   acceptance mandatory.
 4. Fold material decisions, verified commands/results, failures and stage status
    into `0-plan.md`, and update Goal 0 when a finding changes the parent view.
    Keep records concise. Separate existing evidence from new observations,
    pending maintenance from corruption, and measured limits from assumptions.
-   Hand off wakeup/replay and snapshot-reference work to Goal 2, cache/I/O work
-   to Goal 3, query-source work to Goal 4 and scaling acceptance to Goal 7;
-   do not pull their implementations into this child's completion gate.
+   Hand off wakeup/replay, snapshot references and committed snapshot/view key
+   comparison to Goal 2; cache/batched index I/O/compression and shared/indexed
+   speculative state/costs to Goal 3; query sources/preparation/grouped joins to
+   Goal 4; and scaling, generated campaigns/trace minimization, the complete
+   branch/revalidation/commit example and the profiling-based pipeline decision
+   to Goal 7. Do not pull these implementations or premature configuration flags
+   into this child's completion gate.
 5. Continue through this child's stages. A new executable, scaffold or passing
    unit test alone is not completion. Do not narrow the objective to hide an
    unresolved deployment/API gap; report blockers or required authority plainly.

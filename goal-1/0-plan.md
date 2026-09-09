@@ -30,22 +30,34 @@ The scaffold is fresh; no stage below is implemented merely by creating it.
   administrative authority separate. Expose configured PostgreSQL TLS and I/O
   policy; plaintext development use must be explicit, not an inherited example
   default. Reuse the existing configuration policy; do not invent flags for
-  unimplemented later-stage caches or introduce a new configuration framework.
-  Redact credentials and subject data from diagnostics.
+  unimplemented later-stage caches/compression or introduce a new configuration
+  framework. Redact credentials and subject data from diagnostics.
 - Local submission must have a usable configured endpoint or safe discovery,
   restrictive permissions, and clear restart behavior. Coordinate its contract
   with Goal 2 without requiring cross-host networking in this child. Do not add
   a web health endpoint merely to satisfy a deployment checklist.
 - Existing typed operations and monitoring are starting points. Goal 2 owns
   secure cross-host submission, cross-process wakeups with durable-log replay,
-  checkpointed change consumption and public exact snapshot references. Goal 3
-  owns full I/O accounting, safe cache-resident read independence, concurrent
-  cache access, an opt-in bounded SSD cache, timing/metrics callbacks and hints.
-  Goal 4 owns program/query expansion, plain-datom mock sources and log-query
-  integration; Goals 5 and 6 own fulltext and partitions; Goal 7 owns final
-  integrated acceptance, reader scaling and mixed analytics/application loads.
+  checkpointed change consumption, public exact snapshot references and
+  inexpensive public comparison of committed snapshot/view keys. Goal 3 owns
+  full I/O accounting, safe cache-resident read independence, concurrent
+  cache access, an opt-in bounded SSD cache, bounded batched/overlapped verified
+  index I/O, versioned native block compression with old-format/hash/backup
+  safety, structurally shared/indexed speculative state and its measured costs,
+  timing/metrics callbacks and hints. Goal 4 owns program/query expansion,
+  plain-datom mock sources, log-query integration, prepared-query reuse and
+  bounded set-oriented joins/grouped probes. Goals 5 and 6 own fulltext and
+  partitions. Goal 7 owns final integrated acceptance, reader scaling, mixed
+  analytics/application loads, seeded operation/failure campaigns with replayable
+  minimized traces, a complete branch/compare/choose/revalidate/commit application
+  example with a small helper only if needed, and a transaction-pipeline decision
+  based on phase profiling.
+  Deeper pipelining requires measured justification and preserves one serialized
+  commit authority; it is not a required replacement architecture.
   Coordinate contracts and record dependencies; implementing these later
   capabilities is not a prerequisite for closing this local-deployment child.
+  Pure `with` already exists; a successful preview alone does not guarantee that
+  a later transaction will commit against a changed database.
 - Deployment/admin documentation must distinguish process-local `db()` capture
   from an actual cached native query: present storage/protection dependencies
   honestly, and do not equate cursor node-read counts with all PostgreSQL calls.
@@ -56,6 +68,12 @@ The scaffold is fresh; no stage below is implemented merely by creating it.
   destructive controls; preserve migration checksums and durable meaning.
   Measure relevant costs honestly. Broad administrative operations need not
   become cheap or constant-time as a prerequisite for providing a usable CLI.
+- Reuse existing pure-model comparisons and fault hooks for changed behavior;
+  retain the seed and replay trace for any generated checks used in this child.
+  Add small clock/transport test seams when useful in changed lifecycle code,
+  without a blanket trait refactor. Goal 7 owns the generated campaign and trace
+  minimizer; this child need not build a simulator, testing framework or alternate
+  store. Actual PostgreSQL executable/application acceptance remains required.
 
 ## Stages
 
@@ -125,23 +143,34 @@ transaction ordering. PostgreSQL-backed paths actually execute.
 
 **Outcome:** A developer can build and run the service, administrative commands
 and a separate Rust application using documented configuration and permissions.
+One application calculation works against a captured native database value and
+a complete fabricated in-memory value through the same public read APIs.
 
 **Focus:** Reproducible build/run instructions, normal lifecycle and recovery,
 credential separation and the public API path. Exercise schema/transactions,
 query/Pull, immutable old/history values, status/statistics, index requests and
-reopen; reuse existing acceptance evidence where appropriate and check affected
-boundaries in proportion to risk. Explain current storage dependence, the scope
-of I/O counters and live transaction reports without claiming the later-stage
-read independence or durable consumption already exists. Record packaging and
-operating limits plainly.
+reopen. Demonstrate a calculation accepting `&DatabaseValue`, with one native
+capture passed through query and entity navigation. Exercise that same function
+against a complete fabricated database built with existing `Database::new`,
+`with` and `database_value`; this fixture needs neither raw-tuple query sources
+nor a new store. Reuse existing acceptance evidence where appropriate and check
+affected boundaries in proportion to risk. Explain current storage dependence,
+the scope of I/O counters and live transaction reports without claiming that
+later-stage read independence or durable consumption already exists. Record
+packaging and operating limits plainly.
 
 **Completion signal:** A clean local deployment workflow runs the actual
 executables against PostgreSQL and a separate application uses public APIs
 through restart/reopen, with permissions matching the documented model and no
-ordinary eager compatibility materialization. Deployment/admin instructions
-accurately distinguish local value capture, native querying and durable change
-consumption. Material results and remaining cross-stage dependencies are
-reconciled into Goal 0. This child is not the parent's finish line.
+ordinary eager compatibility materialization. The calculation returns the
+expected result from both the native value and an equivalent in-memory fixture;
+re-running against the retained native value after later commits gives the same
+result. The fabricated
+fixture complements the actual PostgreSQL and separate-executable workflow.
+Deployment/admin instructions accurately distinguish local value capture,
+native querying and durable change consumption. Material results and remaining
+cross-stage dependencies are reconciled into Goal 0. This child is not the
+parent's finish line.
 
 ## Continuation
 
