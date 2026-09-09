@@ -1,28 +1,30 @@
 # Atomic
 
-Atomic is a source-study and Rust-port project. Its retained Datomic Pro
-reference corpora are organized by release. The two prior Rust goal passes are
-preserved in `goal-archive/`; the fresh `goal-0/` is the active strategy.
+Atomic is a native Rust/PostgreSQL database inspired by Datomic: immutable
+database values and facts, serialized declarative transactions, schema and
+identity, history/time views, peer-local Datalog/Pull, controlled persisted
+programs, and operational recovery. Retained Datomic Pro documentation governs
+semantics; recovered source is architectural evidence, not a JVM/wire target.
+Earlier goal passes remain preserved in `goal-archive/`.
 
-The repository contains a substantial PostgreSQL-only Rust reconstruction: a
-pure transactional kernel, durable log/recovery, peer indexes and snapshots,
-local query/pull, constrained persisted programs, a transaction service, and
-operational tooling. The native connection/report and transaction stages are
-verified, as is native read composition. Integrated testing exposed and repaired
-an ordinary-GC receipt-retention defect; schema25 now preserves exact receipts
-while allowing reclamation. A scaled background-indexing failure near98000records
-is also repaired and verified on the retained data. Goal6's independent-peer
-100,000-record deployment and abrupt writer replacement pass. Its portable
-operations now restore exact current/history values, but deep inspection exposed
-a valid deferred-publication state being misclassified as corrupt. Goal5's
-pending-membership and finite restore-completion repairs pass focused live tests;
-the original large target is being rechecked. The full Goal0 outcome is not yet
-claimed.
+Goal 0's six stages and integrated acceptance are complete. The independent-peer
+100,000-record workload passes, including abrupt writer replacement, portable
+backup/restore, deep integrity inspection, actual PostgreSQL crash/WAL recovery,
+exact retry and full old/current/history checks through GC. Schema25 preserves
+receipt ownership while allowing obsolete publication reclamation. The final
+pending-publication inspection/restore repair passes on the original large
+failure as well as focused live PostgreSQL regressions.
+
+This is a measured native operating envelope, not universal production or
+Datomic-parity certification. Import measured 129.213 records/s on the documented
+local host; broad semantic restore took 56m 7.648s and deep inspection 43m 15.920s.
+See [Goal 6](goal-6/0-plan.md) and the [operator guide](docs/operations.md) for
+resource limits, retained evidence, commands and deliberate differences.
 
 ## Start here
 
-- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the objective, current baseline,
-  and remaining stages; [`0-loop.md`](goal-0/0-loop.md) guides execution and
+- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the objective and completed
+  acceptance; [`0-loop.md`](goal-0/0-loop.md) guides execution and
   [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
 - [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: restore and verify
   the runnable baseline. Goal 0 scaffolds and executes each following child,
@@ -144,8 +146,8 @@ remain fully resolved. Ordinary request and program hashes remain unchanged;
 new inputs select new grammars and (for code literals) program ABI 6. Transactions
 on filtered values use the full basis and retain the filters on their result:
 `as_of` is not a branch of the past. History values cannot transact. Controlled
-generation follows this same docs-first native rule. Goal 3's live acceptance
-is recorded in its plan; integrated load and failure acceptance remains.
+generation follows this same docs-first native rule. Goal3 records its live
+semantic acceptance; Goal6 records integrated load and failure acceptance.
 
 ## Native read access
 
@@ -194,8 +196,8 @@ meaning. The writer has bounded read memoization but no cross-peer hint channel;
 cold submissions may incur additional index reads. Neither omission changes
 identity, transactions, history, or local Datalog/Pull semantics. See Goal 4 for
 the source-based decisions and measured read fixtures. Goal 5 records operational
-integrity evidence and the completed GC repair; Goal6 retains integrated
-acceptance work and the unsuccessful earlier large-run evidence.
+integrity evidence and the completed GC repair; Goal6 records integrated
+acceptance alongside the preserved unsuccessful earlier large-run evidence.
 
 ## Working boundary
 

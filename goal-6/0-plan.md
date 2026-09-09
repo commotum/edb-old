@@ -10,8 +10,9 @@ a new parent or a reason to create another goal hierarchy.
 
 ## Constraints and starting context
 
-- Goals 1–4 remain complete; Goal5 is reopened for the publication/inspection
-  mismatch below and is the only active child. Goal5 repaired ordinary
+- Goals1–6 and parent integrated acceptance are complete; no child is active.
+  Goal5 repaired the
+  publication/inspection mismatch on the original large target, ordinary
   receipt/GC liveness, backup/replay/proof reuse and repeated semantic sweeping
   on schema25. Preserve those repairs
   and reopen the owning child for any actual core gap discovered here.
@@ -40,7 +41,7 @@ a new parent or a reason to create another goal hierarchy.
 ### 1. Exercise and measure the deployed application
 
 **Status:** Complete scaled deployment measurement. Goal2 receipt-reuse repair
-and focused actual PostgreSQL checks now pass; Stage2 resumes on rebuilt binaries.
+and focused actual PostgreSQL checks pass; Stage2 also passes on rebuilt binaries.
 See exact results below; no unrelated import repeat is needed for this repair.
 
 **Outcome:** A reproducible independent writer/peer workload demonstrates useful
@@ -58,12 +59,11 @@ and any bottlenecks without substituting timing assertions for correctness.
 
 ### 2. Recover the same information through failure and maintenance
 
-**Status:** Paused for Goal5. The exact-manifest 100k restore, independent native
-current/history fingerprints, and original-request retry pass on dedicated55434.
-Inspection failed on valid deferred publication membership; Goal5 owns the
-repair. Large source GC now passes both windows and full fingerprints; the
-dedicated server crash remains pending. Source/backups are preserved (GC adds
-its documented source marker only after the source-unchanged capture passes).
+**Status:** Complete. Exact-manifest100k restore, native current/history, original
+request retry, repaired deep inspection, post-fold native checks, both source GC
+windows and actual dedicated PostgreSQL crash/WAL recovery all pass. Full old,
+acknowledged, as-of, successor and independent-reopen fingerprints stay exact.
+Source/backups are preserved; operational marker writes are explicitly recorded.
 
 **Outcome:** The measured database survives abrupt writer/server interruption,
 replacement and operational recovery without forks, missing commits or changed
@@ -82,7 +82,9 @@ recorded separately from ordinary workload metrics.
 
 ### 3. Establish integrated acceptance and return to Goal 0
 
-**Status:** Pending.
+**Status:** Complete. The original information model and usable native system
+are established with real PostgreSQL/application/failure evidence, measured
+limits, current public run instructions and no known unfinished core failure.
 
 **Outcome:** A coherent database, current public API/runbook and evidence-backed
 operating envelope satisfy the parent objective without hidden core gaps.
@@ -97,9 +99,12 @@ failure. Only then mark Goal 0 complete.
 
 ## Continuation — 2026-09-09
 
-Goal5 is the only active child after the new publication/inspection mismatch.
-The100k deployed application has passed; preserve that source and resume its portable operations,
-dedicated crash recovery and reclamation measurements on current25 binaries.
+Goal6 and Goal0 are complete. The100k deployed application, portable recovery/
+inspection, source GC and actual dedicated server crash pass. All children are
+reconciled; there is no active child or known core failure. Follow the operator
+guide for future use; do not restart the completed loop or repeat expensive
+acceptance simply because a session resumes. Reopen an owning child only for a
+newly demonstrated core gap. The chronological evidence below remains preserved.
 Do not repeat the unrelated import merely because an administrative path changed.
 Small driver smokes and
 the failed initial100k attempt below are not scaled acceptance.
@@ -111,10 +116,27 @@ is available after coordinating users; its explicit config is
 
 ### Current operational run — 2026-09-09
 
-Latest checkpoint: Goal5 remains the only active child. Its27 focused live
+Latest checkpoint: all six children and Goal0 integrated acceptance are complete.
+The original pending target passes repaired deep inspection2595.920s/
+1566504KiB peak, healthy with1pendingpublication/406nodes. One normal512-node
+owner call then finishes the fold: exact1430live/intent nodes, zero headers,
+unchanged1002/gen1/headhash. Independent post-fold native verification passes
+1.120s/13600KiB, every current/history/query/frontier/basis field exact, eager0.
+The enhanced16-full-fingerprint immediatePG crash driver also passes (exit0,
+session83234). Dedicated55434 logs at21:50:09–10UTC prove immediate shutdown,
+interruption, WAL redo and readiness. Storage restart518ms, replacement start
+2616ms including lease expiry; native indexed base991→acknowledged1003 with
+12tail transactions in one range. All16 full current/history scans match old1002,
+acknowledged1003, recovered as-of values and final1004 independent reopen. Exact
+request replay makes no new commit; successor, old log, Pull and marker history
+remain correct. VmHWM26164KiB, eager materializations/hits/failures0. BinarySHA256
+`4290ef643b30f4837aa7e99b7e2954747e1e575dfcedd49faa274d00fab2b435`.
+Final target current401153/history401157 fingerprints:
+`f9fdbcbe0d4aca18611fd5580f60d3642ea81329efb27c2a55f3c0bda4d6569a` /
+`3b3bba41c6702572603705adb852a84f006adf47facca9d0bc7d70c75c40bf0f`.
+Goal5's27 focused live
 publication/inspection/backup checks and current small operations workflow pass.
-The repaired large deep inspection is still running on the original pending
-target. Final source-unchanged full native capture passed1.093s/13412KiB BEFORE
+Final source-unchanged full native capture passed1.093s/13412KiB BEFORE
 GC's intentional marker1002→1003. Independent source GC now passes397.876s/
 38644KiB peak, both windows quiescent (656/14 batches,340.050/48.607s), zero
 blocked prefixes and all12 full old/current/history/reopen fingerprints exact.
@@ -122,10 +144,24 @@ It retires68 obsolete publications, creates68 receipt archives/48378 memberships
 and preserves all5216 owned tree payloads/448956990bytes. Total archive conversion
 reads97394 nodes/11227667529bytes across distinct receipt closures. This ran
 concurrently with target inspection; no isolated-latency or payload-reclamation
-claim. Log:`/tmp/atomic-large-source-gc.2jGpOJ/run.log`. Await target inspection,
-fold its406 pending nodes through the normal owner API, recheck native facts,
-then reclose Goal5/resume Goal6 for the actual dedicated55434 crash and final
-integrated acceptance. The chronology below retains earlier incomplete results.
+claim. Log:`/tmp/atomic-large-source-gc.2jGpOJ/run.log`.
+
+Final read-only checks confirm generation1 on both installations, zero live
+writer leases and fsync/synchronous_commit/full_page_writes all on. Source1003
+hash`ff6524123a621ab8fe31afad13aa90d896f3496cd49a1164222569d0f4e40c17`;
+target1004 hash`c65d8c96cec139803665c358bf2ca5574d86a730fb67b0c73aba148c96a0f9f3`.
+Only the documented GC/crash markers advance these heads after the1002 backup.
+Final fmt, all-target Clippy with warnings denied and diff checks pass. Latest
+full configured library276passes precede the final narrow operator repairs;
+their27 live PG cases, current small full workflow and large lifecycle runs
+establish those changes. Unconfigured PG early returns are never live evidence.
+Public README/operator commands match the actual drivers. Expensive eager admin
+work, receipt-closure costs, same-host submission, cache-versus-RAM distinction
+and the individually documented Goal4 omissions remain explicit limits, not
+hidden core failures. The chronology below retains earlier incomplete results,
+not additional active work or a claim that failed commands exited successfully.
+Final phase output (including the original failed parent) is retained in
+`/tmp/atomic-final-acceptance.40v3Bv/`; the full GC log remains at its path above.
 
 #### Earlier checkpoints (superseded by the latest checkpoint above)
 

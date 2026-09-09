@@ -50,9 +50,10 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Current status
 
-**Status:** Open; Stage5 is reopened for a publication/inspection mismatch and
-is the only active child. Stage6 is paused. The large source GC has passed;
-repaired deep inspection and the dedicated target crash remain in progress/pending.
+**Status:** Complete — 2026-09-09. All six stages and integrated acceptance are
+established. There is no active child or known unfinished core failure. Preserve
+the measured operating limits and intentional native differences below; this is
+not a claim of universal production certification or exhaustive Datomic parity.
 
 ## Historical starting point — 2026-09-08
 
@@ -149,7 +150,7 @@ The retained98100-record failure now consolidates to indexrevision622/basis982
 without changing the transaction head/hash. Boundary/retraction matrices and
 17renewed checks (15actualPG) pass. Maintenance finishes its captured demand
 without repeatedly indexing newer subthreshold tails; real multi-batch/restart
-fixtures pass. Goal6 still owes a successful complete scaled run.
+fixtures pass. Goal6 now records the successful complete scaled run.
 
 Progress: strict independent native reads, non-owning writer attachment and
 replacement, ordered service observation independent of ticket waits,
@@ -165,7 +166,7 @@ actual dedicated PostgreSQL restart with logical and physical sync. Excision
 catch-up retains ordered original reports across multiple generations. Peer
 db/sync defaults are native; eager adapters are explicitly named. The broader
 PostgreSQL peer rerun passed 19/19. SQL/network
-failure-envelope policy and realistic load remain required Stages 5–6 work;
+failure-envelope policy and realistic load are verified in Stages5–6;
 socket delivery deadlines do not cancel arbitrary blocked receipt SQL.
 
 **Outcome:** Applications connect, submit transactions, and observe exact
@@ -229,7 +230,7 @@ tests. The expanded public workflow and all eight final nested shape fixtures
 pass on actual PostgreSQL after writer shutdown. All-target clippy and broad
 Rust regression pass; unconfigured PG cases are not live evidence. Fulltext and transaction
 hints have individual documented consequences/deferral rationale, not blanket
-parity exclusions. Stages 5–6 remain required.
+parity exclusions. Operational and integrated acceptance is recorded in Stages5–6.
 
 **Outcome:** Local queries and navigation preserve exact snapshot semantics,
 have no accidental finite language limits, and expose a truthful useful surface.
@@ -251,16 +252,18 @@ or is hidden behind a parity claim.
 
 ### 5. Establish operational integrity and recovery
 
-**Status:** Reopened; [Goal5](../goal-5/0-plan.md) owns the latest publication/
-inspection mismatch. The large restore and exact native/retry checks pass, but
-inspection rejects a valid1430-node protected transition (1024 live +406 pending).
-Authenticate deferred membership and complete restore-owned publication work;
-preserve the operational-scale repairs below.
+**Status:** Complete again; [Goal5](../goal-5/0-plan.md) closes the publication/
+inspection mismatch on the original large target. Repaired deep inspection
+passes2595.920s/1566504KiB peak while authenticating406 pending nodes. Normal
+bounded completion produces exact1430-node live membership without changing the
+head; post-fold full native fingerprints pass1.120s/13600KiB, zero eager fallback.
+Large source GC passes both quiescent windows and all12 full fingerprint scans.
+Preserve the operational-scale repairs below.
 Initial/repeat capture and indexed eager validators are repaired. Three redundant
 restore replays are replaced by exact-byte/coordinate proofs with17live regression
 passes. GC's repeated19.67s empty semantic sweep is deferred to its own phase;
 22liveGC/integrity/lifecycle checks and the12-full-fingerprint small workflow
-pass. Current100k restore and subsequent integrated crash/GC remain Stage6 work.
+pass. The100k restore and subsequent integrated crash/GC pass in Stage6.
 Preserve schema25 and earlier lifecycle repairs.
 
 Integrated testing found that active-generation receipt bases pin the oldest
@@ -270,8 +273,8 @@ receipts and snapshot pins. Actual tiny workflow reclaims publications8→2 and
 nodes138→120 with blocked prefixes2→0 and no lost receipt bindings. New ordinary
 conversion, interrupted kind1-generation/excision, backup/restore/exact retry,
 upgrade/role and all15GC+3integrity checks pass. A second archive/semantic-GC
-phase mismatch exposed by this lifecycle was also repaired and verified. Costs
-of distinct retained receipt closures remain to be measured at Stage6 scale.
+phase mismatch exposed by this lifecycle was also repaired and verified. Stage6
+measures97,394 conversion reads/11,227,667,529bytes across retained receipt closures.
 
 Deep backup/archive and pending-index provenance checks now reject validly
 hashed false trees. Migration24 repairs versioned code roots, preserves paused
@@ -280,7 +283,7 @@ upgrade fixtures pass live. Real backup/restore, GC/pins, interrupted excision,
 role/TLS, configured SQL timeout/unknown-retry and actual PostgreSQL restart
 witnesses pass. Native and separate writer/two-peer workflows pass on schema24.
 The active operator guide states quiesced repair, retention and deadline limits.
-Broad administrative costs and deployment scale remain required Stage6 work.
+Broad administrative costs and deployment scale are measured in Stage6.
 
 **Outcome:** Operators can protect, recover, upgrade, inspect, reclaim, and
 excise the database under an explicit and tested trust and retention model.
@@ -300,15 +303,18 @@ remain lazy. Operator procedures state supported guarantees and limitations.
 
 ### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Paused for Goal5's publication/inspection repair. [Goal6](../goal-6/0-plan.md)
+**Status:** Complete; [Goal6](../goal-6/0-plan.md)
 has passed the100k independent-peer deployment and writer SIGKILL/replacement.
 First backup was incomplete after520s and deliberately stopped with source and
 partial repository preserved. Repaired copy/repeat pass. The exact-manifest
 restore passes3367.648s/2200884KiB peak RSS; independent native current/history
 fingerprints and original-request retry pass with no new commit. Deep integrity
-inspection failed only on valid deferred membership, now owned by Goal5.
+inspection's original deferred-membership failure is now repaired and verified.
 Large source GC now passes397.876s/38644KiB peak with all12 full fingerprints
-exact and no blocked receipt-retirement prefix. Server-crash acceptance remains.
+exact and no blocked receipt-retirement prefix. Actual dedicated PostgreSQL
+immediate shutdown/WAL recovery passes: storage518ms, replacement2616ms including
+lease expiry,16 full old/acknowledged/as-of/successor/reopen scans exact and zero
+eager fallback. No duplicate commit on retry; normal next commit succeeds.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -333,13 +339,14 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-09:** Goal5 is the only active child,
-verifying deferred-publication inspection and finite restore completion. All27
-focused live repair checks and current small end-to-end operations pass. The
-repaired large inspection is running on the original pending target BEFORE
-draining its406 rows. On success, finish only that publication through the normal
-bounded owner API and recheck exact native facts. Then reclose Goal5 and resume
-Goal6 for its actual dedicated55434 PostgreSQL crash and integrated acceptance.
+**Completion checkpoint — 2026-09-09:** All children are complete and the original
+integrated objective is established. Goal5's27 focused live repair checks, current
+small operations workflow and original large pending-state inspection pass.
+Normal bounded folding yields exact1430-node membership without changing facts.
+Goal6's actual dedicated-server crash and all16 full fingerprint scans pass,
+alongside large source GC and its12 full scans. Final formatting, all-target
+Clippy with warnings denied and diff checks pass. Public run instructions match
+the exercised drivers; earlier failed commands remain accurately recorded.
 
 Banked large outcomes:100k import773.913s/129.213records/s, zero eager loads,
 actual writer SIGKILL/replacement/exact retry; first backup129.687s/8214objects/
@@ -351,6 +358,19 @@ at1002 before GC's intentional marker1003. Large source GC then passed397.876s/
 38644KiB peak, both windows quiescent and all12 full fingerprint scans exact.
 It retired68 obsolete publications and preserved receipt-owned payloads via68
 archives; total conversion read11227667529bytes. GC ran concurrently with target
-inspection, not as an isolated benchmark. See Goals5–6 for exact fixtures,
-measurements, retained failed attempts and current process identity. Never
-restart shared main55432. No overall production outcome is yet claimed.
+inspection, not as an isolated benchmark. Final source is generation1/basis1003
+after the GC marker; restored target is generation1/basis1004 after the two crash
+markers. Both have zero live writer leases and durability settings on. The exact
+1002 backup and all failed-run artifacts remain preserved. See Goals5–6 for
+hashes, paths, measurements and test provenance.
+
+The information model, independent peer application path and recovery outcomes
+are verified together. Broad deep restore/inspection are measured, expensive
+administrative operations; ordinary state remains bounded in the tested workload.
+Data exceeds configured caches, not physical host RAM, and warm queries did not
+eliminate SQL. Fulltext and transaction locality hints retain their individually
+documented consequences in Goal4; JVM/wire compatibility, other stores and
+exhaustive decompilation equivalence were never objectives. No new parent or
+recursive goals are needed. For future use, follow `docs/operations.md`; reopen
+the owning child only for a newly demonstrated core gap, not to repeat this
+acceptance merely because a new session starts.

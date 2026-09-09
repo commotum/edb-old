@@ -5,6 +5,44 @@ evidence. Goal 5 records current integrity/recovery checks; Goal 6 owns the
 measured deployment envelope. No deployment-independent throughput, recovery
 time or network-outage bound is implied.
 
+## Measured integrated acceptance — 2026-09-09
+
+The 100,000-record/400,000-business-fact system-of-record workload uses two
+independent submitting peers, batches of 100 records, a 4MiB writer tree cache,
+1MiB peer caches, and a 2MiB indexing threshold/8MiB recent-pressure cap. Native
+ordinary reads, retained snapshots, retry and reopen use no eager compatibility
+materialization. Actual writer SIGKILL/replacement and dedicated PostgreSQL
+immediate shutdown/WAL recovery pass. These observations are from PostgreSQL
+15.11 on a local Threadripper 2950X/NVMe host, not deployment-independent SLAs.
+
+| Operation | Observed result |
+| --- | --- |
+| Import | 773.913s; 129.213 records/s; 1,000 import transactions, two peers |
+| Writer residency | Sampled peak RSS 60,301,312 bytes; accounted cache/recent limits respected |
+| First/repeat portable backup | 129.687s/137.792s; 8,214 new then 0 new objects; 484,539,927 bytes |
+| Restore including mandatory deep proof | 3367.648s; 2,200,884KiB peak RSS |
+| Repaired deep inspection | 2595.920s; 1,566,504KiB peak RSS; healthy with 406 authenticated pending nodes |
+| Post-fold full native verification | 1.120s; 13,600KiB peak RSS; exact 401,150 current/401,152 history datoms |
+| Dedicated PostgreSQL crash recovery | Storage 518ms; replacement writer 2616ms including lease expiry; 16 full fingerprint scans pass |
+| Large source GC | 397.876s; 38,644KiB peak RSS; both windows quiescent; 12 full fingerprint scans pass |
+
+The original large operations parent exited1 on the pending-membership reporting
+defect. Its valid copy/restore/native/retry phases are retained; acceptance adds
+the repaired audit on that unchanged target, normal bounded publication folding,
+post-fold native comparison and separately verified unchanged source before GC.
+It does not relabel the failed parent invocation as a pass. The complete current
+small operations workflow and27 focused live publication/inspection/backup cases
+also pass. [Goal6](../goal-6/0-plan.md) retains exact fixture/hash provenance and
+other live semantic/failure evidence.
+
+Data exceeds configured caches, not this host's physical RAM. Warm selective
+queries in the scale run still performed SQL; no zero-I/O warm-cache benefit is
+claimed. Broad restore/inspection remain expensive and eager. Source GC ran
+concurrently with part of target inspection; timings are not isolated benchmarks.
+GC conversion's total work follows retained receipt closures, and reachable
+payloads are deliberately retained. Provision administrative memory/time and
+retention policy separately from ordinary application capacity.
+
 ## Provision and upgrade
 
 Use a dedicated object-owning migration account to run
@@ -310,7 +348,11 @@ that the server is unshared; the operator must ensure that. The driver performs
 an immediate PostgreSQL stop, attempts restart even after a later failure, and
 adds two marker transactions. `ATOMIC_RESTART_ATTRIBUTE` defaults to 1002 and
 must select a Long attribute with existing workload facts. It does not provision
-a server or delete its data directory.
+a server or delete its data directory. Sixteen bounded canonical current/history
+fingerprint scans verify acknowledged and retained old values, recovered as-of
+views, the successor and independent writer-offline reopen; eager compatibility
+counters must remain zero. Uncached reads need storage to return after the crash;
+the outage assertion itself only requires the captured immutable basis locally.
 
 Finally run GC against the **source**, only after all source-unchanged checks
 have finished. Every writer in that installation schema must be stopped:

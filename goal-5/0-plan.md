@@ -8,8 +8,8 @@ retention model. Preserve completed Goals 1–4 and the existing lifecycle tools
 
 ## Constraints and starting evidence
 
-- Goal 0 owns the objective. This child is reopened and is the only active
-  child; Goal6 is paused on an observed integrity-reporting/lifecycle gap.
+- Goal0 owns the objective. This child and Goal6's subsequent dedicated crash
+  and integrated acceptance are complete; no child remains active.
   No nested goals or corrective parent. Archived operations goals
   are evidence, not instructions.
 - Local Datomic administration/backup/excision docs govern intended guarantees;
@@ -71,10 +71,9 @@ unknown/rejected outcomes; secure deployment instructions match tested APIs.
 
 ### 3. Verify lifecycle operations as one recoverable workflow
 
-**Status:** Reopened. The large restore, full native fingerprints and exact retry
-pass, but inspection misclassifies valid deferred publication folding as corrupt.
-Repair pending-membership authentication/reporting and finish restore-owned
-bounded publication work, preserving the earlier capture/replay/GC repairs.
+**Status:** Complete. The original large pending target now passes repaired deep
+inspection; normal bounded completion preserves its exact native facts. Both
+large source GC windows and full fingerprint/reopen checks also pass.
 
 **Outcome:** Backup, restore, upgrade, inspection, retention/GC and excision work
 together without losing acknowledged history, receipts or live captured values.
@@ -90,8 +89,9 @@ are measured or explicitly unmeasured, with actionable operator procedures.
 
 ### 4. Return operational acceptance to the parent
 
-**Status:** Pending the reopened publication/inspection repair. Earlier schema25
-lifecycle, upgrade, authority and focused integrity evidence remains valid.
+**Status:** Complete. The publication/inspection repair is established on the
+original large failure, not only small fixtures. Goal6 subsequently completed
+actual dedicated server crash recovery and final integrated acceptance.
 
 **Outcome:** Goal 0 can proceed to realistic integrated load/failure acceptance.
 
@@ -103,6 +103,40 @@ plan and Goal 0 record verified outcomes, and Goal 6 is scaffolded/resumed and
 executed. This child is not the parent's finish line.
 
 ## Continuation
+
+Goal5 and the subsequent Goal6 integrated acceptance are complete. No active
+child or known core failure remains. The repaired large deep inspection passed
+(exit0) in2595.920s
+(43m15.920s), VmHWM1566504KiB/finalRSS968160KiB. It reports healthy at1002,
+authenticating1430 main tree nodes/167521776bytes,68 request archives/48378
+memberships,1002 exact receipt bindings,1003 semantic roots/4314635 nodes, and
+the legitimate pending publication with406 remaining nodes. No orphan or
+uncertain-reachability problem is reported. Source GC was concurrent for part
+of this broad audit; this is not isolated performance evidence.
+
+After success, exact target/cluster preflight found zero other clients or leases.
+One normal512-node owner call finished the406-node fold. SQL proves complete
+live membership = sealed intent =1430 nodes, zero pending headers, and unchanged
+head1002/generation1/original hash. Independent native post-fold verification
+passes1.120s/13600KiB with all401150 current/401152 history fingerprints,
+query/frontier/basis exact and zero eager fallback. Large source GC also passes
+397.876s with exact12 full scans, quiescent windows and zero blocked prefix;
+details below. The original operations parent remains an exit1 failure; portable
+acceptance combines its valid copy/restore/native/retry phases with the repaired
+audit, separately completed source-preservation proof and normal-fold recheck.
+Do not repeat the import or semantic restore merely to change that old exit code.
+
+Goal6's enhanced16-full-fingerprint crash driver subsequently passed on
+dedicated55434: actual immediate stop/WAL recovery, storage518ms, replacement
+2616ms including lease expiry, exact replay and successor/reopen. Final target
+is1004; source is intentionally1003 after GC; retained backup remains1002.
+See Goal6 for final hashes and operating limits. Never restart shared main55432.
+
+### Historical reopening and repair checkpoints (superseded by closure above)
+
+All subsequent sections preserve the chronology of findings and repairs. Their
+then-current instructions and incomplete statuses are historical evidence; the
+completion checkpoint above governs continuation.
 
 Goal5 is the only active child. The large operations parent441700/session11723
 exited1 at deep inspection: `integrity/tree-live-membership-mismatch`, after
