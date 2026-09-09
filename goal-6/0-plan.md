@@ -37,8 +37,8 @@ a new parent or a reason to create another goal hierarchy.
 
 ### 1. Exercise and measure the deployed application
 
-**Status:** Active. Goal5's reclamation repair and indexing/SQL prerequisites
-are verified; execute the100k cache-exceeding workload with current25 binaries.
+**Status:** Paused for owning Goal2. The new100k run failed athead982/98100records
+with an indexer missing-node error; scheduling/preload repairs are in progress.
 
 **Outcome:** A reproducible independent writer/peer workload demonstrates useful
 transactions, query/Pull, identity/programs/history and bounded ordinary state
@@ -192,6 +192,13 @@ peerRSS21.6/21.9MB and cache peaks below1MiB, eager compatibility0. Writer remai
 below~54MB sampledRSS with no failed jobs or backpressure stalls atbasis260.
 This is in-progress evidence, not a successful100k result. Frequent tiny index
 jobs are being diagnosed read-only while the run continues.
+
+That run subsequently failed: actualexit1, head982/hash
+`212ac700ad123000e9cfd50f2a760c0e1de87074be6174c71308600a8de8bdac`, index
+revision621/basis979. Reported missinghash33afd4eb7f55 exists in PostgreSQL;
+Goal2 now owns native merge-preload investigation plus the diagnosed finite-
+scheduling repair. The writer/peer processes stopped; preserve their database.
+Goal2 is the only active child until this core indexing gap is verified closed.
 
 After successful import/fenced-writer-kill acceptance, use this exact database
 for independent backup/deepverify/restore on dedicatedserver55434, then guarded

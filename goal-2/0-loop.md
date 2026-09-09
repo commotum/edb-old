@@ -7,7 +7,8 @@
 4. Exercise the public workflow and targeted live PostgreSQL witnesses. Verify
    prerequisites, ordering, failure behavior and native access costs explicitly.
 5. Fold material decisions, verified results, and status into `0-plan.md`.
-6. Continue until this child's completion signals hold; then update Goal 0 and
-   resume its parent loop toward Stage 3, not merely another scaffold.
+6. Continue until this child's completion signals hold; then update Goal0 and
+   reconcile the parent's remaining stages, not merely another scaffold.
+   On this reopening, preserve complete Goals3–5 and resume existing Goal6.
 7. At a session boundary record the last verified result, exact unresolved gap,
    and next useful action. Report blockers and uncertainty without scope games.

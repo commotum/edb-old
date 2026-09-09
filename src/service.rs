@@ -1918,56 +1918,57 @@ fn run_index_worker(
 ) {
     let mut requested = shared.indexing.should_continue();
     loop {
-        if requested && shared.accepting.load(Ordering::Acquire) {
-            if let Some(through) = shared.indexing.begin_job() {
-                let mut reconnect_before_attempt = false;
-                loop {
-                    match retry_index_job(
-                        || {
-                            if reconnect_before_attempt {
-                                indexer.reconnect()?;
-                            }
-                            let result = indexer.consolidate_background_once(through);
-                            reconnect_before_attempt =
-                                result.as_ref().is_err_and(is_postgres_connection_error);
-                            result
-                        },
-                        || shared.accepting.load(Ordering::Acquire),
-                    ) {
-                        Ok(Some(receipt)) => {
-                            shared.indexing.complete_job(
-                                receipt.publication_revision,
-                                receipt.basis_t,
-                                receipt.pending_avet_projections,
-                                receipt.index_work_remaining,
-                            );
-                            break;
+        if requested
+            && shared.accepting.load(Ordering::Acquire)
+            && let Some(through) = shared.indexing.begin_job()
+        {
+            let mut reconnect_before_attempt = false;
+            loop {
+                match retry_index_job(
+                    || {
+                        if reconnect_before_attempt {
+                            indexer.reconnect()?;
                         }
-                        Ok(None) => {
-                            // One fixed live-set batch made durable progress.
-                            // Reselect before the next step, and observe service
-                            // shutdown between batches rather than hiding an
-                            // uninterruptible whole-database fold.
-                            if !shared.accepting.load(Ordering::Acquire) {
-                                return;
-                            }
-                            thread::yield_now();
-                        }
-                        Err(error) => {
-                            shared.indexing.fail_job(error);
-                            // A writer that can no longer consolidate its bounded
-                            // recent tier must relinquish service ownership so a
-                            // repaired standby can fence and recover. Retaining
-                            // the lease while rejecting forever creates a zombie
-                            // leader and contradicts the failover contract.
-                            shared.accepting.store(false, Ordering::Release);
+                        let result = indexer.consolidate_background_once(through);
+                        reconnect_before_attempt =
+                            result.as_ref().is_err_and(is_postgres_connection_error);
+                        result
+                    },
+                    || shared.accepting.load(Ordering::Acquire),
+                ) {
+                    Ok(Some(receipt)) => {
+                        shared.indexing.complete_job(
+                            receipt.publication_revision,
+                            receipt.basis_t,
+                            receipt.pending_avet_projections,
+                            receipt.index_work_remaining,
+                        );
+                        break;
+                    }
+                    Ok(None) => {
+                        // One fixed live-set batch made durable progress.
+                        // Reselect before the next step, and observe service
+                        // shutdown between batches rather than hiding an
+                        // uninterruptible whole-database fold.
+                        if !shared.accepting.load(Ordering::Acquire) {
                             return;
                         }
+                        thread::yield_now();
+                    }
+                    Err(error) => {
+                        shared.indexing.fail_job(error);
+                        // A writer that can no longer consolidate its bounded
+                        // recent tier must relinquish service ownership so a
+                        // repaired standby can fence and recover. Retaining
+                        // the lease while rejecting forever creates a zombie
+                        // leader and contradicts the failover contract.
+                        shared.accepting.store(false, Ordering::Release);
+                        return;
                     }
                 }
-                if shared.indexing.should_continue() {
-                    continue;
-                }
+            }
+            if shared.indexing.should_continue() {
+                continue;
             }
         }
         match receiver.recv() {

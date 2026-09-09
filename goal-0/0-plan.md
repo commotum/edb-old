@@ -50,7 +50,7 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage 6 is active after repairing the integrated GC defect. This is a fresh
+**Status:** Open; Stage2 is reopened by a scaled background-indexing failure. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -132,7 +132,8 @@ every later feature to be complete before banking this baseline.
 
 ### 2. Complete the native connection and observation model
 
-**Status:** Complete; [Goal 2](../goal-2/0-plan.md) records connection acceptance.
+**Status:** Reopened; [Goal2](../goal-2/0-plan.md) owns the scaled background-index
+preload/scheduling defects. Preserve its completed connection/observation work.
 
 Progress: strict independent native reads, non-owning writer attachment and
 replacement, ordered service observation independent of ticket waits,
@@ -274,8 +275,8 @@ remain lazy. Operator procedures state supported guarantees and limitations.
 
 ### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Active; [Goal 6](../goal-6/0-plan.md) resumes the scaled integrated
-acceptance workflow with current25 binaries and the verified GC/indexing repairs.
+**Status:** Paused; [Goal6](../goal-6/0-plan.md) preserves the scaled workflow
+while owning Goal2 repairs the newly exposed indexer failure and scheduling.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -300,13 +301,15 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-09:** Goal 6 is the only active child.
+**Continuation checkpoint — 2026-09-09:** Goal2 is the only active child again.
 Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
 successors and dependency retention. Goal 4 read-depth/history/composition APIs
 and public workflow pass. Goal5 closes semantic backup verification, versioned
 program-reference repair. Goal6 exposed active-receipt publication-prefix GC
 blocking, repeated index leaf decoding and a missing import retry policy.
-Those GC/index path/commitment SQL batching and retry repairs now pass focused
-live checks. Run Goal6's100k deployment and scaled recovery/maintenance with
-current25 optimized binaries. The first100k run stopped atbasis82, not acceptance.
+The GC/commitment SQL batching and retry repairs pass focused live checks.
+The next100k run reached head982/98100records but its indexer failed with a
+missing in-memory node that exists durably. Repair and verify that boundary
+omission and finite background scheduling in Goal2, then resume Goal6's complete
+scaled deployment/recovery/maintenance. Neither failed100k run is acceptance.
 No overall production outcome has yet been claimed.

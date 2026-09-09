@@ -10,8 +10,9 @@ local query/pull, constrained persisted programs, a transaction service, and
 operational tooling. The native connection/report and transaction stages are
 verified, as is native read composition. Integrated testing exposed and repaired
 an ordinary-GC receipt-retention defect; schema25 now preserves exact receipts
-while allowing reclamation. Goal6 is running the measured deployment/failure
-acceptance. The project is not yet claiming the full Goal0 outcome.
+while allowing reclamation. The measured Goal6 run has reopened Goal2 for a
+background-indexing failure near98000records. The data is retained for repair;
+the project is not yet claiming the full Goal0 outcome.
 
 ## Start here
 

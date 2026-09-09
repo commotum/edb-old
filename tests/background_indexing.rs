@@ -636,11 +636,26 @@ fn finishing_a_multibatch_publication_does_not_index_a_new_subthreshold_tail() {
         )
         .unwrap();
     let indexed = wait_for_stats(&service, |stats| {
-        stats.published_basis_t == crossing.basis_t && !stats.job_in_flight
+        stats.published_basis_t == crossing.basis_t
+            && stats.jobs_completed >= 2
+            && !stats.job_in_flight
     });
     assert_eq!(indexed.published_revision, large.publication_revision + 1);
     assert_eq!(indexed.total_bytes, 0);
     assert_eq!(indexed.jobs_failed, 0);
+    let final_sealed: bool = sql
+        .query_one(
+            "SELECT complete FROM atomic_tree_live_sets l \
+             JOIN atomic_tree_publications p USING (database_id, manifest_hash) \
+             WHERE p.database_id = $1 AND p.publication_revision = $2",
+            &[&database_id, &(indexed.published_revision as i64)],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        final_sealed,
+        "threshold job must finish its own live-set maintenance"
+    );
     assert_eq!(
         PostgresStore::connect(&connection)
             .unwrap()

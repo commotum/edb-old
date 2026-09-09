@@ -63,8 +63,8 @@ observation. Observation failures are surfaced separately from durable success.
 
 ### 3. Complete coordination and native traversal
 
-**Status:** Complete for native coordination/traversal. Blocking PostgreSQL
-access is not a hard-real-time API.
+**Status:** Reopened by Goal6's scaled indexer failure. Preserve completed
+coordination/traversal repairs; finish native background-indexing correctness.
 
 **Outcome:** db/sync and transaction/index/schema/excision coordination expose
 truthful native values; time views and raw traversal retain exact semantics.
@@ -77,8 +77,9 @@ frontier and timeout. Cursor/time differentials and measured lazy accesses pass.
 
 ### 4. Integrate and return to Goal 0
 
-**Status:** Complete — connection acceptance and the independent-process
-  workflow pass. Parent Stage 3 is next; the broad peer rerun also passed.
+**Status:** Pending renewed closure. Existing independent-process and connection
+acceptance remains verified; the newly exposed indexing defects must be repaired
+before returning to Goal0 and resuming Goal6. Goals3–5 remain complete.
 
 **Outcome:** A documented application/deployment workflow exercises the completed
 connection model, and Goal 0 accurately selects the next unfinished stage.
@@ -88,6 +89,31 @@ workflow updates, and actual executed evidence rather than skipped test counts.
 
 **Completion signal:** Connection acceptance and workflow pass without eager
 recovery or writer ownership; parent Stage 2 updated, then Goal 3 resumed/created.
+
+## Reopened by scaled integration — 2026-09-09
+
+This is the only active child again; Goal6 is paused, not replaced. The schema25
+100k attempt reached acknowledged head982 (98100 imported records), hash
+`212ac700ad123000e9cfd50f2a760c0e1de87074be6174c71308600a8de8bdac`, before the
+index worker reported `tree/missing-node` and closed admission. Latest index
+publication621 coversbasis979. The reported immutable hash
+`33afd4eb7f552207520938e197a69fdc0b85e92d0c34310b7646012f6315cded` exists in
+PostgreSQL with2160payload bytes: investigate missing in-memory merge inputs,
+not assume durable loss or rebuild the whole database. Preserve the failed
+fixture `scale-workflow-277036-1788941894497441026` in `atomic_goal6_scale`.
+
+An independent diagnosed scheduler defect kept the publication-maintenance flag
+as unconditional demand. Under sustained writes it repeatedly merged new small
+tails below the2MiB threshold. The partial repair now retains a finite demanded
+basis through multi-batch live-set/AVET completion and preserves newer forced/
+schema demand; focused live multi-batch/subthreshold/restart/threshold fixture
+passes, with existing regressions in progress. Preserve this work.
+
+Next: reproduce the failed index build from its retained native base/tail,
+repair the exact preload/boundary omission with a small regression, prove the
+failed database consolidates without changing its transaction head/hash, then
+finish scheduler/coordination regressions and return to Goal0→Goal6. Do not
+weaken authentication, preload the entire tree, or erase the retained failure.
 
 ## Verified changes — 2026-09-08
 
