@@ -61,7 +61,9 @@ and any bottlenecks without substituting timing assertions for correctness.
 **Status:** Paused for Goal5. The exact-manifest 100k restore, independent native
 current/history fingerprints, and original-request retry pass on dedicated55434.
 Inspection failed on valid deferred publication membership; Goal5 owns the
-repair. Server crash and large GC remain pending. Source/backups are preserved.
+repair. Large source GC now passes both windows and full fingerprints; the
+dedicated server crash remains pending. Source/backups are preserved (GC adds
+its documented source marker only after the source-unchanged capture passes).
 
 **Outcome:** The measured database survives abrupt writer/server interruption,
 replacement and operational recovery without forks, missing commits or changed
@@ -108,6 +110,24 @@ is available after coordinating users; its explicit config is
 `/tmp/atomic-goal5-tls.J4Rk1G/goal5-postgresql.conf`. Preserve all existing work.
 
 ### Current operational run — 2026-09-09
+
+Latest checkpoint: Goal5 remains the only active child. Its27 focused live
+publication/inspection/backup checks and current small operations workflow pass.
+The repaired large deep inspection is still running on the original pending
+target. Final source-unchanged full native capture passed1.093s/13412KiB BEFORE
+GC's intentional marker1002→1003. Independent source GC now passes397.876s/
+38644KiB peak, both windows quiescent (656/14 batches,340.050/48.607s), zero
+blocked prefixes and all12 full old/current/history/reopen fingerprints exact.
+It retires68 obsolete publications, creates68 receipt archives/48378 memberships,
+and preserves all5216 owned tree payloads/448956990bytes. Total archive conversion
+reads97394 nodes/11227667529bytes across distinct receipt closures. This ran
+concurrently with target inspection; no isolated-latency or payload-reclamation
+claim. Log:`/tmp/atomic-large-source-gc.2jGpOJ/run.log`. Await target inspection,
+fold its406 pending nodes through the normal owner API, recheck native facts,
+then reclose Goal5/resume Goal6 for the actual dedicated55434 crash and final
+integrated acceptance. The chronology below retains earlier incomplete results.
+
+#### Earlier checkpoints (superseded by the latest checkpoint above)
 
 Goal5's renewal closes with17livebackup/proof cases,22liveGC/integrity/lifecycle
 cases, full/resumed smalloperations and12-full-fingerprintGC smoke. The broad
@@ -157,7 +177,7 @@ broad scan. ~48.5k archive memberships is an estimate. Requiredreceiptpayloads
 may remain while metadata retires; do not require deletion of reachable data.
 Large restore/crash/GC are still pending. Reopen the owning child for a real gap.
 
-## Integration checkpoint — 2026-09-09
+## Historical integration checkpoint — 2026-09-09
 
 - Fresh main-port catalogs: `atomic_goal6_scale`, `atomic_goal6_restore`,
   `atomic_goal6_regression`. Dedicated server55434 also has a separate fresh
@@ -234,7 +254,7 @@ Large restore/crash/GC are still pending. Reopen the owning child for a real gap
   Stable schema24 binaries are retained under `/tmp/atomic-goal6-stable.1P1qKz`
   for fixture reproducibility; do not use them after migrating a target to25.
 
-## Current execution — 2026-09-09
+## Historical execution checkpoints — 2026-09-09
 
 Goal5 reclosed after the ordinary GC workflow reclaimed actual publications/
 nodes with receipts intact; schema25 conversion, interrupted kind1-generation
@@ -327,7 +347,7 @@ repairs but preceded the newly found weak receipt-core repair; current rebuilt
 operations/restart checks must verify that independent recovery path on this
 same dataset. Backups, server crash and GC are not yet accepted at this scale.
 
-## Scaled operations in progress — 2026-09-09
+## Historical scaled operations checkpoint — 2026-09-09
 
 Goal2's weak receipt-core repair and7targeted actual PostgreSQL safety checks
 pass; current optimized operations/restart/GC examples rebuilt after final

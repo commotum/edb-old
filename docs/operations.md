@@ -201,8 +201,14 @@ Unlike Datomic's documented no-live-segment-read storage GC, this native ownersh
 conversion authenticates live receipt trees and uses short administrative fences.
 It can contend with writers; pace batches and retry explicit Busy admission
 without treating integrity failures as transient. Actual upgrade, resumability,
-backup/retry and retired-generation fixtures pass; larger-workload maintenance
-costs remain part of Goal6 acceptance.
+backup/retry and retired-generation fixtures pass. On the100k-record fixture,
+both large GC windows pass in397.876s total at38644KiB peak RSS:68 obsolete
+publications retire and68 exact receipt archives own48378 node memberships.
+All old/current/history fingerprints and independent reopen remain exact.
+Conversion reads97394 nodes/11227667529bytes across distinct receipt closures;
+all5216 tree payloads/448956990bytes remain reachable and are not deleted.
+The run shared a host with deep inspection; these are observed costs, not an
+isolated benchmark or a payload-space reduction guarantee.
 
 Use `RECOMMENDED_GARBAGE_COLLECTION_AGE` (30 days) or a deliberately chosen horizon
 covering disconnected readers and outages. Zero age is for controlled tests or

@@ -142,6 +142,63 @@ current/history scans (build/clippy/fmt pass, live execution still pending).
 Preserve schema25, applied migration checksums, source/backup and all earlier
 repairs; never migrate the damaged historical version23 catalog.
 
+Current repair verification:27 actual PostgreSQL passes. New restore-fold2/2
+(51.33s) proves >512-node completion, interrupted512-node prefix, same-root retry,
+forged header-state rejection and second-owner-batch SQL error propagation;
+native current/history and old receipts remain exact. Inspector8/8 includes
+pending3/3 (23.55s), scope/snapshot2/2 (9.33s), existing integrity3/3 (9.83s),
+with initial/replacement/incremental safe folds and corrupted witnesses. Broader
+backup10/10 (79.74s), semantic forgery4/4 (22.21s), target-proof3/3 (18.09s) pass.
+Combined small operations workflow passes2.961s; retained repository
+`/tmp/atomic-operations-tse41O`. Formatting/clippy pass; failed-phase timing/RSS
+output is now tested. No migration or authority changes.
+
+All four optimized drivers rebuilt27.39s. Repaired large read-only inspection
+is running as process507976/tool session9248 against the unchanged pending target
+BEFORE any fold. Operations binarySHA256
+`4e533bf686d1280b5d6cba5a5312ed93f9b276a495edd27103d98cc48ae1660c`.
+Both source and target were freshly checked at1002/generation1 and the exact
+original head hash before launch. Await its actual healthy report; then finish
+only manifest`aea88e93d6a6c3f8e60351c4754ce78fa727e80f0dbfc189f5ef779d1af87864`
+through the existing512-node owner API (406 remaining), prove exact complete
+membership and unchanged head, and run full target/source native fingerprint
+checks against the banked values. Do not reimport or rerestore unchanged facts.
+The earlier operations parent exited1; do not relabel that command a pass.
+
+Independent-work sequencing: the final source-unchanged native check has now
+passed1.093s/13412KiB on the current release, with all401150 current/401152 history
+fingerprints, query,frontier101005 and basis1002 exact. Fresh SQL also confirms
+one logical database, generation1/original hash and zero live leases. The remaining
+large audit reads only the restored target, so source GC is authorized to run in
+parallel as this child's lifecycle verification, AFTER that unchanged-source
+capture. It intentionally adds a marker (expected source1003); do not later
+mistake this maintenance write for a failed source-preservation check. Target
+stays at1002 with406 pending nodes until its audit finishes. Both broad operations
+share a host; report concurrent timings, not isolated benchmark latency.
+GC driverSHA256
+`86cc36468290be396c978ede9847722e5e372c2548e24b2695b2267f94aee58c`, budgets4096
+batches/1800s perwindow, exact isolated source schema above. Goal5 remains the
+only active child; Goal6 will consume these verified lifecycle results afterward.
+
+Large source GC started2026-09-09 21:28:12UTC, driver515651/tool session71042
+(Arendt owns it), log`/tmp/atomic-large-source-gc.2jGpOJ/run.log`. Exact schema,
+single source database, zero other clients/leases and fixed GC function paths
+were rechecked; approval passed. Source marker intentionally advanced1002→1003.
+The large GC workflow now passes (exit0), 397.876s total, VmHWM38644KiB and
+final RSS36908KiB. Old-pinned window:656batches/340.050s, max collection call792ms;
+old-released:14batches/48.607s, max800ms. Both reach quiescence with zero blocked
+receipt-retirement prefixes. All12 full current/history fingerprint scans match:
+old basis1002 has401150/401152 datoms; marker successor1003 has401152/401154,
+including independent reopen, with zero eager materializations/hits/failures and
+zero cache bytes. Publication/manifest count69→1, retirement records68→0 and
+build intents69→0;68 archives own48378 node memberships. No raw tree, log,
+program or semantic payload was deleted: all5216 tree nodes/448956990bytes remain
+owned by exact receipt roots or the current root. Conversion reads97394 nodes/
+11227667529bytes across those distinct closures; bounded batches do not make
+total work proportional only to changed paths. Timings include concurrent target
+audit on the same host, not an isolated benchmark. Target audit507976/session9248
+is still running; never restart main55432 or touch target55434 before it finishes.
+
 ## Renewed closure — 2026-09-09
 
 Copy/deep semantics, exact stored-value indexed helpers, schema grouping,

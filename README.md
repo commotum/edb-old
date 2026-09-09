@@ -13,8 +13,11 @@ an ordinary-GC receipt-retention defect; schema25 now preserves exact receipts
 while allowing reclamation. A scaled background-indexing failure near98000records
 is also repaired and verified on the retained data. Goal6's independent-peer
 100,000-record deployment and abrupt writer replacement pass. Its portable
-operations exposed excessive eager replay; Goal5 owns that repair and scaled
-verification is underway. The full Goal0 outcome is not yet claimed.
+operations now restore exact current/history values, but deep inspection exposed
+a valid deferred-publication state being misclassified as corrupt. Goal5's
+pending-membership and finite restore-completion repairs pass focused live tests;
+the original large target is being rechecked. The full Goal0 outcome is not yet
+claimed.
 
 ## Start here
 

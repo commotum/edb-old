@@ -48,11 +48,15 @@ to compiled Datomic or completion of an expanding set of goal folders.
   Use targeted source/runtime witnesses; global AOT equivalence and complete
   dormant-branch coverage are not prerequisites.
 
-## Starting point — 2026-09-08
+## Current status
 
 **Status:** Open; Stage5 is reopened for a publication/inspection mismatch and
-is the only active child. Stage6 is paused. This is a fresh
-strategy over the existing code, not a claim that historical repairs vanished.
+is the only active child. Stage6 is paused. The large source GC has passed;
+repaired deep inspection and the dedicated target crash remain in progress/pending.
+
+## Historical starting point — 2026-09-08
+
+This strategy builds on existing code; historical repairs did not vanish.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
   goals 9–17 are in `goal-archive/A2/`. Their plans, prompts, and completion
@@ -303,7 +307,8 @@ partial repository preserved. Repaired copy/repeat pass. The exact-manifest
 restore passes3367.648s/2200884KiB peak RSS; independent native current/history
 fingerprints and original-request retry pass with no new commit. Deep integrity
 inspection failed only on valid deferred membership, now owned by Goal5.
-Server-crash and full-fingerprint GC must still finish.
+Large source GC now passes397.876s/38644KiB peak with all12 full fingerprints
+exact and no blocked receipt-retirement prefix. Server-crash acceptance remains.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -328,31 +333,24 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-09:** Goal5 is the only active child again,
-repairing deferred-publication inspection and finite restore completion.
-Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
-successors and dependency retention. Goal 4 read-depth/history/composition APIs
-and public workflow pass. Goal5 closes semantic backup verification, versioned
-program-reference repair. Goal6 exposed active-receipt publication-prefix GC
-blocking, repeated index leaf decoding and a missing import retry policy.
-The GC/commitment SQL batching and retry repairs pass focused live checks.
-The next100k run reached head982/98100records but exposed a missing interior
-boundary preload and unconditional scheduling loop. Both are now repaired;
-normal consolidation of the retained failure and relevant live regressions pass.
-The fresh100k run passes in `atomic_goal6_scale.goal6_acceptance_20260909_b`,
-basis1002,773.913s import/129.213records/s with measured cache/RSS and zero eager
-loads; actual writer SIGKILL/fenced replay passes. The new exact-receipt cache/
-session reuse regression is repaired without weakening writer-admission limits.
-First100k backup passes129.687s/8214objects/484.54MB; unchanged repeat137.792s/
-0newobjects. The older standalone deep baseline was stopped incomplete after
-1608s; do not claim it passed. Current release resumes that exact retained
-manifest. Restore with mandatory deep verification passes3367.648s; native
-current/history fingerprints and original-request retry also pass. Integrity
-inspection failed on incomplete folding despite an exact protected live/pending
-node union; final unchanged-source checks did not run. Repair that boundary in
-Goal5, then resume the retained target's inspection/source checks, dedicatedserver
-crash and actual reclamation on the verified Rust-onlyGC phase repair. Latest configured
-library276passes precede the newest backup proof reuse; its17actualPG cases and
-small full/resumed operations workflows pass. See Goal5 for PIDs/binary/paths.
-Neither failed100k run is acceptance.
-No overall production outcome has yet been claimed.
+**Continuation checkpoint — 2026-09-09:** Goal5 is the only active child,
+verifying deferred-publication inspection and finite restore completion. All27
+focused live repair checks and current small end-to-end operations pass. The
+repaired large inspection is running on the original pending target BEFORE
+draining its406 rows. On success, finish only that publication through the normal
+bounded owner API and recheck exact native facts. Then reclose Goal5 and resume
+Goal6 for its actual dedicated55434 PostgreSQL crash and integrated acceptance.
+
+Banked large outcomes:100k import773.913s/129.213records/s, zero eager loads,
+actual writer SIGKILL/replacement/exact retry; first backup129.687s/8214objects/
+484539927bytes and repeat137.792s/0newobjects; semantic restore3367.648s/
+2200884KiB peak and exact native current/history/retry. The original operations
+parent exited1 on misclassified pending membership; do not relabel that command
+a pass. Source-unchanged full native capture subsequently passed1.093s/13412KiB
+at1002 before GC's intentional marker1003. Large source GC then passed397.876s/
+38644KiB peak, both windows quiescent and all12 full fingerprint scans exact.
+It retired68 obsolete publications and preserved receipt-owned payloads via68
+archives; total conversion read11227667529bytes. GC ran concurrently with target
+inspection, not as an isolated benchmark. See Goals5–6 for exact fixtures,
+measurements, retained failed attempts and current process identity. Never
+restart shared main55432. No overall production outcome is yet claimed.
