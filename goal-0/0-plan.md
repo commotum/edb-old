@@ -1,376 +1,347 @@
-# Goal 0 — Finish the Native Datomic Database
+# Goal 0 — Complete the Native Datomic Product and Missing Capabilities
 
 ## Objective
 
-Finish a usable, production-quality Rust database backed only by PostgreSQL
-that preserves Datomic's central benefits: immutable facts and database values,
-declarative atomic transactions in one authoritative order, strong identity,
-schema as information, accessible history and time views, local peer query and
-graph navigation, and reliable recovery and operation. Complete the existing
-implementation rather than restart it.
+Turn the existing working Rust/PostgreSQL Datomic-inspired database into a
+straightforward application and operator product, and implement the useful
+capabilities identified in the follow-up review. Preserve the verified engine;
+do not restart its implementation or treat its previous acceptance as proof that
+the deployment interface and feature surface are finished.
 
-Use `datomic_pro_docs/` to determine the intended behavior and
-`1.0.7705/` to understand the architecture, algorithms, and performance choices
-that make it practical. Translate that design thoughtfully into Rust and
-PostgreSQL. Success is a coherent working database, not exhaustive equivalence
-to compiled Datomic or completion of an expanding set of goal folders.
+Deliver a usable transactor executable, administrative commands, secure
+cross-host submission/reconnection and change observation, shareable exact
+snapshot references, practical application APIs, operational instrumentation and
+transaction hints, storage-independent cached reads, an opt-in SSD cache,
+richer persisted-program queries and plain-data/log query sources, integrated
+fulltext, and partition locality controls. Finish with one deployed application
+exercising these together and measured operating costs and read scaling.
+
+Use `/home/jake/Developer/atomic/datomic_pro_docs` as semantic authority and
+`/home/jake/Developer/atomic/1.0.7705` as architectural and algorithmic evidence.
+Translate useful capabilities and designs into native Rust and PostgreSQL;
+JVM classes, Clojure execution, Datomic wire/storage compatibility, other stores,
+and exhaustive decompilation equivalence are not objectives.
 
 ## Constraints
 
-- Rust runtime, PostgreSQL storage only. Existing Datomic database formats,
-  JVM/Clojure execution, wire compatibility, and other storage backends are
-  outside the objective.
-- Documentation governs semantics. Recovered source supplies implementation
-  evidence and resolves detail; investigate significant disagreements and
-  record deliberate native differences. Preserve useful recovered designs
-  without making exact classes, tree depth, compiler output, or internal error
-  precedence requirements in themselves.
-- Preserve immutable complete database values, unordered transaction meaning,
-  schema/ident authority, exact snapshot propagation, and one serialized fenced
-  writer. Persisted behavior must remain useful, deterministic, and controlled.
-- Keep queries and immutable caches at peers. Ordinary reads, writer state,
-  and localized updates must work with databases larger than memory through
-  durable indexes and bounded recent state. Measure costs against workload and
-  selectivity; do not demand constant work for broad scans or restrictive filters.
-- Preserve acknowledged commits, explicit unknown outcomes, safe retry,
-  failover, and versioned durable meaning. Respect existing data and applied
-  migrations; make compatibility boundaries explicit.
-- Authenticate ordinary root adoption under a trusted, restricted indexer
-  model. Reserve full tree-versus-log equivalence checks for deep verification;
-  do not require a new proof system for lazy opens.
-- Treat operational limits as explicit policy. Preserve documented semantics
-  such as Pull's default cardinality-many limit. Allow inherently broad work
-  such as backup, excision, and index creation to have measured, documented
-  costs. Preserve immutable captured values without inventing an exact
-  cross-rebuild retained-history promise for `noHistory`.
-- Verify risky boundaries with real PostgreSQL and relevant failures. A test
-  that returns without database configuration is not integration evidence.
-  Use targeted source/runtime witnesses; global AOT equivalence and complete
-  dormant-branch coverage are not prerequisites.
+- Preserve immutable facts and database values, declarative serialized
+  transactions, strong identity, schema as data, history/time views, peer-local
+  query/navigation, acknowledged commits, exact retry and fenced writer authority.
+- Preserve existing code, data, durable formats, applied migration checksums,
+  restricted roles and completed repairs. Extend durable meaning through explicit
+  versions/migrations; do not silently reinterpret old requests or program code.
+- Every capability named in this plan has an owning stage and remains required.
+  Lack of parity requirements permits native implementations, not silently
+  deleting features. Bring a material scope change to the user with concrete
+  evidence; do not hide it behind “optional,” “commercial polish,” or completion
+  language. Tactics and native API shapes remain implementation decisions.
+- Keep PostgreSQL as the sole durable authority and execute application queries
+  at peers. A disposable SSD cache is reconstructible acceleration, not another
+  authoritative store. Its implementation is required; enabling it is optional.
+  No mandatory external cache, broker or search service, or central SQL query
+  evaluator as a shortcut around integrated peer-local fulltext. A shared cache
+  or replica-read router is not required by this phase.
+- Preserve bounded ordinary state and configurable resource policy. Background
+  work must be finite/resumable. Broad scans and administrative operations may
+  cost proportionally to data; report their costs instead of demanding constant
+  work or imposing undocumented semantic limits.
+- Fulltext candidate availability is eventually consistent, not part of an
+  exact database basis. Validate returned facts against the supplied database
+  view. Do not invent synchronous freshness, basis-stable ranking, exact Lucene
+  scores, or unconditional fulltext excision as prerequisites absent from the
+  semantic contract. Document supported analysis/query syntax and lifecycle.
+- Hints are bounded, optional acceleration—not transaction data, facts, trust
+  evidence, or authority. Changed/stale/missing hints must preserve request
+  identity and results. Implement and measure them; a neutral benchmark may
+  justify keeping them opt-in, not claiming an unmeasured improvement.
+- A native controlled program runtime is appropriate; a permanently conjunctive
+  query subset is not required by determinism. Expand expressiveness while
+  preserving deterministic persisted execution and shared resource controls.
+- Cache-resident native reads must not depend on a foreground storage health
+  round trip. Preserve safe root/generation ownership and GC behavior when
+  changing pin maintenance; simply deleting health checks is not a solution.
+  This does not promise offline access to uncached data or expired snapshots.
+  Account for health, pin, metadata and background I/O as well as node reads.
+- Notifications are wakeups, not durable transaction authority. Recover gaps
+  from the authenticated log; periodic recovery/failure checks remain allowed.
+  Preserve existing lossless live report queues. A separate bounded restartable
+  consumer must specify checkpoint/replay and excision behavior, not imply
+  exactly-once external side effects or require a consumer-group platform.
+- Snapshot references name exact committed values with database lineage and
+  generation, not just a wall-clock time or a mutable endpoint. Reopening
+  requires authorization and retained data; unavailable/reclaimed references
+  fail explicitly. Do not promise indefinite retention, serialize arbitrary
+  speculative values, or freeze fulltext freshness/ranking through a reference.
+- Use actual PostgreSQL and relevant failure/security witnesses. Tests that
+  return early for missing configuration are not integration evidence. Respect
+  existing fixtures; crash/reclamation tests require isolated disposable targets.
+- Keep one child active and a flat parent/child structure. No corrective parent,
+  recursive goals, blanket reimplementation, or repeated exhaustive audits.
+  Basic executable/configuration/reconnection usability is part of the product;
+  a mandatory web health endpoint, console, marketplace release or new PostgreSQL
+  replication manager is not. Existing storage HA remains deployment policy.
 
-## Current status
+## Starting context — 2026-09-09
 
-**Status:** Complete — 2026-09-09. All six stages and integrated acceptance are
-established. There is no active child or known unfinished core failure. Preserve
-the measured operating limits and intentional native differences below; this is
-not a claim of universal production certification or exhaustive Datomic parity.
+**Status:** Planned; Goal1 is scaffolded and is the first child to execute.
+This request creates the next phase, not a claim that its features are implemented.
 
-## Historical starting point — 2026-09-08
+- `goal-archive/G1/` preserves original Goals0–8 (formerly A1);
+  `goal-archive/G2/` preserves corrective Goals9–17 (formerly A2);
+  `goal-archive/G3/` preserves the just-completed Goals0–6. All are evidence,
+  not active instructions. The current `goal-0/` owns this phase.
+- G3 established a native engine, independent peer processes, application
+  semantics, recovery and operations on real PostgreSQL. The 100,000-record
+  import, writer replacement, portable restore/deep inspection, actual server
+  crash, exact retry and full snapshot/history checks through GC passed.
+  Preserve the fixtures and distinguish the recorded failed attempts from passes.
+- The current package is one unpublished `atomic-core` library plus example
+  executables. Submission is in-process or same-host/same-user Unix sockets;
+  adapter restart currently creates a new endpoint. PostgreSQL TLS already exists.
+- Native `with`, query/Pull, temporal views, log, `entid_at`, entity navigation,
+  synchronous consolidation, `sync_index`, and service/cache/query counters exist.
+  Missing small surfaces include snapshot `db_stats`, asynchronous
+  `request_index`, and time-ordered UUID helpers. Do not recreate working APIs.
+- Persisted `QueryTemplate` permits conjunctions of fixed-attribute patterns,
+  unlike the richer peer query language. Fulltext and transaction hints are
+  absent. Entity validation permits only the three built-in partitions.
+- G3 measured import at129.213 records/s on its declared host; deep restore
+  took3367.648s and inspection2595.920s. These are baselines, not universal SLAs
+  or acceptable-by-definition performance. Data exceeded configured caches,
+  not physical RAM. Use the retained evidence and profile actual bottlenecks.
 
-This strategy builds on existing code; historical repairs did not vanish.
+The follow-up review of Rich Hickey's *Deconstructing the Database* identified
+these additional gaps by source inspection, not new test runs:
 
-- The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
-  goals 9–17 are in `goal-archive/A2/`. Their plans, prompts, and completion
-  labels are historical evidence, not active instructions. This plan and its
-  loop replace both parent loops and their uncreated Goals 18–20.
-- The code already includes a substantial semantic kernel, durable log,
-  persistent trees, bounded recent state, tiered writer, exact query/pull
-  database values, controlled programs, fencing, and lifecycle tooling.
-  Corrective Goals 10–16 record focused PostgreSQL and failure evidence.
-- The review at code commit `19b799d` attempted
-  `cargo test --offline --all-targets --no-fail-fast`; compilation failed because
-  a `TieredReadCore` initializer in `src/peer.rs` omitted `lineage_id`. No tests
-  executed in that review. Recheck current code before acting.
-- The former Goal 17 is partly implemented beyond its written status:
-  time-point resolution, raw-boundary normalization, bidirectional cursors,
-  a connection facade, and complete report types exist with test fixtures.
-  Finish and verify these pieces rather than build them again.
-- Static review found catch-up without report enqueueing, fallible report
-  adoption after successful commit when ticket waits are out of order,
-  connection construction coupled to service startup, eager peer fallbacks,
-  and missing background/specialized synchronization at the public boundary.
-  These are investigation targets, not newly reproduced runtime failures.
-- Unresolved transaction tuple references, chainable native speculative
-  values, default query/pull ceilings, API omissions, deep backup/archive
-  semantic checks, and integrated production evidence remain.
-- The newer decompilation is a sufficient source-study corpus. It is not a
-  standalone recovered runtime. Consult the archived evidence ledger and
-  relevant source directly; restore a narrow oracle only for a consequential
-  question that needs executable reference evidence.
+- Native cursor opening calls `root_pins.ensure()` / `SELECT 1`; node-read
+  counters omit that traffic. Cache hits share a lock with slow PostgreSQL
+  reads. An in-memory `db()` capture is not proof of storage-independent queries.
+- Independent connection observers poll storage at roughly 100ms; immediate
+  commit hints are process-local. Log replay and blocking live reports exist,
+  but supported persistent consumer checkpoints/resume do not.
+- Exact snapshot opening exists internally, not as a public export/reopen API.
+  `as_of` on a newly opened value preserves that value's schema and basis; it
+  is not a substitute for reopening an exact older value.
+- Multiple database sources and relation inputs exist, but plain datom tuples
+  cannot replace a database-pattern source unchanged. Public log traversal and
+  `tx_ids`/`tx_data` exist without corresponding query integration.
+- Native node caching is in-process only. G3's representative warm query still
+  made the same four node reads as cold; its two submitting peers did not prove
+  increasing-reader throughput or isolation from a scan-heavy analytics peer.
+  Transaction provenance, standby takeover and background indexing already
+  exist and need integration, not replacement subsystems.
 
-## Parent and child execution
+Targeted source leads, not an exhaustive reading gate: recovered
+`datomic/launcher.clj` and `coordination.clj`/`reconnector2.clj` for deployment;
+`stats.clj` and `common.clj` for small APIs; `db.clj`'s `with-tx+opts` and
+transactor `update.clj` for advisory prefetch; `fulltext.clj`,
+`fulltext_index.clj` and `lucene.clj` for search; and `db.clj`'s partition
+allocation/assignment paths. The local transaction-hints, partitions, fulltext
+schema/query and release-notice docs establish the corresponding contracts.
+For the talk-derived additions, consult `datomic/connector.clj` / `peer.clj`
+for notifications and catch-up, `cache.clj` / `kv_cache.clj` for concurrent
+misses and cache tiers, and the local synchronization, log, caching and Valcache
+docs. Native starting points include `connection.rs`, `peer.rs`'s exact open,
+root pins and node loader, `native_log.rs`, and `query.rs`'s sources/functions.
 
-Goal 0 owns the overall objective and continuation loop. Each numbered stage
-maps to the active repository folder `goal-N/`: Stage 1 to `goal-1/`, through
-Stage 6 to `goal-6/`. These names are distinct from the archived goal passes.
+## Execution ownership
 
-For the first unfinished stage, use `$scaffold-goal` to create its three-file
-scaffold if absent, or reconcile and resume the existing child if present.
-Execute the child through its completion signal, fold material evidence and
-status into this plan, then return to the parent and repeat for the next stage.
-Creating a scaffold does not complete a stage and is not a stopping point when
-running the parent continuation prompt.
+Stages1–7 map to repository `goal-1/` through `goal-7/`. Goal0 owns the entire
+outcome, not an additional implementation layer. Reconcile an existing child;
+use `$scaffold-goal` to create a missing child's `0-plan.md`, `0-loop.md` and
+`0-prompt.md`. Only Goal1 is created now. Do not pre-create speculative hierarchies.
 
-Keep one child as the active focus, with integration checks throughout. Fix
-necessary prerequisites across stage boundaries without manufacturing new
-goals. Revise unfinished stages and their child plans when evidence warrants;
-preserve established child identities and completed work. Child requirements
-must serve the parent objective and must not reintroduce exhaustive proof gates.
-After all children complete, verify the overall success condition and return
-any discovered gap to its owning child before declaring Goal 0 complete.
+Execute the first unfinished child through its completion signal, update this
+plan with material results, then return to `0-loop.md` and execute the next.
+Scaffolding or finishing one child does not finish the parent. Fix discovered
+prerequisites in their owning code without erasing prior work or opening several
+competing active children. Reopen an owning child for an integrated failure.
 
 ## Stages
 
-### 1. Restore a trustworthy runnable baseline
+### 1. Make the native database usable without example harnesses
 
-**Status:** Complete; [Goal 1](../goal-1/0-plan.md) records the verified baseline.
+**Status:** Pending; [Goal1](../goal-1/0-plan.md) is scaffolded.
 
-Lineage initialization, forward raw-boundary routing, and atomic catch-up report
-publication repaired. Build/clippy and pure baseline pass. Real PostgreSQL
-15.11 evidence: 19 peer, 6 durability (including actual restart), and 15 selected
-service tests pass; the corrected corruption witness ran separately. A public
-schema/transact/query/pull/history/immutable-value/reopen example runs. These
-are baseline checks, not full live-suite or scale acceptance. See child evidence
-for corrected fixtures and the isolated rerun after restart interference.
+**Outcome:** Developers and operators can run the transactor and routine
+administration through supported executables and use the missing small APIs.
 
-**Outcome:** The current implementation builds, its real failures are known,
-and an ordinary application workflow provides a continuing integration check.
+**Focus:** Configured local transactor lifecycle, safe administrative commands,
+normal application setup, restricted-role guidance, snapshot statistics,
+asynchronous finite-target indexing requests, and time-ordered UUID utilities.
+Reuse existing services, operators, indexes and typed APIs.
+Document current read/storage and report-queue limits accurately; later stages
+own the talk-derived runtime changes, not a new prerequisite gate for Goal1.
 
-**Focus:** Reconcile the partial connection changes with actual code; fix the
-build; run appropriate existing tests with explicit PostgreSQL execution;
-establish a small schema/transact/query/pull/history/reopen workflow. Record
-only material failures and evidence, retaining working prior repairs.
+**Completion signal:** A real executable-backed application provisions an
+explicit fixture, submits/queries, retains old values, stops/restarts and reopens
+durably. Administrative commands preserve privilege and destructive-operation
+boundaries. The three small APIs have direct semantic/cost checks. This is local
+product acceptance; Stage2 still owns secure multi-host deployment.
 
-**Completion signal:** The build and relevant baseline tests pass, the
-application workflow runs against disposable PostgreSQL, and remaining gaps
-have concrete locations and ownership in the stages below. Do not require
-every later feature to be complete before banking this baseline.
+### 2. Support distributed applications, reaction and snapshot handoff
 
-### 2. Complete the native connection and observation model
+**Status:** Pending.
 
-**Status:** Complete again; [Goal2](../goal-2/0-plan.md) records weak read-core reuse
-after ambiguous outcome/reconnect:24retries/8reconnects retain3PG sessions, then
-release read/pin lanes when receipts drop. Immutable receipts survive reduced
-writer limits without admitting over-cap work. Original failures and targeted
-archive/restore/excision checks pass. Preserve its verified authenticated lazy
-boundary loading and finite background scheduling. Final PostgreSQL-configured
-library passes266/1intentional ignore; all7targeted safety cases and clippy pass.
+**Outcome:** Applications connect to a stable logical database and submit to the
+current transactor across hosts, react to changes across restart, and share
+references to exact committed database values.
 
-The retained98100-record failure now consolidates to indexrevision622/basis982
-without changing the transaction head/hash. Boundary/retraction matrices and
-17renewed checks (15actualPG) pass. Maintenance finishes its captured demand
-without repeatedly indexing newer subthreshold tails; real multi-batch/restart
-fixtures pass. Goal6 now records the successful complete scaled run.
+**Focus:** Native authenticated/encrypted submission, endpoint discovery,
+reconnection, lease/lineage binding, admission/deadline policy and exact receipt
+handoff. Add bounded cross-process commit/index wakeups with log gap repair;
+support a bounded replay/live consumption API and example with durable
+checkpoint/resume semantics bound to database lineage, generation and the last
+processed transaction. Expose versioned exact snapshot references and
+authorized reopening using existing native coordinates, including lineage,
+generation and exact commit identity. Reuse native codecs and authority; no
+Datomic broker/wire emulation, mandatory HTTP interface or new message broker.
 
-Progress: strict independent native reads, non-owning writer attachment and
-replacement, ordered service observation independent of ticket waits,
-background catch-up with complete tempid receipts, and native index/schema/
-excision synchronization now have focused real PostgreSQL evidence. The public
-two-peer workflow reads and reopens after writer shutdown. An eight-transaction
-lagging-peer witness adopts the indexed prefix with zero recent datoms and zero
-eager materializations; this is not a realistic scale benchmark. Independent-
-process submission now uses a bounded/versioned same-user Unix socket. The
-separate writer/two-peer process workflow passes, as do all 7 native connection
-tests, transport commit-loss/receipt checks, writer/observer-stall checks, and
-actual dedicated PostgreSQL restart with logical and physical sync. Excision
-catch-up retains ordered original reports across multiple generations. Peer
-db/sync defaults are native; eager adapters are explicitly named. The broader
-PostgreSQL peer rerun passed 19/19. SQL/network
-failure-envelope policy and realistic load are verified in Stages5–6;
-socket delivery deadlines do not cancel arbitrary blocked receipt SQL.
+**Completion signal:** Independent networked application/transactor processes
+exercise remote submission, replacement and rediscovery with exact old values,
+acknowledged/unknown outcomes and identical-key retry. Invalid credentials,
+wrong lineage and stale endpoints fail safely. Verify a genuine network boundary
+with separate hosts or isolated network environments, not only Unix sockets.
+Measure idle storage traffic and commit-observation latency. Dropped/coalesced
+notices, disconnects and consumer restarts recover correctly from checkpoints
+without unbounded buffering; replay and unavailable-history behavior are explicit.
+Another process reopens a retained snapshot reference after newer commits and
+schema changes and obtains the same exact value. Invalid/wrong-lineage or
+unavailable references fail explicitly. Retained pre-excision references follow
+the documented access/retention policy rather than silently opening a new value.
 
-**Outcome:** Applications connect, submit transactions, and observe exact
-immutable native values through a coherent API, with reads independent of
-writer availability and lifetime.
+### 3. Deliver independent cached reads, cost visibility and hints
 
-**Focus:** Separate connection attachment from embedded service ownership;
-finish ordered background advancement, complete opt-in reports, and durable
-success/unknown handling independent of ticket wait order. Complete native
-db/sync defaults, raw forward/reverse traversal, T/Tx/instant views, and
-transaction/index/schema/excision synchronization. Make eager oracle/admin
-access explicit. Choose the smallest concrete deployment and delivery design
-that supports independent peers and the single writer.
+**Status:** Pending.
 
-**Completion signal:** Own and external writes yield complete ordered reports;
-concurrent submissions, catch-up, reconnect, and writer replacement preserve
-exact old values and acknowledgement semantics. Native cursors and time views
-match semantic fixtures with measured lazy access. An ordinary application
-path does not materialize the eager database or require ownership of the writer.
+**Outcome:** Applications can attribute I/O and transaction costs to their own
+operations, perform cache-resident queries without foreground storage calls,
+reuse an optional SSD cache, and supply useful bounded advisory prefetch hints.
 
-### 3. Close transaction and speculative-value semantics
+**Focus:** Operation contexts, nested/concurrent attribution, transaction-phase
+timing and metric callbacks covering all storage work. Separate cache access
+from bounded storage work, coalesce same-hash misses, and move pin maintenance
+off routine warm reads while preserving reclamation safety. Implement a bounded,
+opt-in local SSD cache of authenticated immutable bytes with safe fallback,
+access/format separation, restart reuse and documented excision/retention policy.
+Build speculative read tracing, versioned hint transport, authenticated cache
+admission, overlapping bounded prefetch and cancellation on this read path.
 
-**Status:** Complete; [Goal 3](../goal-3/0-plan.md) records transaction acceptance.
+**Completion signal:** Concurrent labelled operations have correctly attributed
+measurements, distinguishing foreground work and background maintenance. A
+fully warmed native query performs no foreground SQL and works through a
+temporary storage outage within the supported snapshot-retention contract;
+uncached/unavailable data fails safely. A deliberately slow cold miss does not
+hold unrelated cache hits behind its storage operation. GC, pin loss/reacquisition
+and restart checks preserve exact old values. SSD cache disablement, eviction,
+corruption and reuse across process restart have direct checks and measured
+costs/benefits; neither cache availability nor cache bytes establish authority.
+Valid, stale, altered and absent hints preserve facts and retry identity.
+Cold/warm dependency workloads measure queue/service latency, I/O,
+peer overhead and cache effects. Publish the measured benefit or lack thereof;
+the feature must exist without requiring it to improve every workload.
 
-Progress: primitive native `with` returns immutable before/after reports and
-supports flattened speculative chains. Eager/native/PostgreSQL differentials
-cover current/history/time/raw traversal, schema/index/noHistory changes and
-ident aliases with no durable advancement or eager loads. A 2,000-step small-
-stack witness and query/pull application branch pass. Tuple/ref-shaped lookup
-inputs and controlled runtime values now pass eager/native/socket/recovery
-fixtures with old receipts and program hashes preserved. The shared native/
-durable controlled pipeline passes actual PostgreSQL acceptance, including code
-retention after reclaim, shared limits, exact predicates and the docs' "as-of
-is not a branch" rule. Final library 250 passed/1 ignored; semantic 22, tuple
-schema 9, runtime 22 pass. Full controlled suite 4/4 and filtered native test
-pass live; public controlled/tuple/speculation workflow reopens at t=3.
+### 4. Expand useful persisted programming and native authoring
 
-**Outcome:** The native API expresses the documented core transaction inputs
-and supports pure, chainable speculative database successors.
+**Status:** Pending.
 
-**Focus:** Reference-shaped tuple slots and lookup keys, tempid/upsert
-resolution, native `with`, complete successor validation, and controlled
-function/predicate composition. Reuse existing semantic access and tiered
-assessment. Version request/program changes where required, keeping stored
-values distinct from unresolved transaction input.
+**Outcome:** Persisted business rules can use practical deterministic query
+composition, and developers can author native queries/programs conveniently
+and query database values, plain data and transaction logs together.
 
-**Completion signal:** Source-backed fixtures and eager/native differentials
-cover legal and invalid reference forms, successive speculative transactions,
-schema changes, and programs. Durable submission, retry, and recovery preserve
-the same accepted facts and identity without full-database reconstruction.
+**Focus:** Close the current restrictions on predicates, rules, negation,
+historical sources and dynamic attributes in program queries. Reuse the native
+query model and resource controls where appropriate, with versioned durable
+forms. Add ergonomic query/program authoring over existing representations;
+typed builders or a safe data/text front end need not embed Clojure or reproduce
+its exact syntax. Do not require a new general-purpose programming language.
+Add plain datom/tuple sources that substitute for database-pattern sources
+without rewriting the query. Integrate the existing authenticated log API with
+query through native `tx_ids`/`tx_data` equivalents. Preserve existing multiple
+database sources and relation-input semantics; keep adapters bounded and under
+query controls rather than requiring PostgreSQL for plain-data tests.
 
-### 4. Finish useful query, pull, and history access
+**Completion signal:** Representative business rules exercise all five formerly
+excluded query capabilities, with source-backed semantics and native/durable
+checks. Speculation, durable execution, old program versions, retry and recovery
+agree. Unsafe/nondeterministic execution remains controlled; application examples
+show usable authoring rather than only hand-assembled low-level instructions.
+The same query runs over a real database source and an equivalent small datom
+fixture. Log-derived changes join to entity/transaction provenance facts with
+correct range boundaries, cancellation and documented source semantics.
 
-**Status:** Complete; [Goal 4](../goal-4/0-plan.md) records native read acceptance.
+### 5. Add integrated peer-local fulltext
 
-Progress: accidental query/Pull defaults removed, iterative traversal and deep
-result/selector ownership verified, native log and index-pull pass real PG,
-and useful query/Pull composition is implemented. Shared persisted-query fuel,
-deferred projections, return maps and native random aggregates have focused
-tests. The expanded public workflow and all eight final nested shape fixtures
-pass on actual PostgreSQL after writer shutdown. All-target clippy and broad
-Rust regression pass; unconfigured PG cases are not live evidence. Fulltext and transaction
-hints have individual documented consequences/deferral rationale, not blanket
-parity exclusions. Operational and integrated acceptance is recorded in Stages5–6.
+**Status:** Pending.
 
-**Outcome:** Local queries and navigation preserve exact snapshot semantics,
-have no accidental finite language limits, and expose a truthful useful surface.
+**Outcome:** Selected string attributes support analyzed, relevance-ranked
+search that composes with Datalog and respects the queried database view.
 
-**Focus:** Explicit resource controls, stack-safe unlimited pull recursion,
-accessible log history, and remaining query/pull APIs. Assess nested queries,
-return maps, pull transforms, lazy result projection, index-pull, fulltext,
-random aggregates, and transaction hints against the objective and source.
-Implement core and practical low-machinery features; justify specialized
-omissions individually. Deterministic persisted execution does not by itself
-forbid randomness in local read queries. Lazy result projection need not imply
-a wholly streaming Datalog evaluator.
+**Focus:** Versioned schema/search metadata, native analysis and search,
+background indexing, immutable durable search ownership, query integration,
+current/history visibility and rebuild/recovery/backup/GC behavior. Consult the
+recovered per-attribute search, candidate filtering and publication designs.
 
-**Completion signal:** Large-result/deep-navigation fixtures work absent
-explicit limits; documented limits remain correct. Implemented features have
-direct semantic checks and an application example. Every material remaining
-omission is identified with its consequence; none removes a central benefit
-or is hidden behind a parity claim.
+**Completion signal:** An application searches text and joins results with
+structured facts. Documented analyzer/query semantics, lag and view filtering
+are tested across updates/retractions, reopen, backup/restore and reclamation.
+Queries run at peers using PostgreSQL-backed durable search data. Supported
+excision behavior is explicit and safe; no extra service or substring-only
+substitute is presented as fulltext.
 
-### 5. Establish operational integrity and recovery
+### 6. Add partition assignment and useful locality controls
 
-**Status:** Complete again; [Goal5](../goal-5/0-plan.md) closes the publication/
-inspection mismatch on the original large target. Repaired deep inspection
-passes2595.920s/1566504KiB peak while authenticating406 pending nodes. Normal
-bounded completion produces exact1430-node live membership without changing the
-head; post-fold full native fingerprints pass1.120s/13600KiB, zero eager fallback.
-Large source GC passes both quiescent windows and all12 full fingerprint scans.
-Preserve the operational-scale repairs below.
-Initial/repeat capture and indexed eager validators are repaired. Three redundant
-restore replays are replaced by exact-byte/coordinate proofs with17live regression
-passes. GC's repeated19.67s empty semantic sweep is deferred to its own phase;
-22liveGC/integrity/lifecycle checks and the12-full-fingerprint small workflow
-pass. The100k restore and subsequent integrated crash/GC pass in Stage6.
-Preserve schema25 and earlier lifecycle repairs.
+**Status:** Pending.
 
-Integrated testing found that active-generation receipt bases pin the oldest
-physical publication and prevent later prefix-ordered retirement indefinitely.
-Migration25 now provides bounded resumable same-hash archive handoff preserving
-receipts and snapshot pins. Actual tiny workflow reclaims publications8→2 and
-nodes138→120 with blocked prefixes2→0 and no lost receipt bindings. New ordinary
-conversion, interrupted kind1-generation/excision, backup/restore/exact retry,
-upgrade/role and all15GC+3integrity checks pass. A second archive/semantic-GC
-phase mismatch exposed by this lifecycle was also repaired and verified. Stage6
-measures97,394 conversion reads/11,227,667,529bytes across retained receipt closures.
+**Outcome:** Applications can group related entities into custom/implicit
+partitions and control new-entity placement without changing transaction meaning.
 
-Deep backup/archive and pending-index provenance checks now reject validly
-hashed false trees. Migration24 repairs versioned code roots, preserves paused
-restore roots and rejects truncated published/retired logs atomically; all eight
-upgrade fixtures pass live. Real backup/restore, GC/pins, interrupted excision,
-role/TLS, configured SQL timeout/unknown-retry and actual PostgreSQL restart
-witnesses pass. Native and separate writer/two-peer workflows pass on schema24.
-The active operator guide states quiesced repair, retention and deadline limits.
-Broad administrative costs and deployment scale are measured in Stage6.
+**Focus:** Named partition schema data, implicit partition helpers, force/match
+assignment, allocation/tempid/upsert interactions, native input forms and durable
+validation. The current whitelist is an implementation restriction, not a
+PostgreSQL requirement. Preserve existing IDs and exact receipt meaning.
 
-**Outcome:** Operators can protect, recover, upgrade, inspect, reclaim, and
-excise the database under an explicit and tested trust and retention model.
+**Completion signal:** Related-entity and tenant/customer examples exercise both
+partition forms and force/match assignment through local and remote submission.
+Invalid/conflicting assignments reject consistently; identity, speculation,
+indexes, historical views, recovery and retry remain correct. Measure locality
+under an appropriate workload without promising a universal speedup or making
+partitions an authorization boundary.
 
-**Focus:** Deep semantic comparison of backup and request-archive trees with
-their authoritative log points; restore/retry correctness; root and generation
-lifetimes; migration/runtime authority; secure transport; excision completion
-and external retention limits. Revisit existing code only where fresh evidence
-shows a gap. Document costs of broad administrative operations. Reconcile older
-program generation-reference rows for dependencies previously omitted inside
-callable lookup references and dual-predicate bodies; new traversal is repaired.
+### 7. Establish integrated product and operating acceptance
 
-**Completion signal:** Meaningful corruption, interrupted backup/restore,
-restart, GC/pin, upgrade, and excision witnesses pass on PostgreSQL. Deep checks
-detect internally consistent false derived trees; normal trusted-root opens
-remain lazy. Operator procedures state supported guarantees and limitations.
+**Status:** Pending.
 
-### 6. Demonstrate the complete system under realistic load and failure
+**Outcome:** The newly implemented capabilities work together as a usable native
+database, with reproducible deployment instructions and an honest operating envelope.
 
-**Status:** Complete; [Goal6](../goal-6/0-plan.md)
-has passed the100k independent-peer deployment and writer SIGKILL/replacement.
-First backup was incomplete after520s and deliberately stopped with source and
-partial repository preserved. Repaired copy/repeat pass. The exact-manifest
-restore passes3367.648s/2200884KiB peak RSS; independent native current/history
-fingerprints and original-request retry pass with no new commit. Deep integrity
-inspection's original deferred-membership failure is now repaired and verified.
-Large source GC now passes397.876s/38644KiB peak with all12 full fingerprints
-exact and no blocked receipt-retirement prefix. Actual dedicated PostgreSQL
-immediate shutdown/WAL recovery passes: storage518ms, replacement2616ms including
-lease expiry,16 full old/acknowledged/as-of/successor/reopen scans exact and zero
-eager fallback. No duplicate commit on retry; normal next commit succeeds.
+**Focus:** Exercise the actual executable/SDK path with remote peers, programs,
+search, locality, notifications/resumable consumers, snapshot handoff, query
+sources, caching, failures and lifecycle operations. Measure increasing reader
+counts, warm selective queries, cold-start bursts and a scan-heavy analytics
+peer alongside normal application traffic. Include throughput, latency tails,
+memory/cache behavior and total PostgreSQL load; separate query CPU scaling
+from shared-storage bottlenecks. Profile and improve material bottlenecks,
+including the expensive G3 administrative paths, without weakening integrity
+or inventing an unmeasured performance target.
 
-**Outcome:** One reproducible deployment and acceptance workflow demonstrates
-the original database objective and a measured operating envelope.
+**Completion signal:** Real PostgreSQL end-to-end acceptance covers every named
+capability and relevant interrupted/retry/upgrade boundaries. Measurements and
+instructions distinguish ordinary and broad work, changed versus retained
+baselines, and tested versus untested conditions. Every required feature has
+implemented, exercised evidence; no missing capability is hidden as an exclusion.
+Read-scaling evidence uses more than one fixed peer count and measures foreground
+plus background/health/pin traffic, not only node-read counters. Validate cached
+native query behavior rather than substituting eager compatibility reads or
+local basis access. Publish the observed limits without promising linear scaling
+or arbitrary offline reads. Only then close this parent.
 
-**Focus:** Independent peers, serialized concurrent writes, representative
-queries and programs, data/history larger than caches, consolidation, abrupt
-process/server failures, failover, recovery, and operational procedures.
-Provision isolated fixtures and prove tests execute. Measure memory, range I/O,
-recovery latency, and throughput against declared workload and resource sizes;
-fix discovered defects directly rather than creating another corrective parent.
+## Continuation
 
-**Completion signal:** The coherent application/deployment workflow and
-risk-appropriate integrated tests pass; retained snapshots and committed history
-remain correct under failure; measurements support the claimed scale. Current
-API documentation and run instructions describe the actual supported system.
-
-## Success and continuation
-
-Complete when the Rust transactor and independent peers, backed only by
-PostgreSQL, deliver the core information model as one usable, tested,
-recoverable system, with measured operational behavior and intentional,
-documented differences from Datomic. No known core correctness or usability
-failure may be relabeled as a non-core omission to close the goal.
-
-**Completion checkpoint — 2026-09-09:** All children are complete and the original
-integrated objective is established. Goal5's27 focused live repair checks, current
-small operations workflow and original large pending-state inspection pass.
-Normal bounded folding yields exact1430-node membership without changing facts.
-Goal6's actual dedicated-server crash and all16 full fingerprint scans pass,
-alongside large source GC and its12 full scans. Final formatting, all-target
-Clippy with warnings denied and diff checks pass. Public run instructions match
-the exercised drivers; earlier failed commands remain accurately recorded.
-
-Banked large outcomes:100k import773.913s/129.213records/s, zero eager loads,
-actual writer SIGKILL/replacement/exact retry; first backup129.687s/8214objects/
-484539927bytes and repeat137.792s/0newobjects; semantic restore3367.648s/
-2200884KiB peak and exact native current/history/retry. The original operations
-parent exited1 on misclassified pending membership; do not relabel that command
-a pass. Source-unchanged full native capture subsequently passed1.093s/13412KiB
-at1002 before GC's intentional marker1003. Large source GC then passed397.876s/
-38644KiB peak, both windows quiescent and all12 full fingerprint scans exact.
-It retired68 obsolete publications and preserved receipt-owned payloads via68
-archives; total conversion read11227667529bytes. GC ran concurrently with target
-inspection, not as an isolated benchmark. Final source is generation1/basis1003
-after the GC marker; restored target is generation1/basis1004 after the two crash
-markers. Both have zero live writer leases and durability settings on. The exact
-1002 backup and all failed-run artifacts remain preserved. See Goals5–6 for
-hashes, paths, measurements and test provenance.
-
-The information model, independent peer application path and recovery outcomes
-are verified together. Broad deep restore/inspection are measured, expensive
-administrative operations; ordinary state remains bounded in the tested workload.
-Data exceeds configured caches, not physical host RAM, and warm queries did not
-eliminate SQL. Fulltext and transaction locality hints retain their individually
-documented consequences in Goal4; JVM/wire compatibility, other stores and
-exhaustive decompilation equivalence were never objectives. No new parent or
-recursive goals are needed. For future use, follow `docs/operations.md`; reopen
-the owning child only for a newly demonstrated core gap, not to repeat this
-acceptance merely because a new session starts.
+Scaffolds reconciled with the talk-derived additions; implementation of this
+phase has not begun. Read Goal1 and reconcile current executable/API surfaces,
+then implement Stage1 directly. G3
+remains the preserved baseline, not an instruction to repeat its entire campaign.
+At session boundaries record the active child, last verified result, actual
+remaining issue and next useful action. Report blockers plainly when new
+authority or information is genuinely required.

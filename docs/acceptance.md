@@ -6,8 +6,9 @@ PostgreSQL may be remote through the configured, verified-TLS API. The examples
 below use explicitly supplied development PostgreSQL connections; they are not
 a TCP transaction service or a PostgreSQL HA manager.
 
-Goal 6's plan is the record of completed runs and workload-specific measurements.
-Until that plan closes, these drivers are acceptance work in progress, not an
+[Archived G3 Goal6](../goal-archive/G3/goal-6/0-plan.md) records completed core
+runs and workload-specific measurements. The fresh Goal0 extends that baseline;
+these existing drivers do not establish its unimplemented features or an
 unqualified production/scale claim. Read [operations.md](operations.md) for
 roles, transport policy, upgrade, unknown outcomes, retention and excision.
 

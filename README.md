@@ -7,7 +7,7 @@ programs, and operational recovery. Retained Datomic Pro documentation governs
 semantics; recovered source is architectural evidence, not a JVM/wire target.
 Earlier goal passes remain preserved in `goal-archive/`.
 
-Goal 0's six stages and integrated acceptance are complete. The independent-peer
+The G3 pass's six stages and core integrated acceptance are complete. The independent-peer
 100,000-record workload passes, including abrupt writer replacement, portable
 backup/restore, deep integrity inspection, actual PostgreSQL crash/WAL recovery,
 exact retry and full old/current/history checks through GC. Schema25 preserves
@@ -18,24 +18,31 @@ failure as well as focused live PostgreSQL regressions.
 This is a measured native operating envelope, not universal production or
 Datomic-parity certification. Import measured 129.213 records/s on the documented
 local host; broad semantic restore took 56m 7.648s and deep inspection 43m 15.920s.
-See [Goal 6](goal-6/0-plan.md) and the [operator guide](docs/operations.md) for
+See [G3 Goal 6](goal-archive/G3/goal-6/0-plan.md) and the [operator guide](docs/operations.md) for
 resource limits, retained evidence, commands and deliberate differences.
+
+The fresh [Goal 0](goal-0/0-plan.md) plans the next phase: usable executables and
+administration, missing application APIs, secure cross-host submission and
+discovery, instrumentation and hints, richer persisted programs, fulltext and
+partition controls. Goal1 is scaffolded for the executable/API stage. These are
+planned additions, not newly implemented capabilities or G3 completion claims.
 
 ## Start here
 
-- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the objective and completed
-  acceptance; [`0-loop.md`](goal-0/0-loop.md) guides execution and
+- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the next-phase objective and
+  required capabilities; [`0-loop.md`](goal-0/0-loop.md) guides execution and
   [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
-- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: restore and verify
-  the runnable baseline. Goal 0 scaffolds and executes each following child,
+- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: usable local
+  transactor/admin executables and small API additions. Goal0 scaffolds and executes each following child,
   reconciling results until the overall objective is complete.
-- [`goal-archive/`](goal-archive/README.md) indexes the original goals 0–8 in
-  A1 and corrective goals 9–17 in A2. Their completion labels are historical.
-- [The corrective evidence ledger](goal-archive/A2/goal-9/EVIDENCE_LEDGER.md)
+- [`goal-archive/`](goal-archive/README.md) indexes original Goals0–8 in G1,
+  corrective Goals9–17 in G2, and the completed native-core Goals0–6 in G3.
+  Their plans and completion labels are historical evidence, not active policy.
+- [The corrective evidence ledger](goal-archive/G2/goal-9/EVIDENCE_LEDGER.md)
   maps prior repairs and unresolved questions to the docs and recovered source.
 - [The active operational guide](docs/operations.md) describes provisioning,
   I/O policy, backup/restore, GC and excision. The archived
-  [tiered writer architecture](goal-archive/A2/goal-16/ARCHITECTURE.md) retains
+  [tiered writer architecture](goal-archive/G2/goal-16/ARCHITECTURE.md) retains
   implementation evidence; check it against current code.
 - [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
   Transactor reference corpus.
@@ -129,8 +136,8 @@ transaction-report queues are unbounded; consumers must drain or disable them.
 Dropping a read connection requests observer shutdown without waiting for a
 stalled storage read; its worker and pins release when that in-flight read ends.
 
-These small examples establish application paths, not scale acceptance. Goal 6
-adds measured deployment/maintenance drivers; its plan records actual runs and
+These small examples establish application paths, not scale acceptance. G3 Goal6
+records measured deployment/maintenance drivers, actual runs and
 the workload-specific operating envelope.
 
 `DatabaseValue::with(&ops, tx_instant)` now returns a pure
@@ -146,8 +153,8 @@ remain fully resolved. Ordinary request and program hashes remain unchanged;
 new inputs select new grammars and (for code literals) program ABI 6. Transactions
 on filtered values use the full basis and retain the filters on their result:
 `as_of` is not a branch of the past. History values cannot transact. Controlled
-generation follows this same docs-first native rule. Goal3 records its live
-semantic acceptance; Goal6 records integrated load and failure acceptance.
+generation follows this same docs-first native rule. Archived G3 Goal3 records
+its live semantic acceptance; G3 Goal6 records integrated load and failure acceptance.
 
 ## Native read access
 
@@ -187,16 +194,18 @@ noHistory transactions. `DatabaseValue::index_pull` lazily projects AVET/AEVT
 ranges with forward/reverse bounds, offset and optional limit, using the exact
 captured database and documented reference/cardinality rules.
 
-Two specialized capabilities are deliberately absent. Fulltext would require
+Fulltext and transaction hints are not yet implemented; both are required by
+the new Goal0 plan. Fulltext requires
 an analyzed, ranked, eventually consistent search index and immutable lifecycle;
 ordinary exact string queries do not replace it. `db/fulltext` remains rejected,
 so applications needing token search must supply a separate search projection.
 Transaction hints are optional peer-to-writer segment prefetch, not transaction
 meaning. The writer has bounded read memoization but no cross-peer hint channel;
 cold submissions may incur additional index reads. Neither omission changes
-identity, transactions, history, or local Datalog/Pull semantics. See Goal 4 for
-the source-based decisions and measured read fixtures. Goal 5 records operational
-integrity evidence and the completed GC repair; Goal6 records integrated
+identity, transactions, history, or local Datalog/Pull semantics. See archived
+G3 Goal4 for the earlier source-based decisions and measured read fixtures.
+G3 Goal5 records operational integrity evidence and the completed GC repair;
+G3 Goal6 records integrated
 acceptance alongside the preserved unsuccessful earlier large-run evidence.
 
 ## Working boundary

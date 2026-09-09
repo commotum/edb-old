@@ -1,8 +1,9 @@
 # Native PostgreSQL operations
 
 This is the active operator guide. Archived goal runbooks are historical
-evidence. Goal 5 records current integrity/recovery checks; Goal 6 owns the
-measured deployment envelope. No deployment-independent throughput, recovery
+evidence. Archived G3 Goal5 records integrity/recovery checks; G3 Goal6 records
+the measured core deployment envelope. The fresh Goal0 plans the next product
+and capability phase. No deployment-independent throughput, recovery
 time or network-outage bound is implied.
 
 ## Measured integrated acceptance — 2026-09-09
@@ -32,7 +33,7 @@ the repaired audit on that unchanged target, normal bounded publication folding,
 post-fold native comparison and separately verified unchanged source before GC.
 It does not relabel the failed parent invocation as a pass. The complete current
 small operations workflow and27 focused live publication/inspection/backup cases
-also pass. [Goal6](../goal-6/0-plan.md) retains exact fixture/hash provenance and
+also pass. [G3 Goal6](../goal-archive/G3/goal-6/0-plan.md) retains exact fixture/hash provenance and
 other live semantic/failure evidence.
 
 Data exceeds configured caches, not this host's physical RAM. Warm selective
