@@ -172,3 +172,64 @@ fn native_preload_includes_interior_leaf_exposed_by_directory_split() {
         }
     }
 }
+
+#[test]
+fn boundary_retractions_preserve_locality_and_exact_retirement_ownership() {
+    let config = TreeConfig {
+        max_leaf_datoms: 2,
+        max_leaves_per_directory: 8,
+        ..TreeConfig::default()
+    };
+    let datoms = (0..64)
+        .map(|index| {
+            let entity = crate::make_eid(crate::USER_PARTITION, index + 1).unwrap();
+            Datom {
+                entity,
+                attribute: 1_000,
+                value: Value::Ref(entity),
+                tx: crate::t_to_tx(1).unwrap(),
+                added: true,
+            }
+        })
+        .collect::<Vec<_>>();
+    for order in all_index_orders() {
+        let built = build_tree(order, false, datoms.clone(), &config).unwrap();
+        for directory in 0..4 {
+            for (start, count) in [(0, 2), (14, 2), (0, 16)] {
+                let range = directory * 16 + start..directory * 16 + start + count;
+                let edits = TreeMergeEdits {
+                    removals: datoms[range.clone()].to_vec(),
+                    ..TreeMergeEdits::default()
+                };
+                let full = merge_tree(&built.descriptor, &built.nodes, &edits, &config).unwrap();
+                let preloaded = preload_nodes(&built.descriptor, &built.nodes, &edits).unwrap();
+                let partial = merge_tree_with_boundary_loader(&built.descriptor, &preloaded, &edits, &config, &mut |_| {
+                    panic!("endpoint/directory retraction already has its complete boundary witnesses")
+                }).unwrap();
+                assert_eq!(partial.descriptor, full.descriptor);
+                assert_eq!(partial.retired_nodes, full.retired_nodes);
+                assert_eq!(
+                    partial.new_nodes.iter().collect::<Vec<_>>(),
+                    full.new_nodes.iter().collect::<Vec<_>>()
+                );
+                let mut nodes = built.nodes.clone();
+                for (hash, payload) in partial.new_nodes.iter() {
+                    nodes.insert_known(*hash, payload.to_vec()).unwrap();
+                }
+                validate_tree(&partial.descriptor, &nodes).unwrap();
+                let expected = datoms
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !range.contains(index))
+                    .map(|(_, datom)| datom.clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    range_tree(&partial.descriptor, &nodes, None, None)
+                        .unwrap()
+                        .datoms,
+                    expected
+                );
+            }
+        }
+    }
+}

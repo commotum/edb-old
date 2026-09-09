@@ -63,8 +63,8 @@ observation. Observation failures are surfaced separately from durable success.
 
 ### 3. Complete coordination and native traversal
 
-**Status:** Reopened by Goal6's scaled indexer failure. Preserve completed
-coordination/traversal repairs; finish native background-indexing correctness.
+**Status:** Complete again; scaled boundary loading and finite background
+scheduling are repaired and verified below. Preserve earlier native coordination.
 
 **Outcome:** db/sync and transaction/index/schema/excision coordination expose
 truthful native values; time views and raw traversal retain exact semantics.
@@ -77,9 +77,9 @@ frontier and timeout. Cursor/time differentials and measured lazy accesses pass.
 
 ### 4. Integrate and return to Goal 0
 
-**Status:** Pending renewed closure. Existing independent-process and connection
-acceptance remains verified; the newly exposed indexing defects must be repaired
-before returning to Goal0 and resuming Goal6. Goals3–5 remain complete.
+**Status:** Complete again. Existing independent-process/connection acceptance
+and renewed live indexing regressions pass. Return to Goal0 and resume Goal6;
+Goals3–5 remain complete.
 
 **Outcome:** A documented application/deployment workflow exercises the completed
 connection model, and Goal 0 accurately selects the next unfinished stage.
@@ -88,11 +88,12 @@ connection model, and Goal 0 accurately selects the next unfinished stage.
 workflow updates, and actual executed evidence rather than skipped test counts.
 
 **Completion signal:** Connection acceptance and workflow pass without eager
-recovery or writer ownership; parent Stage 2 updated, then Goal 3 resumed/created.
+recovery or writer ownership; parent Stage2 updated, then the first unfinished
+parent stage resumed (currently6; do not recreate completed Goals3–5).
 
 ## Reopened by scaled integration — 2026-09-09
 
-This is the only active child again; Goal6 is paused, not replaced. The schema25
+Goal6 paused while this child owned the repair. The schema25
 100k attempt reached acknowledged head982 (98100 imported records), hash
 `212ac700ad123000e9cfd50f2a760c0e1de87074be6174c71308600a8de8bdac`, before the
 index worker reported `tree/missing-node` and closed admission. Latest index
@@ -109,11 +110,38 @@ basis through multi-batch live-set/AVET completion and preserves newer forced/
 schema demand; focused live multi-batch/subthreshold/restart/threshold fixture
 passes, with existing regressions in progress. Preserve this work.
 
-Next: reproduce the failed index build from its retained native base/tail,
-repair the exact preload/boundary omission with a small regression, prove the
-failed database consolidates without changing its transaction head/hash, then
-finish scheduler/coordination regressions and return to Goal0→Goal6. Do not
-weaken authentication, preload the entire tree, or erase the retained failure.
+The strict old preloader was reproduced failing on a64-datom pure fixture:
+splitting a full directory makes an old interior leaf a new routing boundary.
+That leaf is neither touched nor an old directory endpoint. Native merge now
+loads missing boundary objects on demand through the PostgreSQL node store,
+authenticates their hash/type/order/count/routing, and caches each once for the
+merge. The pure strict API remains strict; loaded old nodes do not become new
+payloads or retirement candidates merely because they were fetched. No whole-
+directory/tree preload or weaker authentication was introduced.
+
+Actual retained98100-record repair: old optimized diagnostic fails in730ms with
+the same missing node; new debug diagnostic passes that point and reaches the
+intended AfterSegments fault. Normal consolidation then succeeds in16.396s,
+revision622/basis982, with transaction head/hash unchanged. It reads156nodes /
+11571464bytes, reuses4462subtrees and74previously staged nodes, and seals the
+4538-node/166386560-byte live index closure. Debug/release timings are not a
+speedup comparison; previously staged output explains zero new writes here.
+
+Finite scheduling now keeps the demanded publication basis through bounded
+live-set/AVET maintenance instead of treating each publication as unconditional
+demand for a newer subthreshold tail. Newer forced/schema demand remains
+monotonic. This follows `datomic_pro_docs/06_indexes/02_background_indexing.md`,
+capacity-planning threshold/backpressure semantics and recovered
+`1.0.7705/transactor/src-clj/datomic/indexer.clj`'s separate recent/indexing usage.
+
+Renewed checks:2pure tests cover72split cases (exactly one authenticated deferred
+read each) and48retraction cases (none), exact output/retirement ownership and
+missing/corrupt providers; pass0.93s. Current actual PostgreSQL: background9/9,
+incremental consolidation3/3, AVET2/2, stored-value2/2, decimal decode1/1 pass
+(15 live fixtures and2pure tests). The background suite includes >512-node
+multi-batch maintenance, subthreshold writes/restart and threshold resumption.
+Focused clippy passes5.53s. Goal6 must still finish a fresh100k deployment and
+its portable operations/crash/GC; neither earlier failed run is acceptance.
 
 ## Verified changes — 2026-09-08
 
@@ -244,11 +272,11 @@ Additional executed evidence (same disposable PostgreSQL 15.11 fixtures):
 
 ## Continuation
 
-**Child complete; parent continues with Goal 3.** No known unfixed reproduced
-connection failure is established. The broader `postgres_peer` rerun passed
-19/19 on the main fixture, 435.98s. Reopen this child for an owning later failure.
-Preserve all repairs. Parent Stages 3–6 are unfinished;
-no production/scale acceptance is claimed. PostgreSQL restart checks must use
+**Child complete again; parent continues with Goal6.** The later scaled
+indexing failures are repaired with direct and live regression evidence above.
+The earlier broader `postgres_peer` rerun passed19/19,435.98s. Reopen this child
+for an owning later failure, preserving all repairs and completed Goals3–5.
+No overall production/scale acceptance is claimed. PostgreSQL restart checks use
 the exact isolated startup options documented in README. Long SQL/network
 failure-envelope and load measurements remain explicit parent work, not an
 unbounded-wait guarantee or production acceptance inferred from local tests.

@@ -10,9 +10,9 @@ local query/pull, constrained persisted programs, a transaction service, and
 operational tooling. The native connection/report and transaction stages are
 verified, as is native read composition. Integrated testing exposed and repaired
 an ordinary-GC receipt-retention defect; schema25 now preserves exact receipts
-while allowing reclamation. The measured Goal6 run has reopened Goal2 for a
-background-indexing failure near98000records. The data is retained for repair;
-the project is not yet claiming the full Goal0 outcome.
+while allowing reclamation. A scaled background-indexing failure near98000records
+is also repaired and verified on the retained data. Goal6 is rerunning the full
+deployment and operational acceptance; the full Goal0 outcome is not yet claimed.
 
 ## Start here
 
@@ -189,8 +189,8 @@ meaning. The writer has bounded read memoization but no cross-peer hint channel;
 cold submissions may incur additional index reads. Neither omission changes
 identity, transactions, history, or local Datalog/Pull semantics. See Goal 4 for
 the source-based decisions and measured read fixtures. Goal 5 records operational
-integrity evidence and the reopened GC repair; Goal 6 retains integrated
-acceptance work and the unsuccessful first large-run evidence.
+integrity evidence and the completed GC repair; Goal6 retains integrated
+acceptance work and the unsuccessful earlier large-run evidence.
 
 ## Working boundary
 

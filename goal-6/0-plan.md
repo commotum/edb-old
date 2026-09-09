@@ -37,8 +37,8 @@ a new parent or a reason to create another goal hierarchy.
 
 ### 1. Exercise and measure the deployed application
 
-**Status:** Paused for owning Goal2. The new100k run failed athead982/98100records
-with an indexer missing-node error; scheduling/preload repairs are in progress.
+**Status:** Active again. Goal2 repaired and verified finite scheduling and
+authenticated deferred boundary loading; a fresh100k run is executing below.
 
 **Outcome:** A reproducible independent writer/peer workload demonstrates useful
 transactions, query/Pull, identity/programs/history and bounded ordinary state
@@ -89,7 +89,7 @@ failure. Only then mark Goal 0 complete.
 
 ## Continuation — 2026-09-09
 
-Goal5's receipt-archive handoff and actual PostgreSQL checks now pass. Resume
+Goal2's scaled index repairs and Goal5's receipt-archive handoff now pass. Resume
 the implemented scale/deployment workflow with current25 optimized binaries
 and use the successful workload for portable operations,
 dedicated crash recovery and reclamation measurements. Small driver smokes and
@@ -200,10 +200,21 @@ Goal2 now owns native merge-preload investigation plus the diagnosed finite-
 scheduling repair. The writer/peer processes stopped; preserve their database.
 Goal2 is the only active child until this core indexing gap is verified closed.
 
-After successful import/fenced-writer-kill acceptance, use this exact database
+Goal2 has now reclosed: the failed98100-record database consolidates normally to
+revision622/basis982 in16.396s(debug), unchanged transaction head/hash, sealed
+live closure4538nodes/166386560payload bytes. Pure boundary/retraction matrices
+and17renewed checks (15actualPG) pass. The scheduler no longer perpetually
+indexes subthreshold tails while still finishing finite physical maintenance.
+
+Fresh repaired optimized run: database`scale-workflow-361523-1788975974408163506`
+in catalog`atomic_goal6_scale`, isolated SQL schema`goal6_acceptance_20260909_b`,
+parent361523/writer361545/peers361565,361567. This is the only active child.
+The isolation preserves all failed fixtures and keeps final GC counts scoped
+to this installation alone. Do not GC or restart its source during import.
+
+After successful import/fenced-writer-kill acceptance, use the fresh database
 for independent backup/deepverify/restore on dedicatedserver55434, then guarded
 immediate PostgreSQL crash recovery. Run source GC only after portable workflow
-checks its unchanged fingerprint. GC is global to the source installation,
-which also retains the earlier failed8100-record run and small smokes: disclose
-those extra fixtures in administrative totals instead of calling them100k-only.
+checks its unchanged fingerprint. GC is global to the source installation schema;
+the fresh schema contains only this final workload, not earlier failed runs.
 Preserve all data; no source reset or cleanup is required.

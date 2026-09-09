@@ -50,7 +50,7 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage2 is reopened by a scaled background-indexing failure. This is a fresh
+**Status:** Open; Stage6 is active after repairing scaled background indexing. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -132,8 +132,14 @@ every later feature to be complete before banking this baseline.
 
 ### 2. Complete the native connection and observation model
 
-**Status:** Reopened; [Goal2](../goal-2/0-plan.md) owns the scaled background-index
-preload/scheduling defects. Preserve its completed connection/observation work.
+**Status:** Complete again; [Goal2](../goal-2/0-plan.md) records authenticated lazy
+boundary loading and finite background scheduling, preserving connection work.
+
+The retained98100-record failure now consolidates to indexrevision622/basis982
+without changing the transaction head/hash. Boundary/retraction matrices and
+17renewed checks (15actualPG) pass. Maintenance finishes its captured demand
+without repeatedly indexing newer subthreshold tails; real multi-batch/restart
+fixtures pass. Goal6 still owes a successful complete scaled run.
 
 Progress: strict independent native reads, non-owning writer attachment and
 replacement, ordered service observation independent of ticket waits,
@@ -275,8 +281,8 @@ remain lazy. Operator procedures state supported guarantees and limitations.
 
 ### 6. Demonstrate the complete system under realistic load and failure
 
-**Status:** Paused; [Goal6](../goal-6/0-plan.md) preserves the scaled workflow
-while owning Goal2 repairs the newly exposed indexer failure and scheduling.
+**Status:** Active; [Goal6](../goal-6/0-plan.md) resumes the scaled workflow with
+current repaired binaries in a fresh isolated schema. Earlier failed data stays.
 
 **Outcome:** One reproducible deployment and acceptance workflow demonstrates
 the original database objective and a measured operating envelope.
@@ -301,15 +307,16 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-09:** Goal2 is the only active child again.
+**Continuation checkpoint — 2026-09-09:** Goal6 is the only active child again.
 Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
 successors and dependency retention. Goal 4 read-depth/history/composition APIs
 and public workflow pass. Goal5 closes semantic backup verification, versioned
 program-reference repair. Goal6 exposed active-receipt publication-prefix GC
 blocking, repeated index leaf decoding and a missing import retry policy.
 The GC/commitment SQL batching and retry repairs pass focused live checks.
-The next100k run reached head982/98100records but its indexer failed with a
-missing in-memory node that exists durably. Repair and verify that boundary
-omission and finite background scheduling in Goal2, then resume Goal6's complete
-scaled deployment/recovery/maintenance. Neither failed100k run is acceptance.
+The next100k run reached head982/98100records but exposed a missing interior
+boundary preload and unconditional scheduling loop. Both are now repaired;
+normal consolidation of the retained failure and relevant live regressions pass.
+The fresh100k run uses `atomic_goal6_scale.goal6_acceptance_20260909_b`; follow it
+through scaled deployment/recovery/maintenance. Neither failed100k run is acceptance.
 No overall production outcome has yet been claimed.

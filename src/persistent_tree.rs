@@ -2442,7 +2442,9 @@ impl<'a> MergeContext<'a> {
     }
 
     fn old_node(&self, hash: &Digest) -> Option<&[u8]> {
-        self.old_nodes.get(hash).or_else(|| self.resolved_old_nodes.get(hash))
+        self.old_nodes
+            .get(hash)
+            .or_else(|| self.resolved_old_nodes.get(hash))
     }
 
     fn load_root(&mut self, descriptor: &TreeDescriptor) -> Result<RootNode, SemanticError> {
