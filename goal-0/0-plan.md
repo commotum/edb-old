@@ -50,7 +50,7 @@ to compiled Datomic or completion of an expanding set of goal folders.
 
 ## Starting point — 2026-09-08
 
-**Status:** Open; Stage 2 is the first unfinished stage. This is a fresh
+**Status:** Open; Stage 4 is the first unfinished stage. This is a fresh
 strategy over the existing code, not a claim that historical repairs vanished.
 
 - The initial Rust goals 0–8 are preserved in `goal-archive/A1/`; corrective
@@ -132,7 +132,7 @@ every later feature to be complete before banking this baseline.
 
 ### 2. Complete the native connection and observation model
 
-**Status:** Active; [Goal 2](../goal-2/0-plan.md) owns execution.
+**Status:** Complete; [Goal 2](../goal-2/0-plan.md) records connection acceptance.
 
 Progress: strict independent native reads, non-owning writer attachment and
 replacement, ordered service observation independent of ticket waits,
@@ -141,8 +141,15 @@ excision synchronization now have focused real PostgreSQL evidence. The public
 two-peer workflow reads and reopens after writer shutdown. An eight-transaction
 lagging-peer witness adopts the indexed prefix with zero recent datoms and zero
 eager materializations; this is not a realistic scale benchmark. Independent-
-process submission and broader failure/deadline/retention checks remain open;
-the in-process handle is not remote access. See the child continuation.
+process submission now uses a bounded/versioned same-user Unix socket. The
+separate writer/two-peer process workflow passes, as do all 7 native connection
+tests, transport commit-loss/receipt checks, writer/observer-stall checks, and
+actual dedicated PostgreSQL restart with logical and physical sync. Excision
+catch-up retains ordered original reports across multiple generations. Peer
+db/sync defaults are native; eager adapters are explicitly named. The broader
+PostgreSQL peer rerun passed 19/19. SQL/network
+failure-envelope policy and realistic load remain required Stages 5–6 work;
+socket delivery deadlines do not cancel arbitrary blocked receipt SQL.
 
 **Outcome:** Applications connect, submit transactions, and observe exact
 immutable native values through a coherent API, with reads independent of
@@ -164,7 +171,20 @@ path does not materialize the eager database or require ownership of the writer.
 
 ### 3. Close transaction and speculative-value semantics
 
-**Status:** Pending.
+**Status:** Complete; [Goal 3](../goal-3/0-plan.md) records transaction acceptance.
+
+Progress: primitive native `with` returns immutable before/after reports and
+supports flattened speculative chains. Eager/native/PostgreSQL differentials
+cover current/history/time/raw traversal, schema/index/noHistory changes and
+ident aliases with no durable advancement or eager loads. A 2,000-step small-
+stack witness and query/pull application branch pass. Tuple/ref-shaped lookup
+inputs and controlled runtime values now pass eager/native/socket/recovery
+fixtures with old receipts and program hashes preserved. The shared native/
+durable controlled pipeline passes actual PostgreSQL acceptance, including code
+retention after reclaim, shared limits, exact predicates and the docs' "as-of
+is not a branch" rule. Final library 250 passed/1 ignored; semantic 22, tuple
+schema 9, runtime 22 pass. Full controlled suite 4/4 and filtered native test
+pass live; public controlled/tuple/speculation workflow reopens at t=3.
 
 **Outcome:** The native API expresses the documented core transaction inputs
 and supports pure, chainable speculative database successors.
@@ -182,7 +202,7 @@ the same accepted facts and identity without full-database reconstruction.
 
 ### 4. Finish useful query, pull, and history access
 
-**Status:** Pending.
+**Status:** Active; [Goal 4](../goal-4/0-plan.md) owns execution.
 
 **Outcome:** Local queries and navigation preserve exact snapshot semantics,
 have no accidental finite language limits, and expose a truthful useful surface.
@@ -213,7 +233,9 @@ excise the database under an explicit and tested trust and retention model.
 their authoritative log points; restore/retry correctness; root and generation
 lifetimes; migration/runtime authority; secure transport; excision completion
 and external retention limits. Revisit existing code only where fresh evidence
-shows a gap. Document costs of broad administrative operations.
+shows a gap. Document costs of broad administrative operations. Reconcile older
+program generation-reference rows for dependencies previously omitted inside
+callable lookup references and dual-predicate bodies; new traversal is repaired.
 
 **Completion signal:** Meaningful corruption, interrupted backup/restore,
 restart, GC/pin, upgrade, and excision witnesses pass on PostgreSQL. Deep checks
@@ -247,11 +269,10 @@ recoverable system, with measured operational behavior and intentional,
 documented differences from Datomic. No known core correctness or usability
 failure may be relabeled as a non-core omission to close the goal.
 
-**Continuation checkpoint — 2026-09-08:** Goal 2 remains the only active child;
-its internal Stage 2 is first unfinished. Finish independent-process submission
-and its observation/failure integration, preserving the verified attachment,
-report, native-sync, and checkpoint-adoption repairs. Review callback/SQL stall
-and shutdown deadlines and keep exercising the two-peer public workflow.
-Goal 2 records exact evidence and temporary PostgreSQL fixtures. Stages 3–6
-remain open and must be executed after Goal 2; neither this baseline nor the
-partial connection implementation completes the parent objective.
+**Continuation checkpoint — 2026-09-08:** Goal 4 is the only active child.
+Goal 3 is verified; preserve its input grammar, controlled/filtered speculative
+successors and dependency retention. Begin with accidental default query/pull
+ceilings and stack-safe deep pull, then finish useful native read APIs. Goals
+2–3 record actual PostgreSQL evidence and fixtures. Reopen an owning child for
+later failures. Stages 4–6 remain open; no realistic scale or complete operational
+acceptance claim has been made.

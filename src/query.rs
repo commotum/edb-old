@@ -229,7 +229,7 @@ pub struct QuerySource {
     pub database: DatabaseValue,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum QueryValue {
     Nil,
     Scalar(Value),
@@ -246,7 +246,10 @@ impl QueryValue {
     /// Datomic's logical value comparator.
     pub fn canonical_cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
-
+        enum Task<'a> {
+            Values(&'a QueryValue, &'a QueryValue),
+            Length(usize, usize),
+        }
         let rank = |value: &Self| match value {
             Self::Nil => 0_u8,
             Self::Scalar(_) => 1,
@@ -254,19 +257,82 @@ impl QueryValue {
             Self::Collection(_) => 3,
             Self::Map(_) => 4,
         };
-        let ordering = rank(self).cmp(&rank(other));
-        if ordering != Ordering::Equal {
-            return ordering;
-        }
-        match (self, other) {
-            (Self::Nil, Self::Nil) => Ordering::Equal,
-            (Self::Scalar(left), Self::Scalar(right)) => left.index_cmp(right),
-            (Self::Tuple(left), Self::Tuple(right))
-            | (Self::Collection(left), Self::Collection(right)) => {
-                compare_query_sequences(left, right)
+        let mut pending = vec![Task::Values(self, other)];
+        while let Some(task) = pending.pop() {
+            let (left, right) = match task {
+                Task::Length(left, right) => {
+                    let order = left.cmp(&right);
+                    if order != Ordering::Equal {
+                        return order;
+                    }
+                    continue;
+                }
+                Task::Values(left, right) => (left, right),
+            };
+            let order = rank(left).cmp(&rank(right));
+            if order != Ordering::Equal {
+                return order;
             }
-            (Self::Map(left), Self::Map(right)) => compare_query_maps(left, right),
-            _ => unreachable!("equal query-value ranks must have matching variants"),
+            match (left, right) {
+                (Self::Nil, Self::Nil) => {}
+                (Self::Scalar(left), Self::Scalar(right)) => {
+                    let order = left.index_cmp(right);
+                    if order != Ordering::Equal {
+                        return order;
+                    }
+                }
+                (Self::Tuple(left), Self::Tuple(right))
+                | (Self::Collection(left), Self::Collection(right)) => {
+                    pending.push(Task::Length(left.len(), right.len()));
+                    for (left, right) in left.iter().zip(right).rev() {
+                        pending.push(Task::Values(left, right));
+                    }
+                }
+                (Self::Map(left), Self::Map(right)) => {
+                    let left = sorted_query_map_entries(left);
+                    let right = sorted_query_map_entries(right);
+                    pending.push(Task::Length(left.len(), right.len()));
+                    for ((left_key, left_value), (right_key, right_value)) in
+                        left.into_iter().zip(right).rev()
+                    {
+                        pending.push(Task::Values(left_value, right_value));
+                        pending.push(Task::Values(left_key, right_key));
+                    }
+                }
+                _ => unreachable!("equal query-value ranks must have matching variants"),
+            }
+        }
+        Ordering::Equal
+    }
+
+    /// Move a result container out while retaining stack-safe destruction of
+    /// any other value. Borrowed pattern matching remains available as usual.
+    pub fn into_map(mut self) -> Option<Vec<(Self, Self)>> {
+        if let Self::Map(values) = &mut self {
+            Some(std::mem::take(values))
+        } else {
+            None
+        }
+    }
+    pub fn into_collection(mut self) -> Option<Vec<Self>> {
+        if let Self::Collection(values) = &mut self {
+            Some(std::mem::take(values))
+        } else {
+            None
+        }
+    }
+    pub fn into_tuple(mut self) -> Option<Vec<Self>> {
+        if let Self::Tuple(values) = &mut self {
+            Some(std::mem::take(values))
+        } else {
+            None
+        }
+    }
+    pub fn into_scalar(mut self) -> Option<Value> {
+        if let Self::Scalar(value) = &mut self {
+            Some(std::mem::replace(value, Value::Bool(false)))
+        } else {
+            None
         }
     }
 
@@ -290,6 +356,80 @@ impl QueryValue {
     }
 }
 
+impl Clone for QueryValue {
+    fn clone(&self) -> Self {
+        enum Task<'a> {
+            Value(&'a QueryValue),
+            Collection(usize),
+            Tuple(usize),
+            Map(usize),
+        }
+        let mut pending = vec![Task::Value(self)];
+        let mut values = Vec::new();
+        while let Some(task) = pending.pop() {
+            match task {
+                Task::Value(Self::Nil) => values.push(Self::Nil),
+                Task::Value(Self::Scalar(value)) => values.push(Self::Scalar(value.clone())),
+                Task::Value(Self::Collection(children)) | Task::Value(Self::Tuple(children)) => {
+                    pending.push(if matches!(task, Task::Value(Self::Collection(_))) {
+                        Task::Collection(children.len())
+                    } else {
+                        Task::Tuple(children.len())
+                    });
+                    pending.extend(children.iter().rev().map(Task::Value));
+                }
+                Task::Value(Self::Map(entries)) => {
+                    pending.push(Task::Map(entries.len()));
+                    for (key, value) in entries.iter().rev() {
+                        pending.push(Task::Value(value));
+                        pending.push(Task::Value(key));
+                    }
+                }
+                Task::Collection(count) => {
+                    let children = values.split_off(values.len() - count);
+                    values.push(Self::Collection(children));
+                }
+                Task::Tuple(count) => {
+                    let children = values.split_off(values.len() - count);
+                    values.push(Self::Tuple(children));
+                }
+                Task::Map(count) => {
+                    let mut children = values.split_off(values.len() - 2 * count).into_iter();
+                    let entries = (0..count)
+                        .map(|_| (children.next().unwrap(), children.next().unwrap()))
+                        .collect();
+                    values.push(Self::Map(entries));
+                }
+            }
+        }
+        values.pop().expect("one cloned result")
+    }
+}
+
+impl Drop for QueryValue {
+    fn drop(&mut self) {
+        fn drain(value: &mut QueryValue, pending: &mut Vec<QueryValue>) {
+            match value {
+                QueryValue::Collection(values) | QueryValue::Tuple(values) => {
+                    pending.append(values)
+                }
+                QueryValue::Map(entries) => {
+                    for (key, value) in std::mem::take(entries) {
+                        pending.push(key);
+                        pending.push(value);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut pending = Vec::new();
+        drain(self, &mut pending);
+        while let Some(mut value) = pending.pop() {
+            drain(&mut value, &mut pending);
+        }
+    }
+}
+
 impl PartialEq for QueryValue {
     fn eq(&self, other: &Self) -> bool {
         self.canonical_cmp(other).is_eq()
@@ -297,33 +437,6 @@ impl PartialEq for QueryValue {
 }
 
 impl Eq for QueryValue {}
-
-fn compare_query_sequences(left: &[QueryValue], right: &[QueryValue]) -> std::cmp::Ordering {
-    left.iter()
-        .zip(right)
-        .find_map(|(left, right)| {
-            let ordering = left.canonical_cmp(right);
-            ordering.is_ne().then_some(ordering)
-        })
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
-}
-
-fn compare_query_maps(
-    left: &[(QueryValue, QueryValue)],
-    right: &[(QueryValue, QueryValue)],
-) -> std::cmp::Ordering {
-    let left = sorted_query_map_entries(left);
-    let right = sorted_query_map_entries(right);
-    left.iter()
-        .zip(&right)
-        .find_map(|((left_key, left_value), (right_key, right_value))| {
-            let ordering = left_key
-                .canonical_cmp(right_key)
-                .then_with(|| left_value.canonical_cmp(right_value));
-            ordering.is_ne().then_some(ordering)
-        })
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
-}
 
 fn sorted_query_map_entries(
     entries: &[(QueryValue, QueryValue)],
@@ -385,9 +498,9 @@ impl Default for QueryControl {
     fn default() -> Self {
         Self {
             timeout: None,
-            max_work: 10_000_000,
-            max_intermediate_rows: 1_000_000,
-            max_result_rows: 100_000,
+            max_work: usize::MAX,
+            max_intermediate_rows: usize::MAX,
+            max_result_rows: usize::MAX,
             cancel: Arc::new(AtomicBool::new(false)),
             force_scan: false,
         }
@@ -642,7 +755,7 @@ impl QueryEngine {
             rule_memo: BTreeMap::new(),
             solving_rules: false,
         };
-        let initial = bind_inputs(&query.inputs, inputs)?;
+        let initial = bind_inputs(&query.inputs, inputs, &mut state)?;
         let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut state)?;
         let mut pull_budget = QueryPullBudget::new(
             Arc::clone(&control.cancel),
@@ -931,7 +1044,8 @@ fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
     Ok(())
 }
 
-fn bind_inputs(specs: &[InputSpec], values: &[QueryInput]) -> Result<Vec<Row>, SemanticError> {
+fn bind_inputs(specs: &[InputSpec], values: &[QueryInput], state: &mut State<'_>) -> Result<Vec<Row>, SemanticError> {
+    state.check(0)?;
     let mut rows = vec![Row::new()];
     for (spec, value) in specs.iter().zip(values) {
         let relation = match (spec, value) {
@@ -977,6 +1091,7 @@ fn bind_inputs(specs: &[InputSpec], values: &[QueryInput]) -> Result<Vec<Row>, S
         let mut next = Vec::new();
         for row in &rows {
             for bindings in &relation {
+                state.check(1)?;
                 let mut candidate = row.clone();
                 let mut valid = true;
                 for (variable, value) in bindings {
@@ -992,11 +1107,13 @@ fn bind_inputs(specs: &[InputSpec], values: &[QueryInput]) -> Result<Vec<Row>, S
                     }
                 }
                 if valid {
-                    push_unique_row(&mut next, candidate);
+                    next.push(candidate);
                 }
             }
         }
-        rows = next;
+        rows = dedupe_rows(next);
+        state.check(0)?;
+        if rows.len() > state.control.max_intermediate_rows { return Err(resource("query/intermediate-limit", "query input relation exceeded its row limit")); }
     }
     Ok(rows)
 }
@@ -1095,7 +1212,7 @@ fn evaluate_clause(
                     state,
                 )? {
                     for bound in bind_output(&row, binding, &produced)? {
-                        push_unique_row(&mut next, bound);
+                        next.push(bound);
                     }
                 }
             }
@@ -1150,10 +1267,10 @@ fn evaluate_clause(
                                     unify_variable(&mut merged, variable, value)
                                 })
                             }) {
-                                push_unique_row(&mut next, merged);
+                                next.push(merged);
                             }
                         } else {
-                            push_unique_row(&mut next, produced);
+                            next.push(produced);
                         }
                     }
                 }
@@ -1202,7 +1319,7 @@ fn evaluate_clause(
                         .zip(tuple)
                         .all(|(term, value)| unify_term(&mut candidate, term, value))
                     {
-                        push_unique_row(&mut next, candidate);
+                        next.push(candidate);
                     }
                 }
             }
@@ -1287,7 +1404,7 @@ fn evaluate_pattern(
                     &BoundValue::Stored(Value::Bool(datom.added)),
                 )
             }) {
-                push_unique_row(&mut next, candidate);
+                next.push(candidate);
             }
         }
     }
@@ -1463,26 +1580,15 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), Sema
         for key in keys {
             let produced = evaluate_rule_key(&key, rules, state)?;
             ensure_rule_memo_entry(state, key.clone());
-            for tuple in produced {
-                let is_new = !state
-                    .rule_memo
-                    .get(&key)
-                    .is_some_and(|rows| rows.contains(&tuple));
-                if is_new {
-                    state.check(1)?;
-                    let rows = state
-                        .rule_memo
-                        .get_mut(&key)
-                        .expect("rule memo entry was ensured");
-                    rows.push(tuple);
-                    if rows.len() > state.control.max_intermediate_rows {
-                        return Err(resource(
-                            "query/intermediate-limit",
-                            "rule memo relation exceeded the intermediate row limit",
-                        ));
-                    }
-                }
-            }
+            let (length, added) = {
+                let rows = state.rule_memo.get_mut(&key).expect("rule memo entry was ensured");
+                let prior = rows.len();
+                rows.extend(produced);
+                stable_dedupe_by(rows, Ord::cmp);
+                (rows.len(), rows.len() - prior)
+            };
+            state.check(added)?;
+            if length > state.control.max_intermediate_rows { return Err(resource("query/intermediate-limit", "rule memo relation exceeded the intermediate row limit")); }
         }
 
         state.stats.rule_iterations += 1;
@@ -1527,11 +1633,10 @@ fn evaluate_rule_key(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if !produced.contains(&tuple) {
-                produced.push(tuple);
-            }
+            produced.push(tuple);
         }
     }
+    stable_dedupe_by(&mut produced, Ord::cmp);
     Ok(produced)
 }
 
@@ -1835,10 +1940,10 @@ fn bind_output(
             let value = value.clone().map_or(BoundValue::Nil, BoundValue::Stored);
             let mut candidate = row.clone();
             if unify_variable(&mut candidate, variable, &value) {
-                push_unique_row(&mut rows, candidate);
+                rows.push(candidate);
             }
         }
-        return Ok(rows);
+        return Ok(dedupe_rows(rows));
     }
     let bindings: Vec<(Option<&Variable>, &BoundValue)> = match binding {
         Binding::Scalar(variable) if output.len() == 1 => vec![(Some(variable), &output[0])],
@@ -1887,6 +1992,7 @@ fn shape_results(
         .collect::<Vec<_>>();
     let mut basis = Vec::new();
     for row in rows {
+        pull_budget.check(1)?;
         let projected = basis_variables
             .iter()
             .map(|variable| {
@@ -1898,10 +2004,10 @@ fn shape_results(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if !basis.contains(&projected) {
-            basis.push(projected);
-        }
+        basis.push(projected);
     }
+    stable_dedupe_by(&mut basis, Ord::cmp);
+    pull_budget.check(0)?;
     let mut output = if elements
         .iter()
         .any(|element| matches!(element, FindElement::Aggregate { .. }))
@@ -1911,6 +2017,7 @@ fn shape_results(
         basis
             .into_iter()
             .map(|row| {
+                pull_budget.check(1)?;
                 elements
                     .iter()
                     .map(|element| {
@@ -1921,6 +2028,7 @@ fn shape_results(
             .collect::<Result<Vec<_>, _>>()?
     };
     dedupe_query_rows(&mut output, query.with.is_empty());
+    pull_budget.check(0)?;
     if output.len() > max {
         return Err(resource(
             "query/result-limit",
@@ -1953,8 +2061,10 @@ fn aggregate_rows(
             _ => None,
         })
         .collect();
-    let mut groups: Vec<(Vec<BoundValue>, Vec<&Vec<BoundValue>>)> = Vec::new();
+    let mut groups: Vec<Vec<&Vec<BoundValue>>> = Vec::new();
+    let mut group_indices = BTreeMap::new();
     for row in basis {
+        pull_budget.check(1)?;
         let key = group_variables
             .iter()
             .map(|variable| {
@@ -1965,18 +2075,16 @@ fn aggregate_rows(
                 .clone()
             })
             .collect::<Vec<_>>();
-        if let Some((_, rows)) = groups.iter_mut().find(|(candidate, _)| *candidate == key) {
-            rows.push(row);
-        } else {
-            groups.push((key, vec![row]));
-        }
+        let index = *group_indices.entry(key).or_insert_with(|| { groups.push(Vec::new()); groups.len() - 1 });
+        groups[index].push(row);
     }
     if groups.is_empty() && group_variables.is_empty() {
-        groups.push((Vec::new(), Vec::new()));
+        groups.push(Vec::new());
     }
     groups
         .into_iter()
-        .map(|(_, rows)| {
+        .map(|rows| {
+            pull_budget.check(rows.len())?;
             elements
                 .iter()
                 .map(|element| match element {
@@ -2038,13 +2146,9 @@ fn aggregate(
     match function {
         Aggregate::Count => Ok(QueryValue::Scalar(Value::Long(values.len() as i64))),
         Aggregate::CountDistinct => {
-            let mut unique = Vec::new();
-            for value in values {
-                if !unique.contains(&value) {
-                    unique.push(value);
-                }
-            }
-            Ok(QueryValue::Scalar(Value::Long(unique.len() as i64)))
+            values.sort_by(|left, right| left.index_cmp(right));
+            values.dedup_by(|left, right| left.index_cmp(right).is_eq());
+            Ok(QueryValue::Scalar(Value::Long(values.len() as i64)))
         }
         Aggregate::Min | Aggregate::Max => {
             let value = if function == Aggregate::Min {
@@ -2524,11 +2628,6 @@ fn unify_variable(row: &mut Row, variable: &Variable, value: &BoundValue) -> boo
         }
     }
 }
-fn push_unique_row(rows: &mut Vec<Row>, row: Row) {
-    if !rows.contains(&row) {
-        rows.push(row);
-    }
-}
 fn project_row(row: &Row, variables: &[Variable]) -> Row {
     variables
         .iter()
@@ -2539,23 +2638,46 @@ fn project_row(row: &Row, variables: &[Variable]) -> Row {
         })
         .collect()
 }
-fn dedupe_rows(rows: Vec<Row>) -> Vec<Row> {
-    let mut result = Vec::new();
-    for row in rows {
-        push_unique_row(&mut result, row);
-    }
-    result
+fn dedupe_rows(mut rows: Vec<Row>) -> Vec<Row> {
+    stable_dedupe_by(&mut rows, Ord::cmp);
+    rows
 }
 fn dedupe_query_rows(rows: &mut Vec<Vec<QueryValue>>, dedupe: bool) {
     if dedupe {
-        let mut unique = Vec::new();
-        for row in rows.drain(..) {
-            if !unique.contains(&row) {
-                unique.push(row);
-            }
-        }
-        *rows = unique;
+        stable_dedupe_by(rows, |left, right| {
+            left.iter()
+                .zip(right)
+                .map(|(left, right)| left.canonical_cmp(right))
+                .find(|order| !order.is_eq())
+                .unwrap_or_else(|| left.len().cmp(&right.len()))
+        });
     }
+}
+
+/// Set semantics with stable first-representation retention. Sorting offsets
+/// avoids payload clones and the former quadratic repeated `Vec::contains`.
+fn stable_dedupe_by<T>(values: &mut Vec<T>, compare: impl Fn(&T, &T) -> std::cmp::Ordering) {
+    if values.len() < 2 {
+        return;
+    }
+    let mut order: Vec<_> = (0..values.len()).collect();
+    order.sort_unstable_by(|&left, &right| {
+        compare(&values[left], &values[right]).then_with(|| left.cmp(&right))
+    });
+    let mut keep = vec![false; values.len()];
+    let mut previous = None;
+    for index in order {
+        if previous.is_none_or(|previous| !compare(&values[previous], &values[index]).is_eq()) {
+            keep[index] = true;
+            previous = Some(index);
+        }
+    }
+    let mut index = 0;
+    values.retain(|_| {
+        let retained = keep[index];
+        index += 1;
+        retained
+    });
 }
 fn source_database<'a>(
     state: &'a State<'_>,

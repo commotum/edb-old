@@ -17,6 +17,7 @@ mod excision;
 mod identity;
 mod idents;
 mod index;
+mod index_pull;
 #[cfg(unix)]
 mod local_transport;
 mod log_generation;
@@ -49,6 +50,7 @@ pub use connection::{Connection, ConnectionTransactionTicket, DatabaseIdentity};
 pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
 pub use database_value::{
     DatabaseValue, DatabaseValuePrefixCursor, DatabaseValueScanCursor, RawIndexValue,
+    SpeculativeTransactionReport,
 };
 pub use datom::{Datom, IndexOrder};
 pub use encoding::{
@@ -65,6 +67,7 @@ pub use identity::{
     tx_to_t,
 };
 pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
+pub use index_pull::{IndexPullCursor, IndexPullOptions};
 #[cfg(unix)]
 pub use local_transport::{CommittedTransaction, LocalTransactionServer, LocalTransportConfig};
 pub use operations::{
@@ -77,6 +80,7 @@ pub use operations::{
     PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, RequestBaseArchiveGarbage,
     SemanticCommitmentRootGarbage, TreeBuildIntentGarbage, TreePublicationGarbage,
 };
+pub use peer::native_log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
 pub use peer::{
     CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PeerCursorStats, PeerIndexCursor,
     PeerLoadStats, PeerSnapshot, PostgresIndexer, RecoveryStats,
@@ -109,6 +113,7 @@ pub use service::{
     TransactionTicket,
 };
 pub use time_point::TimePoint;
+pub use transaction::SpeculationLimits;
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
 pub use tree_manifest::{AvetProjectionWork, ManifestTree, PersistentTreeManifest};
 pub use tree_store::{

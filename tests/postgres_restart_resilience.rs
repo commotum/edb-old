@@ -173,6 +173,10 @@ fn live_handles_reborrow_after_server_restart_without_losing_peer_values() {
     let target = first.basis_t + 1;
     let waiter =
         thread::spawn(move || waiting_peer.sync_to_snapshot(target, Duration::from_secs(15)));
+    let waiting_native = native_connection.clone();
+    let index_target = first.basis_t;
+    let index_waiter =
+        thread::spawn(move || waiting_native.sync_index(index_target, Duration::from_secs(15)));
     let standby = TransactionStandby::start(
         standby_config(&connection, &database_id),
         Duration::from_millis(20),
@@ -191,6 +195,7 @@ fn live_handles_reborrow_after_server_restart_without_losing_peer_values() {
         .unwrap();
     assert_eq!(second.basis_t, target);
     let synchronized = waiter.join().unwrap().unwrap();
+    assert!(index_waiter.join().unwrap().unwrap().basis_t() >= index_target);
     assert_eq!(synchronized.basis_t(), target);
     assert_eq!(old_database.basis_t(), first.basis_t);
     assert_eq!(old_snapshot.basis_t(), first.basis_t);

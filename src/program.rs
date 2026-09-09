@@ -13,9 +13,10 @@ const MAX_ARITY: u8 = 10;
 const MAX_INSTRUCTIONS: usize = 4_096;
 const MAX_BLOCK_DEPTH: usize = 32;
 // ABI 4 adds full persisted transaction-data emitters and structured cancel
-// anomalies.  Existing program kinds continue to encode as ABI 4 so their
-// bytes and content identities never change.  ABI 5 is used only by the
-// explicit dual-predicate representation below.
+// anomalies. Existing programs without recursive input-reference literals
+// retain ABI 4 (or ABI 5 for the explicit dual-predicate representation).
+// Only programs containing the new lookup-input literals select ABI 6, so
+// all previously accepted program bytes and content identities stay intact.
 pub const PROGRAM_ABI_VERSION: u16 = 4;
 pub(crate) const DUAL_PREDICATE_PROGRAM_ABI_VERSION: u16 = 5;
 pub const QUERY_TEMPLATE_VERSION: u16 = 1;
@@ -50,6 +51,9 @@ impl From<EntityRef> for RuntimeValue {
 
 impl RuntimeValue {
     pub fn map(mut entries: Vec<(Value, RuntimeValue)>) -> Result<Self, SemanticError> {
+        for (key, _) in &entries {
+            crate::transaction::validate_stored_input(key)?;
+        }
         entries.sort_by(|left, right| left.0.stored_cmp(&right.0));
         if entries
             .windows(2)
@@ -121,6 +125,43 @@ fn canonical_entity_ref_cmp(left: &EntityRef, right: &EntityRef) -> Ordering {
             ) => left_attribute
                 .cmp(right_attribute)
                 .then_with(|| left_value.stored_cmp(right_value)),
+            (
+                EntityRef::LookupInput {
+                    attribute: left_attribute,
+                    value: left_value,
+                },
+                EntityRef::LookupInput {
+                    attribute: right_attribute,
+                    value: right_value,
+                },
+            ) => left_attribute
+                .cmp(right_attribute)
+                .then_with(|| canonical_tx_value_cmp(left_value, right_value)),
+            _ => Ordering::Equal,
+        })
+}
+
+fn canonical_tx_value_cmp(left: &TxValue, right: &TxValue) -> Ordering {
+    let rank = |value: &TxValue| match value {
+        TxValue::Scalar(_) => 0,
+        TxValue::Entity(_) => 1,
+        TxValue::Tuple(_) => 2,
+    };
+    rank(left)
+        .cmp(&rank(right))
+        .then_with(|| match (left, right) {
+            (TxValue::Scalar(left), TxValue::Scalar(right)) => left.stored_cmp(right),
+            (TxValue::Entity(left), TxValue::Entity(right)) => {
+                canonical_entity_ref_cmp(left, right)
+            }
+            (TxValue::Tuple(left), TxValue::Tuple(right)) => {
+                canonical_slice_cmp(left, right, |left, right| match (left, right) {
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Less,
+                    (Some(_), None) => Ordering::Greater,
+                    (Some(left), Some(right)) => canonical_tx_value_cmp(left, right),
+                })
+            }
             _ => Ordering::Equal,
         })
 }
@@ -141,6 +182,7 @@ fn entity_ref_rank(entity: &EntityRef) -> u8 {
         EntityRef::Temp(_) => 2,
         EntityRef::Lookup { .. } => 3,
         EntityRef::Tx => 4,
+        EntityRef::LookupInput { .. } => 5,
     }
 }
 
@@ -419,16 +461,24 @@ pub enum Instruction {
     /// false raises the Datomic-shaped incorrect/conflict anomaly described by
     /// the map. No truthiness coercion is permitted.
     RequireAnomaly,
+    /// Emit an add with a scalar, entity reference, or 2–8-slot runtime
+    /// vector. A vector becomes a transaction tuple; its entity references
+    /// resolve under the attribute's tuple schema, and nil slots stay nil.
     EmitAdd(u32),
+    /// Emit a value-specific retraction using the same value grammar as add.
     EmitRetract(u32),
     /// Emit the value-less `[:db/retract e a]` convenience form. Expansion to
     /// matching db-before values remains the ordinary transaction kernel's
     /// responsibility.
     EmitRetractAll(u32),
+    /// Emit compare-and-swap using the same value grammar as add. A nil old
+    /// value means the attribute must be absent, not an all-nil tuple.
     EmitCas(u32),
     EmitRetractEntity,
     EmitEnsure,
     /// Consume a runtime map and emit a canonical transaction entity-map.
+    /// Map vectors retain their collection-of-values meaning; use explicit
+    /// add/retract/CAS emission for tuples containing entity references.
     EmitEntityMap,
     /// Emit a nested transaction-function call as declarative transaction
     /// data. The caller recursively expands it against the same db-before.
@@ -808,6 +858,18 @@ impl<'a> ProgramRead<'a> {
         }
     }
 
+    fn lookup_input(self, attribute: u32, value: &TxValue) -> Result<Option<u64>, SemanticError> {
+        match self {
+            Self::AttributePredicate => {
+                unreachable!("validated attribute predicate attempted a database read")
+            }
+            Self::Eager(database) => database
+                .database_value()
+                .resolve_lookup_input(attribute, value),
+            Self::Exact(database) => database.resolve_lookup_input(attribute, value),
+        }
+    }
+
     fn prefix_cursor(self, prefix: &IndexPrefix) -> Result<ProgramPrefixCursor<'a>, SemanticError> {
         match self {
             Self::AttributePredicate => {
@@ -1074,6 +1136,19 @@ impl Validation {
                 "program/argument-index",
                 format!("argument {index} is outside arity {}", self.arity),
             ));
+        }
+        // New recursive reference literals are checked before execution can
+        // clone them, including literals in an untaken branch. Arguments are
+        // checked separately by the shared runtime budget.
+        match instruction {
+            Instruction::PushEntity(entity @ EntityRef::LookupInput { .. })
+            | Instruction::EmitCall {
+                function: CallableRef::Database(entity @ EntityRef::LookupInput { .. }),
+                ..
+            } => {
+                entity_ref_bytes(entity)?;
+            }
+            _ => {}
         }
         if self.kind == ProgramKind::AttributePredicate
             && matches!(
@@ -2245,6 +2320,14 @@ fn database_entity_id(
                 )
             })
         }
+        EntityRef::LookupInput { attribute, value } => {
+            database.lookup_input(attribute, &value)?.ok_or_else(|| {
+                incorrect(
+                    "program/entity-not-found",
+                    "database lookup reference did not resolve",
+                )
+            })
+        }
         EntityRef::Temp(_) | EntityRef::Tx => Err(incorrect(
             "program/unresolved-entity-read",
             "transaction-local entity references cannot be read from db-before",
@@ -2256,9 +2339,32 @@ fn tx_value(value: RuntimeValue) -> Result<TxValue, SemanticError> {
     match value {
         RuntimeValue::Scalar(value) => Ok(TxValue::Scalar(value)),
         RuntimeValue::Entity(entity) => Ok(TxValue::Entity(entity)),
-        RuntimeValue::Null | RuntimeValue::Vector(_) | RuntimeValue::Map(_) => Err(incorrect(
+        RuntimeValue::Vector(values) => {
+            if !(2..=8).contains(&values.len()) {
+                return Err(incorrect(
+                    "program/invalid-input-tuple",
+                    "input tuples require 2–8 scalar or reference slots",
+                ));
+            }
+            let slots = values
+                .into_iter()
+                .map(|value| match value {
+                    RuntimeValue::Null => Ok(None),
+                    RuntimeValue::Scalar(Value::Tuple(_))
+                    | RuntimeValue::Vector(_)
+                    | RuntimeValue::Map(_) => Err(incorrect(
+                        "program/invalid-input-tuple",
+                        "input tuple slots cannot contain nested collections or tuples",
+                    )),
+                    RuntimeValue::Scalar(value) => Ok(Some(TxValue::Scalar(value))),
+                    RuntimeValue::Entity(entity) => Ok(Some(TxValue::Entity(entity))),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(TxValue::Tuple(slots))
+        }
+        RuntimeValue::Null | RuntimeValue::Map(_) => Err(incorrect(
             "program/type",
-            "transaction values must be scalar or entity references",
+            "transaction values must be scalars, entity references, or tuple vectors",
         )),
     }
 }
@@ -2738,7 +2844,7 @@ fn validate_runtime_value(
             encoded_value_bytes(value, depth)?;
         }
         RuntimeValue::Entity(entity) => {
-            entity_ref_bytes(entity)?;
+            entity_ref_bytes_at_depth(entity, depth)?;
         }
         RuntimeValue::Null => {}
         RuntimeValue::Vector(values) => {
@@ -2786,7 +2892,9 @@ fn runtime_value_bytes(value: &RuntimeValue, depth: usize) -> Result<usize, Sema
     }
     match value {
         RuntimeValue::Scalar(value) => checked_size_add(1, encoded_value_bytes(value, depth)?),
-        RuntimeValue::Entity(entity) => checked_size_add(1, entity_ref_bytes(entity)?),
+        RuntimeValue::Entity(entity) => {
+            checked_size_add(1, entity_ref_bytes_at_depth(entity, depth)?)
+        }
         RuntimeValue::Null => Ok(1),
         RuntimeValue::Vector(values) => {
             let mut bytes = 5usize;
@@ -2905,9 +3013,39 @@ fn tx_op_output_bytes(operation: &TxOp) -> Result<usize, SemanticError> {
 }
 
 fn tx_value_bytes(value: &TxValue) -> Result<usize, SemanticError> {
+    tx_value_bytes_at_depth(value, 0)
+}
+
+fn tx_value_bytes_at_depth(value: &TxValue, depth: usize) -> Result<usize, SemanticError> {
+    if depth > 16 {
+        return Err(incorrect(
+            "program/value-depth",
+            "program values may contain at most 16 collection or reference levels",
+        ));
+    }
     match value {
-        TxValue::Scalar(value) => checked_size_add(1, encoded_value_bytes(value, 0)?),
-        TxValue::Entity(entity) => checked_size_add(1, entity_ref_bytes(entity)?),
+        TxValue::Scalar(value) => checked_size_add(1, encoded_value_bytes(value, depth)?),
+        TxValue::Entity(entity) => checked_size_add(1, entity_ref_bytes_at_depth(entity, depth)?),
+        TxValue::Tuple(slots) => {
+            if !(2..=8).contains(&slots.len())
+                || slots.iter().flatten().any(|slot| {
+                    matches!(slot, TxValue::Tuple(_) | TxValue::Scalar(Value::Tuple(_)))
+                })
+            {
+                return Err(incorrect(
+                    "program/invalid-input-tuple",
+                    "input tuples require 2–8 scalar or reference slots",
+                ));
+            }
+            let mut bytes = 5;
+            for slot in slots {
+                bytes = checked_size_add(bytes, 1)?;
+                if let Some(slot) = slot {
+                    bytes = checked_size_add(bytes, tx_value_bytes_at_depth(slot, depth + 1)?)?;
+                }
+            }
+            Ok(bytes)
+        }
     }
 }
 
@@ -2949,6 +3087,16 @@ fn callable_ref_bytes(function: &CallableRef) -> Result<usize, SemanticError> {
 }
 
 fn entity_ref_bytes(entity: &EntityRef) -> Result<usize, SemanticError> {
+    entity_ref_bytes_at_depth(entity, 0)
+}
+
+fn entity_ref_bytes_at_depth(entity: &EntityRef, depth: usize) -> Result<usize, SemanticError> {
+    if depth > 16 {
+        return Err(incorrect(
+            "program/value-depth",
+            "program values may contain at most 16 collection or reference levels",
+        ));
+    }
     match entity {
         EntityRef::Id(_) | EntityRef::Tx => Ok(9),
         EntityRef::Ident(keyword) => {
@@ -2959,7 +3107,10 @@ fn entity_ref_bytes(entity: &EntityRef) -> Result<usize, SemanticError> {
             checked_size_add(checked_size_add(6, keyword.name.len())?, namespace)
         }
         EntityRef::Temp(tempid) => checked_size_add(6, tempid.len()),
-        EntityRef::Lookup { value, .. } => checked_size_add(6, encoded_value_bytes(value, 0)?),
+        EntityRef::Lookup { value, .. } => checked_size_add(6, encoded_value_bytes(value, depth)?),
+        EntityRef::LookupInput { value, .. } => {
+            checked_size_add(6, tx_value_bytes_at_depth(value, depth + 1)?)
+        }
     }
 }
 

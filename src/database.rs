@@ -21,14 +21,27 @@ pub enum EntityRef {
     Id(u64),
     Ident(crate::Keyword),
     Temp(String),
-    Lookup { attribute: u32, value: Value },
+    Lookup {
+        attribute: u32,
+        value: Value,
+    },
+    /// A lookup key whose ref or tuple-ref slots use transaction entity forms.
+    /// Resolution is always against db-before, never transaction-local tempids.
+    LookupInput {
+        attribute: u32,
+        value: Box<TxValue>,
+    },
     Tx,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TxValue {
     Scalar(Value),
     Entity(EntityRef),
+    /// Transaction-only tuple slots. References remain symbolic until entity
+    /// allocation; `None` is a tuple nil. Stored tuple values never contain
+    /// unresolved identities, and nested tuple slots are not valid schema data.
+    Tuple(Vec<Option<TxValue>>),
 }
 
 /// The raw value key used while resolving unique identities. Datomic permits
@@ -41,6 +54,7 @@ pub enum TxValue {
 pub(crate) enum UpsertIdentityValue {
     Resolved(Value),
     TempRef(String),
+    Tuple(Vec<Option<UpsertIdentityValue>>),
 }
 
 impl UpsertIdentityValue {
@@ -48,6 +62,17 @@ impl UpsertIdentityValue {
         match (self, other) {
             (Self::Resolved(left), Self::Resolved(right)) => left.index_cmp(right).is_eq(),
             (Self::TempRef(left), Self::TempRef(right)) => left == right,
+            (Self::Tuple(left), Self::Tuple(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| match (left, right) {
+                            (None, None) => true,
+                            (Some(left), Some(right)) => left.same_key(right),
+                            _ => false,
+                        })
+            }
             _ => false,
         }
     }
@@ -55,12 +80,80 @@ impl UpsertIdentityValue {
     pub(crate) fn resolved(&self) -> Option<&Value> {
         match self {
             Self::Resolved(value) => Some(value),
-            Self::TempRef(_) => None,
+            Self::TempRef(_) | Self::Tuple(_) => None,
         }
     }
 
     pub(crate) fn is_nan(&self) -> bool {
         self.resolved().is_some_and(Value::is_nan)
+    }
+}
+
+/// Resolve only ref-typed input slots; scalar and nil slots retain their
+/// stored meaning. Symbolic references remain available to identity grouping.
+pub(crate) fn resolve_tuple_input(
+    schema: &Schema,
+    attribute: &crate::Attribute,
+    slots: &[Option<TxValue>],
+    mut resolve: impl FnMut(&EntityRef) -> Result<UpsertIdentityValue, SemanticError>,
+) -> Result<UpsertIdentityValue, SemanticError> {
+    let types = match &attribute.tuple {
+        Some(TupleSpec::Homogeneous(kind)) => vec![*kind; slots.len()],
+        Some(TupleSpec::Heterogeneous(types)) => types.clone(),
+        Some(TupleSpec::Composite(attributes)) => attributes
+            .iter()
+            .map(|attribute| {
+                schema
+                    .attribute(*attribute)
+                    .map(|attribute| attribute.value_type)
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        None => {
+            return Err(SemanticError::incorrect(
+                "transaction/value-type",
+                "tuple input requires a tuple attribute",
+            ));
+        }
+    };
+    if !(2..=8).contains(&slots.len()) || types.len() != slots.len() {
+        return Err(SemanticError::incorrect(
+            "transaction/invalid-tuple-length",
+            "tuple input does not match its schema length",
+        ));
+    }
+    let mut resolved = Vec::with_capacity(slots.len());
+    for (slot, kind) in slots.iter().zip(types) {
+        resolved.push(match slot {
+            None => None,
+            Some(TxValue::Scalar(value)) => Some(UpsertIdentityValue::Resolved(value.clone())),
+            Some(TxValue::Entity(entity)) if kind == ValueType::Ref => Some(resolve(entity)?),
+            Some(_) => return Err(SemanticError::incorrect("transaction/invalid-tuple-element", "tuple reference input requires a ref-typed slot; nested tuples are not scalar slots")),
+        });
+    }
+    // A temporary ref's final numeric id cannot change tuple shape/type.
+    // Validate with a type-only placeholder, never store or allocate it.
+    let shape = Value::Tuple(
+        resolved
+            .iter()
+            .map(|slot| {
+                slot.as_ref().map(|value| {
+                    value
+                        .resolved()
+                        .cloned()
+                        .unwrap_or(Value::Ref(crate::DB_IDENT))
+                })
+            })
+            .collect(),
+    );
+    schema.validate_value(attribute, &shape)?;
+    if resolved
+        .iter()
+        .flatten()
+        .all(|value| value.resolved().is_some())
+    {
+        Ok(UpsertIdentityValue::Resolved(shape))
+    } else {
+        Ok(UpsertIdentityValue::Tuple(resolved))
     }
 }
 
@@ -1506,6 +1599,7 @@ impl Database {
         ops: &[TxOp],
         tx_instant: i64,
     ) -> Result<AssessedTransaction, SemanticError> {
+        crate::transaction::validate_ops_input(ops)?;
         if let Some(previous) = self.last_tx_instant
             && tx_instant < previous
         {
@@ -2162,6 +2256,19 @@ impl Database {
     ) -> Result<UpsertIdentityValue, SemanticError> {
         let descriptor = self.schema.attribute(attribute)?;
         match value {
+            TxValue::Tuple(slots) => {
+                for value in slots.iter().flatten() {
+                    if let TxValue::Scalar(value) = value {
+                        self.validate_explicit_value_refs(value)?;
+                    }
+                }
+                resolve_tuple_input(&self.schema, descriptor, slots, |entity| match entity {
+                    EntityRef::Temp(name) => Ok(UpsertIdentityValue::TempRef(name.clone())),
+                    entity => self
+                        .resolve_entity(entity, tx, &BTreeMap::new())
+                        .map(|entity| UpsertIdentityValue::Resolved(Value::Ref(entity))),
+                })
+            }
             TxValue::Scalar(value) => {
                 self.validate_explicit_value_refs(value)?;
                 self.schema.validate_value(descriptor, value)?;
@@ -2545,6 +2652,15 @@ impl Database {
                     )
                 })
             }
+            EntityRef::LookupInput { attribute, value } => self
+                .database_value()
+                .resolve_lookup_input(*attribute, value)?
+                .ok_or_else(|| {
+                    SemanticError::incorrect(
+                        "transaction/lookup-not-found",
+                        "lookup ref did not resolve in db-before",
+                    )
+                }),
             EntityRef::Tx => Ok(tx),
         }
     }
@@ -2573,6 +2689,20 @@ impl Database {
     ) -> Result<Value, SemanticError> {
         let schema = self.schema.attribute(attribute)?;
         let value = match (schema.value_type, value) {
+            (ValueType::Tuple, TxValue::Tuple(slots)) => {
+                for value in slots.iter().flatten() {
+                    if let TxValue::Scalar(value) = value {
+                        self.validate_explicit_value_refs(value)?;
+                    }
+                }
+                resolve_tuple_input(&self.schema, schema, slots, |entity| {
+                    self.resolve_entity(entity, tx, tempids)
+                        .map(|entity| UpsertIdentityValue::Resolved(Value::Ref(entity)))
+                })?
+                .resolved()
+                .expect("allocated tuple has no symbolic references")
+                .clone()
+            }
             (ValueType::Ref, TxValue::Entity(entity)) => {
                 Value::Ref(self.resolve_entity(entity, tx, tempids)?)
             }
@@ -2690,8 +2820,16 @@ fn collect_tempids_op(op: &TxOp, entities: &mut BTreeSet<String>, values: &mut B
 }
 
 fn collect_tempids_value(value: &TxValue, output: &mut BTreeSet<String>) {
-    if let TxValue::Entity(entity) = value {
-        collect_tempids_entity(entity, output);
+    match value {
+        TxValue::Entity(entity) => collect_tempids_entity(entity, output),
+        TxValue::Tuple(slots) => {
+            for value in slots.iter().flatten() {
+                if let TxValue::Entity(entity) = value {
+                    collect_tempids_entity(entity, output);
+                }
+            }
+        }
+        TxValue::Scalar(_) => {}
     }
 }
 

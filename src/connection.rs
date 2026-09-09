@@ -312,6 +312,11 @@ impl Connection {
         self.core.peer.database_value()
     }
 
+    /// Capture an immutable transaction log without contacting the writer.
+    pub fn log(&self) -> crate::LogValue {
+        self.core.peer.log()
+    }
+
     /// Capture and adopt the newest durable head visible at the time of this
     /// call. This is the native synchronous counterpart of recovered
     /// zero-argument `sync`.

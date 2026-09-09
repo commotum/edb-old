@@ -121,6 +121,22 @@ stalled storage read; its worker and pins release when that in-flight read ends.
 
 These examples establish application paths, not production or scale acceptance.
 
+`DatabaseValue::with(&ops, tx_instant)` now returns a pure
+`SpeculativeTransactionReport`; its `db_after` can be extended, queried, pulled,
+or viewed through history/time/raw indexes without advancing PostgreSQL or a
+connection. Speculative chains share their committed base and retain their own
+information delta. `with` accepts primitive operations; `with_forms` also accepts
+maps and persisted controlled calls, using durable binding/predicate checks.
+`with_forms_with_limits` exposes operation/read/program and code-retention
+resource policy. Tuple ref slots accept `TxValue::Tuple` with symbolic references
+and nils; structured lookup keys use `EntityRef::LookupInput`. Stored values
+remain fully resolved. Ordinary request and program hashes remain unchanged;
+new inputs select new grammars and (for code literals) program ABI 6. Transactions
+on filtered values use the full basis and retain the filters on their result:
+`as_of` is not a branch of the past. History values cannot transact. Controlled
+generation follows this same docs-first native rule. Goal 3's live acceptance
+is recorded in its plan; overall query, operations and scale work remains.
+
 ## Working boundary
 
 Treat the recovered source as evidence, not as the unpublished original source

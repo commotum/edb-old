@@ -1885,12 +1885,9 @@ fn run_worker(
             .writer_residency
             .lock()
             .expect("writer residency mutex poisoned") = store.writer_residency_stats(database_id);
-        if let Ok(report) = &result {
-            shared.observe(report);
-        }
         let _ = work.response.send(result);
         if let Some(report) = publish {
-            shared.publish_reports(&report);
+            shared.publish(&report);
         }
         // Future/result delivery precedes report notification, matching the
         // recovered peer. Reconciliation therefore begins only after the

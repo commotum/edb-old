@@ -63,8 +63,8 @@ observation. Observation failures are surfaced separately from durable success.
 
 ### 3. Complete coordination and native traversal
 
-**Status:** Complete for native coordination/traversal; final combined rerun is
-part of Stage 4. Blocking PostgreSQL access is not a hard-real-time API.
+**Status:** Complete for native coordination/traversal. Blocking PostgreSQL
+access is not a hard-real-time API.
 
 **Outcome:** db/sync and transaction/index/schema/excision coordination expose
 truthful native values; time views and raw traversal retain exact semantics.
@@ -77,8 +77,8 @@ frontier and timeout. Cursor/time differentials and measured lazy accesses pass.
 
 ### 4. Integrate and return to Goal 0
 
-**Status:** Active — final combined peer/connection suite and process workflow
-are running after the last deadline repair; return to Goal 0 when they pass.
+**Status:** Complete — connection acceptance and the independent-process
+  workflow pass. Parent Stage 3 is next; the broad peer rerun also passed.
 
 **Outcome:** A documented application/deployment workflow exercises the completed
 connection model, and Goal 0 accurately selects the next unfinished stage.
@@ -191,8 +191,8 @@ Additional executed evidence (same disposable PostgreSQL 15.11 fixtures):
 - Native connection suite: 7/7, 101.83s after the multi-generation repair.
   Added T/Tx/duplicate-instant native views and two excision rewrites followed
   by a new-generation transaction, preserving all five original reports.
-  The later local-only `Connection::sync_to` change is under final rerun.
-- Actual dedicated server restart: 1/1, 3.11s, preserving native old values,
+  Final local-only `Connection::sync_to` rerun: 7/7, 123.35s.
+- Actual dedicated server restart: 1/1, final extended run 3.13s, preserving native old values,
   recovering root pins, standby takeover, complete reports, zero eager loads.
   An initial fixture run restarted at the wrong socket; only the corrected
   explicit-options run counts. That run exposed the root-pin retry bug, now fixed.
@@ -204,17 +204,25 @@ Additional executed evidence (same disposable PostgreSQL 15.11 fixtures):
   and oversized/slow frame rejection. Max-scalar and full grammar codec tests
   pass. Runtime-role test permits socket submission/native receipt reads while
   peer-role SQL UPDATE is denied (42501), compatibility loads zero.
-- Independent-process workflow passed twice before the final rerun (last prior
-  database `process-workflow-67405-1788929549629119046`). No scale claim.
+- Final independent-process workflow passed with database
+  `process-workflow-79850-1788930549341561928`, peer PIDs 81193/81194.
+  Final transport tests 3/3, 49.58s; stalled-observer/drop/local deadline test
+  1/1, 1.02s. No scale claim.
+- Service notifications now follow authoritative response delivery; the focused
+  own/external/unwaited/replay fixture passed again, 1/1, 1.52s. Background log
+  polling and report consumption remain asynchronous; do not promise scheduling
+  order of arbitrary user threads.
 - Library: 243 passed / 1 ignored, 32.46s; conditional PostgreSQL skips are not
   live evidence. Socket framing requires local socket permissions; a prior
   sandbox EPERM run was not a passing suite. Clippy/all-target checks pass.
 
 ## Continuation
 
-**Active child:** Goal 2, internal Stage 4. Finish the current final checks,
-record their real outcomes, then close parent Stage 2 and use `$scaffold-goal`
-for missing Goal 3. No external blocker or known unfixed reproduced connection
-failure is established. Preserve all repairs. Parent Stages 3–6 are unfinished;
+**Child complete; parent continues with Goal 3.** No known unfixed reproduced
+connection failure is established. The broader `postgres_peer` rerun passed
+19/19 on the main fixture, 435.98s. Reopen this child for an owning later failure.
+Preserve all repairs. Parent Stages 3–6 are unfinished;
 no production/scale acceptance is claimed. PostgreSQL restart checks must use
-the exact isolated startup options documented in README.
+the exact isolated startup options documented in README. Long SQL/network
+failure-envelope and load measurements remain explicit parent work, not an
+unbounded-wait guarantee or production acceptance inferred from local tests.

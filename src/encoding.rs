@@ -98,7 +98,9 @@ pub fn sha256(bytes: &[u8]) -> Digest {
 pub fn encode_program(program: &Program) -> Result<Vec<u8>, SemanticError> {
     program.validate()?;
     let mut body = Vec::new();
-    let abi_version = if program.kind == ProgramKind::DualPredicate {
+    let abi_version = if program_has_lookup_inputs(&program.instructions) {
+        6
+    } else if program.kind == ProgramKind::DualPredicate {
         DUAL_PREDICATE_PROGRAM_ABI_VERSION
     } else {
         // Existing kinds remain byte-for-byte ABI 4, preserving their
@@ -142,13 +144,11 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
     let abi_version = cursor.u16()?;
     if !matches!(
         abi_version,
-        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION
+        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6
     ) {
         return Err(fault(
             "encoding/unsupported-program-abi",
-            format!(
-                "program ABI {abi_version} is unsupported; expected {PROGRAM_ABI_VERSION} or {DUAL_PREDICATE_PROGRAM_ABI_VERSION}"
-            ),
+            format!("program ABI {abi_version} is unsupported; expected 4, 5 or 6"),
         ));
     }
     let kind = match cursor.u8()? {
@@ -156,7 +156,9 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
         1 => ProgramKind::AttributePredicate,
         2 => ProgramKind::Query,
         3 => ProgramKind::EntityPredicate,
-        4 if abi_version == DUAL_PREDICATE_PROGRAM_ABI_VERSION => ProgramKind::DualPredicate,
+        4 if matches!(abi_version, DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6) => {
+            ProgramKind::DualPredicate
+        }
         tag => return Err(invalid_tag("program kind", tag)),
     };
     let arity = cursor.u8()?;
@@ -780,7 +782,11 @@ pub(crate) fn canonical_submission_request(
     let mut body = Vec::new();
     // Submission identity has its own grammar version because these bytes are
     // hashed for idempotency but are not durable database values.
-    body.push(2);
+    body.push(if crate::transaction::forms_have_extended_inputs(forms) {
+        3
+    } else {
+        2
+    });
     match compare_basis_t {
         Some(basis) => {
             body.push(1);
@@ -1562,6 +1568,7 @@ fn encode_attribute(output: &mut Vec<u8>, attribute: &Attribute) -> Result<(), S
 }
 
 fn encode_value(output: &mut Vec<u8>, value: &Value) -> Result<(), SemanticError> {
+    crate::transaction::validate_stored_input(value)?;
     match value {
         Value::BigDec(value) => {
             output.push(0);
@@ -1989,6 +1996,7 @@ pub(crate) fn program_call_digest(call: &ProgramCall) -> Result<Digest, Semantic
 }
 
 fn encode_entity_ref(output: &mut Vec<u8>, entity: &EntityRef) -> Result<(), SemanticError> {
+    crate::transaction::validate_entity_input(entity)?;
     match entity {
         EntityRef::Id(id) => {
             output.push(0);
@@ -2008,11 +2016,31 @@ fn encode_entity_ref(output: &mut Vec<u8>, entity: &EntityRef) -> Result<(), Sem
             encode_value(output, value)?;
         }
         EntityRef::Tx => output.push(4),
+        EntityRef::LookupInput { attribute, value } => {
+            output.push(5);
+            put_u32(output, *attribute);
+            encode_tx_value(output, value)?;
+        }
     }
     Ok(())
 }
 
 fn decode_entity_ref(cursor: &mut Cursor<'_>) -> Result<EntityRef, SemanticError> {
+    decode_entity_ref_at(cursor, 0)
+}
+
+fn input_depth(depth: usize) -> Result<(), SemanticError> {
+    if depth > 32 {
+        return Err(fault(
+            "encoding/input-depth",
+            "transaction reference input exceeds the 32-level admission policy",
+        ));
+    }
+    Ok(())
+}
+
+fn decode_entity_ref_at(cursor: &mut Cursor<'_>, depth: usize) -> Result<EntityRef, SemanticError> {
+    input_depth(depth)?;
     Ok(match cursor.u8()? {
         0 => EntityRef::Id(cursor.u64()?),
         1 => EntityRef::Ident(decode_keyword(cursor)?),
@@ -2022,11 +2050,16 @@ fn decode_entity_ref(cursor: &mut Cursor<'_>) -> Result<EntityRef, SemanticError
             value: decode_value(cursor, 0)?,
         },
         4 => EntityRef::Tx,
+        5 => EntityRef::LookupInput {
+            attribute: cursor.u32()?,
+            value: Box::new(decode_tx_value_at(cursor, depth + 1, false)?),
+        },
         tag => return Err(invalid_tag("entity reference", tag)),
     })
 }
 
 fn encode_tx_value(output: &mut Vec<u8>, value: &TxValue) -> Result<(), SemanticError> {
+    crate::transaction::validate_value_input(value)?;
     match value {
         TxValue::Scalar(value) => {
             output.push(0);
@@ -2036,7 +2069,85 @@ fn encode_tx_value(output: &mut Vec<u8>, value: &TxValue) -> Result<(), Semantic
             output.push(1);
             encode_entity_ref(output, entity)
         }
+        TxValue::Tuple(slots) => {
+            if !(2..=8).contains(&slots.len())
+                || slots
+                    .iter()
+                    .flatten()
+                    .any(|slot| matches!(slot, TxValue::Tuple(_)))
+            {
+                return Err(SemanticError::incorrect(
+                    "encoding/invalid-input-tuple",
+                    "input tuples require 2–8 non-tuple slots",
+                ));
+            }
+            output.push(2);
+            put_len(output, slots.len())?;
+            for slot in slots {
+                output.push(u8::from(slot.is_some()));
+                if let Some(slot) = slot {
+                    encode_tx_value(output, slot)?;
+                }
+            }
+            Ok(())
+        }
     }
+}
+
+fn decode_tx_value(cursor: &mut Cursor<'_>) -> Result<TxValue, SemanticError> {
+    decode_tx_value_at(cursor, 0, false)
+}
+
+fn decode_tx_value_at(
+    cursor: &mut Cursor<'_>,
+    depth: usize,
+    nested: bool,
+) -> Result<TxValue, SemanticError> {
+    input_depth(depth)?;
+    Ok(match cursor.u8()? {
+        0 => TxValue::Scalar(decode_value(cursor, 0)?),
+        1 => TxValue::Entity(decode_entity_ref_at(cursor, depth + 1)?),
+        2 => {
+            let count = cursor.collection_len()?;
+            if nested || !(2..=8).contains(&count) {
+                return Err(fault(
+                    "encoding/invalid-input-tuple",
+                    "input tuples require 2–8 non-tuple slots",
+                ));
+            }
+            let mut slots = Vec::with_capacity(count);
+            for _ in 0..count {
+                slots.push(if cursor.boolean()? {
+                    Some(decode_tx_value_at(cursor, depth + 1, true)?)
+                } else {
+                    None
+                });
+            }
+            TxValue::Tuple(slots)
+        }
+        tag => return Err(invalid_tag("transaction value", tag)),
+    })
+}
+
+// Only programs containing the new input representation use ABI 6. Existing
+// program content addresses, including dual predicates, remain byte-identical.
+fn program_has_lookup_inputs(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|instruction| match instruction {
+        Instruction::PushEntity(EntityRef::LookupInput { .. })
+        | Instruction::EmitCall {
+            function: CallableRef::Database(EntityRef::LookupInput { .. }),
+            ..
+        } => true,
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => program_has_lookup_inputs(then_branch) || program_has_lookup_inputs(else_branch),
+        Instruction::ForEach { body } => program_has_lookup_inputs(body),
+        Instruction::PredicateDispatch { attribute, entity } => {
+            program_has_lookup_inputs(attribute) || program_has_lookup_inputs(entity)
+        }
+        _ => false,
+    })
 }
 
 fn encode_keyword(output: &mut Vec<u8>, value: &Keyword) -> Result<(), SemanticError> {

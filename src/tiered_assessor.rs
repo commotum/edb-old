@@ -405,6 +405,7 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     // standalone semantic-oracle entry still needs the same cross-phase
     // behavior, so give it a private unbounded observer while Reader enforces
     // the caller's explicit assessment allowance.
+    crate::transaction::validate_ops_input(ops)?;
     let base = if base.transaction_read_context().is_some() {
         base.clone()
     } else {
@@ -1460,6 +1461,22 @@ fn compare_upsert_identity_values(
         }
         (UpsertIdentityValue::Resolved(_), UpsertIdentityValue::TempRef(_)) => Ordering::Less,
         (UpsertIdentityValue::TempRef(_), UpsertIdentityValue::Resolved(_)) => Ordering::Greater,
+        (UpsertIdentityValue::Tuple(left), UpsertIdentityValue::Tuple(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let compared = match (left, right) {
+                    (None, None) => Ordering::Equal,
+                    (None, Some(_)) => Ordering::Less,
+                    (Some(_), None) => Ordering::Greater,
+                    (Some(left), Some(right)) => compare_upsert_identity_values(left, right),
+                };
+                if !compared.is_eq() {
+                    return compared;
+                }
+            }
+            left.len().cmp(&right.len())
+        }
+        (UpsertIdentityValue::Tuple(_), _) => Ordering::Greater,
+        (_, UpsertIdentityValue::Tuple(_)) => Ordering::Less,
     }
 }
 
@@ -1478,6 +1495,24 @@ fn resolve_upsert_identity_value(
 ) -> Result<UpsertIdentityValue, SemanticError> {
     let descriptor = reader.base.schema().attribute(attribute)?;
     match value {
+        TxValue::Tuple(slots) => {
+            for value in slots.iter().flatten() {
+                if let TxValue::Scalar(value) = value {
+                    validate_explicit_value_refs(reader.base, value)?;
+                }
+            }
+            let schema = reader.base.schema_arc();
+            crate::database::resolve_tuple_input(
+                &schema,
+                schema.attribute(attribute)?,
+                slots,
+                |entity| match entity {
+                    EntityRef::Temp(name) => Ok(UpsertIdentityValue::TempRef(name.clone())),
+                    entity => resolve_entity(reader, entity, tx, &BTreeMap::new())
+                        .map(|entity| UpsertIdentityValue::Resolved(Value::Ref(entity))),
+                },
+            )
+        }
         TxValue::Scalar(value) => {
             validate_explicit_value_refs(reader.base, value)?;
             reader.base.schema().validate_value(descriptor, value)?;
@@ -1726,6 +1761,18 @@ fn resolve_entity(
                 )
             })
         }
+        EntityRef::LookupInput { attribute, value } => reader
+            .base
+            .clone()
+            .resolve_lookup_input_with(*attribute, value, &mut |attribute, value| {
+                reader.lookup(attribute, value)
+            })?
+            .ok_or_else(|| {
+                SemanticError::incorrect(
+                    "transaction/lookup-not-found",
+                    "lookup ref did not resolve in db-before",
+                )
+            }),
         EntityRef::Tx => Ok(tx),
     }
 }
@@ -1754,6 +1801,26 @@ fn resolve_value(
 ) -> Result<Value, SemanticError> {
     let descriptor = reader.base.schema().attribute(attribute)?;
     let value = match (descriptor.value_type, value) {
+        (ValueType::Tuple, TxValue::Tuple(slots)) => {
+            for value in slots.iter().flatten() {
+                if let TxValue::Scalar(value) = value {
+                    validate_explicit_value_refs(reader.base, value)?;
+                }
+            }
+            let schema = reader.base.schema_arc();
+            crate::database::resolve_tuple_input(
+                &schema,
+                schema.attribute(attribute)?,
+                slots,
+                |entity| {
+                    resolve_entity(reader, entity, tx, tempids)
+                        .map(|entity| UpsertIdentityValue::Resolved(Value::Ref(entity)))
+                },
+            )?
+            .resolved()
+            .expect("allocated tuple has no symbolic references")
+            .clone()
+        }
         (ValueType::Ref, TxValue::Entity(entity)) => {
             Value::Ref(resolve_entity(reader, entity, tx, tempids)?)
         }
@@ -3108,6 +3175,72 @@ mod tests {
             assert_eq!(tiered.category, eager.category, "ops: {ops:?}");
             assert_eq!(tiered.code, eager.code, "ops: {ops:?}");
         }
+    }
+
+    #[test]
+    fn nested_lookup_input_charges_each_lookup_to_the_assessor() {
+        const KEY_REF: u32 = 1_004;
+        let mut schema = schema();
+        schema
+            .install(
+                Attribute::new(
+                    KEY_REF,
+                    Keyword::new("item", "key-ref"),
+                    ValueType::Ref,
+                    Cardinality::One,
+                )
+                .unique(Unique::Identity),
+            )
+            .unwrap();
+        let mut ops = add("one", 1);
+        ops.push(TxOp::Add {
+            entity: EntityRef::Temp("owner".into()),
+            attribute: KEY_REF,
+            value: TxValue::Entity(EntityRef::Temp("item".into())),
+        });
+        let report = Database::new(schema).unwrap().with(&ops, 10).unwrap();
+        let base = report.db_after.database_value();
+        let reference = EntityRef::LookupInput {
+            attribute: KEY_REF,
+            value: Box::new(TxValue::Entity(EntityRef::Lookup {
+                attribute: NAME,
+                value: Value::String("one".into()),
+            })),
+        };
+        let mut reader = Reader::new(
+            &base,
+            AssessmentLimits {
+                max_read_datoms: 1,
+                max_read_bytes: u64::MAX,
+            },
+        );
+        let error = resolve_entity(
+            &mut reader,
+            &reference,
+            t_to_tx(base.basis_t() + 1).unwrap(),
+            &BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "transaction/read-capacity");
+        assert_eq!(reader.work.datoms, 1);
+        let mut reader = Reader::new(
+            &base,
+            AssessmentLimits {
+                max_read_datoms: 2,
+                max_read_bytes: u64::MAX,
+            },
+        );
+        assert_eq!(
+            resolve_entity(
+                &mut reader,
+                &reference,
+                t_to_tx(base.basis_t() + 1).unwrap(),
+                &BTreeMap::new()
+            )
+            .unwrap(),
+            report.tempids["owner"]
+        );
+        assert_eq!(reader.work.datoms, 2);
     }
 
     #[test]

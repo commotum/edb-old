@@ -486,6 +486,10 @@ pub struct DatabaseValue {
     filters: Arc<[Arc<ReadFilter>]>,
     read_observer: Option<Arc<LogicalReadObserver>>,
     read_context: Option<Arc<TransactionReadContext>>,
+    // A speculative binding has no durable generation reference. Keep its
+    // authenticated dependency closure alive independently of cache eviction
+    // and program garbage collection. Flatten with the speculative datoms.
+    programs: Arc<crate::postgres::program_bindings::ResolvedPrograms>,
 }
 
 #[derive(Clone)]
@@ -495,22 +499,35 @@ enum ReadBasis {
     TransactionOverlay(Arc<TransactionOverlay>),
 }
 
-/// One immutable assessment-local db-after over an exact db-before.
+/// One immutable speculative db-after over an exact committed base.
 ///
 /// The overlay owns only canonical transaction datoms, transaction-local
 /// ident assertions, and resident successor metadata. Prefix reads merge that
-/// bounded delta with the wrapped value by exact stored E/A/V identity; no
-/// complete durable index is retained or materialized.
+/// delta with the wrapped value by exact stored E/A/V identity; no complete
+/// durable index is retained or materialized. Chaining flattens only speculative
+/// information, so iterator and destructor stack depth do not grow with history.
 #[derive(Clone)]
 struct TransactionOverlay {
     base: DatabaseValue,
     tx_data: Arc<[Datom]>,
+    current_data: Arc<[Datom]>,
+    base_removals: Arc<[Datom]>,
     ident_assertions: Arc<[(Keyword, u64)]>,
     schema: Arc<Schema>,
     newly_enabled_avet: Arc<[u32]>,
     basis_t: u64,
     eidx_frontier: u64,
     last_tx_instant: i64,
+}
+
+/// The result of a pure transaction. These values never advance a connection
+/// or create a durable transaction receipt.
+#[derive(Clone, Debug)]
+pub struct SpeculativeTransactionReport {
+    pub db_before: DatabaseValue,
+    pub db_after: DatabaseValue,
+    pub tx_data: Vec<Datom>,
+    pub tempids: BTreeMap<String, u64>,
 }
 
 /// A fallible forward scan of one exact immutable database value.
@@ -605,6 +622,7 @@ struct TransactionOverlayScanCursor<'a> {
     schema: Arc<Schema>,
     history: bool,
     order: IndexOrder,
+    reverse: bool,
     observer: Option<Arc<LogicalReadObserver>>,
     base_next: Option<OverlayCursorDatom>,
     delta_next: Option<OverlayCursorDatom>,
@@ -1055,6 +1073,59 @@ impl fmt::Debug for DatabaseValue {
 }
 
 impl DatabaseValue {
+    /// Database-filter docs: `with` computes over the full basis, then applies
+    /// the supplied view. An as-of view is not a branch of the past.
+    pub(crate) fn speculation_base(&self) -> Result<Self, SemanticError> {
+        if self.history {
+            return Err(SemanticError::incorrect(
+                "transaction/history-with",
+                "history values cannot be used for speculative transactions",
+            ));
+        }
+        let mut base = self.clone();
+        base.read_identity = Arc::new(ReadValueIdentity);
+        base.as_of_t = None;
+        base.since_t = None;
+        base.filters = Arc::default();
+        Ok(base)
+    }
+
+    pub(crate) fn with_speculation_view(mut self, original: &Self) -> Self {
+        self.read_identity = Arc::new(ReadValueIdentity);
+        self.as_of_t = original.as_of_t;
+        self.since_t = original.since_t;
+        self.filters = Arc::clone(&original.filters);
+        self
+    }
+
+    pub(crate) fn resolve_program(
+        &self,
+        hash: crate::ProgramHash,
+    ) -> Result<Arc<crate::program::ValidatedProgram>, SemanticError> {
+        if let Some(program) = self.programs.get(&hash) {
+            return Ok(Arc::clone(program));
+        }
+        match &self.basis {
+            ReadBasis::Native(snapshot) => snapshot.resolve_program(hash),
+            ReadBasis::TransactionOverlay(overlay) => overlay.base.resolve_program(hash),
+            ReadBasis::Eager(_) => Err(SemanticError::new(
+                ErrorCategory::NotFound,
+                "postgres/program-not-found",
+                "program content is not available in this database value",
+            )),
+        }
+    }
+
+    pub(crate) fn retain_programs(
+        mut self,
+        programs: crate::postgres::program_bindings::ResolvedPrograms,
+    ) -> Self {
+        if !programs.is_empty() {
+            Arc::make_mut(&mut self.programs).extend(programs);
+        }
+        self
+    }
+
     pub fn eager(database: Arc<Database>) -> Self {
         let last_tx_instant_memo = Arc::new(LastTxInstantMemo::seeded(database.last_tx_instant()));
         Self {
@@ -1067,6 +1138,7 @@ impl DatabaseValue {
             filters: Arc::default(),
             read_observer: None,
             read_context: None,
+            programs: Arc::default(),
         }
     }
 
@@ -1085,6 +1157,7 @@ impl DatabaseValue {
             filters: Arc::default(),
             read_observer: None,
             read_context: None,
+            programs: Arc::default(),
         }
     }
 
@@ -1110,9 +1183,9 @@ impl DatabaseValue {
         }
     }
 
-    /// Build the ephemeral exact db-after used while validating one assessed
-    /// transaction. A committed successor must install a new tiered value;
-    /// overlays are deliberately not chainable across commits.
+    /// Build an exact db-after for assessment or pure speculation. Chained
+    /// values share one committed base and retain only speculative information.
+    /// A committed successor still must install an authenticated tiered value.
     pub(crate) fn transaction_overlay(
         mut base: DatabaseValue,
         tx_data: Arc<[Datom]>,
@@ -1127,12 +1200,7 @@ impl DatabaseValue {
                 "a transaction overlay requires an unfiltered point-current db-before",
             ));
         }
-        if matches!(&base.basis, ReadBasis::TransactionOverlay(_)) {
-            return Err(SemanticError::incorrect(
-                "database/overlay-cannot-chain",
-                "a committed tiered successor must replace an assessment overlay",
-            ));
-        }
+        let programs = Arc::clone(&base.programs);
         let expected_basis = base.basis_t().checked_add(1).ok_or_else(|| {
             SemanticError::incorrect(
                 "database/overlay-basis-overflow",
@@ -1203,6 +1271,49 @@ impl DatabaseValue {
             ident_assertions.push((ident.clone(), datom.entity));
         }
 
+        let read_context = base.read_context.clone();
+        let mut current_data: Vec<_> = tx_data
+            .iter()
+            .filter(|datom| datom.added)
+            .cloned()
+            .collect();
+        let mut base_removals: Vec<_> = tx_data
+            .iter()
+            .filter(|datom| !datom.added)
+            .cloned()
+            .collect();
+        let tx_data = if let ReadBasis::TransactionOverlay(prior) = &base.basis {
+            let additions = current_data.len();
+            for datom in prior.current_data.iter() {
+                if !base_removals
+                    .iter()
+                    .any(|removal| same_stored_eav(removal, datom))
+                    && !current_data[..additions]
+                        .iter()
+                        .any(|addition| same_stored_eav(addition, datom))
+                {
+                    current_data.push(datom.clone());
+                }
+            }
+            base_removals.extend(prior.base_removals.iter().cloned());
+            // Keep newest assertions first for aliases and canonical names.
+            ident_assertions.extend(prior.ident_assertions.iter().cloned());
+            let mut history = prior.tx_data.to_vec();
+            history.extend(tx_data.iter().cloned());
+            history.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+            base = prior.base.clone();
+            Arc::from(history)
+        } else {
+            tx_data
+        };
+        current_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
+        base_removals.sort_by(|left, right| {
+            left.entity
+                .cmp(&right.entity)
+                .then(left.attribute.cmp(&right.attribute))
+                .then_with(|| left.value.stored_cmp(&right.value))
+        });
+        base_removals.dedup_by(|left, right| same_stored_eav(left, right));
         let base_schema = base.schema_arc();
         let newly_enabled_avet: Arc<[u32]> = if Arc::ptr_eq(&schema, &base_schema) {
             Arc::from([])
@@ -1222,12 +1333,13 @@ impl DatabaseValue {
         // memo context on both it and its wrapped base would charge/cache
         // every base datom twice. The outer value inherits the same attempt
         // context under its own immutable-value identity.
-        let read_context = base.read_context.clone();
         base.read_observer = None;
         base.read_context = None;
         Ok(Self {
             basis: ReadBasis::TransactionOverlay(Arc::new(TransactionOverlay {
                 base,
+                current_data: current_data.into(),
+                base_removals: base_removals.into(),
                 tx_data,
                 ident_assertions: ident_assertions.into(),
                 schema,
@@ -1244,6 +1356,7 @@ impl DatabaseValue {
             filters: Arc::default(),
             read_observer: read_context.as_ref().map(|context| context.observer()),
             read_context,
+            programs,
         })
     }
 
@@ -1600,6 +1713,7 @@ impl DatabaseValue {
                         datom.entity == datom.tx
                             && datom.attribute == crate::DB_TX_INSTANT as u32
                             && datom.added
+                            && matches!(datom.value, Value::Instant(value) if value >= instant)
                     })
                     .cloned()
                     .map(Some)
@@ -1956,8 +2070,8 @@ impl DatabaseValue {
             ReadBasis::Eager(_) => true,
             ReadBasis::Native(snapshot) => snapshot.avet_ready(attribute),
             ReadBasis::TransactionOverlay(overlay) => {
-                schema_has_avet(overlay.base.schema(), attribute)
-                    && overlay.base.physical_avet_ready(attribute)
+                overlay.newly_enabled_avet.binary_search(&attribute).is_ok()
+                    || overlay.base.physical_avet_ready(attribute)
             }
         }
     }
@@ -2414,11 +2528,19 @@ impl DatabaseValue {
                 physical_recorded: false,
                 failed: false,
             }),
-            ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
-                ErrorCategory::Unsupported,
-                "database/raw-seek-transaction-overlay",
-                "raw boundary seek is available on committed eager and native database values",
-            )),
+            ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Overlay(Box::new(overlay.scan_cursor_from(
+                    history,
+                    order,
+                    observer,
+                    physical_context,
+                    Some((boundary, false)),
+                )?)),
+                observer: None,
+                physical_context: None,
+                physical_recorded: false,
+                failed: false,
+            }),
         }
     }
 
@@ -2454,11 +2576,19 @@ impl DatabaseValue {
                 physical_recorded: false,
                 failed: false,
             }),
-            ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
-                ErrorCategory::Unsupported,
-                "database/raw-seek-transaction-overlay",
-                "raw boundary seek is available on committed eager and native database values",
-            )),
+            ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Overlay(Box::new(overlay.scan_cursor_from(
+                    history,
+                    order,
+                    observer,
+                    physical_context,
+                    Some((boundary, true)),
+                )?)),
+                observer: None,
+                physical_context: None,
+                physical_recorded: false,
+                failed: false,
+            }),
         }
     }
 
@@ -2623,21 +2753,55 @@ impl TransactionOverlay {
         observer: Option<Arc<LogicalReadObserver>>,
         physical_context: Option<Arc<TransactionReadContext>>,
     ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
-        let base = TransactionOverlayBaseCursor::Scan(self.base.basis_scan_cursor(
-            history,
-            order,
-            None,
-            physical_context.clone(),
-        )?);
+        self.scan_cursor_from(history, order, observer, physical_context, None)
+    }
+
+    fn scan_cursor_from(
+        &self,
+        history: bool,
+        order: IndexOrder,
+        observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
+        seek: Option<(&IndexBoundary, bool)>,
+    ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
+        let reverse = seek.is_some_and(|(_, reverse)| reverse);
+        let base = TransactionOverlayBaseCursor::Scan(match (&self.base.basis, seek) {
+            (ReadBasis::Native(snapshot), Some((boundary, reverse)))
+                if boundary.avet_attribute().is_some_and(|attribute| {
+                    self.newly_enabled_avet.binary_search(&attribute).is_ok()
+                }) =>
+            {
+                DatabaseValueScanCursor {
+                    inner: DatabaseValueScanCursorInner::Native(Box::new(
+                        snapshot.boundary_cursor_existing_projection(history, boundary, reverse)?,
+                    )),
+                    observer: None,
+                    physical_context: physical_context.clone(),
+                    physical_recorded: false,
+                    failed: false,
+                }
+            }
+            (_, Some((boundary, true))) => self.base.basis_reverse_boundary_cursor(
+                history,
+                boundary,
+                None,
+                physical_context.clone(),
+            )?,
+            (_, Some((boundary, false))) => self.base.basis_seek_boundary_cursor(
+                history,
+                boundary,
+                None,
+                physical_context.clone(),
+            )?,
+            (_, None) => {
+                self.base
+                    .basis_scan_cursor(history, order, None, physical_context.clone())?
+            }
+        });
         let removals: Arc<[Datom]> = if history {
             Arc::from([])
         } else {
-            self.tx_data
-                .iter()
-                .filter(|datom| !datom.added)
-                .cloned()
-                .collect::<Vec<_>>()
-                .into()
+            Arc::clone(&self.base_removals)
         };
         let mut delta = Vec::<OverlayCursorDatom>::new();
 
@@ -2675,15 +2839,20 @@ impl TransactionOverlay {
             }
         }
 
-        for datom in self
-            .tx_data
-            .iter()
-            .filter(|datom| overlay_index_member(&self.schema, datom, order))
-            .filter(|datom| history || datom.added)
+        let backfill_len = delta.len();
+        for datom in (if history {
+            &self.tx_data
+        } else {
+            &self.current_data
+        })
+        .iter()
+        .filter(|datom| overlay_index_member(&self.schema, datom, order))
+        .filter(|datom| history || datom.added)
         {
             if history
                 || !delta
                     .iter()
+                    .take(backfill_len)
                     .any(|existing| same_stored_eav(&existing.datom, datom))
             {
                 delta.push(OverlayCursorDatom {
@@ -2693,6 +2862,20 @@ impl TransactionOverlay {
             }
         }
         delta.sort_by(|left, right| left.datom.cmp_in(&right.datom, order));
+        if let Some((boundary, reverse)) = seek {
+            let normalized = boundary.normalized()?;
+            delta.retain(|item| {
+                let compared = normalized.compare_datom(&item.datom);
+                if reverse {
+                    !compared.is_gt()
+                } else {
+                    !compared.is_lt()
+                }
+            });
+            if reverse {
+                delta.reverse();
+            }
+        }
         Ok(TransactionOverlayScanCursor {
             base,
             delta: delta.into_iter(),
@@ -2700,6 +2883,7 @@ impl TransactionOverlay {
             schema: Arc::clone(&self.schema),
             history,
             order,
+            reverse,
             observer,
             base_next: None,
             delta_next: None,
@@ -2718,12 +2902,7 @@ impl TransactionOverlay {
         let removals: Arc<[Datom]> = if history {
             Arc::from([])
         } else {
-            self.tx_data
-                .iter()
-                .filter(|datom| !datom.added)
-                .cloned()
-                .collect::<Vec<_>>()
-                .into()
+            Arc::clone(&self.base_removals)
         };
         let mut delta = Vec::<OverlayCursorDatom>::new();
 
@@ -2766,18 +2945,23 @@ impl TransactionOverlay {
             TransactionOverlayBaseCursor::Empty
         };
 
-        for datom in self
-            .tx_data
-            .iter()
-            .filter(|datom| {
-                overlay_index_member(&self.schema, datom, prefix.order())
-                    && compare_prefix(datom, prefix).is_eq()
-            })
-            .filter(|datom| history || datom.added)
+        let backfill_len = delta.len();
+        for datom in (if history {
+            &self.tx_data
+        } else {
+            &self.current_data
+        })
+        .iter()
+        .filter(|datom| {
+            overlay_index_member(&self.schema, datom, prefix.order())
+                && compare_prefix(datom, prefix).is_eq()
+        })
+        .filter(|datom| history || datom.added)
         {
             if history
                 || !delta
                     .iter()
+                    .take(backfill_len)
                     .any(|existing| same_stored_eav(&existing.datom, datom))
             {
                 delta.push(OverlayCursorDatom {
@@ -2795,6 +2979,7 @@ impl TransactionOverlay {
             schema: Arc::clone(&self.schema),
             history,
             order: prefix.order(),
+            reverse: false,
             observer,
             base_next: None,
             delta_next: None,
@@ -2868,7 +3053,11 @@ impl TransactionOverlayScanCursor<'_> {
                     Ok(self.base_next.take())
                 }
             }
-            (Some(base), Some(delta)) => match base.datom.cmp_in(&delta.datom, self.order) {
+            (Some(base), Some(delta)) => match if self.reverse {
+                delta.datom.cmp_in(&base.datom, self.order)
+            } else {
+                base.datom.cmp_in(&delta.datom, self.order)
+            } {
                 std::cmp::Ordering::Less => Ok(self.base_next.take()),
                 std::cmp::Ordering::Greater => Ok(self.delta_next.take()),
                 std::cmp::Ordering::Equal => {
@@ -4033,8 +4222,8 @@ mod tests {
             overlay.eidx_frontier(),
             5_000,
         )
-        .unwrap_err();
-        assert_eq!(chained.code, "database/overlay-cannot-chain");
+        .unwrap();
+        assert_eq!(chained.basis_t(), overlay.basis_t() + 1);
 
         let mut reversed = report.tx_data.clone();
         reversed.reverse();
@@ -4277,12 +4466,11 @@ mod tests {
     }
 
     #[test]
-    fn raw_avet_boundary_rejects_a_logically_enabled_but_pending_projection() {
+    fn raw_avet_boundary_can_use_a_speculative_attribute_backfill() {
         let (_, overlay, ..) = overlay_fixture();
-        let error = overlay
+        let boundary = overlay
             .avet_boundary(IndexComponents::One(AttributeName::Id(AMOUNT)))
-            .unwrap_err();
-        assert_eq!(error.category, ErrorCategory::Unavailable);
-        assert_eq!(error.code, "index/avet-not-ready");
+            .unwrap();
+        assert!(overlay.seek_cursor(&boundary).unwrap().next().is_some());
     }
 }

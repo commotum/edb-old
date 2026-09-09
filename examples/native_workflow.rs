@@ -1,15 +1,17 @@
 //! A repeatable public-API workflow. Run against a disposable PostgreSQL database:
 //! ATOMIC_POSTGRES_URL='host=... user=... dbname=...' cargo run --example native_workflow
 use atomic_core::{
-    Attribute, AttributeName, CapacityLimits, Cardinality, Clause, Connection, DataPattern,
-    EntityRef, FindElement, FindSpec, IndexOrder, Keyword, PostgresMigrator, PostgresStore,
-    PullAttribute, PullPattern, Query, QueryControl, QueryResult, QueryValue, Schema, Term,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, Value, ValueType,
-    Variable,
+    Attribute, AttributeName, CallableRef, CapacityLimits, Cardinality, Clause, Connection,
+    DataPattern, EntityRef, FindElement, FindSpec, IndexOrder, Instruction, Keyword,
+    PostgresMigrator, PostgresStore, Program, ProgramCall, ProgramKind, PullAttribute, PullPattern,
+    Query, QueryControl, QueryResult, QueryValue, Schema, Term, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TupleSpec, TxForm, TxOp, TxValue, Unique, Value,
+    ValueType, Variable,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const NAME: u32 = 1_000;
+const REGISTRATION: u32 = 1_001;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let postgres = std::env::var("ATOMIC_POSTGRES_URL")?;
@@ -20,7 +22,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // Provisioning is explicit. All subsequent application work uses Connection.
     PostgresMigrator::connect(&postgres)?.migrate()?;
-    PostgresStore::connect(&postgres)?.create_database(&database_id, Schema::new())?;
+    let mut store = PostgresStore::connect(&postgres)?;
+    store.create_database(&database_id, Schema::new())?;
+    let rename = store.deploy_program_blob(&Program {
+        kind: ProgramKind::Transaction,
+        arity: 2,
+        instructions: vec![
+            Instruction::PushArgument(0),
+            Instruction::PushArgument(1),
+            Instruction::EmitAdd(NAME),
+            Instruction::Return,
+        ],
+    })?;
+    drop(store);
     let config = TransactionServiceConfig {
         connection: postgres,
         database_id: database_id.clone(),
@@ -37,23 +51,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     connection.transact(
         TransactionRequest::new(
             "schema",
-            vec![TxOp::InstallAttribute(Attribute::new(
-                NAME,
-                Keyword::new("person", "name"),
-                ValueType::String,
-                Cardinality::One,
-            ))],
+            vec![
+                TxOp::InstallAttribute(Attribute::new(
+                    NAME,
+                    Keyword::new("person", "name"),
+                    ValueType::String,
+                    Cardinality::One,
+                )),
+                TxOp::InstallAttribute(
+                    Attribute::new(
+                        REGISTRATION,
+                        Keyword::new("registration", "key"),
+                        ValueType::Tuple,
+                        Cardinality::One,
+                    )
+                    .tuple(TupleSpec::Heterogeneous(vec![
+                        ValueType::Ref,
+                        ValueType::Long,
+                    ]))
+                    .unique(Unique::Identity),
+                ),
+                TxOp::Add {
+                    entity: EntityRef::Temp("rename".into()),
+                    attribute: atomic_core::DB_IDENT as u32,
+                    value: Value::Keyword(Keyword::new("person", "rename")).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("rename".into()),
+                    attribute: atomic_core::DB_FN as u32,
+                    value: Value::Function(rename).into(),
+                },
+            ],
         ),
         timeout,
     )?;
     let inserted = connection.transact(
         TransactionRequest::new(
             "insert",
-            vec![TxOp::Add {
-                entity: EntityRef::Temp("person".into()),
-                attribute: NAME,
-                value: Value::String("Ada".into()).into(),
-            }],
+            vec![
+                TxOp::Add {
+                    entity: EntityRef::Temp("person".into()),
+                    attribute: NAME,
+                    value: Value::String("Ada".into()).into(),
+                },
+                TxOp::Add {
+                    entity: EntityRef::Temp("person".into()),
+                    attribute: atomic_core::DB_IDENT as u32,
+                    value: Value::Keyword(Keyword::new("person", "ada")).into(),
+                },
+            ],
         ),
         timeout,
     )?;
@@ -84,15 +130,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )))],
     };
     let original_pull = original.pull(&pattern, person)?;
+    // Pure native branches can be queried, navigated, and extended without
+    // advancing either peer or the durable writer.
+    let speculative_instant = original.last_tx_instant()?.unwrap_or(0) + 1;
+    let rename_form = |name: &str| {
+        TxForm::ProgramCall(ProgramCall {
+            function: CallableRef::Database(EntityRef::Ident(Keyword::new("person", "rename"))),
+            arguments: vec![
+                EntityRef::Id(person).into(),
+                Value::String(name.into()).into(),
+            ],
+        })
+    };
+    let registration_key = || {
+        TxValue::Tuple(vec![
+            Some(TxValue::Entity(EntityRef::Ident(Keyword::new(
+                "person", "ada",
+            )))),
+            Some(Value::Long(2026).into()),
+        ])
+    };
+    let registration = TxForm::Op(TxOp::Add {
+        entity: EntityRef::Temp("registration".into()),
+        attribute: REGISTRATION,
+        value: registration_key(),
+    });
+    let speculative = original.with_forms(
+        &[rename_form("Hypothetical Ada"), registration.clone()],
+        speculative_instant,
+    )?;
+    let chained = speculative.db_after.with(
+        &[TxOp::Add {
+            entity: EntityRef::LookupInput {
+                attribute: REGISTRATION,
+                value: Box::new(registration_key()),
+            },
+            attribute: NAME,
+            value: Value::String("Hypothetical registration".into()).into(),
+        }],
+        speculative_instant + 1,
+    )?;
+    assert_ne!(names(&chained.db_after)?, names(&original)?);
+    assert_ne!(chained.db_after.pull(&pattern, person)?, original_pull);
+    assert_eq!(connection.db().basis_t(), original.basis_t());
+    assert_eq!(original.pull(&pattern, person)?, original_pull);
     let changed = connection.transact(
-        TransactionRequest::new(
-            "rename",
-            vec![TxOp::Add {
-                entity: EntityRef::Id(person),
-                attribute: NAME,
-                value: Value::String("Ada Lovelace".into()).into(),
-            }],
-        ),
+        TransactionRequest::from_forms("rename", vec![rename_form("Ada Lovelace"), registration]),
         timeout,
     )?;
     assert_eq!(original.pull(&pattern, person)?, original_pull);
@@ -135,7 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(names(&reopened.db())?, expected);
     assert_eq!(original.pull(&pattern, person)?, original_pull);
     println!(
-        "PASS {database_id}: schema, transact, query, pull, history, immutable values, reopen at t={}",
+        "PASS {database_id}: schema, controlled transact, tuple references, lookup keys, query, pull, history, chained native speculation, immutable values, reopen at t={}",
         changed.basis_t
     );
     Ok(())

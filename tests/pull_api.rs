@@ -185,9 +185,7 @@ fn pull_aliases_accept_string_numeric_and_collection_keys() {
         Some(&QueryValue::Scalar(Value::Ref(ids[0])))
     );
 
-    let QueryValue::Map(entries) = pulled else {
-        unreachable!("pull always returns a map")
-    };
+    let entries = pulled.into_map().expect("pull always returns a map");
     assert!(
         entries
             .windows(2)

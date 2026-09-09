@@ -105,7 +105,11 @@ pub struct PullPattern {
 
 #[derive(Clone, Debug)]
 pub struct PullControl {
+    /// Explicit traversal depth policy, with the root at zero. The default
+    /// imposes no practical cap; selector recursion limits remain independent.
     pub max_depth: usize,
+    /// Explicit number of expanded entity occurrences, counting repeated
+    /// branches independently. The default imposes no practical cap.
     pub max_entities: usize,
     pub cancel: Arc<AtomicBool>,
 }
@@ -113,8 +117,8 @@ pub struct PullControl {
 impl Default for PullControl {
     fn default() -> Self {
         Self {
-            max_depth: 512,
-            max_entities: 100_000,
+            max_depth: usize::MAX,
+            max_entities: usize::MAX,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -126,7 +130,7 @@ struct PullState<'a> {
     /// Cycle and depth state belongs to one lexical recursive selector. An
     /// ordinary nested pull, or a different recursive selector in the same
     /// pattern, must not consume this state.
-    recursions: BTreeMap<Vec<usize>, RecursionState>,
+    recursions: BTreeMap<RecursionKey, RecursionState>,
     entities: usize,
 }
 
@@ -161,7 +165,7 @@ impl QueryPullBudget {
         self.work
     }
 
-    fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
+    pub(crate) fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
         self.work = self.work.saturating_add(amount);
         if self.cancel.load(Ordering::Relaxed) {
             return Err(SemanticError::new(
@@ -211,6 +215,12 @@ impl PullState<'_> {
 struct RecursionState {
     depth: usize,
     seen: BTreeSet<u64>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum RecursionKey {
+    Selector(Vec<usize>),
+    Component(Vec<usize>),
 }
 
 impl PullPattern {
@@ -633,6 +643,69 @@ fn unresolved_pull(pattern: &PullPattern) -> QueryValue {
     QueryValue::Map(result)
 }
 
+#[derive(Clone)]
+struct PullContext<'a> {
+    pattern: &'a PullPattern,
+    scope: Vec<usize>,
+    depth: usize,
+}
+
+#[derive(Clone, Copy)]
+enum Selector<'a> {
+    Explicit(usize, &'a PullAttribute),
+    Wildcard(u32),
+}
+
+enum PullTask<'a> {
+    Entity(u64, PullContext<'a>),
+    Attribute(u64, Selector<'a>, PullContext<'a>),
+    Value {
+        source: u64,
+        value: Value,
+        value_type: ValueType,
+        component: bool,
+        nested: Option<&'a PullNested>,
+        selector_index: Option<usize>,
+        context: PullContext<'a>,
+    },
+    FinishMap {
+        start: usize,
+        entries: Vec<(QueryValue, QueryValue)>,
+    },
+    FinishAttribute {
+        start: usize,
+        key: QueryValue,
+        default: Option<QueryValue>,
+        multiple: bool,
+        omit_empty: bool,
+    },
+    LeaveRecursion {
+        key: RecursionKey,
+        entity: u64,
+        new_traversal: bool,
+    },
+}
+
+enum PullOutput {
+    Value(QueryValue),
+    Attribute(Option<(QueryValue, QueryValue)>),
+}
+
+enum PreparedAttribute {
+    Complete(Option<(QueryValue, QueryValue)>),
+    Values {
+        key: QueryValue,
+        default: Option<QueryValue>,
+        values: Vec<Value>,
+        multiple: bool,
+        value_type: ValueType,
+        component: bool,
+    },
+}
+
+/// Explicit continuations keep native stack depth independent of graph depth.
+/// A recursive selector's visited set is removed at its lexical return point,
+/// so siblings and unrelated nested patterns do not share accidental state.
 fn pull_entity(
     database: &DatabaseValue,
     entity: u64,
@@ -641,99 +714,281 @@ fn pull_entity(
     state: &mut PullState<'_>,
     depth: usize,
 ) -> Result<QueryValue, SemanticError> {
-    state.check(1)?;
-    if depth > state.control.max_depth {
-        return Err(SemanticError::new(
-            ErrorCategory::Busy,
-            "pull/depth-limit",
-            "pull exceeded its recursion depth limit",
-        ));
-    }
-    state.entities += 1;
-    if state.entities > state.control.max_entities {
-        return Err(SemanticError::new(
-            ErrorCategory::Busy,
-            "pull/entity-limit",
-            "pull exceeded its entity traversal limit",
-        ));
-    }
-    let mut result = Vec::new();
-    let mut wildcard_processed = BTreeSet::new();
-    if pattern.wildcard {
-        put(
-            &mut result,
-            keyword_key(db_id()),
-            QueryValue::Scalar(Value::Ref(entity)),
-        );
-        let datoms = database.datoms_with_prefix(&IndexPrefix::Eavt {
-            entity,
-            attribute: None,
-            value: None,
-        })?;
-        state.check(datoms.len())?;
-        let mut attributes = BTreeSet::new();
-        for datom in datoms {
-            attributes.insert(datom.attribute);
-        }
-        for attribute in attributes {
-            let default_selector = PullAttribute::forward(AttributeName::Id(attribute));
-            let explicit = pattern
-                .attributes
-                .iter()
-                .enumerate()
-                .find(|(_, selector)| selector_selects_forward(database, selector, attribute));
-            let (selector_index, selector) = match explicit {
-                Some((selector_index, selector)) => {
-                    wildcard_processed.insert(selector_index);
-                    (Some(selector_index), selector)
+    let wildcard = PullPattern::wildcard();
+    let mut tasks = vec![PullTask::Entity(
+        entity,
+        PullContext {
+            pattern,
+            scope: pattern_scope.to_vec(),
+            depth,
+        },
+    )];
+    let mut output = Vec::new();
+    while let Some(task) = tasks.pop() {
+        match task {
+            PullTask::Entity(entity, context) => {
+                state.check(1)?;
+                if context.depth > state.control.max_depth {
+                    return Err(SemanticError::new(
+                        ErrorCategory::Busy,
+                        "pull/depth-limit",
+                        "pull exceeded its recursion depth limit",
+                    ));
                 }
-                None => (None, &default_selector),
-            };
-            if let Some((key, value)) = pull_attribute(
-                database,
-                entity,
-                selector,
-                pattern,
-                pattern_scope,
+                state.entities = state.entities.checked_add(1).ok_or_else(|| {
+                    SemanticError::new(
+                        ErrorCategory::Busy,
+                        "pull/entity-limit",
+                        "pull entity count overflowed",
+                    )
+                })?;
+                if state.entities > state.control.max_entities {
+                    return Err(SemanticError::new(
+                        ErrorCategory::Busy,
+                        "pull/entity-limit",
+                        "pull exceeded its entity traversal limit",
+                    ));
+                }
+                let mut entries = Vec::new();
+                let mut selectors = Vec::new();
+                let mut wildcard_processed = BTreeSet::new();
+                if context.pattern.wildcard {
+                    put(
+                        &mut entries,
+                        keyword_key(db_id()),
+                        QueryValue::Scalar(Value::Ref(entity)),
+                    );
+                    let datoms = database.datoms_with_prefix(&IndexPrefix::Eavt {
+                        entity,
+                        attribute: None,
+                        value: None,
+                    })?;
+                    state.check(datoms.len())?;
+                    let attributes = datoms
+                        .into_iter()
+                        .map(|datom| datom.attribute)
+                        .collect::<BTreeSet<_>>();
+                    for attribute in attributes {
+                        let explicit =
+                            context
+                                .pattern
+                                .attributes
+                                .iter()
+                                .enumerate()
+                                .find(|(_, selector)| {
+                                    selector_selects_forward(database, selector, attribute)
+                                });
+                        selectors.push(match explicit {
+                            Some((index, selector)) => {
+                                wildcard_processed.insert(index);
+                                Selector::Explicit(index, selector)
+                            }
+                            None => Selector::Wildcard(attribute),
+                        });
+                    }
+                }
+                for (index, selector) in context.pattern.attributes.iter().enumerate() {
+                    if !wildcard_processed.contains(&index) {
+                        selectors.push(Selector::Explicit(index, selector));
+                    }
+                }
+                tasks.push(PullTask::FinishMap {
+                    start: output.len(),
+                    entries,
+                });
+                for selector in selectors.into_iter().rev() {
+                    tasks.push(PullTask::Attribute(entity, selector, context.clone()));
+                }
+            }
+            PullTask::Attribute(entity, selector, context) => {
+                let default_selector;
+                let (selector_index, nested, selector) = match selector {
+                    Selector::Explicit(index, selector) => {
+                        (Some(index), selector.nested.as_ref(), selector)
+                    }
+                    Selector::Wildcard(attribute) => {
+                        default_selector = PullAttribute::forward(AttributeName::Id(attribute));
+                        (None, None, &default_selector)
+                    }
+                };
+                match prepare_attribute(database, entity, selector, state)? {
+                    PreparedAttribute::Complete(attribute) => {
+                        output.push(PullOutput::Attribute(attribute))
+                    }
+                    PreparedAttribute::Values {
+                        key,
+                        default,
+                        values,
+                        multiple,
+                        value_type,
+                        component,
+                    } => {
+                        tasks.push(PullTask::FinishAttribute {
+                            start: output.len(),
+                            key,
+                            default,
+                            multiple,
+                            omit_empty: nested.is_some(),
+                        });
+                        for value in values.into_iter().rev() {
+                            tasks.push(PullTask::Value {
+                                source: entity,
+                                value,
+                                value_type,
+                                component,
+                                nested,
+                                selector_index,
+                                context: context.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            PullTask::Value {
+                source,
+                value,
+                value_type,
+                component,
+                nested,
                 selector_index,
-                state,
-                depth,
-            )? {
-                put(&mut result, key, value);
+                context,
+            } => {
+                let Value::Ref(entity) = value else {
+                    if nested.is_some() {
+                        return Err(SemanticError::incorrect(
+                            "pull/nested-non-ref",
+                            "nested pull requires a ref attribute",
+                        ));
+                    }
+                    output.push(PullOutput::Value(QueryValue::Scalar(value)));
+                    continue;
+                };
+                if value_type != ValueType::Ref {
+                    return Err(fault(
+                        "pull/schema-value-mismatch",
+                        "ref value belongs to a non-ref attribute",
+                    ));
+                }
+                let mut child_context = context.clone();
+                child_context.depth = context.depth.checked_add(1).ok_or_else(|| {
+                    SemanticError::new(
+                        ErrorCategory::Busy,
+                        "pull/depth-limit",
+                        "pull traversal depth overflowed",
+                    )
+                })?;
+                let recursion = match nested {
+                    Some(PullNested::Pattern(pattern)) => {
+                        child_context.pattern = pattern;
+                        child_context
+                            .scope
+                            .push(selector_index.expect("nested selector has an index"));
+                        None
+                    }
+                    Some(PullNested::Recursion(limit)) => {
+                        let mut path = context.scope.clone();
+                        path.push(selector_index.expect("recursive selector has an index"));
+                        Some((RecursionKey::Selector(path), *limit))
+                    }
+                    None if component => {
+                        child_context.pattern = &wildcard;
+                        Some((RecursionKey::Component(context.scope.clone()), None))
+                    }
+                    None => {
+                        output.push(PullOutput::Value(id_map(entity)));
+                        continue;
+                    }
+                };
+                if let Some((key, limit)) = recursion {
+                    let new_traversal = !state.recursions.contains_key(&key);
+                    let recursion = state.recursions.entry(key.clone()).or_default();
+                    if new_traversal {
+                        recursion.seen.insert(source);
+                    }
+                    if limit.is_some_and(|limit| recursion.depth >= limit)
+                        || recursion.seen.contains(&entity)
+                    {
+                        if new_traversal {
+                            state.recursions.remove(&key);
+                        }
+                        output.push(PullOutput::Value(id_map(entity)));
+                        continue;
+                    }
+                    recursion.depth += 1;
+                    recursion.seen.insert(entity);
+                    tasks.push(PullTask::LeaveRecursion {
+                        key,
+                        entity,
+                        new_traversal,
+                    });
+                }
+                tasks.push(PullTask::Entity(entity, child_context));
+            }
+            PullTask::FinishMap { start, mut entries } => {
+                for item in output.drain(start..) {
+                    let PullOutput::Attribute(attribute) = item else {
+                        unreachable!("entity continuation requires attribute results")
+                    };
+                    if let Some((key, value)) = attribute {
+                        put(&mut entries, key, value);
+                    }
+                }
+                output.push(PullOutput::Value(QueryValue::Map(entries)));
+            }
+            PullTask::FinishAttribute {
+                start,
+                key,
+                default,
+                multiple,
+                omit_empty,
+            } => {
+                let mut values = Vec::new();
+                for item in output.drain(start..) {
+                    let PullOutput::Value(value) = item else {
+                        unreachable!("attribute continuation requires value results")
+                    };
+                    if !omit_empty || !is_empty_map(&value) {
+                        values.push(value);
+                    }
+                }
+                let value = if multiple {
+                    Some(QueryValue::Collection(values))
+                } else if values.is_empty() {
+                    default
+                } else {
+                    Some(values.remove(0))
+                };
+                output.push(PullOutput::Attribute(value.map(|value| (key, value))));
+            }
+            PullTask::LeaveRecursion {
+                key,
+                entity,
+                new_traversal,
+            } => {
+                let recursion = state
+                    .recursions
+                    .get_mut(&key)
+                    .expect("recursive selector remains active until its continuation");
+                recursion.depth -= 1;
+                recursion.seen.remove(&entity);
+                if new_traversal {
+                    state.recursions.remove(&key);
+                }
             }
         }
     }
-    for (selector_index, selector) in pattern.attributes.iter().enumerate() {
-        if wildcard_processed.contains(&selector_index) {
-            continue;
-        }
-        if let Some((key, value)) = pull_attribute(
-            database,
-            entity,
-            selector,
-            pattern,
-            pattern_scope,
-            Some(selector_index),
-            state,
-            depth,
-        )? {
-            put(&mut result, key, value);
-        }
+    match output.pop() {
+        Some(PullOutput::Value(value)) => Ok(value),
+        _ => unreachable!("root pull must return one value"),
     }
-    Ok(QueryValue::Map(result))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pull_attribute(
+fn prepare_attribute(
     database: &DatabaseValue,
     entity: u64,
     selector: &PullAttribute,
-    pattern: &PullPattern,
-    pattern_scope: &[usize],
-    selector_index: Option<usize>,
     state: &mut PullState<'_>,
-    depth: usize,
-) -> Result<Option<(QueryValue, QueryValue)>, SemanticError> {
+) -> Result<PreparedAttribute, SemanticError> {
     state.check(1)?;
     let (name, reverse) = match &selector.direction {
         PullDirection::Forward(attribute) => (attribute, false),
@@ -744,7 +999,10 @@ fn pull_attribute(
             .alias
             .clone()
             .unwrap_or_else(|| keyword_key(db_id()));
-        return Ok(Some((key, QueryValue::Scalar(Value::Ref(entity)))));
+        return Ok(PreparedAttribute::Complete(Some((
+            key,
+            QueryValue::Scalar(Value::Ref(entity)),
+        ))));
     }
     let Some(attribute) = resolve_pull_attribute(database, name)? else {
         let AttributeName::Ident(ident) = name else {
@@ -754,7 +1012,9 @@ fn pull_attribute(
             .alias
             .clone()
             .unwrap_or_else(|| keyword_key(reverse_ident(ident, reverse)));
-        return Ok(selector.default.clone().map(|default| (key, default)));
+        return Ok(PreparedAttribute::Complete(
+            selector.default.clone().map(|default| (key, default)),
+        ));
     };
     let schema = database.schema().attribute(attribute)?;
     if reverse && schema.value_type != ValueType::Ref {
@@ -785,7 +1045,9 @@ fn pull_attribute(
     };
     state.check(values.len())?;
     if values.is_empty() {
-        return Ok(selector.default.clone().map(|default| (key, default)));
+        return Ok(PreparedAttribute::Complete(
+            selector.default.clone().map(|default| (key, default)),
+        ));
     }
     let multiple = if reverse {
         !schema.component
@@ -804,146 +1066,14 @@ fn pull_attribute(
     } else {
         values.truncate(1);
     }
-    let mut pulled = Vec::new();
-    for value in values {
-        let value = pull_value(
-            database,
-            entity,
-            value,
-            schema.value_type,
-            schema.component,
-            selector.nested.as_ref(),
-            pattern,
-            pattern_scope,
-            selector_index,
-            state,
-            depth,
-        )?;
-        if selector.nested.is_none() || !is_empty_map(&value) {
-            pulled.push(value);
-        }
-    }
-    if pulled.is_empty() && !multiple {
-        return Ok(selector.default.clone().map(|default| (key, default)));
-    }
-    Ok(Some((
+    Ok(PreparedAttribute::Values {
         key,
-        if multiple {
-            QueryValue::Collection(pulled)
-        } else {
-            pulled.remove(0)
-        },
-    )))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pull_value(
-    database: &DatabaseValue,
-    source_entity: u64,
-    value: Value,
-    value_type: ValueType,
-    component: bool,
-    nested: Option<&PullNested>,
-    pattern: &PullPattern,
-    pattern_scope: &[usize],
-    selector_index: Option<usize>,
-    state: &mut PullState<'_>,
-    depth: usize,
-) -> Result<QueryValue, SemanticError> {
-    let Value::Ref(entity) = value else {
-        if nested.is_some() {
-            return Err(SemanticError::incorrect(
-                "pull/nested-non-ref",
-                "nested pull requires a ref attribute",
-            ));
-        }
-        return Ok(QueryValue::Scalar(value));
-    };
-    if value_type != ValueType::Ref {
-        return Err(fault(
-            "pull/schema-value-mismatch",
-            "ref value belongs to a non-ref attribute",
-        ));
-    }
-    match nested {
-        Some(PullNested::Pattern(pattern)) => {
-            let mut nested_scope = pattern_scope.to_vec();
-            nested_scope.push(selector_index.expect("nested selector must belong to its pattern"));
-            pull_entity(database, entity, pattern, &nested_scope, state, depth + 1)
-        }
-        Some(PullNested::Recursion(limit)) => pull_recursive(
-            database,
-            source_entity,
-            entity,
-            pattern,
-            pattern_scope,
-            selector_index.expect("recursive selector must belong to its pattern"),
-            *limit,
-            state,
-            depth,
-        ),
-        None if component => {
-            let pattern = PullPattern::wildcard();
-            pull_entity(database, entity, &pattern, pattern_scope, state, depth + 1)
-        }
-        None => Ok(id_map(entity)),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn pull_recursive(
-    database: &DatabaseValue,
-    source_entity: u64,
-    target_entity: u64,
-    pattern: &PullPattern,
-    pattern_scope: &[usize],
-    selector_index: usize,
-    limit: Option<usize>,
-    state: &mut PullState<'_>,
-    depth: usize,
-) -> Result<QueryValue, SemanticError> {
-    let mut selector_path = pattern_scope.to_vec();
-    selector_path.push(selector_index);
-    let new_traversal = !state.recursions.contains_key(&selector_path);
-    let should_recurse = {
-        let recursion = state.recursions.entry(selector_path.clone()).or_default();
-        if new_traversal {
-            recursion.seen.insert(source_entity);
-        }
-        let within_limit = limit.is_none_or(|limit| recursion.depth < limit);
-        if within_limit && !recursion.seen.contains(&target_entity) {
-            recursion.depth += 1;
-            recursion.seen.insert(target_entity);
-            true
-        } else {
-            false
-        }
-    };
-    if !should_recurse {
-        if new_traversal {
-            state.recursions.remove(&selector_path);
-        }
-        return Ok(id_map(target_entity));
-    }
-
-    let result = pull_entity(
-        database,
-        target_entity,
-        pattern,
-        pattern_scope,
-        state,
-        depth + 1,
-    );
-    let recursion = state
-        .recursions
-        .get_mut(&selector_path)
-        .expect("active recursive selector state must remain present");
-    recursion.depth -= 1;
-    recursion.seen.remove(&target_entity);
-    if new_traversal {
-        state.recursions.remove(&selector_path);
-    }
-    result
+        default: selector.default.clone(),
+        values,
+        multiple,
+        value_type: schema.value_type,
+        component: schema.component,
+    })
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -954,45 +1084,50 @@ enum PullAttributeIdentity {
 }
 
 fn validate_pattern(database: &DatabaseValue, pattern: &PullPattern) -> Result<(), SemanticError> {
-    let mut selectors = BTreeSet::new();
-    for selector in &pattern.attributes {
-        if selector.limit == PullLimit::Limit(0) {
-            return Err(SemanticError::incorrect(
-                "db.error/invalid-limit",
-                "pull limits must be positive or unlimited",
-            ));
-        }
-        match selector.nested.as_ref() {
-            Some(PullNested::Pattern(pattern)) => validate_pattern(database, pattern)?,
-            Some(PullNested::Recursion(Some(0))) => {
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        let mut selectors = BTreeSet::new();
+        for selector in &pattern.attributes {
+            if selector.limit == PullLimit::Limit(0) {
                 return Err(SemanticError::incorrect(
-                    "db.error/invalid-recur-limit",
-                    "recursive pull limits must be positive",
+                    "db.error/invalid-limit",
+                    "pull limits must be positive or unlimited",
                 ));
             }
-            _ => {}
-        }
-
-        let (name, reverse) = match &selector.direction {
-            PullDirection::Forward(name) => (name, false),
-            PullDirection::Reverse(name) => (name, true),
-        };
-        let identity = if !reverse && is_db_id(name) {
-            PullAttributeIdentity::DbId
-        } else {
-            match resolve_pull_attribute(database, name)? {
-                Some(attribute) => PullAttributeIdentity::Installed(attribute),
-                None => match name {
-                    AttributeName::Ident(ident) => PullAttributeIdentity::Unknown(ident.clone()),
-                    AttributeName::Id(_) => unreachable!("numeric attributes resolve strictly"),
-                },
+            match selector.nested.as_ref() {
+                Some(PullNested::Pattern(pattern)) => pending.push(pattern),
+                Some(PullNested::Recursion(Some(0))) => {
+                    return Err(SemanticError::incorrect(
+                        "db.error/invalid-recur-limit",
+                        "recursive pull limits must be positive",
+                    ));
+                }
+                _ => {}
             }
-        };
-        if !selectors.insert((reverse, identity)) {
-            return Err(SemanticError::incorrect(
-                "pull/duplicate-attribute",
-                "a pull pattern may specify an attribute only once per direction",
-            ));
+
+            let (name, reverse) = match &selector.direction {
+                PullDirection::Forward(name) => (name, false),
+                PullDirection::Reverse(name) => (name, true),
+            };
+            let identity = if !reverse && is_db_id(name) {
+                PullAttributeIdentity::DbId
+            } else {
+                match resolve_pull_attribute(database, name)? {
+                    Some(attribute) => PullAttributeIdentity::Installed(attribute),
+                    None => match name {
+                        AttributeName::Ident(ident) => {
+                            PullAttributeIdentity::Unknown(ident.clone())
+                        }
+                        AttributeName::Id(_) => unreachable!("numeric attributes resolve strictly"),
+                    },
+                }
+            };
+            if !selectors.insert((reverse, identity)) {
+                return Err(SemanticError::incorrect(
+                    "pull/duplicate-attribute",
+                    "a pull pattern may specify an attribute only once per direction",
+                ));
+            }
         }
     }
     Ok(())

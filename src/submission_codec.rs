@@ -45,13 +45,24 @@ pub(crate) fn encode_submission(
         encode_persistent_tx_form(&mut bytes, form)?;
         put_framed_bytes(&mut body, &bytes)?;
     }
+    // Form encoding has already enforced shape/depth limits before this walk.
+    if crate::transaction::forms_have_extended_inputs(&request.forms) {
+        body[0] = 2;
+    }
     encode_blob(REQUEST, &body)
 }
 
 pub(crate) fn decode_submission(
     bytes: &[u8],
 ) -> Result<(DatabaseIdentity, TransactionRequest), SemanticError> {
-    let mut cursor = versioned(bytes, REQUEST)?;
+    let mut cursor = Cursor::new(decode_blob(bytes, REQUEST)?);
+    let version = cursor.u8()?;
+    if ![1, 2].contains(&version) {
+        return Err(fault(
+            "transport/version",
+            "unsupported native submission version",
+        ));
+    }
     let identity = DatabaseIdentity::new(cursor.string()?, cursor.string()?);
     let request_key = cursor.string()?;
     let compare_basis_t = if cursor.boolean()? {
@@ -72,6 +83,12 @@ pub(crate) fn decode_submission(
         form.finish()?;
     }
     cursor.finish()?;
+    if version == 1 && crate::transaction::forms_have_extended_inputs(&forms) {
+        return Err(fault(
+            "transport/version",
+            "structured transaction inputs require native submission version 2",
+        ));
+    }
     Ok((
         identity,
         TransactionRequest {
@@ -81,17 +98,6 @@ pub(crate) fn decode_submission(
             tx_instant_override,
         },
     ))
-}
-
-fn versioned(bytes: &[u8], kind: u8) -> Result<Cursor<'_>, SemanticError> {
-    let mut cursor = Cursor::new(decode_blob(bytes, kind)?);
-    if cursor.u8()? != VERSION {
-        return Err(fault(
-            "transport/version",
-            "unsupported native transport version",
-        ));
-    }
-    Ok(cursor)
 }
 
 fn framed<'a>(cursor: &mut Cursor<'a>) -> Result<&'a [u8], SemanticError> {
@@ -164,14 +170,6 @@ fn decode_op(cursor: &mut Cursor<'_>) -> Result<TxOp, SemanticError> {
         5 => TxOp::InstallAttribute(decode_attribute(cursor)?),
         6 => TxOp::AlterAttribute(decode_attribute(cursor)?),
         tag => return Err(invalid_tag("transaction operation", tag)),
-    })
-}
-
-fn decode_tx_value(cursor: &mut Cursor<'_>) -> Result<TxValue, SemanticError> {
-    Ok(match cursor.u8()? {
-        0 => TxValue::Scalar(decode_value(cursor, 0)?),
-        1 => TxValue::Entity(decode_entity_ref(cursor)?),
-        tag => return Err(invalid_tag("transaction value", tag)),
     })
 }
 
@@ -390,6 +388,9 @@ pub(crate) fn encode_submission_outcome(
             bytes.push(u8::from(error.anomaly.is_some()));
             if let Some(anomaly) = &error.anomaly {
                 encode_runtime_value(&mut bytes, anomaly, 0)?;
+                if crate::transaction::runtime_has_extended_inputs(anomaly) {
+                    bytes[0] = 2;
+                }
             }
         }
     }
@@ -413,7 +414,14 @@ fn categories() -> [ErrorCategory; 10] {
 }
 
 pub(crate) fn decode_submission_outcome(bytes: &[u8]) -> Result<WireOutcome, SemanticError> {
-    let mut cursor = versioned(bytes, RESPONSE)?;
+    let mut cursor = Cursor::new(decode_blob(bytes, RESPONSE)?);
+    let version = cursor.u8()?;
+    if ![1, 2].contains(&version) {
+        return Err(fault(
+            "transport/version",
+            "unsupported native outcome version",
+        ));
+    }
     let result = match cursor.u8()? {
         0 => {
             let before = endpoint(&mut cursor)?;
@@ -461,6 +469,17 @@ pub(crate) fn decode_submission_outcome(bytes: &[u8]) -> Result<WireOutcome, Sem
             error.details.insert("remote_code".into(), remote_code);
             if cursor.boolean()? {
                 error.anomaly = Some(Box::new(decode_runtime(&mut cursor, 0)?));
+                if version == 1
+                    && error
+                        .anomaly
+                        .as_deref()
+                        .is_some_and(crate::transaction::runtime_has_extended_inputs)
+                {
+                    return Err(fault(
+                        "transport/version",
+                        "structured reference anomalies require native outcome version 2",
+                    ));
+                }
             }
             WireOutcome::Rejected(error)
         }
@@ -473,6 +492,71 @@ pub(crate) fn decode_submission_outcome(bytes: &[u8]) -> Result<WireOutcome, Sem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tuple_input_versions_are_explicit_and_old_receipt_hashes_remain_stable() {
+        // Actual pre-extension receipt hashes from the Goal 2 independent-
+        // process workflow, not expectations computed by this new encoder.
+        for (name, expected) in [
+            (
+                "Ada",
+                "71acc726c2c5243f67e09eb7afa4d8482790a579d51eec4949d9b22732e50133",
+            ),
+            (
+                "Grace",
+                "d1dc8d55e6f0dd4c14d14114486f366a503fa22dcd2265bdfaf6b14aa7ca41d9",
+            ),
+        ] {
+            let form = TxForm::EntityMap(EntityMap {
+                id: Some(EntityRef::Temp("person".into())),
+                attributes: vec![(
+                    AttributeRef::Ident(Keyword::new("person", "name")),
+                    MapValue::Value(Value::String(name.into()).into()),
+                )],
+            });
+            let digest = submission_request_digest(&[form], None, None).unwrap();
+            assert_eq!(
+                digest
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>(),
+                expected
+            );
+        }
+        let identity = DatabaseIdentity::new("catalog", "lineage");
+        let old = TransactionRequest::new("old", vec![]);
+        let old_bytes = encode_submission(&identity, &old).unwrap();
+        assert_eq!(decode_blob(&old_bytes, REQUEST).unwrap()[0], 1);
+        let new = TransactionRequest::new(
+            "tuple",
+            vec![TxOp::Add {
+                entity: EntityRef::Temp("owner".into()),
+                attribute: 1_000,
+                value: TxValue::Tuple(vec![
+                    Some(TxValue::Entity(EntityRef::Temp("target".into()))),
+                    None,
+                ]),
+            }],
+        );
+        let bytes = encode_submission(&identity, &new).unwrap();
+        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], 2);
+        let (_, decoded) = decode_submission(&bytes).unwrap();
+        assert_eq!(
+            submission_request_digest(&new.forms, None, None).unwrap(),
+            submission_request_digest(&decoded.forms, None, None).unwrap()
+        );
+        let mut downgraded = decode_blob(&bytes, REQUEST).unwrap().to_vec();
+        downgraded[0] = 1;
+        assert_eq!(
+            decode_submission(&encode_blob(REQUEST, &downgraded).unwrap())
+                .unwrap_err()
+                .code,
+            "transport/version"
+        );
+        for length in 0..bytes.len() {
+            assert!(decode_submission(&bytes[..length]).is_err());
+        }
+    }
 
     #[test]
     fn native_submission_round_trip_preserves_all_form_shapes_and_identity() {
@@ -605,6 +689,53 @@ mod tests {
             assert_eq!(decoded.details["remote_code"], error.code);
             assert_eq!(decoded.anomaly, error.anomaly);
         }
+    }
+
+    #[test]
+    fn lookup_input_request_and_anomaly_cannot_be_downgraded() {
+        let reference = EntityRef::LookupInput {
+            attribute: 1_000,
+            value: Box::new(TxValue::Tuple(vec![
+                Some(TxValue::Entity(EntityRef::Ident(Keyword::new(
+                    "target", "one",
+                )))),
+                None,
+            ])),
+        };
+        let request =
+            TransactionRequest::new("lookup", vec![TxOp::RetractEntity(reference.clone())]);
+        let bytes =
+            encode_submission(&DatabaseIdentity::new("catalog", "lineage"), &request).unwrap();
+        let mut body = decode_blob(&bytes, REQUEST).unwrap().to_vec();
+        assert_eq!(body[0], 2);
+        let (_, decoded) = decode_submission(&bytes).unwrap();
+        assert_eq!(
+            submission_request_digest(&request.forms, None, None).unwrap(),
+            submission_request_digest(&decoded.forms, None, None).unwrap()
+        );
+        body[0] = 1;
+        assert_eq!(
+            decode_submission(&encode_blob(REQUEST, &body).unwrap())
+                .unwrap_err()
+                .code,
+            "transport/version"
+        );
+
+        let mut error = SemanticError::incorrect("app/reference", "invalid reference");
+        error.anomaly = Some(Box::new(RuntimeValue::Vector(vec![RuntimeValue::Entity(
+            reference,
+        )])));
+        let bytes = encode_submission_outcome(&Err(error.clone())).unwrap();
+        let mut body = decode_blob(&bytes, RESPONSE).unwrap().to_vec();
+        assert_eq!(body[0], 2);
+        let WireOutcome::Rejected(decoded) = decode_submission_outcome(&bytes).unwrap() else {
+            panic!("expected rejection")
+        };
+        assert_eq!(decoded.anomaly, error.anomaly);
+        body[0] = 1;
+        assert!(
+            matches!(decode_submission_outcome(&encode_blob(RESPONSE, &body).unwrap()), Err(error) if error.code == "transport/version")
+        );
     }
 
     #[test]

@@ -2,6 +2,13 @@ use crate::{
     Attribute, CallableRef, Cardinality, Database, DatabaseValue, EntityRef, Keyword, ProgramCall,
     RuntimeValue, SemanticError, TupleSpec, TxOp, TxReport, TxValue, Unique, Value, ValueType,
 };
+
+#[path = "transaction_input.rs"]
+mod input;
+pub(crate) use input::{
+    validate_entity_input, validate_forms_input, validate_ops_input, validate_stored_input,
+    validate_value_input,
+};
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -297,6 +304,18 @@ fn compare_entity_ref(left: &EntityRef, right: &EntityRef) -> Ordering {
                 .cmp(right_attribute)
                 .then_with(|| compare_value(left_value, right_value)),
             (EntityRef::Tx, EntityRef::Tx) => Ordering::Equal,
+            (
+                EntityRef::LookupInput {
+                    attribute: left_attribute,
+                    value: left,
+                },
+                EntityRef::LookupInput {
+                    attribute: right_attribute,
+                    value: right,
+                },
+            ) => left_attribute
+                .cmp(right_attribute)
+                .then_with(|| compare_tx_value(left, right)),
             _ => Ordering::Equal,
         })
 }
@@ -308,6 +327,7 @@ fn entity_ref_rank(entity: &EntityRef) -> u8 {
         EntityRef::Temp(_) => 2,
         EntityRef::Lookup { .. } => 3,
         EntityRef::Tx => 4,
+        EntityRef::LookupInput { .. } => 5,
     }
 }
 
@@ -317,6 +337,11 @@ fn compare_tx_value(left: &TxValue, right: &TxValue) -> Ordering {
         .then_with(|| match (left, right) {
             (TxValue::Scalar(left), TxValue::Scalar(right)) => compare_value(left, right),
             (TxValue::Entity(left), TxValue::Entity(right)) => compare_entity_ref(left, right),
+            (TxValue::Tuple(left), TxValue::Tuple(right)) => {
+                compare_slice_by(left, right, |left, right| {
+                    compare_option_by(left, right, compare_tx_value)
+                })
+            }
             _ => Ordering::Equal,
         })
 }
@@ -325,6 +350,70 @@ fn tx_value_rank(value: &TxValue) -> u8 {
     match value {
         TxValue::Scalar(_) => 0,
         TxValue::Entity(_) => 1,
+        TxValue::Tuple(_) => 2,
+    }
+}
+
+/// New-input grammar is selected only when needed, preserving all existing
+/// request hashes rather than globally bumping the idempotency domain.
+pub(crate) fn forms_have_extended_inputs(forms: &[TxForm]) -> bool {
+    fn entity(input: &EntityRef) -> bool {
+        matches!(input, EntityRef::LookupInput { .. })
+    }
+    fn value(value: &TxValue) -> bool {
+        matches!(
+            value,
+            TxValue::Tuple(_) | TxValue::Entity(EntityRef::LookupInput { .. })
+        )
+    }
+    fn map(input: &EntityMap) -> bool {
+        input.id.as_ref().is_some_and(entity)
+            || input.attributes.iter().any(|(_, input)| map_value(input))
+    }
+    fn map_value(input: &MapValue) -> bool {
+        match input {
+            MapValue::Value(input) => value(input),
+            MapValue::Nested(input) => map(input),
+            MapValue::Many(inputs) => inputs.iter().any(map_value),
+        }
+    }
+    forms.iter().any(|form| match form {
+        TxForm::Op(TxOp::Add {
+            entity: id,
+            value: input,
+            ..
+        }) => entity(id) || value(input),
+        TxForm::Op(TxOp::Retract {
+            entity: id,
+            value: input,
+            ..
+        }) => entity(id) || input.as_ref().is_some_and(value),
+        TxForm::Op(TxOp::Cas {
+            entity: id,
+            old,
+            new,
+            ..
+        }) => entity(id) || old.as_ref().is_some_and(value) || value(new),
+        TxForm::Op(TxOp::RetractEntity(id)) => entity(id),
+        TxForm::Op(TxOp::Ensure { entity: id, spec }) => entity(id) || entity(spec),
+        TxForm::EntityMap(input) => map(input),
+        TxForm::ProgramCall(call) => {
+            matches!(&call.function, CallableRef::Database(input) if entity(input))
+                || call.arguments.iter().any(runtime_has_extended_inputs)
+        }
+        TxForm::Call(call) => call.arguments.iter().any(value),
+        _ => false,
+    })
+}
+
+pub(crate) fn runtime_has_extended_inputs(input: &RuntimeValue) -> bool {
+    match input {
+        RuntimeValue::Entity(EntityRef::LookupInput { .. }) => true,
+        RuntimeValue::Vector(values) => values.iter().any(runtime_has_extended_inputs),
+        RuntimeValue::Map(values) => values
+            .iter()
+            .any(|(_, input)| runtime_has_extended_inputs(input)),
+        _ => false,
     }
 }
 
@@ -759,6 +848,152 @@ impl Database {
 }
 
 impl DatabaseValue {
+    /// Apply primitive transaction information without persisting it. The
+    /// caller supplies time, as for the eager `Database::with` oracle.
+    pub fn with(
+        &self,
+        ops: &[TxOp],
+        tx_instant: i64,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        validate_ops_input(ops)?;
+        self.with_forms(
+            &ops.iter().cloned().map(TxForm::Op).collect::<Vec<_>>(),
+            tx_instant,
+        )
+    }
+
+    /// Pure native transaction forms, including persisted controlled calls.
+    /// All initial and generated calls see this same immutable db-before;
+    /// predicates use the same validation path as committed transactions.
+    /// Read filters (including as-of/since) are applied to the result, not to
+    /// transaction generation or invariants. History values cannot transact.
+    pub fn with_forms(
+        &self,
+        forms: &[TxForm],
+        tx_instant: i64,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        self.with_forms_with_limits(forms, tx_instant, SpeculationLimits::default())
+    }
+
+    pub fn with_forms_with_limits(
+        &self,
+        forms: &[TxForm],
+        tx_instant: i64,
+        limits: SpeculationLimits,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        use crate::database_value::TransactionReadContext;
+        use crate::postgres::program_bindings::{
+            expand_submission_forms, persisted_predicates, transaction_program_roots,
+            validate_successor_program_bindings, visit_program_closure,
+        };
+        use std::sync::Mutex;
+        validate_forms_input(forms)?;
+        if limits.max_operations == 0
+            || limits.max_read_datoms == 0
+            || limits.max_read_bytes == 0
+            || limits.max_program_dependencies == 0
+            || limits.max_program_bytes == 0
+        {
+            return Err(SemanticError::incorrect(
+                "transaction/invalid-speculation-capacity",
+                "speculative operation, read and code dependency limits must be positive",
+            ));
+        }
+        let context = Arc::new(TransactionReadContext::new(
+            limits.max_read_datoms,
+            limits.max_read_bytes,
+        ));
+        let before = self
+            .speculation_base()?
+            .with_transaction_read_context(Arc::clone(&context));
+        let budget = Arc::new(Mutex::new(crate::ProgramBudget::new(
+            limits.program.control(),
+        )?));
+        let mut retained = BTreeMap::new();
+        let mut program_bytes = 0usize;
+        let mut resolve = |hash| {
+            if let Some(program) = retained.get(&hash) {
+                return Ok(Arc::clone(program));
+            }
+            if retained.len() >= limits.max_program_dependencies {
+                return Err(SemanticError::new(
+                    crate::ErrorCategory::Busy,
+                    "transaction/program-dependency-capacity",
+                    "speculative attempt exceeds its immutable code dependency count",
+                ));
+            }
+            let program = self.resolve_program(hash)?;
+            // Same canonical-payload + fixed-overhead proxy as the durable
+            // program cache. At most one bounded blob is decoded before the
+            // byte limit rejects it; dependency traversal never escapes this
+            // resolver, including dormant fixed calls in newly bound code.
+            let weight = crate::encode_program(program.program())?
+                .len()
+                .saturating_add(1_024 + std::mem::size_of::<crate::ProgramHash>());
+            program_bytes = program_bytes
+                .checked_add(weight)
+                .filter(|bytes| *bytes <= limits.max_program_bytes)
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        crate::ErrorCategory::Busy,
+                        "transaction/program-dependency-capacity",
+                        "speculative attempt exceeds its immutable code byte allowance",
+                    )
+                })?;
+            retained.insert(hash, Arc::clone(&program));
+            Ok(program)
+        };
+        let expanded = {
+            let mut budget = budget.lock().map_err(|_| {
+                SemanticError::new(
+                    crate::ErrorCategory::Fault,
+                    "program/budget-poisoned",
+                    "speculation budget mutex poisoned",
+                )
+            })?;
+            expand_submission_forms(&mut resolve, &before, forms, &mut budget)?
+        };
+        let ops = before.normalize_persisted_forms_with_limit(&expanded, limits.max_operations)?;
+        let remaining = context.remaining()?;
+        let assessed = crate::tiered_assessor::assess_tiered_with_remaining_limits(
+            &before,
+            &ops,
+            tx_instant,
+            crate::tiered_assessor::AssessmentLimits {
+                max_read_datoms: remaining.datoms,
+                max_read_bytes: remaining.retained_bytes,
+            },
+        )?;
+        validate_successor_program_bindings(
+            &mut resolve,
+            &assessed.db_before,
+            &assessed.db_after,
+            &assessed.tx_data,
+        )?;
+        let functions = persisted_predicates(
+            &mut resolve,
+            &assessed.db_before,
+            &assessed.predicate_requirements()?,
+            Arc::clone(&budget),
+        )?;
+        assessed.validate_exact(Some(&functions))?;
+        visit_program_closure(
+            &mut resolve,
+            transaction_program_roots(&assessed.tx_data),
+            &mut |_, _| {},
+        )?;
+        Ok(crate::SpeculativeTransactionReport {
+            db_before: self.clone(),
+            db_after: assessed
+                .db_after
+                .without_transaction_read_context()
+                .retain_programs(retained)
+                .with_speculation_view(self),
+            tx_data: assessed.tx_data,
+            tempids: assessed.tempids,
+        })
+    }
+
     /// Normalize already expanded persistent transaction forms against one
     /// exact db-before. Entity-map attribute resolution consults only the
     /// immutable schema/ident caches; primitive forms pass through unchanged.
@@ -769,6 +1004,36 @@ impl DatabaseValue {
         max_primitive_ops: usize,
     ) -> Result<Vec<TxOp>, SemanticError> {
         normalize_forms_against(NormalizerRead::Exact(self), forms, None, max_primitive_ops)
+    }
+}
+
+/// Explicit per-attempt resource policy, independent of transaction semantics.
+/// The defaults match the durable service's operation, read and program limits.
+#[derive(Clone, Copy, Debug)]
+pub struct SpeculationLimits {
+    pub max_operations: usize,
+    pub max_read_datoms: u64,
+    pub max_read_bytes: u64,
+    pub program: crate::ProgramLimits,
+    /// Distinct immutable programs resolved by this attempt, including the
+    /// complete fixed dependency closure of newly referenced code.
+    pub max_program_dependencies: usize,
+    /// Canonical payload bytes plus 1 KiB/key overhead per resolved program.
+    /// The cumulative speculative database may retain code from earlier calls.
+    pub max_program_bytes: usize,
+}
+
+impl Default for SpeculationLimits {
+    fn default() -> Self {
+        let durable = crate::CapacityLimits::default();
+        Self {
+            max_operations: durable.max_transaction_ops,
+            max_read_datoms: durable.max_transaction_read_datoms,
+            max_read_bytes: durable.max_transaction_read_bytes,
+            program: durable.program,
+            max_program_dependencies: 1_024,
+            max_program_bytes: 64 * 1024 * 1024,
+        }
     }
 }
 
@@ -807,6 +1072,7 @@ fn normalize_forms_against(
     functions: Option<&TxFunctions>,
     max_primitive_ops: usize,
 ) -> Result<Vec<TxOp>, SemanticError> {
+    validate_forms_input(forms)?;
     let mut normalizer = Normalizer {
         db_before,
         functions,

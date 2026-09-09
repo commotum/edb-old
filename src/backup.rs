@@ -6816,8 +6816,22 @@ fn collect_function_hashes(value: &crate::Value, output: &mut BTreeSet<Digest>) 
 
 fn collect_program_dependencies(program: &Program, output: &mut BTreeSet<Digest>) {
     fn entity(entity: &crate::EntityRef, output: &mut BTreeSet<Digest>) {
-        if let crate::EntityRef::Lookup { value, .. } = entity {
-            collect_function_hashes(value, output);
+        match entity {
+            crate::EntityRef::Lookup { value, .. } => collect_function_hashes(value, output),
+            crate::EntityRef::LookupInput { value, .. } => input(value, output),
+            _ => {}
+        }
+    }
+
+    fn input(value: &crate::TxValue, output: &mut BTreeSet<Digest>) {
+        match value {
+            crate::TxValue::Scalar(value) => collect_function_hashes(value, output),
+            crate::TxValue::Entity(value) => entity(value, output),
+            crate::TxValue::Tuple(values) => {
+                for value in values.iter().flatten() {
+                    input(value, output);
+                }
+            }
         }
     }
 
@@ -6840,6 +6854,10 @@ fn collect_program_dependencies(program: &Program, output: &mut BTreeSet<Digest>
                     instructions(else_branch, output);
                 }
                 crate::Instruction::ForEach { body } => instructions(body, output),
+                crate::Instruction::PredicateDispatch { attribute, entity } => {
+                    instructions(attribute, output);
+                    instructions(entity, output);
+                }
                 crate::Instruction::Query(query) => {
                     for pattern in query.patterns() {
                         term(&pattern.entity, output);

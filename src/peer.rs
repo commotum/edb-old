@@ -34,6 +34,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
+#[path = "native_log.rs"]
+pub(crate) mod native_log;
+
 const DEFAULT_SEGMENT_DATOMS: usize = 4_096;
 const MANIFEST_SELECTION_PAGE_SIZE: i64 = 32;
 const MAX_MANIFEST_CANDIDATE_PROBES: u64 = 256;
@@ -4327,6 +4330,7 @@ struct TieredReadCore {
     recent_limits: RecentLimits,
     load_counters: PeerLoadCounters,
     root_pins: Arc<RootPinManager>,
+    programs: crate::postgres::SharedProgramCache,
     io: Mutex<PeerIo>,
 }
 
@@ -4686,6 +4690,7 @@ impl Peer {
             recent_limits,
             load_counters,
             root_pins,
+            programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             io: Mutex::new(PeerIo { client, tree_cache }),
         });
         Ok(Self {
@@ -4723,6 +4728,15 @@ impl Peer {
     /// Capture the current immutable native value without SQL or eager recovery.
     pub fn db(&self) -> DatabaseValue {
         self.database_value()
+    }
+
+    /// Capture the immutable transaction log at this peer's current endpoint.
+    /// Capture performs no I/O and retains the exact generation's read pins.
+    pub fn log(&self) -> native_log::LogValue {
+        native_log::LogValue::new(TieredSnapshot {
+            core: Arc::clone(&self.core.read),
+            state: Arc::clone(&self.state().tiered),
+        })
     }
 
     /// Explicit eager kernel/oracle adapter; may read the entire database.
@@ -6760,6 +6774,18 @@ impl Drop for PeerIndexCursor {
 }
 
 impl TieredSnapshot {
+    /// Fetch authenticated immutable code; release the I/O lane before any
+    /// interpreter runs and recursively opens native read cursors.
+    pub(crate) fn resolve_program(
+        &self,
+        hash: crate::ProgramHash,
+    ) -> Result<Arc<crate::program::ValidatedProgram>, SemanticError> {
+        let mut io = lock(&self.core.io);
+        if io.client.is_closed() {
+            reconnect_peer_io(&self.core, &mut io)?;
+        }
+        crate::postgres::resolve_program_in(&mut io.client, &self.core.programs, hash)
+    }
     /// Open an already-committed immutable value without applying writer
     /// admission limits. Exact reports remain readable if an operator later
     /// lowers the live writer's recent-tier ceiling.
@@ -6871,6 +6897,7 @@ impl TieredSnapshot {
             recent_limits: configuration.recent_limits,
             load_counters: counters,
             root_pins,
+            programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             io: Mutex::new(PeerIo { client, tree_cache }),
         });
         Ok((
@@ -7448,25 +7475,8 @@ impl TieredSnapshot {
         history: bool,
         boundary: &IndexBoundary,
     ) -> Result<PeerIndexCursor, SemanticError> {
-        let normalized = boundary.normalized()?;
-        let order = normalized.order();
-        self.core.root_pins.ensure()?;
-        self.ensure_avet_ready(order, boundary.avet_attribute())?;
-        let (_, root) = self.exact_tree(history, order)?;
-        let recent = self.state.recent.boundary_cursor(history, &normalized);
-        let durable =
-            DurableTreeCursor::new_forward_boundary(self.clone(), root, history, normalized);
-        Ok(PeerIndexCursor {
-            durable,
-            recent,
-            history,
-            order,
-            reverse: false,
-            durable_next: None,
-            recent_next: None,
-            failed: false,
-            work_recorded: false,
-        })
+        self.ensure_avet_ready(boundary.order(), boundary.avet_attribute())?;
+        self.boundary_cursor_existing_projection(history, boundary, false)
     }
 
     /// Open a lazy reverse raw-index cursor at the typed virtual boundary.
@@ -7477,22 +7487,43 @@ impl TieredSnapshot {
         history: bool,
         boundary: &IndexBoundary,
     ) -> Result<PeerIndexCursor, SemanticError> {
+        self.ensure_avet_ready(boundary.order(), boundary.avet_attribute())?;
+        self.boundary_cursor_existing_projection(history, boundary, true)
+    }
+
+    /// Read only the already-present projection at an arbitrary routing key.
+    /// A speculative overlay may supply a newly enabled attribute via AEVT;
+    /// its base must still seek past that absent attribute without pretending
+    /// the base itself has completed a physical backfill. Ordinary qualified
+    /// public cursors check readiness before calling this internal primitive.
+    pub(crate) fn boundary_cursor_existing_projection(
+        &self,
+        history: bool,
+        boundary: &IndexBoundary,
+        reverse: bool,
+    ) -> Result<PeerIndexCursor, SemanticError> {
         let normalized = boundary.normalized()?;
         let order = normalized.order();
         self.core.root_pins.ensure()?;
-        self.ensure_avet_ready(order, boundary.avet_attribute())?;
         let (_, root) = self.exact_tree(history, order)?;
-        let recent = self
-            .state
-            .recent
-            .reverse_boundary_cursor(history, &normalized);
-        let durable = DurableTreeCursor::new_reverse(self.clone(), root, history, normalized);
+        let recent = if reverse {
+            self.state
+                .recent
+                .reverse_boundary_cursor(history, &normalized)
+        } else {
+            self.state.recent.boundary_cursor(history, &normalized)
+        };
+        let durable = if reverse {
+            DurableTreeCursor::new_reverse(self.clone(), root, history, normalized)
+        } else {
+            DurableTreeCursor::new_forward_boundary(self.clone(), root, history, normalized)
+        };
         Ok(PeerIndexCursor {
             durable,
             recent,
             history,
             order,
-            reverse: true,
+            reverse,
             durable_next: None,
             recent_next: None,
             failed: false,
