@@ -127,6 +127,12 @@ pub(crate) fn validate_forms_input(forms: &[TxForm]) -> Result<(), SemanticError
         match value {
             RuntimeValue::Scalar(value) => validate_stored_input(value)?,
             RuntimeValue::Entity(entity) => validate_entity_input(entity)?,
+            RuntimeValue::Query(_) => {
+                return Err(SemanticError::incorrect(
+                    "program/query-only-value",
+                    "general query data is not a transaction argument",
+                ));
+            }
             RuntimeValue::Vector(values) => {
                 for value in values {
                     runtime(value, depth + 1)?;

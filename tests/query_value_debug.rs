@@ -110,6 +110,9 @@ fn canonical_maps_preserve_unordered_keys_and_duplicate_key_value_ordering() {
                 QueryValue::Tuple(_) => 2,
                 QueryValue::Collection(_) => 3,
                 QueryValue::Map(_) => 4,
+                QueryValue::Set(_) | QueryValue::Char(_) | QueryValue::Tagged(_, _) => {
+                    unreachable!("historical oracle covers only the original value variants")
+                }
             }
         }
         let order = rank(left).cmp(&rank(right));

@@ -4,9 +4,10 @@ mod admin;
 #[path = "atomic/data.rs"]
 mod data;
 use atomic_core::{
-    BackgroundIndexingConfig, CapacityLimits, ErrorCategory, LocalTransactionEndpoint,
-    LocalTransportConfig, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, SemanticError,
-    TransactionDefaults, TransactionService, TransactionServiceConfig, postgres_config_from_env,
+    BackgroundIndexingConfig, CapacityLimits, DatabaseCatalog, ErrorCategory,
+    LocalTransactionEndpoint, LocalTransportConfig, PostgresIndexer, PostgresMigrator,
+    PostgresStore, Schema, SemanticError, TransactionDefaults, TransactionService,
+    TransactionServiceConfig, postgres_config_from_env,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -261,13 +262,20 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         }
         "create" => {
             let id = args.required("--database")?;
-            let db = PostgresStore::connect_configured(&connection)?
-                .create_database(id, Schema::new())?;
-            println!("CREATED database={id:?} basis_t={}", db.basis_t());
+            let result = DatabaseCatalog::connect_configured(&connection)?
+                .create_if_absent(id, Schema::new())?;
+            println!(
+                "{} name={id:?} storage_id={:?} lineage={}",
+                if result.created { "CREATED" } else { "EXISTS" },
+                result.database.database_id,
+                result.database.lineage_id
+            );
         }
         "status" => {
+            let entry = DatabaseCatalog::connect_configured(&connection)?
+                .resolve(args.required("--database")?)?;
             let status = PostgresStore::connect_configured(&connection)?
-                .database_status(args.required("--database")?)?;
+                .database_status(&entry.database_id)?;
             println!(
                 "STATUS database={:?} lineage={} basis_t={} generation={}",
                 args.required("--database")?,

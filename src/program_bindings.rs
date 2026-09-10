@@ -71,6 +71,54 @@ fn bound_program_hash(
     }
 }
 
+pub(crate) enum PredicateBinding {
+    Program(ProgramHash),
+    Native(crate::Symbol),
+}
+
+/// Native deployment is explicit temporal data, never a fallback for missing
+/// or malformed content-addressed code. Retained ordinary bindings keep meaning.
+pub(crate) fn resolve_predicate_binding(
+    database: &DatabaseValue,
+    name: &str,
+) -> Result<PredicateBinding, SemanticError> {
+    let ident = qualified_program_ident(name)?;
+    let entity = database.entid(&ident).ok_or_else(|| {
+        SemanticError::new(
+            ErrorCategory::NotFound,
+            "program/function-not-found",
+            format!("predicate {name} is not installed"),
+        )
+    })?;
+    let programs = database.values(entity, crate::DB_FN as u32)?;
+    let native = match crate::native_registry::deployment_attribute_id(database) {
+        Some(attribute) => database.values(entity, attribute)?,
+        None => Vec::new(),
+    };
+    if !programs.is_empty() {
+        let hash = bound_program_hash(database, &ident)?;
+        if !native.is_empty() && crate::native_registry::deployment_attribute(database).is_ok() {
+            return Err(SemanticError::incorrect(
+                "native/ambiguous-binding",
+                "a predicate cannot bind both :db/fn and :atomic.native/deployment",
+            ));
+        }
+        return Ok(PredicateBinding::Program(hash));
+    }
+    if !native.is_empty() {
+        crate::native_registry::deployment_attribute(database)?;
+        let [Value::Symbol(name)] = native.as_slice() else {
+            return Err(SemanticError::incorrect(
+                "native/invalid-binding",
+                "native deployment binding must be one versioned Symbol",
+            ));
+        };
+        crate::native_registry::validate_name(name)?;
+        return Ok(PredicateBinding::Native(name.clone()));
+    }
+    bound_program_hash(database, &ident).map(PredicateBinding::Program)
+}
+
 fn database_callable_entity(
     database: &DatabaseValue,
     reference: &crate::EntityRef,
@@ -168,6 +216,7 @@ fn execute_program_calls(
     db_before: &DatabaseValue,
     calls: &[ProgramCall],
     budget: &mut ProgramBudget<'_>,
+    native: &crate::NativeRegistry,
 ) -> Result<Vec<TxForm>, SemanticError> {
     let mut ordered = calls
         .iter()
@@ -177,16 +226,33 @@ fn execute_program_calls(
 
     let mut forms = Vec::new();
     for (_, call) in ordered {
-        expand_program_call(resolve, db_before, call, budget, 0, &mut forms)?;
+        expand_program_call(resolve, db_before, call, budget, native, 0, &mut forms)?;
     }
     Ok(forms)
 }
 
+#[cfg(test)]
 pub(crate) fn expand_submission_forms(
     resolve: &mut ProgramResolver<'_>,
     db_before: &DatabaseValue,
     submitted: &[TxForm],
     budget: &mut ProgramBudget<'_>,
+) -> Result<Vec<TxForm>, SemanticError> {
+    expand_submission_forms_with_native(
+        resolve,
+        db_before,
+        submitted,
+        budget,
+        &crate::NativeRegistry::default(),
+    )
+}
+
+pub(crate) fn expand_submission_forms_with_native(
+    resolve: &mut ProgramResolver<'_>,
+    db_before: &DatabaseValue,
+    submitted: &[TxForm],
+    budget: &mut ProgramBudget<'_>,
+    native: &crate::NativeRegistry,
 ) -> Result<Vec<TxForm>, SemanticError> {
     crate::transaction::validate_forms_input(submitted)?;
     // This runs inside the receipt-miss branch against the locked db-before.
@@ -213,7 +279,9 @@ pub(crate) fn expand_submission_forms(
             TxForm::Edn(_) => unreachable!("EDN forms were lowered against db-before"),
         }
     }
-    forms.extend(execute_program_calls(resolve, db_before, &calls, budget)?);
+    forms.extend(execute_program_calls(
+        resolve, db_before, &calls, budget, native,
+    )?);
     Ok(forms)
 }
 
@@ -222,6 +290,7 @@ fn expand_program_call(
     db_before: &DatabaseValue,
     call: &ProgramCall,
     budget: &mut ProgramBudget<'_>,
+    native: &crate::NativeRegistry,
     depth: usize,
     output: &mut Vec<TxForm>,
 ) -> Result<(), SemanticError> {
@@ -231,28 +300,46 @@ fn expand_program_call(
             "persisted transaction-function expansion exceeded 32 nested calls",
         ));
     }
-    let hash = callable_hash(db_before, &call.function)?;
-    let program = resolve(hash)?;
-    if program.program().kind != ProgramKind::Transaction {
-        return Err(SemanticError::incorrect(
-            "program/not-transaction-function",
-            "transaction data called a non-transaction program",
-        ));
-    }
-    let ProgramOutput::Transaction(forms) = ProgramRuntime
-        .execute_prevalidated_runtime_exact_with_budget(
-            &program,
-            db_before,
-            &call.arguments,
-            budget,
-        )?
-    else {
-        unreachable!("program kind was checked");
+    let forms = if let CallableRef::Local(name) = &call.function {
+        native.transaction(name, db_before, &call.arguments, budget)?
+    } else {
+        let hash = callable_hash(db_before, &call.function)?;
+        let program = resolve(hash)?;
+        if program.program().kind != ProgramKind::Transaction {
+            return Err(SemanticError::incorrect(
+                "program/not-transaction-function",
+                "transaction data called a non-transaction program",
+            ));
+        }
+        let ProgramOutput::Transaction(forms) = ProgramRuntime
+            .execute_prevalidated_runtime_exact_with_budget(
+                &program,
+                db_before,
+                &call.arguments,
+                budget,
+            )?
+        else {
+            unreachable!("program kind was checked");
+        };
+        forms
+    };
+    let forms = if crate::transaction::forms_have_edn(&forms) {
+        crate::edn_transaction::lower_forms(db_before, &forms)?
+    } else {
+        forms
     };
     for form in forms {
         match form {
             TxForm::ProgramCall(nested) => {
-                expand_program_call(resolve, db_before, &nested, budget, depth + 1, output)?;
+                expand_program_call(
+                    resolve,
+                    db_before,
+                    &nested,
+                    budget,
+                    native,
+                    depth + 1,
+                    output,
+                )?;
             }
             TxForm::Call(_) => {
                 return Err(SemanticError::incorrect(
@@ -266,25 +353,79 @@ fn expand_program_call(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn validate_successor_program_bindings(
     resolve: &mut ProgramResolver<'_>,
     db_before: &DatabaseValue,
     db_after: &DatabaseValue,
     tx_data: &[Datom],
 ) -> Result<(), SemanticError> {
-    if !tx_data.iter().any(|datom| {
-        matches!(
-            u64::from(datom.attribute),
-            crate::DB_FN | crate::DB_IDENT | crate::DB_ATTR_PREDS | crate::DB_ENTITY_PREDS
-        )
-    }) {
+    validate_successor_program_bindings_with_native(
+        resolve,
+        db_before,
+        db_after,
+        tx_data,
+        &crate::NativeRegistry::default(),
+    )
+}
+
+pub(crate) fn validate_successor_program_bindings_with_native(
+    resolve: &mut ProgramResolver<'_>,
+    db_before: &DatabaseValue,
+    db_after: &DatabaseValue,
+    tx_data: &[Datom],
+    native: &crate::NativeRegistry,
+) -> Result<(), SemanticError> {
+    let marker_before = crate::native_registry::deployment_attribute_id(db_before);
+    let marker_after = crate::native_registry::deployment_attribute_id(db_after);
+    let marker_definition_changed = marker_before != marker_after
+        || tx_data.iter().any(|datom| {
+            (Some(datom.entity) == marker_before.map(u64::from)
+                || Some(datom.entity) == marker_after.map(u64::from))
+                && matches!(
+                    u64::from(datom.attribute),
+                    crate::DB_IDENT
+                        | crate::DB_CARDINALITY
+                        | crate::DB_VALUE_TYPE
+                        | crate::DB_NO_HISTORY
+                )
+        });
+    if !marker_definition_changed
+        && !tx_data.iter().any(|datom| {
+            matches!(
+                u64::from(datom.attribute),
+                crate::DB_FN | crate::DB_IDENT | crate::DB_ATTR_PREDS | crate::DB_ENTITY_PREDS
+            ) || Some(datom.attribute) == marker_before
+                || Some(datom.attribute) == marker_after
+        })
+    {
         return Ok(());
     }
     let mut changed_function_entities = BTreeSet::new();
     let mut changed_function_bindings = BTreeSet::new();
     let mut changed_predicate_names = BTreeSet::new();
+    if marker_definition_changed {
+        // Only explicit marker schema/ident changes inspect its dependents.
+        // This is not an ordinary-transaction or unrelated-schema scan.
+        for (database, attribute) in [(db_before, marker_before), (db_after, marker_after)] {
+            if let Some(attribute) = attribute {
+                for datom in database.datoms_with_prefix(&crate::IndexPrefix::Aevt {
+                    attribute,
+                    entity: None,
+                    value: None,
+                })? {
+                    changed_function_entities.insert(datom.entity);
+                    changed_function_bindings.insert(datom.entity);
+                }
+            }
+        }
+    }
 
     for datom in tx_data {
+        if Some(datom.attribute) == marker_before || Some(datom.attribute) == marker_after {
+            changed_function_entities.insert(datom.entity);
+            changed_function_bindings.insert(datom.entity);
+        }
         match u64::from(datom.attribute) {
             crate::DB_FN => {
                 changed_function_entities.insert(datom.entity);
@@ -323,6 +464,18 @@ pub(crate) fn validate_successor_program_bindings(
         }
 
         let functions = db_after.values(entity, crate::DB_FN as u32)?;
+        if let Some(attribute) = marker_after {
+            let markers = db_after.values(entity, attribute)?;
+            if !markers.is_empty()
+                && !functions.is_empty()
+                && crate::native_registry::deployment_attribute(db_after).is_ok()
+            {
+                return Err(SemanticError::incorrect(
+                    "native/ambiguous-binding",
+                    "a function cannot bind both :db/fn and :atomic.native/deployment",
+                ));
+            }
+        }
         if functions.is_empty() {
             continue;
         }
@@ -353,8 +506,17 @@ pub(crate) fn validate_successor_program_bindings(
         &changed_function_bindings,
     )?;
     for (name, role) in changed_roles {
-        let ident = qualified_program_ident(&name)?;
-        let hash = bound_program_hash(db_after, &ident)?;
+        let hash = match resolve_predicate_binding(db_after, &name)? {
+            PredicateBinding::Program(hash) => hash,
+            PredicateBinding::Native(deployment) => {
+                native.require_predicate(
+                    &deployment,
+                    role.requires_attribute(),
+                    role.requires_entity(),
+                )?;
+                continue;
+            }
+        };
         let program = resolve(hash)?;
         if role.requires_attribute() && !program.program().supports_attribute_predicate() {
             return Err(SemanticError::incorrect(
@@ -471,15 +633,56 @@ mod dependency_work {
     }
 }
 
-pub(crate) fn persisted_predicates(
+pub(crate) fn persisted_predicates_with_native(
     resolve: &mut ProgramResolver<'_>,
     database: &DatabaseValue,
     required: &BTreeMap<String, PredicateRole>,
     shared_budget: SharedProgramBudget,
+    native: &crate::NativeRegistry,
 ) -> Result<TxFunctions, SemanticError> {
     let mut functions = TxFunctions::new();
     for (name, role) in required {
-        let hash = bound_program_hash(database, &qualified_program_ident(name)?)?;
+        let hash = match resolve_predicate_binding(database, name)? {
+            PredicateBinding::Program(hash) => hash,
+            PredicateBinding::Native(deployment) => {
+                native.require_predicate(
+                    &deployment,
+                    role.requires_attribute(),
+                    role.requires_entity(),
+                )?;
+                if role.requires_attribute() {
+                    let registry = native.clone();
+                    let deployment = deployment.clone();
+                    let budget = Arc::clone(&shared_budget);
+                    functions.register_attribute_value_predicate(name.clone(), move |value| {
+                        let mut budget = budget.lock().map_err(|_| {
+                            fault(
+                                "program/budget-poisoned",
+                                "native predicate budget poisoned",
+                            )
+                        })?;
+                        registry.attribute(&deployment, value, &mut budget)
+                    });
+                }
+                if role.requires_entity() {
+                    let registry = native.clone();
+                    let budget = Arc::clone(&shared_budget);
+                    functions.register_entity_value_predicate(
+                        name.clone(),
+                        move |database, entity| {
+                            let mut budget = budget.lock().map_err(|_| {
+                                fault(
+                                    "program/budget-poisoned",
+                                    "native predicate budget poisoned",
+                                )
+                            })?;
+                            registry.entity(&deployment, database, entity, &mut budget)
+                        },
+                    );
+                }
+                continue;
+            }
+        };
         let program = resolve(hash)?;
         if role.requires_attribute() {
             if !program.program().supports_attribute_predicate() {
@@ -613,6 +816,9 @@ fn collect_fixed_program_dependencies(
             }
             Instruction::ForEach { body } => pending.extend(body),
             Instruction::Query(query) => {
+                if let Some(native) = query.native_query() {
+                    collect_native_query_dependencies(native, output);
+                }
                 for pattern in query.patterns() {
                     for term in [&pattern.entity, &pattern.value] {
                         if let QueryTerm::Constant(value) = term {
@@ -629,6 +835,118 @@ fn collect_fixed_program_dependencies(
                 CallableRef::Local(_) => {}
             },
             _ => {}
+        }
+    }
+}
+
+/// The portable native AST is already admitted by the program codec's node,
+/// depth and byte limits. Walk borrowed nodes iteratively; fixed function
+/// values are dependencies even in dormant branches, map keys, or Pull data.
+fn collect_native_query_dependencies(query: &crate::Query, output: &mut Vec<Digest>) {
+    use crate::{Clause, FindElement, FindSpec, Function, PullNested, QueryValue, Term};
+    enum Node<'a> {
+        Query(&'a crate::Query),
+        Clause(&'a Clause),
+        Term(&'a Term),
+        Find(&'a FindElement),
+        Pull(&'a crate::PullPattern),
+        Value(&'a QueryValue),
+    }
+    let mut pending = vec![Node::Query(query)];
+    while let Some(node) = pending.pop() {
+        match node {
+            Node::Query(query) => {
+                match &query.find {
+                    FindSpec::Relation(elements) | FindSpec::Tuple(elements) => {
+                        pending.extend(elements.iter().map(Node::Find))
+                    }
+                    FindSpec::Scalar(element) | FindSpec::Collection(element) => {
+                        pending.push(Node::Find(element))
+                    }
+                }
+                pending.extend(query.clauses.iter().map(Node::Clause));
+                for rule in &query.rules {
+                    pending.extend(rule.clauses.iter().map(Node::Clause));
+                }
+            }
+            Node::Clause(clause) => match clause {
+                Clause::Pattern(pattern) => {
+                    pending.extend(
+                        [&pattern.entity, &pattern.attribute, &pattern.value]
+                            .into_iter()
+                            .map(Node::Term),
+                    );
+                    pending.extend(
+                        pattern
+                            .transaction
+                            .iter()
+                            .chain(pattern.added.iter())
+                            .map(Node::Term),
+                    );
+                }
+                Clause::RelationPattern(pattern) => {
+                    pending.extend(pattern.terms.iter().map(Node::Term))
+                }
+                Clause::Predicate { args, .. } | Clause::Rule { args, .. } => {
+                    pending.extend(args.iter().map(Node::Term))
+                }
+                Clause::Function { function, args, .. } => {
+                    pending.extend(args.iter().map(Node::Term));
+                    if let Function::Query(query) = function {
+                        pending.push(Node::Query(query));
+                    }
+                }
+                Clause::Not { clauses, .. } => pending.extend(clauses.iter().map(Node::Clause)),
+                Clause::Or { branches, .. } => {
+                    for branch in branches {
+                        pending.extend(branch.iter().map(Node::Clause));
+                    }
+                }
+            },
+            Node::Term(term) => match term {
+                Term::Constant(value) => collect_program_hashes_vec(value, output),
+                Term::QueryConstant(value) => pending.push(Node::Value(value)),
+                Term::Variable(_) | Term::Nil | Term::Blank => {}
+            },
+            Node::Find(element) => match element {
+                FindElement::Pull { pattern, .. } => pending.push(Node::Pull(pattern)),
+                FindElement::CustomAggregate(call) => {
+                    for arg in &call.args {
+                        if let crate::AggregateArg::Constant(value) = arg {
+                            pending.push(Node::Value(value));
+                        }
+                    }
+                }
+                FindElement::Variable(_) | FindElement::Aggregate { .. } => {}
+            },
+            Node::Pull(pattern) => {
+                for attribute in &pattern.attributes {
+                    pending.extend(
+                        attribute
+                            .alias
+                            .iter()
+                            .chain(attribute.default.iter())
+                            .map(Node::Value),
+                    );
+                    if let Some(PullNested::Pattern(pattern)) = &attribute.nested {
+                        pending.push(Node::Pull(pattern));
+                    }
+                }
+            }
+            Node::Value(value) => match value {
+                QueryValue::Scalar(value) => collect_program_hashes_vec(value, output),
+                QueryValue::Tuple(values)
+                | QueryValue::Collection(values)
+                | QueryValue::Set(values) => pending.extend(values.iter().map(Node::Value)),
+                QueryValue::Map(entries) => {
+                    for (key, value) in entries {
+                        pending.push(Node::Value(key));
+                        pending.push(Node::Value(value));
+                    }
+                }
+                QueryValue::Tagged(_, value) => pending.push(Node::Value(value)),
+                QueryValue::Nil | QueryValue::Char(_) => {}
+            },
         }
     }
 }
@@ -665,6 +983,10 @@ fn collect_program_hashes_vec(value: &Value, output: &mut Vec<Digest>) {
 #[cfg(test)]
 #[path = "program_binding_dependency_tests.rs"]
 mod dependency_tests;
+
+#[cfg(test)]
+#[path = "program_query_dependency_tests.rs"]
+mod query_dependency_tests;
 
 #[cfg(test)]
 mod tests {

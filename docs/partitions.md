@@ -62,6 +62,89 @@ transaction, with a durable request key. Do not rerun the upgrade with a new key
 on an already upgraded database; retry the original key after an unknown outcome.
 Do not rewrite genesis or treat an absent attribute as already installed.
 
+## Reserved allocation and existing databases
+
+Schema and named-partition allocation uses a retained, monotone system-partition
+cursor, independent of ordinary entity growth. The ordinary issued frontier stays
+at least as high as this cursor so existing explicit-ID range checks remain valid.
+This is not a separate counter for each application partition, and does not move
+or renumber existing entities. Receipt-only allocations and typed references also
+reserve system identities; a scan of current schema alone cannot establish which
+IDs are safe to issue.
+
+Run the explicit catalog migration with the upgraded binary (`atomic migrate`)
+before starting writers. Migration 31 admits ATLC v2 allocation checkpoints and
+fences older binaries through the catalog-version check; it does not rewrite old
+transaction payloads or genesis. For an existing native generation containing
+ATLC v1, the first fresh transaction obtains allocation proof from the complete
+authenticated log, including numeric allocation witnesses and any required legacy
+excision bounds. An immutable loaded value caches that proof. The next commit
+stores its reserved frontier in ATLC v2; subsequent exact endpoints read this
+authenticated checkpoint instead of reconstructing the whole prefix. Existing
+v1 content and saved request receipts remain readable without reexecution.
+
+The available ranges remain finite: named-partition entities must be below
+524,288, and schema attribute IDs must be at most 1,048,576. An explicit high
+system ID can advance the retained cursor past otherwise unused lower slots.
+The allocator does not search holes or clamp that observation to a smaller range.
+Legacy physical excision may have erased an explicit reference-only identity;
+without a modern checkpoint, the proof conservatively reserves the issued prefix
+that could have lost evidence. Exact cutoffs exclude later ordinary growth, but a
+large uncertain prefix can still exhaust automatic reserved allocation. The
+database fails closed rather than reusing a possibly acknowledged identity.
+
+### Generation-zero conversion
+
+Generation zero remains readable/recoverable, but current native writers reject
+fresh writes with `postgres/native-writer-requires-generation`. Convert explicitly
+using a latest-point backup and same-target restore. Stop the writer and release
+peer/report pins on the generation being replaced before the administrative
+cutover; unrelated retained readers do not need to be closed. Do not select an
+older point, which would intentionally restore older information.
+
+The following uses the existing public operator APIs; `connection` selects the
+same migrated PostgreSQL catalog throughout, and `database_id` is unchanged:
+
+```rust
+use atomic_core::{PortableBackup, PostgresIndexer};
+
+let mut backup = PortableBackup::connect(&connection)?;
+let point = backup.backup_database(database_id, repository)?;
+assert_eq!(point.log_generation, 0);
+PortableBackup::verify_backup_point(repository, point.basis_t, 0, true)?;
+let restored = backup.restore_backup_point(repository, point.basis_t, 0, database_id)?;
+let mut indexer = PostgresIndexer::connect(&connection, database_id)?;
+indexer.consolidate()?;
+drop(indexer);
+```
+
+Restore publishes a positive native generation while retaining lineage, EIDs,
+facts and caller receipt mappings. Physical generation/membership hashes change;
+they are not cross-restore logical equality checks. Administrative consolidation
+creates or completes the ordinary native publication before restarting the
+writer. A log-only backup can have historical receipt archives without that
+ordinary publication; starting its writer prematurely reports
+`service/native-index-required`. Run the explicit consolidation above instead
+of expecting ordinary startup to scan the full log. Restart the writer afterward;
+its next fresh native transaction establishes the reserved allocation checkpoint.
+Retry the same exact backup point/target after an interrupted restore.
+
+Conversion also builds native historical receipt checkpoints without changing
+old receipt kinds or caller mappings. Reopening an old receipt uses a native
+checkpoint plus at most 256 transactions, 16,384 datoms, or 4 MiB of encoded
+and estimated retained value bytes between checkpoints, plus one indivisible
+historical transaction when that transaction alone exceeds a limit. Checkpoints
+are built incrementally; AVET backfill uses the existing bounded projection
+steps. This is not a bounded-memory claim for the whole administrative restore:
+deep verification still replays the database, and each archive records its
+reachable node membership. Generation-owned archives remain protected until
+their generation can be retired.
+
+The CLI exposes the same operations through `backup`, `verify-backup`, and
+`restore`; restore requires an exact basis/generation, explicit PostgreSQL
+database/catalog targets, and `--apply`. See [administrative commands](admin.md)
+for the complete target checks and preview behavior.
+
 ## Transaction allocation policy
 
 Include directives alongside actual entity assertions:

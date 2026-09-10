@@ -2,9 +2,7 @@
 use atomic_core::edn::{EdnValue, read_edn, write_edn};
 use atomic_core::edn_pull::{entity_identifier_from_edn, parse_pull_edn};
 use atomic_core::edn_query::{EdnQueryArgument, EdnQueryInput, parse_query_edn};
-use atomic_core::edn_value::{
-    edn_keyword, edn_to_value, query_value_to_edn, transaction_report_to_edn,
-};
+use atomic_core::edn_value::{edn_keyword, query_value_to_edn, transaction_report_to_edn};
 use atomic_core::{
     Connection, DatabaseValue, Datom, ErrorCategory, PostgresConnectionConfig, PullControl,
     QueryControl, QuerySourceValue, SemanticError, TransactionRequest, postgres_config_from_env,
@@ -12,7 +10,6 @@ use atomic_core::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_INPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -22,9 +19,9 @@ EDN data commands (file path '-' reads stdin; results are EDN on stdout):
     (--endpoint PATH | --remote) [--basis N] [--tx-instant MILLIS] [--timeout-ms N]
   atomic with --database ID --file PATH [--tx-instant MILLIS]
     [--default-partition KEYWORD]
-  atomic query --database ID --file PATH [--inputs PATH] [--sources PATH]
+  atomic query [--database ID] --file PATH [--inputs PATH] [--sources PATH]
     [--as-of N] [--since N] [--history] [--timeout-ms N] [--max-work N]
-    [--max-results N] [--max-join-bytes N]
+    [--max-results N] [--max-join-bytes N] [--max-value-bytes N]
   atomic pull --database ID --file PATH --entity EDN
     [--as-of N] [--since N] [--max-depth N] [--max-entities N]
 
@@ -37,6 +34,7 @@ query --inputs is a vector of non-source :in arguments (including rules/patterns
 --sources is a map from source symbols to tuple rows or descriptors such as
 {$past {:database \"customers\" :as-of 42} $log {:database \"customers\" :log true}}.
 The default $ source is the selected --database value. Reads never start a writer.
+Data-only queries need no --database or PostgreSQL connection configuration.
 The same PostgreSQL/TLS credential configuration applies. --remote uses verified
 TLS writer discovery and ATOMIC_REMOTE_TOKEN_FILE, not plaintext TCP.
 Input files are limited to16MiB each. Output conversion/printing is bounded;
@@ -93,6 +91,7 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
                 "--max-work",
                 "--max-results",
                 "--max-join-bytes",
+                "--max-value-bytes",
             ],
             &["--history"],
         ),
@@ -133,7 +132,9 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
             return Err(usage("unknown or misplaced option; run atomic --help"));
         }
     }
-    args.required("--database")?;
+    if command != "query" {
+        args.required("--database")?;
+    }
     args.required("--file")?;
     super::transaction_defaults(args.values.get("--default-partition").map(String::as_str))?;
     if command == "transact" {
@@ -162,6 +163,7 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
         "--max-work",
         "--max-results",
         "--max-join-bytes",
+        "--max-value-bytes",
         "--max-depth",
         "--max-entities",
     ] {
@@ -248,6 +250,9 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
     let text = read_file(args.required("--file")?)?;
     // Reject lexical errors before opening any database or attempting a write.
     read_edn(&text)?;
+    if args.command == "query" {
+        return run_query(&args, &text);
+    }
     let config = postgres_config_from_env()?;
     let connection =
         Connection::connect_configured(config.clone(), args.required("--database")?, 128)?;
@@ -335,71 +340,6 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
             fields.push((key("speculative"), EdnValue::Bool(true)));
             output(&EdnValue::Map(fields))?;
         }
-        "query" => {
-            let query = parse_query_edn(&text)?;
-            let db = view(connection.db(), &args)?;
-            let inputs = args
-                .values
-                .get("--inputs")
-                .map(|path| read_file(path).and_then(|s| read_edn(&s)))
-                .transpose()?
-                .unwrap_or_else(|| EdnValue::Vector(Vec::new()));
-            let EdnValue::Vector(input_values) = &inputs else {
-                return Err(usage(
-                    "--inputs must contain a vector of non-source arguments",
-                ));
-            };
-            let mut values = input_values.iter();
-            let sources = args
-                .values
-                .get("--sources")
-                .map(|path| read_file(path).and_then(|s| read_edn(&s)))
-                .transpose()?
-                .unwrap_or_else(|| EdnValue::Map(Vec::new()));
-            let EdnValue::Map(source_values) = &sources else {
-                return Err(usage("--sources must contain a map"));
-            };
-            let source_values = source_descriptors(source_values)?;
-            let mut supplied = BTreeSet::new();
-            let mut arguments = Vec::new();
-            for input in &query.inputs {
-                match input {
-                    EdnQueryInput::Source(name) => {
-                        let source = if let Some(descriptor) = source_values.get(name) {
-                            supplied.insert(name.clone());
-                            source_value(descriptor, &config, &connection)?
-                        } else if name == "$" {
-                            QuerySourceValue::Database(db.clone())
-                        } else {
-                            return Err(usage("a named query source has no --sources descriptor"));
-                        };
-                        arguments.push(EdnQueryArgument::Source(source));
-                    }
-                    _ => arguments.push(EdnQueryArgument::Data(
-                        values
-                            .next()
-                            .ok_or_else(|| usage("not enough non-source query inputs"))?
-                            .clone(),
-                    )),
-                }
-            }
-            if values.next().is_some() {
-                return Err(usage("too many non-source query inputs"));
-            }
-            if supplied.len() != source_values.len() {
-                return Err(usage("unused or invalid query source descriptor"));
-            }
-            let bound = query.bind(&arguments)?;
-            let control = QueryControl {
-                timeout: Some(Duration::from_millis(args.number("--timeout-ms", 30_000)?)),
-                max_work: args.size("--max-work", usize::MAX)?,
-                max_result_rows: args.size("--max-results", usize::MAX)?,
-                max_join_bytes: args.size("--max-join-bytes", 4 * 1024 * 1024)?,
-                ..QueryControl::default()
-            };
-            let result = bound.execute(&control, None)?;
-            output(&bound.result_to_edn(&result.result)?)?;
-        }
         "pull" => {
             let pattern = parse_pull_edn(&text)?;
             let identifier = entity_identifier_from_edn(&read_edn(args.required("--entity")?)?)?;
@@ -416,6 +356,101 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         _ => unreachable!(),
     }
     Ok(())
+}
+
+fn run_query(args: &Arguments, text: &str) -> Result<(), SemanticError> {
+    let query = parse_query_edn(text)?;
+    let inputs = args
+        .values
+        .get("--inputs")
+        .map(|path| read_file(path).and_then(|s| read_edn(&s)))
+        .transpose()?
+        .unwrap_or_else(|| EdnValue::Vector(Vec::new()));
+    let EdnValue::Vector(input_values) = &inputs else {
+        return Err(usage(
+            "--inputs must contain a vector of non-source arguments",
+        ));
+    };
+    let sources = args
+        .values
+        .get("--sources")
+        .map(|path| read_file(path).and_then(|s| read_edn(&s)))
+        .transpose()?
+        .unwrap_or_else(|| EdnValue::Map(Vec::new()));
+    let EdnValue::Map(source_values) = &sources else {
+        return Err(usage("--sources must contain a map"));
+    };
+    let source_values = source_descriptors(source_values)?;
+    let mut values = input_values.iter();
+    let mut supplied = BTreeSet::new();
+    let mut primary = None;
+    let mut arguments = Vec::new();
+    for input in &query.inputs {
+        match input {
+            EdnQueryInput::Source(name) => {
+                if let Some(descriptor) = source_values.get(name) {
+                    supplied.insert(name.clone());
+                    if matches!(
+                        descriptor,
+                        EdnValue::Vector(_) | EdnValue::List(_) | EdnValue::Set(_)
+                    ) {
+                        // Raw data uses exactly the public EDN relation adapter.
+                        arguments.push(EdnQueryArgument::Data((*descriptor).clone()));
+                    } else {
+                        let config = postgres_config_from_env()?;
+                        if primary.is_none()
+                            && let Some(id) = args.values.get("--database")
+                        {
+                            primary =
+                                Some(Connection::connect_configured(config.clone(), id, 128)?);
+                        }
+                        arguments.push(EdnQueryArgument::Source(source_value(
+                            descriptor,
+                            &config,
+                            primary.as_ref(),
+                        )?));
+                    }
+                } else if name == "$" {
+                    if primary.is_none() {
+                        primary = Some(Connection::connect_configured(
+                            postgres_config_from_env()?,
+                            args.required("--database")?,
+                            128,
+                        )?);
+                    }
+                    arguments.push(EdnQueryArgument::Source(QuerySourceValue::Database(view(
+                        primary.as_ref().expect("opened primary").db(),
+                        args,
+                    )?)));
+                } else {
+                    return Err(usage("a named query source has no --sources descriptor"));
+                }
+            }
+            _ => arguments.push(EdnQueryArgument::Data(
+                values
+                    .next()
+                    .ok_or_else(|| usage("not enough non-source query inputs"))?
+                    .clone(),
+            )),
+        }
+    }
+    if values.next().is_some() {
+        return Err(usage("too many non-source query inputs"));
+    }
+    if supplied.len() != source_values.len() {
+        return Err(usage("unused or invalid query source descriptor"));
+    }
+    let bound = query.bind(&arguments)?;
+    let control = QueryControl {
+        timeout: Some(Duration::from_millis(args.number("--timeout-ms", 30_000)?)),
+        max_work: args.size("--max-work", usize::MAX)?,
+        max_result_rows: args.size("--max-results", usize::MAX)?,
+        max_join_bytes: args.size("--max-join-bytes", 4 * 1024 * 1024)?,
+        max_value_bytes: args.size("--max-value-bytes", 16 * 1024 * 1024)?,
+        ..QueryControl::default()
+    };
+    let result = bound.execute(&control, None)?;
+    output(&bound.result_to_edn(&result.result)?)
 }
 fn key(name: &str) -> EdnValue {
     edn_keyword("atomic", name)
@@ -472,23 +507,8 @@ fn source_descriptors(
 fn source_value(
     value: &EdnValue,
     config: &PostgresConnectionConfig,
-    primary: &Connection,
+    primary: Option<&Connection>,
 ) -> Result<QuerySourceValue, SemanticError> {
-    if let EdnValue::Vector(rows) | EdnValue::List(rows) = value {
-        let rows = rows
-            .iter()
-            .map(|row| {
-                let (EdnValue::Vector(values) | EdnValue::List(values)) = row else {
-                    return Err(usage("raw source requires rows of values"));
-                };
-                values
-                    .iter()
-                    .map(edn_to_value)
-                    .collect::<Result<Vec<_>, _>>()
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        return Ok(QuerySourceValue::Tuples(Arc::new(rows)));
-    }
     let EdnValue::Map(fields) = value else {
         return Err(usage("source must be rows or a database descriptor"));
     };
@@ -509,11 +529,31 @@ fn source_value(
     }
     let opened;
     let connection = match options.get("database") {
-        Some(EdnValue::String(id)) if id != primary.identity().database_id() => {
-            opened = Connection::connect_configured(config.clone(), id.as_str(), 128)?;
-            &opened
+        Some(EdnValue::String(name)) => {
+            // A name may have been reused while the primary still holds its
+            // old identity. Compare resolved identities, never name spelling
+            // against a captured storage ID.
+            let selected =
+                atomic_core::DatabaseCatalog::connect_configured(config)?.resolve(name)?;
+            if let Some(primary) = primary.filter(|primary| {
+                primary.identity().database_id() == selected.database_id
+                    && primary.identity().lineage_id() == selected.lineage_id
+            }) {
+                primary
+            } else {
+                opened = Connection::connect_configured(config.clone(), name.as_str(), 128)?;
+                if opened.identity().database_id() != selected.database_id
+                    || opened.identity().lineage_id() != selected.lineage_id
+                {
+                    return Err(SemanticError::conflict(
+                        "cli/source-identity-changed",
+                        "source name changed identity while opening the query source",
+                    ));
+                }
+                &opened
+            }
         }
-        Some(EdnValue::String(_)) | None => primary,
+        None => primary.ok_or_else(|| usage("database source requires :database or --database"))?,
         _ => return Err(usage("database source name must be a string")),
     };
     for name in ["history", "log"] {

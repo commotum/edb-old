@@ -26,6 +26,10 @@ pub const PROGRAM_ABI_VERSION: u16 = 4;
 pub(crate) const DUAL_PREDICATE_PROGRAM_ABI_VERSION: u16 = 5;
 pub const QUERY_TEMPLATE_VERSION: u16 = 1;
 pub const NATIVE_QUERY_TEMPLATE_VERSION: u16 = 2;
+/// General query literals and arbitrary-width relation patterns.
+pub const GENERAL_QUERY_TEMPLATE_VERSION: u16 = 3;
+/// Native portable data/string helpers; earlier templates retain their bytes.
+pub const DATA_FUNCTION_QUERY_TEMPLATE_VERSION: u16 = 4;
 pub const MAX_QUERY_PATTERNS: usize = 64;
 pub const MAX_QUERY_VARIABLES: usize = 32;
 
@@ -41,6 +45,9 @@ pub enum RuntimeValue {
     Vector(Vec<RuntimeValue>),
     /// Entries are kept in canonical stored-value order with unique keys.
     Map(Vec<(Value, RuntimeValue)>),
+    /// Lossless query-only data. Not a stored value or a portable transaction
+    /// argument; query programs may receive and produce this carrier.
+    Query(crate::QueryValue),
 }
 
 impl From<Value> for RuntimeValue {
@@ -56,6 +63,15 @@ impl From<EntityRef> for RuntimeValue {
 }
 
 impl RuntimeValue {
+    pub(crate) fn from_query_value(value: crate::QueryValue) -> Self {
+        match &value {
+            crate::QueryValue::Nil => Self::Null,
+            crate::QueryValue::Scalar(_) => {
+                Self::Scalar(value.into_scalar().expect("scalar variant"))
+            }
+            _ => Self::Query(value),
+        }
+    }
     pub fn map(mut entries: Vec<(Value, RuntimeValue)>) -> Result<Self, SemanticError> {
         for (key, _) in &entries {
             crate::transaction::validate_stored_input(key)?;
@@ -92,6 +108,7 @@ impl RuntimeValue {
                             .then_with(|| left.1.canonical_cmp(&right.1))
                     })
                 }
+                (Self::Query(left), Self::Query(right)) => left.canonical_cmp(right),
                 _ => Ordering::Equal,
             })
     }
@@ -104,6 +121,7 @@ fn runtime_value_rank(value: &RuntimeValue) -> u8 {
         RuntimeValue::Entity(_) => 2,
         RuntimeValue::Vector(_) => 3,
         RuntimeValue::Map(_) => 4,
+        RuntimeValue::Query(_) => 5,
     }
 }
 
@@ -305,7 +323,7 @@ impl QueryTemplate {
     ) -> Result<Self, SemanticError> {
         let native = native_query::NativeQueryTemplate::new(query, input_arguments, sources)?;
         Ok(Self {
-            version: NATIVE_QUERY_TEMPLATE_VERSION,
+            version: native.version()?,
             find: Vec::new(),
             patterns: Vec::new(),
             native: Some(Box::new(native)),
@@ -350,7 +368,7 @@ impl QueryTemplate {
 
     fn validate_static(&self) -> Result<(), SemanticError> {
         if let Some(native) = &self.native {
-            if self.version != NATIVE_QUERY_TEMPLATE_VERSION
+            if self.version != native.version()?
                 || !self.find.is_empty()
                 || !self.patterns.is_empty()
             {
@@ -825,6 +843,35 @@ impl<'a> ProgramBudget<'a> {
         Ok(())
     }
 
+    pub(crate) fn native_check(&mut self, work: u64) -> Result<(), SemanticError> {
+        self.charge(work)
+    }
+
+    pub(crate) fn native_begin(&mut self, arguments: &[RuntimeValue]) -> Result<(), SemanticError> {
+        self.check_cancel()?;
+        self.begin_call()?;
+        for argument in arguments {
+            self.charge_runtime_value(argument)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn native_result(&mut self, result: &RuntimeValue) -> Result<(), SemanticError> {
+        self.check_cancel()?;
+        self.charge_runtime_value(result)
+    }
+
+    pub(crate) fn native_forms(&mut self, forms: &[TxForm]) -> Result<(), SemanticError> {
+        self.check_cancel()?;
+        crate::transaction::validate_forms_input(forms)?;
+        for form in forms {
+            let bytes = crate::encoding::persistent_tx_form_bytes(form)?;
+            self.charge(usize_as_u64(bytes)?)?;
+            self.reserve_form(bytes)?;
+        }
+        Ok(())
+    }
+
     fn begin_call(&mut self) -> Result<(), SemanticError> {
         self.calls = self.calls.checked_add(1).ok_or_else(|| {
             busy(
@@ -862,6 +909,7 @@ impl<'a> ProgramBudget<'a> {
     }
 
     fn charge_runtime_value(&mut self, value: &RuntimeValue) -> Result<(), SemanticError> {
+        self.check_query_carriers(value)?;
         validate_runtime_value(value, self.max_collection_items, 0)?;
         let bytes = runtime_value_bytes(value, 0)?;
         self.charge(usize_as_u64(bytes)?)?;
@@ -874,6 +922,53 @@ impl<'a> ProgramBudget<'a> {
         }
         self.value_bytes = next;
         Ok(())
+    }
+
+    fn check_query_data(&mut self, value: &crate::QueryValue) -> Result<usize, SemanticError> {
+        let size = value.measure_with(&mut |work| self.charge(usize_as_u64(work)?))?;
+        if size.retained_bytes.saturating_add(size.canonical_bytes)
+            > self.max_value_bytes.saturating_sub(self.value_bytes)
+        {
+            return Err(busy(
+                "program/value-byte-limit",
+                "general query data exceeds remaining runtime retention",
+            ));
+        }
+        validate_general_runtime(value, self.max_collection_items, 0)?;
+        value.validate_with(&mut |work| self.charge(usize_as_u64(work)?))?;
+        Ok(size.retained_bytes)
+    }
+
+    fn check_query_carriers(&mut self, value: &RuntimeValue) -> Result<(), SemanticError> {
+        self.check_query_carriers_at(value, 0)
+    }
+    fn check_query_carriers_at(
+        &mut self,
+        value: &RuntimeValue,
+        depth: usize,
+    ) -> Result<(), SemanticError> {
+        if depth > 16 {
+            return Err(incorrect(
+                "program/value-depth",
+                "runtime values may contain at most 16 collection levels",
+            ));
+        }
+        match value {
+            RuntimeValue::Query(value) => self.check_query_data(value).map(|_| ()),
+            RuntimeValue::Vector(values) => {
+                for value in values {
+                    self.check_query_carriers_at(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            RuntimeValue::Map(entries) => {
+                for (_, value) in entries {
+                    self.check_query_carriers_at(value, depth + 1)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 
     fn reserve_form(&mut self, bytes: usize) -> Result<(), SemanticError> {
@@ -905,6 +1000,8 @@ pub enum ProgramOutput {
     AttributePredicate(RuntimeValue),
     EntityPredicate(RuntimeValue),
     Query(Vec<Vec<Value>>),
+    /// Query-only cells which cannot be represented as stored `Value`s.
+    GeneralQuery(Vec<Vec<crate::QueryValue>>),
 }
 
 pub fn is_exact_true(value: &RuntimeValue) -> bool {
@@ -1412,6 +1509,66 @@ fn require_stack(actual: isize, needed: isize) -> Result<(), SemanticError> {
 }
 
 impl ProgramRuntime {
+    pub fn execute_query_general(
+        &self,
+        program: &Program,
+        database: &DatabaseValue,
+        arguments: &[crate::QueryValue],
+        control: ProgramControl<'_>,
+    ) -> Result<ProgramOutput, SemanticError> {
+        self.execute_query_general_with_budget(
+            program,
+            database,
+            arguments,
+            &mut ProgramBudget::new(control)?,
+        )
+    }
+
+    /// General query data with the same exact database and shared accounting
+    /// as the stored-scalar compatibility entry point.
+    pub fn execute_query_general_with_budget(
+        &self,
+        program: &Program,
+        database: &DatabaseValue,
+        arguments: &[crate::QueryValue],
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<ProgramOutput, SemanticError> {
+        budget.check_cancel()?;
+        if program.kind != ProgramKind::Query {
+            return Err(incorrect(
+                "program/not-query-program",
+                "general query execution accepts only query programs",
+            ));
+        }
+        // Validate borrowed trees before cloning caller-owned data.
+        let mut retained = 0usize;
+        for argument in arguments {
+            retained = checked_size_add(retained, budget.check_query_data(argument)?)?;
+            if retained > budget.max_value_bytes.saturating_sub(budget.value_bytes) {
+                return Err(busy(
+                    "program/value-byte-limit",
+                    "general query arguments exceed remaining runtime retention",
+                ));
+            }
+        }
+        let arguments = arguments
+            .iter()
+            .map(|value| match value {
+                crate::QueryValue::Scalar(value) => RuntimeValue::Scalar(value.clone()),
+                crate::QueryValue::Nil => RuntimeValue::Null,
+                _ => RuntimeValue::Query(value.clone()),
+            })
+            .collect::<Vec<_>>();
+        contain_runtime_panic(|| {
+            program.validate()?;
+            self.execute_validated_runtime_with_budget_inner(
+                program,
+                ProgramRead::Exact(database),
+                &arguments,
+                budget,
+            )
+        })
+    }
     pub fn execute(
         &self,
         program: &Program,
@@ -1683,7 +1840,26 @@ impl ProgramRuntime {
                 if !stack.is_empty() {
                     evaluation.emit_row(stack)?;
                 }
-                Ok(ProgramOutput::Query(evaluation.query_rows))
+                if evaluation
+                    .query_rows
+                    .iter()
+                    .flatten()
+                    .all(|value| matches!(value, crate::QueryValue::Scalar(_)))
+                {
+                    Ok(ProgramOutput::Query(
+                        evaluation
+                            .query_rows
+                            .into_iter()
+                            .map(|row| {
+                                row.into_iter()
+                                    .map(|value| value.into_scalar().expect("checked scalar"))
+                                    .collect()
+                            })
+                            .collect(),
+                    ))
+                } else {
+                    Ok(ProgramOutput::GeneralQuery(evaluation.query_rows))
+                }
             }
             ProgramKind::DualPredicate => Err(incorrect(
                 "program/predicate-role-required",
@@ -1733,7 +1909,7 @@ struct Evaluation<'db, 'args, 'budget, 'control> {
     arguments: &'args [RuntimeValue],
     budget: &'budget mut ProgramBudget<'control>,
     forms: Vec<TxForm>,
-    query_rows: Vec<Vec<Value>>,
+    query_rows: Vec<Vec<crate::QueryValue>>,
 }
 
 impl Evaluation<'_, '_, '_, '_> {
@@ -1798,29 +1974,59 @@ impl Evaluation<'_, '_, '_, '_> {
                 Instruction::Get => {
                     let key = pop(stack)?;
                     let collection = pop(stack)?;
-                    let value = runtime_get(collection, key)?;
+                    let value = runtime_get(collection, key, self.budget)?;
                     self.push(stack, value)?;
                 }
                 Instruction::ContainsKey => {
-                    let key = scalar(pop(stack)?)?;
+                    let key = pop(stack)?;
                     let map = pop(stack)?;
-                    let RuntimeValue::Map(entries) = map else {
-                        return Err(incorrect(
-                            "program/type",
-                            "contains-key requires a runtime map",
-                        ));
+                    let exists = match map {
+                        RuntimeValue::Map(entries) => {
+                            let key = scalar(key)?;
+                            entries.iter().any(|entry| entry.0.index_cmp(&key).is_eq())
+                        }
+                        RuntimeValue::Query(value) => {
+                            let crate::QueryValue::Map(entries) = &value else {
+                                return Err(incorrect(
+                                    "program/type",
+                                    "contains-key requires a map",
+                                ));
+                            };
+                            let key = native_query::runtime_query_value(&key)?;
+                            let mut found = false;
+                            for (candidate, _) in entries {
+                                if candidate
+                                    .compare_with(&key, &mut |work| {
+                                        self.budget.charge(usize_as_u64(work)?)
+                                    })?
+                                    .is_eq()
+                                {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            found
+                        }
+                        _ => return Err(incorrect("program/type", "contains-key requires a map")),
                     };
-                    self.push(
-                        stack,
-                        RuntimeValue::Scalar(Value::Bool(
-                            entries
-                                .iter()
-                                .any(|entry| entry.0.index_cmp(&key) == Ordering::Equal),
-                        )),
-                    )?;
+                    self.push(stack, RuntimeValue::Scalar(Value::Bool(exists)))?;
                 }
                 Instruction::Length => {
                     let length = match pop(stack)? {
+                        RuntimeValue::Query(value) => match &value {
+                            crate::QueryValue::Tuple(values)
+                            | crate::QueryValue::Collection(values) => values.len(),
+                            crate::QueryValue::Set(_) => {
+                                finite_items(RuntimeValue::Query(value), self.budget)?.len()
+                            }
+                            crate::QueryValue::Map(entries) => entries.len(),
+                            _ => {
+                                return Err(incorrect(
+                                    "program/type",
+                                    "length requires a query collection",
+                                ));
+                            }
+                        },
                         RuntimeValue::Vector(values) => values.len(),
                         RuntimeValue::Map(entries) => entries.len(),
                         // Clojure delegates string `count` to Java's String
@@ -1841,11 +2047,23 @@ impl Evaluation<'_, '_, '_, '_> {
                     )?;
                 }
                 Instruction::Unpack(width) => {
-                    let RuntimeValue::Vector(values) = pop(stack)? else {
-                        return Err(incorrect(
-                            "program/type",
-                            "unpack requires a runtime vector",
-                        ));
+                    let values = match pop(stack)? {
+                        RuntimeValue::Vector(values) => values,
+                        RuntimeValue::Query(mut value) => {
+                            let (crate::QueryValue::Tuple(values)
+                            | crate::QueryValue::Collection(values)) = &mut value
+                            else {
+                                return Err(incorrect(
+                                    "program/type",
+                                    "unpack requires a sequence",
+                                ));
+                            };
+                            std::mem::take(values)
+                                .into_iter()
+                                .map(RuntimeValue::from_query_value)
+                                .collect()
+                        }
+                        _ => return Err(incorrect("program/type", "unpack requires a sequence")),
                     };
                     if values.len() != usize::from(*width) {
                         return Err(incorrect(
@@ -1877,7 +2095,7 @@ impl Evaluation<'_, '_, '_, '_> {
                     ));
                 }
                 Instruction::ForEach { body } => {
-                    let items = finite_items(pop(stack)?)?;
+                    let items = finite_items(pop(stack)?, self.budget)?;
                     if items.len() > self.budget.max_collection_items {
                         return Err(busy(
                             "program/collection-limit",
@@ -2169,13 +2387,25 @@ impl Evaluation<'_, '_, '_, '_> {
     }
 
     fn emit_row(&mut self, values: Vec<RuntimeValue>) -> Result<(), SemanticError> {
-        let values = values
-            .into_iter()
-            .map(query_value)
-            .collect::<Result<Vec<_>, SemanticError>>()?;
-        let bytes = row_output_bytes(&values)?;
+        let mut bytes = 8usize;
+        for value in &values {
+            bytes = checked_size_add(
+                bytes,
+                match value {
+                    RuntimeValue::Scalar(value) => encoded_value_bytes(value, 0)?,
+                    RuntimeValue::Entity(EntityRef::Id(entity)) => {
+                        encoded_value_bytes(&Value::Ref(*entity), 0)?
+                    }
+                    _ => runtime_value_bytes(value, 0)?,
+                },
+            )?;
+        }
         self.budget.charge(usize_as_u64(bytes)?)?;
         self.budget.reserve_form(bytes)?;
+        let values = values
+            .iter()
+            .map(native_query::runtime_query_value)
+            .collect::<Result<Vec<_>, SemanticError>>()?;
         self.query_rows.push(values);
         Ok(())
     }
@@ -2395,6 +2625,10 @@ fn runtime_map_value(
             "program/entity-map-value",
             "nil is not a valid entity-map attribute value",
         )),
+        RuntimeValue::Query(_) => Err(incorrect(
+            "program/query-only-value",
+            "general query data is not an entity-map attribute value",
+        )),
     }
 }
 
@@ -2506,6 +2740,7 @@ fn runtime_detail_text(value: &RuntimeValue) -> String {
         RuntimeValue::Scalar(value) => format!("{value:?}"),
         RuntimeValue::Entity(value) => format!("{value:?}"),
         RuntimeValue::Null => "nil".to_owned(),
+        RuntimeValue::Query(value) => format!("{value:?}"),
         RuntimeValue::Vector(values) => format!(
             "[{}]",
             values
@@ -2578,6 +2813,7 @@ fn tx_value(value: RuntimeValue) -> Result<TxValue, SemanticError> {
                     RuntimeValue::Null => Ok(None),
                     RuntimeValue::Scalar(Value::Tuple(_))
                     | RuntimeValue::Vector(_)
+                    | RuntimeValue::Query(_)
                     | RuntimeValue::Map(_) => Err(incorrect(
                         "program/invalid-input-tuple",
                         "input tuple slots cannot contain nested collections or tuples",
@@ -2588,20 +2824,9 @@ fn tx_value(value: RuntimeValue) -> Result<TxValue, SemanticError> {
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(TxValue::Tuple(slots))
         }
-        RuntimeValue::Null | RuntimeValue::Map(_) => Err(incorrect(
+        RuntimeValue::Null | RuntimeValue::Map(_) | RuntimeValue::Query(_) => Err(incorrect(
             "program/type",
             "transaction values must be scalars, entity references, or tuple vectors",
-        )),
-    }
-}
-
-fn query_value(value: RuntimeValue) -> Result<Value, SemanticError> {
-    match value {
-        RuntimeValue::Scalar(value) => Ok(value),
-        RuntimeValue::Entity(EntityRef::Id(entity)) => Ok(Value::Ref(entity)),
-        _ => Err(incorrect(
-            "program/query-value",
-            "query rows may contain only database scalar values",
         )),
     }
 }
@@ -2890,7 +3115,10 @@ fn query_term_value(
                     RuntimeValue::Entity(entity.clone()),
                     budget,
                 )?),
-                RuntimeValue::Null | RuntimeValue::Vector(_) | RuntimeValue::Map(_) => {
+                RuntimeValue::Null
+                | RuntimeValue::Vector(_)
+                | RuntimeValue::Map(_)
+                | RuntimeValue::Query(_) => {
                     return Err(incorrect(
                         "program/query-input-type",
                         "query inputs must be scalar database values or resolvable entities",
@@ -3033,8 +3261,48 @@ fn split_stack(
     Ok(stack.split_off(at))
 }
 
-fn runtime_get(collection: RuntimeValue, key: RuntimeValue) -> Result<RuntimeValue, SemanticError> {
+fn runtime_get(
+    collection: RuntimeValue,
+    key: RuntimeValue,
+    budget: &mut ProgramBudget<'_>,
+) -> Result<RuntimeValue, SemanticError> {
     match (collection, key) {
+        (RuntimeValue::Query(value), key) => {
+            let key = native_query::runtime_query_value(&key)?;
+            let result = match &value {
+                crate::QueryValue::Map(entries) => {
+                    let mut found = None;
+                    for (candidate, value) in entries {
+                        if candidate
+                            .compare_with(&key, &mut |work| budget.charge(usize_as_u64(work)?))?
+                            .is_eq()
+                        {
+                            found = Some(value.clone());
+                            break;
+                        }
+                    }
+                    found
+                }
+                crate::QueryValue::Tuple(values) | crate::QueryValue::Collection(values) => {
+                    match &key {
+                        crate::QueryValue::Scalar(Value::Long(index)) if *index >= 0 => {
+                            usize::try_from(*index)
+                                .ok()
+                                .and_then(|index| values.get(index))
+                                .cloned()
+                        }
+                        _ => {
+                            return Err(incorrect(
+                                "program/index",
+                                "sequence index must be a nonnegative integer",
+                            ));
+                        }
+                    }
+                }
+                _ => return Err(incorrect("program/type", "get requires a map or sequence")),
+            };
+            Ok(result.map_or(RuntimeValue::Null, RuntimeValue::from_query_value))
+        }
         (RuntimeValue::Vector(values), RuntimeValue::Scalar(Value::Long(index))) => {
             let index = usize::try_from(index).map_err(|_| {
                 incorrect(
@@ -3055,8 +3323,67 @@ fn runtime_get(collection: RuntimeValue, key: RuntimeValue) -> Result<RuntimeVal
     }
 }
 
-fn finite_items(value: RuntimeValue) -> Result<Vec<RuntimeValue>, SemanticError> {
+fn finite_items(
+    value: RuntimeValue,
+    budget: &mut ProgramBudget<'_>,
+) -> Result<Vec<RuntimeValue>, SemanticError> {
     match value {
+        RuntimeValue::Query(mut value) => match &mut value {
+            crate::QueryValue::Tuple(values) | crate::QueryValue::Collection(values) => {
+                Ok(std::mem::take(values)
+                    .into_iter()
+                    .map(RuntimeValue::from_query_value)
+                    .collect())
+            }
+            crate::QueryValue::Set(values) => {
+                let mut values = std::mem::take(values);
+                let mut failure = None;
+                values.sort_by(|left, right| {
+                    if failure.is_some() {
+                        return Ordering::Equal;
+                    }
+                    match left.compare_with(right, &mut |work| budget.charge(usize_as_u64(work)?)) {
+                        Ok(order) => order,
+                        Err(error) => {
+                            failure = Some(error);
+                            Ordering::Equal
+                        }
+                    }
+                });
+                if let Some(error) = failure.take() {
+                    return Err(error);
+                }
+                values.dedup_by(|left, right| {
+                    match left.compare_with(right, &mut |work| budget.charge(usize_as_u64(work)?)) {
+                        Ok(order) => order.is_eq(),
+                        Err(error) => {
+                            failure = Some(error);
+                            false
+                        }
+                    }
+                });
+                if let Some(error) = failure {
+                    return Err(error);
+                }
+                Ok(values
+                    .into_iter()
+                    .map(RuntimeValue::from_query_value)
+                    .collect())
+            }
+            crate::QueryValue::Map(entries) => Ok(std::mem::take(entries)
+                .into_iter()
+                .map(|(key, value)| {
+                    RuntimeValue::Vector(vec![
+                        RuntimeValue::from_query_value(key),
+                        RuntimeValue::from_query_value(value),
+                    ])
+                })
+                .collect()),
+            _ => Err(incorrect(
+                "program/type",
+                "for-each requires a finite query collection",
+            )),
+        },
         RuntimeValue::Vector(values) => Ok(values),
         RuntimeValue::Map(entries) => Ok(entries
             .into_iter()
@@ -3089,6 +3416,9 @@ fn validate_runtime_value(
             entity_ref_bytes_at_depth(entity, depth)?;
         }
         RuntimeValue::Null => {}
+        RuntimeValue::Query(value) => {
+            validate_general_runtime(value, max_collection_items, depth)?;
+        }
         RuntimeValue::Vector(values) => {
             if values.len() > max_collection_items {
                 return Err(busy(
@@ -3125,6 +3455,55 @@ fn validate_runtime_value(
     Ok(())
 }
 
+fn validate_general_runtime(
+    value: &crate::QueryValue,
+    max_items: usize,
+    depth: usize,
+) -> Result<(), SemanticError> {
+    use crate::QueryValue;
+    if depth > 16 {
+        return Err(incorrect(
+            "program/value-depth",
+            "general runtime values may contain at most 16 collection levels",
+        ));
+    }
+    match value {
+        QueryValue::Tuple(values) | QueryValue::Collection(values) | QueryValue::Set(values) => {
+            if values.len() > max_items {
+                return Err(busy(
+                    "program/collection-limit",
+                    "general runtime collection exceeds its item limit",
+                ));
+            }
+            for value in values {
+                validate_general_runtime(value, max_items, depth + 1)?;
+            }
+        }
+        QueryValue::Map(entries) => {
+            if entries.len() > max_items {
+                return Err(busy(
+                    "program/collection-limit",
+                    "general runtime map exceeds its item limit",
+                ));
+            }
+            for (key, value) in entries {
+                validate_general_runtime(key, max_items, depth + 1)?;
+                validate_general_runtime(value, max_items, depth + 1)?;
+            }
+        }
+        QueryValue::Tagged(_, value) => validate_general_runtime(value, max_items, depth + 1)?,
+        QueryValue::Scalar(value) => {
+            encoded_value_bytes(value, depth)?;
+        }
+        QueryValue::Nil | QueryValue::Char(_) => {}
+    }
+    Ok(())
+}
+
+fn general_runtime_bytes(value: &crate::QueryValue, _depth: usize) -> Result<usize, SemanticError> {
+    Ok(value.measure_with(&mut |_| Ok(()))?.retained_bytes)
+}
+
 fn runtime_value_bytes(value: &RuntimeValue, depth: usize) -> Result<usize, SemanticError> {
     if depth > 16 {
         return Err(incorrect(
@@ -3138,6 +3517,7 @@ fn runtime_value_bytes(value: &RuntimeValue, depth: usize) -> Result<usize, Sema
             checked_size_add(1, entity_ref_bytes_at_depth(entity, depth)?)
         }
         RuntimeValue::Null => Ok(1),
+        RuntimeValue::Query(value) => general_runtime_bytes(value, depth),
         RuntimeValue::Vector(values) => {
             let mut bytes = 5usize;
             for value in values {
@@ -3297,15 +3677,6 @@ fn tx_value_bytes_at_depth(value: &TxValue, depth: usize) -> Result<usize, Seman
             Ok(bytes)
         }
     }
-}
-
-fn row_output_bytes(values: &[Value]) -> Result<usize, SemanticError> {
-    // Element length plus the row's collection length.
-    let mut bytes = 8usize;
-    for value in values {
-        bytes = checked_size_add(bytes, encoded_value_bytes(value, 0)?)?;
-    }
-    Ok(bytes)
 }
 
 fn call_output_bytes(

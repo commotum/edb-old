@@ -289,7 +289,7 @@ fn commit_growth(
             first = Some(report);
         }
         *next_batch += 1;
-        if *next_batch % 8 == 0 {
+        if (*next_batch).is_multiple_of(8) {
             eprintln!(
                 "PostgreSQL allocation frontier={} total_batches={} elapsed={:?}",
                 current.eidx_frontier(),

@@ -1,4 +1,6 @@
 use crate::pull::QueryPullBudget;
+#[path = "query_functions.rs"]
+mod functions;
 #[path = "query_numeric.rs"]
 mod numeric;
 use crate::{
@@ -24,6 +26,11 @@ mod nested;
 mod sources;
 use sources::SourceRef;
 pub use sources::{QueryDataSource, QuerySourceValue};
+#[path = "query_aggregate.rs"]
+mod custom_aggregate;
+pub use custom_aggregate::{
+    AggregateArg, AggregateCall, AggregateGroup, AggregateSource, AggregateValue,
+};
 #[path = "query_prepare.rs"]
 mod prepare;
 pub use prepare::{PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats};
@@ -67,6 +74,8 @@ impl From<&str> for Variable {
 pub enum Term {
     Variable(Variable),
     Constant(Value),
+    /// General immutable query data; never a new persisted datom value type.
+    QueryConstant(QueryValue),
     /// Query-language nil. Nil is a legal literal and binding value, but is
     /// deliberately not part of the persisted `Value` domain.
     Nil,
@@ -102,6 +111,23 @@ impl DataPattern {
     }
 }
 
+/// A pattern over ordinary relation data, without a datom's five-column limit.
+/// Database sources still use their E/A/V/T/assertion semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RelationPattern {
+    pub source: String,
+    pub terms: Vec<Term>,
+}
+
+impl RelationPattern {
+    pub fn new(terms: Vec<Term>) -> Self {
+        Self {
+            source: "$".into(),
+            terms,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Predicate {
     Eq,
@@ -116,6 +142,13 @@ pub enum Predicate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Function {
     Ground,
+    Count,
+    Quot,
+    Subs,
+    Str,
+    StartsWith,
+    EndsWith,
+    Includes,
     Add,
     Subtract,
     Multiply,
@@ -148,6 +181,7 @@ pub enum Binding {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Clause {
     Pattern(Box<DataPattern>),
+    RelationPattern(Box<RelationPattern>),
     Predicate {
         predicate: Predicate,
         source: String,
@@ -196,6 +230,9 @@ pub enum QueryInput {
     Tuple(Vec<Value>),
     Collection(Vec<Value>),
     Relation(Vec<Vec<Value>>),
+    /// `InputSpec` controls scalar versus sequence/relation destructuring.
+    /// A map, nil or nested collection may itself be a single scalar input.
+    General(QueryValue),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -230,6 +267,8 @@ pub enum FindElement {
         function: Aggregate,
         variable: Variable,
     },
+    /// A trusted, process-local grouped aggregate registered by the caller.
+    CustomAggregate(Box<AggregateCall>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,361 +306,10 @@ pub struct QuerySource {
     pub database: DatabaseValue,
 }
 
-pub enum QueryValue {
-    Nil,
-    Scalar(Value),
-    Collection(Vec<QueryValue>),
-    Tuple(Vec<QueryValue>),
-    Map(Vec<(QueryValue, QueryValue)>),
-}
-
-impl QueryValue {
-    /// Deterministic total comparison used to canonicalize arbitrary pull
-    /// result keys. This is deliberately a query-result ordering rather than
-    /// a stored-value index ordering: container shape participates before
-    /// recursively comparing contents, while scalar comparison delegates to
-    /// Datomic's logical value comparator.
-    pub fn canonical_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-        enum Task<'a> {
-            Values(&'a QueryValue, &'a QueryValue),
-            Length(usize, usize),
-        }
-        let rank = |value: &Self| match value {
-            Self::Nil => 0_u8,
-            Self::Scalar(_) => 1,
-            Self::Tuple(_) => 2,
-            Self::Collection(_) => 3,
-            Self::Map(_) => 4,
-        };
-        let mut pending = vec![Task::Values(self, other)];
-        while let Some(task) = pending.pop() {
-            let (left, right) = match task {
-                Task::Length(left, right) => {
-                    let order = left.cmp(&right);
-                    if order != Ordering::Equal {
-                        return order;
-                    }
-                    continue;
-                }
-                Task::Values(left, right) => (left, right),
-            };
-            let order = rank(left).cmp(&rank(right));
-            if order != Ordering::Equal {
-                return order;
-            }
-            match (left, right) {
-                (Self::Nil, Self::Nil) => {}
-                (Self::Scalar(left), Self::Scalar(right)) => {
-                    let order = left.index_cmp(right);
-                    if order != Ordering::Equal {
-                        return order;
-                    }
-                }
-                (Self::Tuple(left), Self::Tuple(right))
-                | (Self::Collection(left), Self::Collection(right)) => {
-                    pending.push(Task::Length(left.len(), right.len()));
-                    for (left, right) in left.iter().zip(right).rev() {
-                        pending.push(Task::Values(left, right));
-                    }
-                }
-                (Self::Map(left), Self::Map(right)) => {
-                    let order = compare_query_maps(left, right);
-                    if order != Ordering::Equal {
-                        return order;
-                    }
-                }
-                _ => unreachable!("equal query-value ranks must have matching variants"),
-            }
-        }
-        Ordering::Equal
-    }
-
-    /// Move a result container out while retaining stack-safe destruction of
-    /// any other value. Borrowed pattern matching remains available as usual.
-    pub fn into_map(mut self) -> Option<Vec<(Self, Self)>> {
-        if let Self::Map(values) = &mut self {
-            Some(std::mem::take(values))
-        } else {
-            None
-        }
-    }
-    pub fn into_collection(mut self) -> Option<Vec<Self>> {
-        if let Self::Collection(values) = &mut self {
-            Some(std::mem::take(values))
-        } else {
-            None
-        }
-    }
-    pub fn into_tuple(mut self) -> Option<Vec<Self>> {
-        if let Self::Tuple(values) = &mut self {
-            Some(std::mem::take(values))
-        } else {
-            None
-        }
-    }
-    pub fn into_scalar(mut self) -> Option<Value> {
-        if let Self::Scalar(value) = &mut self {
-            Some(std::mem::replace(value, Value::Bool(false)))
-        } else {
-            None
-        }
-    }
-
-    /// Insert or replace one map entry and restore canonical key order. Pull
-    /// maps are semantically unordered, so neither keyword-only ordering nor
-    /// selector order may leak into equality or returned representation.
-    pub(crate) fn put_map_entry(
-        entries: &mut Vec<(QueryValue, QueryValue)>,
-        key: QueryValue,
-        value: QueryValue,
-    ) {
-        if let Some((_, existing)) = entries
-            .iter_mut()
-            .find(|(candidate, _)| candidate.canonical_cmp(&key).is_eq())
-        {
-            *existing = value;
-        } else {
-            entries.push((key, value));
-            entries.sort_by(|(left, _), (right, _)| left.canonical_cmp(right));
-        }
-    }
-}
-
-impl Clone for QueryValue {
-    fn clone(&self) -> Self {
-        enum Task<'a> {
-            Value(&'a QueryValue),
-            Collection(usize),
-            Tuple(usize),
-            Map(usize),
-        }
-        let mut pending = vec![Task::Value(self)];
-        let mut values = Vec::new();
-        while let Some(task) = pending.pop() {
-            match task {
-                Task::Value(Self::Nil) => values.push(Self::Nil),
-                Task::Value(Self::Scalar(value)) => values.push(Self::Scalar(value.clone())),
-                Task::Value(Self::Collection(children)) | Task::Value(Self::Tuple(children)) => {
-                    pending.push(if matches!(task, Task::Value(Self::Collection(_))) {
-                        Task::Collection(children.len())
-                    } else {
-                        Task::Tuple(children.len())
-                    });
-                    pending.extend(children.iter().rev().map(Task::Value));
-                }
-                Task::Value(Self::Map(entries)) => {
-                    pending.push(Task::Map(entries.len()));
-                    for (key, value) in entries.iter().rev() {
-                        pending.push(Task::Value(value));
-                        pending.push(Task::Value(key));
-                    }
-                }
-                Task::Collection(count) => {
-                    let children = values.split_off(values.len() - count);
-                    values.push(Self::Collection(children));
-                }
-                Task::Tuple(count) => {
-                    let children = values.split_off(values.len() - count);
-                    values.push(Self::Tuple(children));
-                }
-                Task::Map(count) => {
-                    let mut children = values.split_off(values.len() - 2 * count).into_iter();
-                    let entries = (0..count)
-                        .map(|_| (children.next().unwrap(), children.next().unwrap()))
-                        .collect();
-                    values.push(Self::Map(entries));
-                }
-            }
-        }
-        values.pop().expect("one cloned result")
-    }
-}
-
-impl Drop for QueryValue {
-    fn drop(&mut self) {
-        fn drain(value: &mut QueryValue, pending: &mut Vec<QueryValue>) {
-            match value {
-                QueryValue::Collection(values) | QueryValue::Tuple(values) => {
-                    pending.append(values)
-                }
-                QueryValue::Map(entries) => {
-                    for (key, value) in std::mem::take(entries) {
-                        pending.push(key);
-                        pending.push(value);
-                    }
-                }
-                _ => {}
-            }
-        }
-        let mut pending = Vec::new();
-        drain(self, &mut pending);
-        while let Some(mut value) = pending.pop() {
-            drain(&mut value, &mut pending);
-        }
-    }
-}
-
-impl PartialEq for QueryValue {
-    fn eq(&self, other: &Self) -> bool {
-        self.canonical_cmp(other).is_eq()
-    }
-}
-
-impl Eq for QueryValue {}
-
-/// Map sorting must not recursively invoke `QueryValue::canonical_cmp` on
-/// map-shaped keys or equal-key values. Build canonical child order bottom-up
-/// in a flat arena, then compare arena nodes with explicit heap tasks. The
-/// arena borrows scalar leaves and never clones or recursively owns results.
-enum CanonicalQueryNode<'a> {
-    Nil,
-    Scalar(&'a Value),
-    Tuple(Vec<usize>),
-    Collection(Vec<usize>),
-    Map(Vec<(usize, usize)>),
-}
-
-fn compare_query_maps(
-    left: &[(QueryValue, QueryValue)],
-    right: &[(QueryValue, QueryValue)],
-) -> std::cmp::Ordering {
-    if left.is_empty() || right.is_empty() {
-        return left.len().cmp(&right.len());
-    }
-    let mut arena = Vec::new();
-    let left = canonical_query_map_root(left, &mut arena);
-    let right = canonical_query_map_root(right, &mut arena);
-    compare_canonical_query_nodes(&arena, left, right)
-}
-
-fn canonical_query_map_root<'a>(
-    entries: &'a [(QueryValue, QueryValue)],
-    arena: &mut Vec<CanonicalQueryNode<'a>>,
-) -> usize {
-    enum Task<'a> {
-        Value(&'a QueryValue),
-        Tuple(usize),
-        Collection(usize),
-        Map(usize),
-    }
-    let mut pending = vec![Task::Map(entries.len())];
-    for (key, value) in entries.iter().rev() {
-        pending.push(Task::Value(value));
-        pending.push(Task::Value(key));
-    }
-    let mut completed = Vec::new();
-    while let Some(task) = pending.pop() {
-        let node = match task {
-            Task::Value(QueryValue::Nil) => CanonicalQueryNode::Nil,
-            Task::Value(QueryValue::Scalar(value)) => CanonicalQueryNode::Scalar(value),
-            Task::Value(QueryValue::Tuple(values)) => {
-                pending.push(Task::Tuple(values.len()));
-                pending.extend(values.iter().rev().map(Task::Value));
-                continue;
-            }
-            Task::Value(QueryValue::Collection(values)) => {
-                pending.push(Task::Collection(values.len()));
-                pending.extend(values.iter().rev().map(Task::Value));
-                continue;
-            }
-            Task::Value(QueryValue::Map(entries)) => {
-                pending.push(Task::Map(entries.len()));
-                for (key, value) in entries.iter().rev() {
-                    pending.push(Task::Value(value));
-                    pending.push(Task::Value(key));
-                }
-                continue;
-            }
-            Task::Tuple(count) => {
-                CanonicalQueryNode::Tuple(completed.split_off(completed.len() - count))
-            }
-            Task::Collection(count) => {
-                CanonicalQueryNode::Collection(completed.split_off(completed.len() - count))
-            }
-            Task::Map(count) => {
-                let children = completed.split_off(completed.len() - 2 * count);
-                let mut entries = children
-                    .chunks_exact(2)
-                    .map(|entry| (entry[0], entry[1]))
-                    .collect::<Vec<_>>();
-                entries.sort_by(|(left_key, left_value), (right_key, right_value)| {
-                    compare_canonical_query_nodes(arena, *left_key, *right_key).then_with(|| {
-                        compare_canonical_query_nodes(arena, *left_value, *right_value)
-                    })
-                });
-                CanonicalQueryNode::Map(entries)
-            }
-        };
-        completed.push(arena.len());
-        arena.push(node);
-    }
-    completed.pop().expect("one canonical map root")
-}
-
-fn compare_canonical_query_nodes(
-    arena: &[CanonicalQueryNode<'_>],
-    left: usize,
-    right: usize,
-) -> std::cmp::Ordering {
-    use std::cmp::Ordering;
-    enum Task {
-        Nodes(usize, usize),
-        Length(usize, usize),
-    }
-    let rank = |node: &CanonicalQueryNode<'_>| match node {
-        CanonicalQueryNode::Nil => 0_u8,
-        CanonicalQueryNode::Scalar(_) => 1,
-        CanonicalQueryNode::Tuple(_) => 2,
-        CanonicalQueryNode::Collection(_) => 3,
-        CanonicalQueryNode::Map(_) => 4,
-    };
-    let mut pending = vec![Task::Nodes(left, right)];
-    while let Some(task) = pending.pop() {
-        let (left, right) = match task {
-            Task::Length(left, right) => {
-                let order = left.cmp(&right);
-                if order != Ordering::Equal {
-                    return order;
-                }
-                continue;
-            }
-            Task::Nodes(left, right) if left == right => continue,
-            Task::Nodes(left, right) => (&arena[left], &arena[right]),
-        };
-        let order = rank(left).cmp(&rank(right));
-        if order != Ordering::Equal {
-            return order;
-        }
-        match (left, right) {
-            (CanonicalQueryNode::Nil, CanonicalQueryNode::Nil) => {}
-            (CanonicalQueryNode::Scalar(left), CanonicalQueryNode::Scalar(right)) => {
-                let order = left.index_cmp(right);
-                if order != Ordering::Equal {
-                    return order;
-                }
-            }
-            (CanonicalQueryNode::Tuple(left), CanonicalQueryNode::Tuple(right))
-            | (CanonicalQueryNode::Collection(left), CanonicalQueryNode::Collection(right)) => {
-                pending.push(Task::Length(left.len(), right.len()));
-                for (left, right) in left.iter().zip(right).rev() {
-                    pending.push(Task::Nodes(*left, *right));
-                }
-            }
-            (CanonicalQueryNode::Map(left), CanonicalQueryNode::Map(right)) => {
-                pending.push(Task::Length(left.len(), right.len()));
-                for ((left_key, left_value), (right_key, right_value)) in
-                    left.iter().zip(right).rev()
-                {
-                    pending.push(Task::Nodes(*left_value, *right_value));
-                    pending.push(Task::Nodes(*left_key, *right_key));
-                }
-            }
-            _ => unreachable!("equal canonical query-value ranks have matching variants"),
-        }
-    }
-    Ordering::Equal
-}
+#[path = "query_value.rs"]
+mod value;
+pub use value::QueryValue;
+pub(crate) use value::{QueryValueRef, QueryValueSize};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryResult {
@@ -691,6 +379,10 @@ pub struct QueryControl {
     /// operation. Compact decimal exponents do not themselves consume bytes.
     /// Program queries additionally obey their shared remaining value budget.
     pub max_numeric_bytes: usize,
+    /// Cumulative admitted query-value and general-key scratch allocation.
+    /// Inputs/sources remain borrowed until selected; nested/program queries
+    /// share the remaining allowance rather than resetting it.
+    pub max_value_bytes: usize,
 }
 
 impl Default for QueryControl {
@@ -704,6 +396,7 @@ impl Default for QueryControl {
             force_scan: false,
             max_join_bytes: 4 * 1024 * 1024,
             max_numeric_bytes: 16 * 1024 * 1024,
+            max_value_bytes: usize::MAX,
         }
     }
 }
@@ -713,6 +406,8 @@ pub struct QueryEngine;
 type NativeQueryFunction = dyn Fn(&DatabaseValue, &[Value], &QueryControl) -> Result<Vec<Vec<Value>>, SemanticError>
     + Send
     + Sync;
+type PureQueryFunction =
+    dyn Fn(&[QueryValue], &QueryControl) -> Result<QueryValue, SemanticError> + Send + Sync;
 
 #[derive(Clone)]
 struct QueryExtension {
@@ -723,12 +418,14 @@ struct QueryExtension {
 #[derive(Clone)]
 enum QueryExtensionImplementation {
     Local(Arc<NativeQueryFunction>),
+    Pure(Arc<PureQueryFunction>),
     Program(Arc<Program>),
 }
 
 #[derive(Clone, Default)]
 pub struct QueryExtensions {
     functions: BTreeMap<String, QueryExtension>,
+    aggregates: BTreeMap<String, Arc<custom_aggregate::NativeAggregate>>,
 }
 
 impl fmt::Debug for QueryExtensions {
@@ -740,6 +437,11 @@ impl fmt::Debug for QueryExtensions {
                     .iter()
                     .map(|(name, function)| (name, function.exact_hash)),
             )
+            .entries(
+                self.aggregates
+                    .keys()
+                    .map(|name| (name, None::<ProgramHash>)),
+            )
             .finish()
     }
 }
@@ -747,6 +449,40 @@ impl fmt::Debug for QueryExtensions {
 impl QueryExtensions {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Register a trusted, cooperative grouped Rust aggregate. Input rows are
+    /// borrowed and aligned; constants and sources remain explicit arguments.
+    /// Call `group.check(work)` inside substantial callback loops to share the
+    /// enclosing query's work, cancellation and deadline checks. This callback
+    /// is process-local code, not a content-addressed portable program.
+    pub fn register_aggregate<F>(&mut self, name: impl Into<String>, function: F)
+    where
+        F: Fn(&AggregateGroup<'_>, &QueryControl) -> Result<QueryValue, SemanticError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.aggregates.insert(name.into(), Arc::new(function));
+    }
+
+    /// Register a trusted, cooperative pure Rust function. Its general query
+    /// value result is interpreted using the caller's binding form; no database
+    /// argument or database source is required. Panics become fault anomalies.
+    pub fn register_pure<F>(&mut self, name: impl Into<String>, function: F)
+    where
+        F: Fn(&[QueryValue], &QueryControl) -> Result<QueryValue, SemanticError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.functions.insert(
+            name.into(),
+            QueryExtension {
+                implementation: QueryExtensionImplementation::Pure(Arc::new(function)),
+                exact_hash: None,
+            },
+        );
     }
 
     /// Register trusted peer-local Rust code. The callback receives remaining
@@ -797,10 +533,10 @@ impl QueryExtensions {
         &self,
         name: &str,
         database: &DatabaseValue,
-        arguments: &[Value],
+        arguments: &[QueryValue],
         control: &QueryControl,
         deadline: Option<Instant>,
-    ) -> (Result<Vec<Vec<Value>>, SemanticError>, usize) {
+    ) -> (Result<Vec<Vec<QueryValue>>, SemanticError>, usize) {
         let mut work = 0;
         let result = catch_unwind(AssertUnwindSafe(|| {
             let extension = self.functions.get(name).ok_or_else(|| {
@@ -811,7 +547,24 @@ impl QueryExtensions {
             })?;
             match &extension.implementation {
                 QueryExtensionImplementation::Local(callback) => {
-                    callback(database, arguments, control)
+                    let arguments = arguments
+                        .iter()
+                        .map(|value| match value {
+                            QueryValue::Scalar(value) => Ok(value.clone()),
+                            _ => Err(SemanticError::incorrect(
+                                "query/nil-extension-arg",
+                                "local database callbacks require stored scalar arguments",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    callback(database, &arguments, control).map(|rows| {
+                        rows.into_iter()
+                            .map(|row| row.into_iter().map(QueryValue::Scalar).collect())
+                            .collect()
+                    })
+                }
+                QueryExtensionImplementation::Pure(_) => {
+                    unreachable!("pure callback does not consume a database")
                 }
                 QueryExtensionImplementation::Program(program) => {
                     if control.max_work == 0 {
@@ -824,7 +577,7 @@ impl QueryExtensions {
                     let program_control = ProgramControl {
                         fuel,
                         max_stack: control.max_intermediate_rows,
-                        max_value_bytes: control.max_work,
+                        max_value_bytes: control.max_work.min(control.max_value_bytes),
                         max_collection_items: control.max_intermediate_rows,
                         max_forms: control.max_result_rows,
                         max_output: control.max_work,
@@ -834,15 +587,41 @@ impl QueryExtensions {
                     let mut budget = crate::ProgramBudget::new(program_control)?
                         .with_deadline(deadline)
                         .with_query_numeric_bytes(control.max_numeric_bytes);
-                    let result = ProgramRuntime.execute_query_with_budget(
-                        program,
-                        database,
-                        arguments,
-                        &mut budget,
-                    );
+                    // Keep the established scalar ABI/fuel path unchanged.
+                    // General admission is necessary only for newly admitted
+                    // query-only arguments, not a tax on all old invocations.
+                    let result = if arguments
+                        .iter()
+                        .all(|value| matches!(value, QueryValue::Scalar(_)))
+                    {
+                        let arguments = arguments
+                            .iter()
+                            .map(|value| match value {
+                                QueryValue::Scalar(value) => value.clone(),
+                                _ => unreachable!(),
+                            })
+                            .collect::<Vec<_>>();
+                        ProgramRuntime.execute_query_with_budget(
+                            program,
+                            database,
+                            &arguments,
+                            &mut budget,
+                        )
+                    } else {
+                        ProgramRuntime.execute_query_general_with_budget(
+                            program,
+                            database,
+                            arguments,
+                            &mut budget,
+                        )
+                    };
                     work = usize::try_from(fuel - budget.remaining_fuel()).unwrap_or(usize::MAX);
                     match result {
-                        Ok(ProgramOutput::Query(rows)) => Ok(rows),
+                        Ok(ProgramOutput::Query(rows)) => Ok(rows
+                            .into_iter()
+                            .map(|row| row.into_iter().map(QueryValue::Scalar).collect())
+                            .collect()),
+                        Ok(ProgramOutput::GeneralQuery(rows)) => Ok(rows),
                         Ok(_) => unreachable!("program kind was checked"),
                         Err(error) if error.code == "program/fuel-exhausted" => Err(resource(
                             "query/work-limit",
@@ -881,7 +660,7 @@ impl QueryExtensions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 enum BoundValue {
     Nil,
     Stored(Value),
@@ -889,6 +668,13 @@ enum BoundValue {
     /// Construction normalizes nil/scalar leaves to the variants above.
     Query(QueryValue),
 }
+
+impl PartialEq for BoundValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.index_cmp(other).is_eq()
+    }
+}
+impl Eq for BoundValue {}
 
 impl Ord for BoundValue {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
@@ -911,12 +697,22 @@ impl BoundValue {
     }
 
     fn index_cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Nil, Self::Nil) => std::cmp::Ordering::Equal,
-            (Self::Nil, _) | (Self::Stored(_), Self::Query(_)) => std::cmp::Ordering::Less,
-            (_, Self::Nil) | (Self::Query(_), Self::Stored(_)) => std::cmp::Ordering::Greater,
-            (Self::Stored(left), Self::Stored(right)) => left.index_cmp(right),
-            (Self::Query(left), Self::Query(right)) => left.canonical_cmp(right),
+        self.borrowed().logical_cmp(other.borrowed())
+    }
+
+    fn borrowed(&self) -> QueryValueRef<'_> {
+        match self {
+            Self::Nil => QueryValueRef::Nil,
+            Self::Stored(v) => QueryValueRef::Stored(v),
+            Self::Query(v) => QueryValueRef::Query(v),
+        }
+    }
+
+    fn from_borrowed(value: QueryValueRef<'_>) -> Self {
+        match value {
+            QueryValueRef::Nil => Self::Nil,
+            QueryValueRef::Stored(v) => Self::Stored(v.clone()),
+            QueryValueRef::Query(v) => Self::from_query_value(v.clone()),
         }
     }
 
@@ -955,6 +751,14 @@ impl BoundValue {
             _ => None,
         }
     }
+
+    fn collection_values(&self) -> Option<Vec<Self>> {
+        if let Self::Query(QueryValue::Set(values)) = self {
+            Some(values.iter().cloned().map(Self::from_query_value).collect())
+        } else {
+            self.sequence_values()
+        }
+    }
 }
 
 /// A sequential tuple of stored values is the same legal tuple join key
@@ -962,20 +766,25 @@ impl BoundValue {
 /// Traverse iteratively; maps/collections remain query-only containers.
 fn query_tuple_value(value: &QueryValue) -> Option<Value> {
     enum Task<'a> {
-        Value(&'a QueryValue),
+        Value(&'a QueryValue, usize),
         Tuple(usize),
     }
-    let mut pending = vec![Task::Value(value)];
+    let mut pending = vec![Task::Value(value, 0)];
     let mut values = Vec::new();
     while let Some(task) = pending.pop() {
         match task {
-            Task::Value(QueryValue::Nil) => values.push(None),
-            Task::Value(QueryValue::Scalar(value)) => values.push(Some(value.clone())),
-            Task::Value(QueryValue::Tuple(children)) => {
+            Task::Value(QueryValue::Nil, _) => values.push(None),
+            Task::Value(QueryValue::Scalar(value), _) => values.push(Some(value.clone())),
+            Task::Value(QueryValue::Tuple(children), depth) if depth < 32 => {
                 pending.push(Task::Tuple(children.len()));
-                pending.extend(children.iter().rev().map(Task::Value));
+                pending.extend(
+                    children
+                        .iter()
+                        .rev()
+                        .map(|child| Task::Value(child, depth + 1)),
+                );
             }
-            Task::Value(QueryValue::Collection(_) | QueryValue::Map(_)) => return None,
+            Task::Value(..) => return None,
             Task::Tuple(count) => {
                 let children = values.split_off(values.len() - count);
                 values.push(Some(Value::Tuple(children)));
@@ -1110,7 +919,7 @@ impl QueryEngine {
             rule_memo_complete: false,
             defer_rules: false,
             borrowed_cancel: None,
-            max_value_bytes: usize::MAX,
+            max_value_bytes: control.max_value_bytes,
         };
         let result = run_query(query, inputs, &mut state)?;
         Ok(QueryOutcome {
@@ -1161,7 +970,9 @@ impl QueryEngine {
                 rule_memo_complete: false,
                 defer_rules: false,
                 borrowed_cancel: budget.query_cancelled(),
-                max_value_bytes: budget.query_remaining_value_bytes(),
+                max_value_bytes: budget
+                    .query_remaining_value_bytes()
+                    .min(control.max_value_bytes),
             };
             let result = (|| {
                 state.check(1)?;
@@ -1208,6 +1019,7 @@ fn run_query(
     state: &mut State<'_>,
 ) -> Result<QueryResult, SemanticError> {
     state.check(0)?;
+    validate_query_values(query, state)?;
     if query.inputs.len() != inputs.len() {
         return Err(SemanticError::incorrect(
             "query/input-arity",
@@ -1215,7 +1027,7 @@ fn run_query(
         ));
     }
     // These checks depend on the invocation's sources, never cached preparation.
-    validate_consumed_sources(query, &state.sources)?;
+    validate_consumed_sources(query, &state.sources, state.extensions)?;
     dependencies::validate_negation(query, state)?;
     let initial = bind_inputs(&query.inputs, inputs, state)?;
     let rows = dependencies::evaluate_complete(query, initial, state)?;
@@ -1234,6 +1046,11 @@ fn run_query(
         &state.sources,
         &mut pull_budget,
         state.control.max_numeric_bytes,
+        &custom_aggregate::Context {
+            extensions: state.extensions,
+            control: state.control,
+            deadline: state.deadline,
+        },
     );
     state.work = pull_budget.work();
     state.stats.allocated_value_bytes = pull_budget.value_bytes();
@@ -1246,6 +1063,7 @@ fn run_query(
 fn validate_consumed_sources(
     query: &Query,
     sources: &BTreeMap<&str, SourceRef<'_>>,
+    extensions: Option<&QueryExtensions>,
 ) -> Result<(), SemanticError> {
     let mut consumed = BTreeSet::new();
     let mut visited_rules = BTreeSet::new();
@@ -1255,10 +1073,19 @@ fn validate_consumed_sources(
         None,
         &mut consumed,
         &mut visited_rules,
+        extensions,
     );
     for element in find_elements(&query.find) {
         if let FindElement::Pull { source, .. } = element {
             consumed.insert(source.clone());
+        }
+        if let FindElement::CustomAggregate(call) = element {
+            custom_aggregate::validate(call, extensions)?;
+            for arg in &call.args {
+                if let AggregateArg::Source(source) = arg {
+                    consumed.insert(source.clone());
+                }
+            }
         }
     }
     if let Some(source) = consumed
@@ -1281,7 +1108,62 @@ fn validate_consumed_sources(
         None,
         sources,
         &mut BTreeSet::new(),
+        extensions,
     )?;
+    Ok(())
+}
+
+fn validate_query_values(query: &Query, state: &mut State<'_>) -> Result<(), SemanticError> {
+    let mut queries = vec![query];
+    while let Some(query) = queries.pop() {
+        for element in find_elements(&query.find) {
+            if let FindElement::CustomAggregate(call) = element {
+                state.check(call.args.len())?;
+                for arg in &call.args {
+                    if let AggregateArg::Constant(value) = arg {
+                        state.validate_general(value)?;
+                    }
+                }
+            }
+        }
+        let mut clauses: Vec<_> = query
+            .clauses
+            .iter()
+            .chain(query.rules.iter().flat_map(|rule| &rule.clauses))
+            .collect();
+        while let Some(clause) = clauses.pop() {
+            state.check(1)?;
+            let terms: Vec<&Term> = match clause {
+                Clause::Pattern(pattern) => join::pattern_terms(pattern)
+                    .into_iter()
+                    .map(|(_, term)| term)
+                    .collect(),
+                Clause::RelationPattern(pattern) => pattern.terms.iter().collect(),
+                Clause::Predicate { args, .. } | Clause::Rule { args, .. } => args.iter().collect(),
+                Clause::Function { function, args, .. } => {
+                    if let Function::Query(query) = function {
+                        queries.push(query);
+                    }
+                    args.iter().collect()
+                }
+                Clause::Not {
+                    clauses: nested, ..
+                } => {
+                    clauses.extend(nested);
+                    Vec::new()
+                }
+                Clause::Or { branches, .. } => {
+                    clauses.extend(branches.iter().flatten());
+                    Vec::new()
+                }
+            };
+            for term in terms {
+                if let Term::QueryConstant(value) = term {
+                    state.validate_general(value)?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1294,6 +1176,7 @@ fn validate_nested_sources(
     inherited: Option<&str>,
     sources: &BTreeMap<&str, SourceRef<'_>>,
     visited: &mut BTreeSet<(String, String)>,
+    extensions: Option<&QueryExtensions>,
 ) -> Result<(), SemanticError> {
     let mut pending: Vec<_> = clauses
         .iter()
@@ -1303,6 +1186,30 @@ fn validate_nested_sources(
     while let Some((clause, inherited_name)) = pending.pop() {
         let inherited = inherited_name.as_deref();
         match clause {
+            Clause::RelationPattern(pattern) => {
+                let name = effective_source(&pattern.source, inherited);
+                match sources.get(name) {
+                    Some(SourceRef::Tuples(_) | SourceRef::Relation(_)) => {}
+                    Some(SourceRef::Database(database)) => {
+                        let pattern = relation_data_pattern(pattern)?;
+                        if let Term::Constant(attribute) = &pattern.attribute {
+                            attribute_value(database, attribute)?;
+                        }
+                    }
+                    Some(SourceRef::Log(_)) => {
+                        return Err(SemanticError::incorrect(
+                            "query/source-kind",
+                            "log sources require tx-ids/tx-data",
+                        ));
+                    }
+                    None => {
+                        return Err(SemanticError::incorrect(
+                            "query/unknown-source",
+                            format!("unknown source {name}"),
+                        ));
+                    }
+                }
+            }
             Clause::Pattern(pattern) => {
                 let name = effective_source(&pattern.source, inherited);
                 match sources.get(name) {
@@ -1311,7 +1218,7 @@ fn validate_nested_sources(
                             attribute_value(database, attribute)?;
                         }
                     }
-                    Some(SourceRef::Tuples(_)) => {}
+                    Some(SourceRef::Tuples(_) | SourceRef::Relation(_)) => {}
                     Some(SourceRef::Log(_)) => {
                         return Err(SemanticError::incorrect(
                             "query/source-kind",
@@ -1378,11 +1285,31 @@ fn validate_nested_sources(
                 ..
             }
             | Clause::Function {
-                function: Function::GetElse | Function::GetSome | Function::Extension(_),
+                function: Function::GetElse | Function::GetSome,
                 source,
                 ..
             } => {
                 find_source(sources, effective_source(source, inherited))?;
+            }
+            Clause::Function {
+                function: Function::Extension(name),
+                source,
+                ..
+            } => {
+                let extension = extensions
+                    .and_then(|extensions| extensions.functions.get(name))
+                    .ok_or_else(|| {
+                        SemanticError::incorrect(
+                            "query/unknown-extension",
+                            format!("unknown query extension {name}"),
+                        )
+                    })?;
+                if !matches!(
+                    extension.implementation,
+                    QueryExtensionImplementation::Pure(_)
+                ) {
+                    find_source(sources, effective_source(source, inherited))?;
+                }
             }
             Clause::Function {
                 function: Function::Query(query),
@@ -1390,15 +1317,13 @@ fn validate_nested_sources(
                 ..
             } => {
                 let selected = effective_source(source, inherited);
-                let database = *sources.get(selected).ok_or_else(|| {
-                    SemanticError::incorrect(
-                        "query/unknown-source",
-                        format!("unknown source {selected}"),
-                    )
-                })?;
                 let mut nested = sources.clone();
-                nested.insert("$", database);
-                validate_consumed_sources(query, &nested)?;
+                if let Some(database) = sources.get(selected) {
+                    nested.insert("$", *database);
+                } else {
+                    nested.remove("$");
+                }
+                validate_consumed_sources(query, &nested, extensions)?;
             }
             Clause::Not { clauses, .. } => {
                 pending.extend(
@@ -1442,6 +1367,7 @@ fn collect_consumed_sources(
     inherited_source: Option<&str>,
     consumed: &mut BTreeSet<String>,
     visited_rules: &mut BTreeSet<(String, String)>,
+    extensions: Option<&QueryExtensions>,
 ) {
     let mut pending: Vec<_> = clauses
         .iter()
@@ -1451,6 +1377,9 @@ fn collect_consumed_sources(
     while let Some((clause, inherited_name)) = pending.pop() {
         let inherited_source = inherited_name.as_deref();
         match clause {
+            Clause::RelationPattern(pattern) => {
+                consumed.insert(effective_source(&pattern.source, inherited_source).to_owned());
+            }
             Clause::Pattern(pattern) => {
                 consumed.insert(effective_source(&pattern.source, inherited_source).to_owned());
             }
@@ -1460,13 +1389,7 @@ fn collect_consumed_sources(
                 ..
             }
             | Clause::Function {
-                function:
-                    Function::GetElse
-                    | Function::GetSome
-                    | Function::Extension(_)
-                    | Function::Query(_)
-                    | Function::TxIds
-                    | Function::TxData,
+                function: Function::GetElse | Function::GetSome | Function::TxIds | Function::TxData,
                 source,
                 ..
             }
@@ -1475,6 +1398,21 @@ fn collect_consumed_sources(
                 source,
                 ..
             } => {
+                consumed.insert(effective_source(source, inherited_source).to_owned());
+            }
+            Clause::Function {
+                function: Function::Extension(name),
+                source,
+                ..
+            } if !extensions
+                .and_then(|registry| registry.functions.get(name))
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.implementation,
+                        QueryExtensionImplementation::Pure(_)
+                    )
+                }) =>
+            {
                 consumed.insert(effective_source(source, inherited_source).to_owned());
             }
             Clause::Not { clauses, .. } => {
@@ -1641,6 +1579,12 @@ fn validate_query(query: &Query, input_count: usize) -> Result<(), SemanticError
 fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
     for clause in clauses {
         match clause {
+            Clause::RelationPattern(pattern) if pattern.terms.is_empty() => {
+                return Err(SemanticError::incorrect(
+                    "query/empty-pattern",
+                    "relation patterns require at least one term",
+                ));
+            }
             Clause::Function {
                 function: Function::Fulltext,
                 args,
@@ -1672,7 +1616,10 @@ fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
                         "ground requires exactly one constant",
                     ));
                 }
-                if !matches!(args[0], Term::Constant(_) | Term::Nil) {
+                if !matches!(
+                    args[0],
+                    Term::Constant(_) | Term::QueryConstant(_) | Term::Nil
+                ) {
                     return Err(SemanticError::incorrect(
                         "query/ground-not-constant",
                         "ground requires a constant argument",
@@ -1699,6 +1646,16 @@ fn bind_inputs(
     state.check(0)?;
     let mut rows = vec![Row::new()];
     for (spec, value) in specs.iter().zip(values) {
+        if let QueryInput::General(value) = value {
+            state.validate_general(value)?;
+            let (terms, relation) = general_input_relation(spec, value)?;
+            let terms = terms.iter().enumerate().collect();
+            let (next, _) =
+                join::evaluate_raw(terms, rows, join::RawRelation::Input(&relation), state)?;
+            rows = dedupe_rows(next, state)?;
+            state.check_row_count(rows.len())?;
+            continue;
+        }
         let relation = match (spec, value) {
             (InputSpec::Scalar(variable), QueryInput::Scalar(value)) => {
                 vec![vec![(Some(variable), value)]]
@@ -1740,7 +1697,7 @@ fn bind_inputs(
             }
         };
         let next = join::input_join(&rows, &relation, state)?;
-        rows = dedupe_rows(next);
+        rows = dedupe_rows(next, state)?;
         state.check(0)?;
         if rows.len() > state.control.max_intermediate_rows {
             return Err(resource(
@@ -1750,6 +1707,89 @@ fn bind_inputs(
         }
     }
     Ok(rows)
+}
+
+fn query_sequence_refs(value: &QueryValue, unordered: bool) -> Option<Vec<QueryValueRef<'_>>> {
+    match value {
+        QueryValue::Tuple(values) | QueryValue::Collection(values) => {
+            Some(values.iter().map(QueryValueRef::Query).collect())
+        }
+        QueryValue::Set(values) if unordered => {
+            Some(values.iter().map(QueryValueRef::Query).collect())
+        }
+        QueryValue::Scalar(Value::Tuple(values)) => Some(
+            values
+                .iter()
+                .map(|value| {
+                    value
+                        .as_ref()
+                        .map_or(QueryValueRef::Nil, QueryValueRef::Stored)
+                })
+                .collect(),
+        ),
+        _ => None,
+    }
+}
+
+fn general_input_relation<'a>(
+    spec: &InputSpec,
+    value: &'a QueryValue,
+) -> Result<(Vec<Term>, Vec<Vec<QueryValueRef<'a>>>), SemanticError> {
+    let shape = || {
+        SemanticError::incorrect(
+            "query/input-shape",
+            "query input does not match its binding form",
+        )
+    };
+    let terms = |variables: &[Option<Variable>]| {
+        variables
+            .iter()
+            .map(|variable| variable.clone().map_or(Term::Blank, Term::Variable))
+            .collect()
+    };
+    match spec {
+        InputSpec::Scalar(variable) => Ok((
+            vec![Term::Variable(variable.clone())],
+            vec![vec![QueryValueRef::Query(value)]],
+        )),
+        InputSpec::Tuple(variables) => {
+            let row = query_sequence_refs(value, false).ok_or_else(shape)?;
+            if row.len() != variables.len() {
+                return Err(shape());
+            }
+            Ok((terms(variables), vec![row]))
+        }
+        InputSpec::Collection(variable) => Ok((
+            vec![Term::Variable(variable.clone())],
+            query_sequence_refs(value, true)
+                .ok_or_else(shape)?
+                .into_iter()
+                .map(|value| vec![value])
+                .collect(),
+        )),
+        InputSpec::Relation(variables) => {
+            let outer = query_sequence_refs(value, true).ok_or_else(shape)?;
+            let mut rows = Vec::with_capacity(outer.len());
+            for value in outer {
+                let row = match value {
+                    QueryValueRef::Query(value) => query_sequence_refs(value, false),
+                    QueryValueRef::Stored(Value::Tuple(values)) => Some(
+                        values
+                            .iter()
+                            .map(|v| v.as_ref().map_or(QueryValueRef::Nil, QueryValueRef::Stored))
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+                .ok_or_else(shape)?;
+                if row.len() != variables.len() {
+                    return Err(shape());
+                }
+                rows.push(row);
+            }
+            Ok((terms(variables), rows))
+        }
+    }
 }
 
 fn evaluate_clauses(
@@ -1782,7 +1822,7 @@ fn evaluate_clauses(
         let before = rows.len();
         let (next, access) =
             evaluate_clause(clause, rows, rules, inherited_source, clauses, state)?;
-        rows = dedupe_rows(next);
+        rows = dedupe_rows(next, state)?;
         if rows.len() > state.control.max_intermediate_rows {
             return Err(resource(
                 "query/intermediate-limit",
@@ -1820,6 +1860,13 @@ fn evaluate_clause(
             conjunction,
             state,
         )?),
+        Clause::RelationPattern(pattern) => Ok(evaluate_relation_pattern(
+            pattern,
+            rows,
+            inherited_source,
+            conjunction,
+            state,
+        )?),
         Clause::Predicate {
             predicate,
             source,
@@ -1828,7 +1875,7 @@ fn evaluate_clause(
             let mut next = Vec::new();
             for row in rows {
                 state.check(1)?;
-                let values = resolve_args(args, &row)?;
+                let values = resolve_args(args, &row, state)?;
                 if evaluate_predicate(
                     *predicate,
                     effective_source(source, inherited_source),
@@ -1849,7 +1896,7 @@ fn evaluate_clause(
             let mut next = Vec::new();
             for row in rows {
                 state.check(1)?;
-                let values = resolve_args(args, &row)?;
+                let values = resolve_args(args, &row, state)?;
                 for produced in evaluate_function(
                     function.clone(),
                     effective_source(source, inherited_source),
@@ -1857,7 +1904,7 @@ fn evaluate_clause(
                     binding,
                     state,
                 )? {
-                    for bound in bind_output(&row, binding, &produced)? {
+                    for bound in bind_output(&row, binding, &produced, state)? {
                         state.push_row(&mut next, bound)?;
                     }
                 }
@@ -1938,11 +1985,14 @@ fn evaluate_clause(
                     for produced in produced {
                         if let Some(join) = join {
                             let mut merged = row.clone();
-                            if join.iter().all(|variable| {
-                                produced.get(variable).is_none_or(|value| {
-                                    unify_variable(&mut merged, variable, value)
+                            if join.iter().try_fold(true, |matches, variable| {
+                                if !matches {
+                                    return Ok(false);
+                                }
+                                produced.get(variable).map_or(Ok(true), |value| {
+                                    unify_variable_checked(&mut merged, variable, value, state)
                                 })
-                            }) {
+                            })? {
                                 state.push_row(&mut next, merged)?;
                             }
                         } else {
@@ -2013,7 +2063,13 @@ fn evaluate_clause(
                     if args
                         .iter()
                         .zip(tuple)
-                        .all(|(term, value)| unify_term(&mut candidate, term, value))
+                        .try_fold(true, |matches, (term, value)| {
+                            if matches {
+                                unify_term_checked(&mut candidate, term, value, state)
+                            } else {
+                                Ok(false)
+                            }
+                        })?
                     {
                         state.push_row(&mut next, candidate)?;
                     }
@@ -2021,6 +2077,62 @@ fn evaluate_clause(
             }
             Ok((next, "rule-relation".into()))
         }
+    }
+}
+
+fn relation_data_pattern(pattern: &RelationPattern) -> Result<DataPattern, SemanticError> {
+    if pattern.terms.len() > 5 {
+        return Err(SemanticError::incorrect(
+            "query/pattern-width",
+            "database patterns have at most five datom columns",
+        ));
+    }
+    Ok(DataPattern {
+        source: pattern.source.clone(),
+        entity: pattern.terms.first().cloned().unwrap_or(Term::Blank),
+        attribute: pattern.terms.get(1).cloned().unwrap_or(Term::Blank),
+        value: pattern.terms.get(2).cloned().unwrap_or(Term::Blank),
+        transaction: pattern.terms.get(3).cloned(),
+        added: pattern.terms.get(4).cloned(),
+    })
+}
+
+fn evaluate_relation_pattern(
+    pattern: &RelationPattern,
+    rows: Vec<Row>,
+    inherited: Option<&str>,
+    conjunction: &[Clause],
+    state: &mut State<'_>,
+) -> Result<(Vec<Row>, String), SemanticError> {
+    let source = effective_source(&pattern.source, inherited);
+    match state.sources.get(source).copied() {
+        Some(SourceRef::Tuples(tuples)) => join::evaluate_raw(
+            pattern.terms.iter().enumerate().collect(),
+            rows,
+            join::RawRelation::Stored(tuples),
+            state,
+        ),
+        Some(SourceRef::Relation(relation)) => join::evaluate_raw(
+            pattern.terms.iter().enumerate().collect(),
+            rows,
+            join::RawRelation::General(relation),
+            state,
+        ),
+        Some(SourceRef::Database(_)) => evaluate_pattern(
+            &relation_data_pattern(pattern)?,
+            rows,
+            inherited,
+            conjunction,
+            state,
+        ),
+        Some(SourceRef::Log(_)) => Err(SemanticError::incorrect(
+            "query/source-kind",
+            "log sources require tx-ids/tx-data",
+        )),
+        None => Err(SemanticError::incorrect(
+            "query/unknown-source",
+            format!("unknown source {source}"),
+        )),
     }
 }
 
@@ -2038,6 +2150,14 @@ fn evaluate_pattern(
     let database = match source_value {
         SourceRef::Database(database) => database,
         SourceRef::Tuples(tuples) => return join::evaluate_tuples(pattern, rows, tuples, state),
+        SourceRef::Relation(relation) => {
+            return join::evaluate_raw(
+                join::pattern_terms(pattern),
+                rows,
+                join::RawRelation::General(relation),
+                state,
+            );
+        }
         SourceRef::Log(_) => {
             return Err(SemanticError::incorrect(
                 "query/source-kind",
@@ -2129,19 +2249,21 @@ fn evaluate_pattern(
                         attribute,
                         value,
                         &datom.value,
-                    )? && pattern.transaction.as_ref().is_none_or(|term| {
-                        unify_term(
+                    )? && pattern.transaction.as_ref().map_or(Ok(true), |term| {
+                        unify_term_checked(
                             &mut candidate,
                             term,
                             &BoundValue::Stored(Value::Ref(datom.tx)),
+                            state,
                         )
-                    }) && pattern.added.as_ref().is_none_or(|term| {
-                        unify_term(
+                    })? && pattern.added.as_ref().map_or(Ok(true), |term| {
+                        unify_term_checked(
                             &mut candidate,
                             term,
                             &BoundValue::Stored(Value::Bool(datom.added)),
+                            state,
                         )
-                    }) {
+                    })? {
                         state.push_row(&mut next, candidate)?;
                     }
                 }
@@ -2226,7 +2348,7 @@ fn clause_ready(
     state: &mut State<'_>,
 ) -> Result<bool, SemanticError> {
     Ok(match clause {
-        Clause::Pattern(_) => true,
+        Clause::Pattern(_) | Clause::RelationPattern(_) => true,
         Clause::Or { .. } => dependencies::ready(clause, row, rules, state)?,
         Clause::Predicate { args, .. } | Clause::Function { args, .. } => args
             .iter()
@@ -2253,6 +2375,12 @@ fn clause_ready(
 
 fn clause_score(clause: &Clause, row: &Row) -> usize {
     match clause {
+        Clause::RelationPattern(pattern) => pattern
+            .terms
+            .iter()
+            .filter(|term| term_is_bound(term, row))
+            .count()
+            .saturating_mul(10),
         Clause::Pattern(pattern) => {
             [&pattern.entity, &pattern.attribute, &pattern.value]
                 .into_iter()
@@ -2325,16 +2453,17 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> EvaluationResul
                 Err(error) => return Err(error),
             };
             ensure_rule_memo_entry(state, key.clone())?;
-            let (length, added) = {
-                let rows = state
+            let mut rows = std::mem::take(
+                state
                     .rule_memo
                     .get_mut(&key)
-                    .expect("rule memo entry was ensured");
-                let prior = rows.len();
-                rows.extend(produced);
-                stable_dedupe_by(rows, Ord::cmp);
-                (rows.len(), rows.len() - prior)
-            };
+                    .expect("rule memo entry was ensured"),
+            );
+            let prior = rows.len();
+            rows.extend(produced);
+            dedupe_bound_tuples(&mut rows, state)?;
+            let (length, added) = (rows.len(), rows.len() - prior);
+            state.rule_memo.insert(key, rows);
             state.check(added)?;
             if length > state.control.max_intermediate_rows {
                 return Err(resource(
@@ -2371,7 +2500,7 @@ fn evaluate_rule_key(
         let mut compatible = true;
         for (variable, value) in rule.head.iter().zip(&key.bindings) {
             if let Some(value) = value
-                && !unify_variable(&mut seed, variable, value)
+                && !unify_variable_checked(&mut seed, variable, value, state)?
             {
                 compatible = false;
                 break;
@@ -2413,7 +2542,7 @@ fn evaluate_rule_key(
             pending.into_iter().collect(),
         ));
     }
-    stable_dedupe_by(&mut produced, Ord::cmp);
+    dedupe_bound_tuples(&mut produced, state)?;
     Ok(produced)
 }
 
@@ -2453,7 +2582,7 @@ fn evaluate_predicate(
     predicate: Predicate,
     source: &str,
     args: &[BoundValue],
-    state: &State<'_>,
+    state: &mut State<'_>,
 ) -> Result<bool, SemanticError> {
     match predicate {
         Predicate::Eq
@@ -2468,7 +2597,7 @@ fn evaluate_predicate(
                     "comparison predicates require two arguments",
                 ));
             }
-            let ordering = args[0].index_cmp(&args[1]);
+            let ordering = state.compare_keys(args[0].borrowed(), args[1].borrowed())?;
             Ok(match predicate {
                 Predicate::Eq => ordering.is_eq(),
                 Predicate::NotEq => !ordering.is_eq(),
@@ -2506,6 +2635,14 @@ fn evaluate_function(
     state: &mut State<'_>,
 ) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
     match function {
+        Function::Count
+        | Function::Quot
+        | Function::Subs
+        | Function::Str
+        | Function::StartsWith
+        | Function::EndsWith
+        | Function::Includes => functions::execute(function, args, state)
+            .map(|value| vec![vec![BoundValue::Stored(value)]]),
         Function::TxIds | Function::TxData => {
             sources::log_function(function, source, args, binding, state)
         }
@@ -2564,10 +2701,16 @@ fn evaluate_function(
                     "get-else requires cardinality one",
                 ));
             }
-            let default = require_stored(&args[2], "query/get-else-nil-default")?.clone();
+            if matches!(args[2], BoundValue::Nil) {
+                return Err(SemanticError::incorrect(
+                    "query/get-else-nil-default",
+                    "get-else default cannot be nil",
+                ));
+            }
             let values = database.values(entity, attribute)?;
-            Ok(vec![vec![BoundValue::Stored(
-                values.first().cloned().unwrap_or(default),
+            Ok(vec![vec![values.first().map_or_else(
+                || args[2].clone(),
+                |value| BoundValue::Stored(value.clone()),
             )]])
         }
         Function::GetSome => {
@@ -2610,29 +2753,57 @@ fn evaluate_function(
         }
         Function::Extension(name) => {
             state.check(1)?;
-            let database = source_database(state, source)?;
             let extensions = state.extensions.ok_or_else(|| {
                 SemanticError::incorrect(
                     "query/unknown-extension",
                     format!("no query extension registry supplies {name}"),
                 )
             })?;
-            let extension_args = args
-                .iter()
-                .map(|value| require_stored(value, "query/nil-extension-arg").cloned())
-                .collect::<Result<Vec<_>, _>>()?;
+            for value in args {
+                state.admit_ref(value.borrowed())?;
+            }
+            let extension_args: Vec<_> = args.iter().map(BoundValue::query_value).collect();
             // Native callbacks are trusted cooperative code, but receive only
             // the parent's remaining allowance. Persisted programs report
             // interpreter fuel back into that same allowance on every call.
             let mut control = state.control.clone();
             control.max_work = control.max_work.saturating_sub(state.work);
+            control.max_value_bytes = state
+                .max_value_bytes
+                .saturating_sub(state.stats.allocated_value_bytes);
             control.timeout = state
                 .deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+            if let Some(QueryExtension {
+                implementation: QueryExtensionImplementation::Pure(callback),
+                ..
+            }) = extensions.functions.get(&name)
+            {
+                let result = catch_unwind(AssertUnwindSafe(|| callback(&extension_args, &control)))
+                    .map_err(|_| {
+                        SemanticError::new(
+                            ErrorCategory::Fault,
+                            "query/local-extension-panicked",
+                            format!("query extension {name} panicked"),
+                        )
+                    })?;
+                state.check(0)?;
+                let value = result?;
+                state.validate_general(&value)?;
+                state.charge_value_bytes(value.retained_bytes())?;
+                return ground_output(&[BoundValue::from_query_value(value)], binding);
+            }
+            let database = source_database(state, source)?;
             let (rows, work) =
                 extensions.invoke(&name, database, &extension_args, &control, state.deadline);
             state.check(work)?;
             let rows = rows?;
+            for row in &rows {
+                for value in row {
+                    state.validate_general(value)?;
+                    state.charge_value_bytes(value.retained_bytes())?;
+                }
+            }
             if rows.len() > state.control.max_result_rows
                 || rows
                     .iter()
@@ -2646,7 +2817,7 @@ fn evaluate_function(
             }
             Ok(rows
                 .into_iter()
-                .map(|row| row.into_iter().map(BoundValue::Stored).collect())
+                .map(|row| row.into_iter().map(BoundValue::from_query_value).collect())
                 .collect())
         }
     }
@@ -2674,7 +2845,7 @@ fn ground_output(
                 )
             }),
         Binding::Relation(_) => constant
-            .sequence_values()
+            .collection_values()
             .ok_or_else(|| {
                 SemanticError::incorrect(
                     "query/function-binding",
@@ -2739,6 +2910,7 @@ fn bind_output(
     row: &Row,
     binding: &Binding,
     output: &[BoundValue],
+    state: &mut State<'_>,
 ) -> Result<Vec<Row>, SemanticError> {
     if let Binding::Collection(variable) = binding {
         let [value] = output else {
@@ -2747,7 +2919,7 @@ fn bind_output(
                 "collection binding requires one sequential value",
             ));
         };
-        let values = value.sequence_values().ok_or_else(|| {
+        let values = value.collection_values().ok_or_else(|| {
             SemanticError::incorrect(
                 "query/function-binding",
                 "collection binding requires one sequential value",
@@ -2756,11 +2928,11 @@ fn bind_output(
         let mut rows = Vec::new();
         for value in values {
             let mut candidate = row.clone();
-            if unify_variable(&mut candidate, variable, &value) {
+            if unify_variable_checked(&mut candidate, variable, &value, state)? {
                 rows.push(candidate);
             }
         }
-        return Ok(dedupe_rows(rows));
+        return dedupe_rows(rows, state);
     }
     let bindings: Vec<(Option<&Variable>, &BoundValue)> = match binding {
         Binding::Scalar(variable) if output.len() == 1 => vec![(Some(variable), &output[0])],
@@ -2784,7 +2956,7 @@ fn bind_output(
     let mut candidate = row.clone();
     for (variable, value) in bindings {
         if let Some(variable) = variable
-            && !unify_variable(&mut candidate, variable, value)
+            && !unify_variable_checked(&mut candidate, variable, value, state)?
         {
             return Ok(Vec::new());
         }
@@ -2799,6 +2971,7 @@ fn shape_results(
     sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
     max_numeric_bytes: usize,
+    aggregates: &custom_aggregate::Context<'_>,
 ) -> Result<QueryResult, SemanticError> {
     let elements = match &query.find {
         FindSpec::Relation(elements) | FindSpec::Tuple(elements) => elements.as_slice(),
@@ -2826,12 +2999,24 @@ fn shape_results(
             .collect::<Result<Vec<_>, _>>()?;
         basis.push(projected);
     }
-    stable_dedupe_by(&mut basis, Ord::cmp);
-    pull_budget.check(0)?;
-    let mut output = if elements
+    if basis
         .iter()
-        .any(|element| matches!(element, FindElement::Aggregate { .. }))
+        .flatten()
+        .any(|value| matches!(value, BoundValue::Query(_)))
     {
+        checked_stable_dedupe_by(&mut basis, |left, right| {
+            compare_bound_slices(left, right, pull_budget)
+        })?;
+    } else {
+        stable_dedupe_by(&mut basis, Ord::cmp);
+    }
+    pull_budget.check(0)?;
+    let mut output = if elements.iter().any(|element| {
+        matches!(
+            element,
+            FindElement::Aggregate { .. } | FindElement::CustomAggregate(_)
+        )
+    }) {
         aggregate_rows(
             elements,
             &basis_variables,
@@ -2839,6 +3024,7 @@ fn shape_results(
             sources,
             pull_budget,
             max_numeric_bytes,
+            aggregates,
         )?
     } else {
         basis
@@ -2860,7 +3046,7 @@ fn shape_results(
     let has_pull = elements
         .iter()
         .any(|element| matches!(element, FindElement::Pull { .. }));
-    dedupe_query_rows(&mut output, query.with.is_empty() && !has_pull);
+    dedupe_query_rows(&mut output, query.with.is_empty() && !has_pull, pull_budget)?;
     pull_budget.check(0)?;
     if output.len() > max {
         return Err(resource(
@@ -2887,6 +3073,7 @@ fn aggregate_rows(
     sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
     max_numeric_bytes: usize,
+    aggregates: &custom_aggregate::Context<'_>,
 ) -> Result<Vec<Vec<QueryValue>>, SemanticError> {
     let group_variables: Vec<_> = elements
         .iter()
@@ -2895,26 +3082,72 @@ fn aggregate_rows(
             _ => None,
         })
         .collect();
-    let mut groups: Vec<Vec<&Vec<BoundValue>>> = Vec::new();
-    let mut group_indices = BTreeMap::new();
-    for row in basis {
-        pull_budget.check(1)?;
-        let key = group_variables
+    let positions = group_variables
+        .iter()
+        .map(|variable| {
+            basis_variables
+                .iter()
+                .position(|candidate| candidate == *variable)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let general = basis.iter().any(|row| {
+        positions
             .iter()
-            .map(|variable| {
-                row[basis_variables
-                    .iter()
-                    .position(|candidate| candidate == *variable)
-                    .unwrap()]
-                .clone()
-            })
-            .collect::<Vec<_>>();
-        let index = *group_indices.entry(key).or_insert_with(|| {
-            groups.push(Vec::new());
-            groups.len() - 1
-        });
-        groups[index].push(row);
-    }
+            .any(|index| matches!(row[*index], BoundValue::Query(_)))
+    });
+    let mut groups: Vec<Vec<&Vec<BoundValue>>> = if general {
+        // Sort borrowed row ordinals, not cloned arbitrary map/set keys.
+        // Each group retains its first basis row; restore first-group order
+        // after the sort so aggregate representation retention stays stable.
+        pull_budget.check(basis.len())?;
+        pull_budget.charge_value_bytes(basis.len().saturating_mul(
+            8 * std::mem::size_of::<usize>() + 3 * std::mem::size_of::<Vec<&Vec<BoundValue>>>(),
+        ))?;
+        let mut order = (0..basis.len()).collect::<Vec<_>>();
+        let mut compare = |left: &usize, right: &usize| {
+            for position in &positions {
+                let ordering = compare_bound_slices(
+                    std::slice::from_ref(&basis[*left][*position]),
+                    std::slice::from_ref(&basis[*right][*position]),
+                    pull_budget,
+                )?;
+                if !ordering.is_eq() {
+                    return Ok(ordering);
+                }
+            }
+            Ok(std::cmp::Ordering::Equal)
+        };
+        checked_aggregate_sort(&mut order, &mut compare)?;
+        let mut grouped: Vec<(usize, Vec<&Vec<BoundValue>>)> = Vec::new();
+        for index in order {
+            if let Some((first, rows)) = grouped.last_mut()
+                && compare(first, &index)?.is_eq()
+            {
+                rows.push(&basis[index]);
+                continue;
+            }
+            grouped.push((index, vec![&basis[index]]));
+        }
+        grouped.sort_by_key(|(index, _)| *index);
+        grouped.into_iter().map(|(_, rows)| rows).collect()
+    } else {
+        let mut groups: Vec<Vec<&Vec<BoundValue>>> = Vec::new();
+        let mut group_indices = BTreeMap::new();
+        for row in basis {
+            pull_budget.check(1)?;
+            let key = positions
+                .iter()
+                .map(|index| row[*index].clone())
+                .collect::<Vec<_>>();
+            let index = *group_indices.entry(key).or_insert_with(|| {
+                groups.push(Vec::new());
+                groups.len() - 1
+            });
+            groups[index].push(row);
+        }
+        groups
+    };
     if groups.is_empty() && group_variables.is_empty() {
         groups.push(Vec::new());
     }
@@ -2925,17 +3158,20 @@ fn aggregate_rows(
             elements
                 .iter()
                 .map(|element| match element {
-                    FindElement::Variable(variable) => rows
-                        .first()
-                        .and_then(|row| {
-                            basis_variables
-                                .iter()
-                                .position(|candidate| candidate == variable)
-                                .map(|index| row[index].query_value())
-                        })
-                        .ok_or_else(|| {
-                            fault("query/missing-group-key", "aggregate group key is missing")
-                        }),
+                    FindElement::Variable(variable) => {
+                        let value = rows
+                            .first()
+                            .and_then(|row| {
+                                basis_variables
+                                    .iter()
+                                    .position(|candidate| candidate == variable)
+                                    .map(|index| &row[index])
+                            })
+                            .ok_or_else(|| {
+                                fault("query/missing-group-key", "aggregate group key is missing")
+                            })?;
+                        aggregate_output_value(value, pull_budget)
+                    }
                     FindElement::Pull {
                         source,
                         variable,
@@ -2975,6 +3211,14 @@ fn aggregate_rows(
                             max_numeric_bytes,
                         )
                     }
+                    FindElement::CustomAggregate(call) => custom_aggregate::invoke(
+                        call,
+                        &rows,
+                        basis_variables,
+                        sources,
+                        pull_budget,
+                        aggregates,
+                    ),
                 })
                 .collect()
         })
@@ -2998,13 +3242,15 @@ fn aggregate(
             let mut output = Vec::new();
             for _ in 0..count {
                 budget.check(0)?;
-                output.push(values[rand::random_range(0..values.len())].query_value());
+                output.push(aggregate_output_value(
+                    values[rand::random_range(0..values.len())],
+                    budget,
+                )?);
             }
             Ok(QueryValue::Collection(output))
         }
         Aggregate::Sample(count) => {
-            values.sort_by(|left, right| left.index_cmp(right));
-            values.dedup_by(|left, right| left.index_cmp(right).is_eq());
+            sort_aggregate_values(&mut values, true, budget)?;
             let count = count.min(values.len());
             for index in 0..count {
                 budget.check(0)?;
@@ -3015,23 +3261,47 @@ fn aggregate(
                 values
                     .into_iter()
                     .take(count)
-                    .map(BoundValue::query_value)
-                    .collect(),
+                    .map(|value| aggregate_output_value(value, budget))
+                    .collect::<Result<_, _>>()?,
             ))
         }
         Aggregate::Count => Ok(QueryValue::Scalar(Value::Long(values.len() as i64))),
         Aggregate::CountDistinct => {
-            values.sort_by(|left, right| left.index_cmp(right));
-            values.dedup_by(|left, right| left.index_cmp(right).is_eq());
+            sort_aggregate_values(&mut values, true, budget)?;
             Ok(QueryValue::Scalar(Value::Long(values.len() as i64)))
         }
         Aggregate::Min | Aggregate::Max => {
-            let value = if function == Aggregate::Min {
+            let value = if values
+                .iter()
+                .any(|value| matches!(value, BoundValue::Query(_)))
+            {
+                let mut best = None;
+                for value in values {
+                    budget.check(1)?;
+                    if let Some(previous) = best {
+                        let order = compare_bound_slices(
+                            std::slice::from_ref(value),
+                            std::slice::from_ref(previous),
+                            budget,
+                        )?;
+                        if (function == Aggregate::Min && order.is_lt())
+                            || (function == Aggregate::Max && !order.is_lt())
+                        {
+                            best = Some(value);
+                        }
+                    } else {
+                        best = Some(value);
+                    }
+                }
+                best
+            } else if function == Aggregate::Min {
                 values.into_iter().min_by(|a, b| a.index_cmp(b))
             } else {
                 values.into_iter().max_by(|a, b| a.index_cmp(b))
             };
-            Ok(value.map_or(QueryValue::Nil, BoundValue::query_value))
+            value.map_or(Ok(QueryValue::Nil), |value| {
+                aggregate_output_value(value, budget)
+            })
         }
         Aggregate::Sum
         | Aggregate::Average
@@ -3057,14 +3327,16 @@ fn aggregate(
             .map(QueryValue::Scalar)
         }
         Aggregate::Distinct => {
-            values.sort_by(|left, right| left.index_cmp(right));
-            values.dedup_by(|left, right| left.index_cmp(right).is_eq());
+            sort_aggregate_values(&mut values, true, budget)?;
             Ok(QueryValue::Collection(
-                values.into_iter().map(BoundValue::query_value).collect(),
+                values
+                    .into_iter()
+                    .map(|value| aggregate_output_value(value, budget))
+                    .collect::<Result<_, _>>()?,
             ))
         }
         Aggregate::MinN(limit) | Aggregate::MaxN(limit) => {
-            values.sort_by(|a, b| a.index_cmp(b));
+            sort_aggregate_values(&mut values, false, budget)?;
             if matches!(function, Aggregate::MaxN(_)) {
                 values.reverse();
             }
@@ -3072,11 +3344,97 @@ fn aggregate(
                 values
                     .into_iter()
                     .take(limit)
-                    .map(BoundValue::query_value)
-                    .collect(),
+                    .map(|value| aggregate_output_value(value, budget))
+                    .collect::<Result<_, _>>()?,
             ))
         }
     }
+}
+
+fn aggregate_output_value(
+    value: &BoundValue,
+    budget: &mut QueryPullBudget,
+) -> Result<QueryValue, SemanticError> {
+    if let BoundValue::Query(value) = value {
+        let size = value.measure_with(&mut |work| budget.check(work))?;
+        budget.charge_value_bytes(size.retained_bytes)?;
+    }
+    Ok(value.query_value())
+}
+
+fn sort_aggregate_values(
+    values: &mut Vec<&BoundValue>,
+    dedupe: bool,
+    budget: &mut QueryPullBudget,
+) -> Result<(), SemanticError> {
+    if !values
+        .iter()
+        .any(|value| matches!(value, BoundValue::Query(_)))
+    {
+        values.sort_by(|left, right| left.index_cmp(right));
+        if dedupe {
+            values.dedup_by(|left, right| left.index_cmp(right).is_eq());
+        }
+        return Ok(());
+    }
+    budget.check(values.len())?;
+    budget.charge_value_bytes(
+        values
+            .len()
+            .saturating_mul(2 * std::mem::size_of::<&BoundValue>()),
+    )?;
+    let mut compare = |left: &&BoundValue, right: &&BoundValue| {
+        compare_bound_slices(
+            std::slice::from_ref(*left),
+            std::slice::from_ref(*right),
+            budget,
+        )
+    };
+    checked_aggregate_sort(values, &mut compare)?;
+    if dedupe {
+        let mut kept = 0;
+        for read in 0..values.len() {
+            if kept == 0 || !compare(&values[kept - 1], &values[read])?.is_eq() {
+                values[kept] = values[read];
+                kept += 1;
+            }
+        }
+        values.truncate(kept);
+    }
+    Ok(())
+}
+
+/// Borrowed aggregate inputs/ordinals are Copy. One admitted scratch vector
+/// permits immediate failure on comparison errors and stable equal-key order.
+fn checked_aggregate_sort<T: Copy>(
+    values: &mut [T],
+    compare: &mut impl FnMut(&T, &T) -> Result<std::cmp::Ordering, SemanticError>,
+) -> Result<(), SemanticError> {
+    let len = values.len();
+    let mut scratch = Vec::with_capacity(len);
+    let mut width = 1usize;
+    while width < len {
+        scratch.clear();
+        for start in (0..len).step_by(width.saturating_mul(2)) {
+            let middle = start.saturating_add(width).min(len);
+            let end = start.saturating_add(width.saturating_mul(2)).min(len);
+            let (mut left, mut right) = (start, middle);
+            while left < middle && right < end {
+                if compare(&values[left], &values[right])?.is_gt() {
+                    scratch.push(values[right]);
+                    right += 1;
+                } else {
+                    scratch.push(values[left]);
+                    left += 1;
+                }
+            }
+            scratch.extend_from_slice(&values[left..middle]);
+            scratch.extend_from_slice(&values[right..end]);
+        }
+        values.copy_from_slice(&scratch);
+        width = width.saturating_mul(2);
+    }
+    Ok(())
 }
 
 fn validate_or(branches: &[Vec<Clause>], join: Option<&[Variable]>) -> Result<(), SemanticError> {
@@ -3114,6 +3472,7 @@ fn variables_in_clauses(clauses: &[Clause]) -> Vec<Variable> {
 fn collect_clause_variables(clause: &Clause, output: &mut BTreeSet<Variable>) {
     let mut terms = Vec::new();
     match clause {
+        Clause::RelationPattern(pattern) => terms.extend(&pattern.terms),
         Clause::Pattern(pattern) => {
             terms.extend([&pattern.entity, &pattern.attribute, &pattern.value]);
             terms.extend(pattern.transaction.iter());
@@ -3168,14 +3527,21 @@ fn binding_variables(binding: &Binding) -> Vec<&Variable> {
     }
 }
 fn find_variables(elements: &[FindElement]) -> Vec<Variable> {
-    elements
-        .iter()
-        .map(|element| match element {
+    let mut variables = Vec::new();
+    for element in elements {
+        match element {
             FindElement::Variable(variable)
             | FindElement::Pull { variable, .. }
-            | FindElement::Aggregate { variable, .. } => variable.clone(),
-        })
-        .collect()
+            | FindElement::Aggregate { variable, .. } => variables.push(variable.clone()),
+            FindElement::CustomAggregate(call) => {
+                variables.extend(call.args.iter().filter_map(|arg| match arg {
+                    AggregateArg::Variable(variable) => Some(variable.clone()),
+                    _ => None,
+                }));
+            }
+        }
+    }
+    variables
 }
 fn find_elements(find: &FindSpec) -> &[FindElement] {
     match find {
@@ -3193,6 +3559,12 @@ fn project_element(
     let variable = match element {
         FindElement::Variable(variable) | FindElement::Aggregate { variable, .. } => variable,
         FindElement::Pull { variable, .. } => variable,
+        FindElement::CustomAggregate(_) => {
+            return Err(fault(
+                "query/aggregate-projection",
+                "custom aggregate requires grouped projection",
+            ));
+        }
     };
     let index = basis_variables
         .iter()
@@ -3221,29 +3593,49 @@ fn project_element(
         }
     }
 }
-fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<BoundValue>, SemanticError> {
+fn resolve_args(
+    args: &[Term],
+    row: &Row,
+    state: &mut State<'_>,
+) -> Result<Vec<BoundValue>, SemanticError> {
     args.iter()
-        .map(|term| match term {
-            Term::Constant(value) => Ok(BoundValue::Stored(value.clone())),
-            Term::Nil => Ok(BoundValue::Nil),
-            Term::Variable(variable) => row.get(variable).cloned().ok_or_else(|| {
-                SemanticError::incorrect(
-                    "query/insufficient-binding",
-                    format!("{} is not bound", variable.name()),
-                )
-            }),
-            Term::Blank => Err(SemanticError::incorrect(
-                "query/blank-expression-arg",
-                "blank cannot be an expression argument",
-            )),
+        .map(|term| {
+            if let Some(value) = term_borrowed(term, row) {
+                state.admit_ref(value)?;
+            }
+            match term {
+                Term::Constant(value) => Ok(BoundValue::Stored(value.clone())),
+                Term::QueryConstant(value) => Ok(BoundValue::from_query_value(value.clone())),
+                Term::Nil => Ok(BoundValue::Nil),
+                Term::Variable(variable) => row.get(variable).cloned().ok_or_else(|| {
+                    SemanticError::incorrect(
+                        "query/insufficient-binding",
+                        format!("{} is not bound", variable.name()),
+                    )
+                }),
+                Term::Blank => Err(SemanticError::incorrect(
+                    "query/blank-expression-arg",
+                    "blank cannot be an expression argument",
+                )),
+            }
         })
         .collect()
 }
 fn term_bound_value(term: &Term, row: &Row) -> Option<BoundValue> {
     match term {
         Term::Constant(value) => Some(BoundValue::Stored(value.clone())),
+        Term::QueryConstant(value) => Some(BoundValue::from_query_value(value.clone())),
         Term::Nil => Some(BoundValue::Nil),
         Term::Variable(variable) => row.get(variable).cloned(),
+        Term::Blank => None,
+    }
+}
+fn term_borrowed<'a>(term: &'a Term, row: &'a Row) -> Option<QueryValueRef<'a>> {
+    match term {
+        Term::Constant(v) => Some(QueryValueRef::Stored(v)),
+        Term::QueryConstant(v) => Some(QueryValueRef::Query(v)),
+        Term::Nil => Some(QueryValueRef::Nil),
+        Term::Variable(v) => row.get(v).map(BoundValue::borrowed),
         Term::Blank => None,
     }
 }
@@ -3371,7 +3763,7 @@ fn unify_entity_term(
     match term {
         Term::Blank => Ok(true),
         Term::Nil => Ok(false),
-        Term::Constant(_) => Ok(resolved == Some(entity)),
+        Term::Constant(_) | Term::QueryConstant(_) => Ok(resolved == Some(entity)),
         Term::Variable(variable) => match row.get(variable) {
             Some(BoundValue::Nil | BoundValue::Query(_)) => Ok(false),
             Some(BoundValue::Stored(expected)) => Ok(match resolved {
@@ -3395,7 +3787,7 @@ fn unify_attribute_term(
     match term {
         Term::Blank => Ok(true),
         Term::Nil => Ok(false),
-        Term::Constant(_) => Ok(resolved == Some(attribute)),
+        Term::Constant(_) | Term::QueryConstant(_) => Ok(resolved == Some(attribute)),
         Term::Variable(variable) => match row.get(variable) {
             Some(BoundValue::Nil | BoundValue::Query(_)) => Ok(false),
             Some(BoundValue::Stored(expected)) => Ok(match resolved {
@@ -3423,7 +3815,7 @@ fn unify_value_term(
     match term {
         Term::Blank => Ok(true),
         Term::Nil => Ok(false),
-        Term::Constant(_) => Ok(resolved == Some(value)),
+        Term::Constant(_) | Term::QueryConstant(_) => Ok(resolved == Some(value)),
         Term::Variable(variable) => match row.get(variable) {
             Some(BoundValue::Nil | BoundValue::Query(_)) => Ok(false),
             Some(BoundValue::Stored(expected)) => Ok(match resolved {
@@ -3437,24 +3829,40 @@ fn unify_value_term(
         },
     }
 }
-fn unify_term(row: &mut Row, term: &Term, value: &BoundValue) -> bool {
-    match term {
-        Term::Blank => true,
-        Term::Nil => matches!(value, BoundValue::Nil),
-        Term::Constant(expected) => {
-            matches!(value, BoundValue::Stored(actual) if expected == actual)
-        }
-        Term::Variable(variable) => unify_variable(row, variable, value),
+fn unify_term_checked(
+    row: &mut Row,
+    term: &Term,
+    value: &BoundValue,
+    state: &mut State<'_>,
+) -> Result<bool, SemanticError> {
+    if matches!(term, Term::Blank) {
+        return Ok(true);
     }
+    if let Some(expected) = term_borrowed(term, row) {
+        return Ok(state.compare_keys(expected, value.borrowed())?.is_eq());
+    }
+    let Term::Variable(variable) = term else {
+        return Ok(false);
+    };
+    unify_variable_checked(row, variable, value, state)
 }
-fn unify_variable(row: &mut Row, variable: &Variable, value: &BoundValue) -> bool {
-    match row.get(variable) {
-        Some(expected) => expected == value,
-        None => {
-            row.insert(variable.clone(), value.clone());
-            true
-        }
+
+fn unify_variable_checked(
+    row: &mut Row,
+    variable: &Variable,
+    value: &BoundValue,
+    state: &mut State<'_>,
+) -> Result<bool, SemanticError> {
+    if let Some(expected) = row.get(variable) {
+        return Ok(state
+            .compare_keys(expected.borrowed(), value.borrowed())?
+            .is_eq());
     }
+    if matches!(value, BoundValue::Query(_)) {
+        state.admit_ref(value.borrowed())?;
+    }
+    row.insert(variable.clone(), value.clone());
+    Ok(true)
 }
 fn project_row(row: &Row, variables: &[Variable]) -> Row {
     variables
@@ -3466,20 +3874,175 @@ fn project_row(row: &Row, variables: &[Variable]) -> Row {
         })
         .collect()
 }
-fn dedupe_rows(mut rows: Vec<Row>) -> Vec<Row> {
-    stable_dedupe_by(&mut rows, Ord::cmp);
-    rows
-}
-fn dedupe_query_rows(rows: &mut Vec<Vec<QueryValue>>, dedupe: bool) {
-    if dedupe {
-        stable_dedupe_by(rows, |left, right| {
-            left.iter()
-                .zip(right)
-                .map(|(left, right)| left.canonical_cmp(right))
-                .find(|order| !order.is_eq())
-                .unwrap_or_else(|| left.len().cmp(&right.len()))
-        });
+fn dedupe_bound_tuples(
+    rows: &mut Vec<Vec<BoundValue>>,
+    state: &mut State<'_>,
+) -> Result<(), SemanticError> {
+    if rows
+        .iter()
+        .flatten()
+        .any(|value| matches!(value, BoundValue::Query(_)))
+    {
+        state.charge_value_bytes(rows.len().saturating_mul(3 * std::mem::size_of::<usize>()))?;
+        checked_stable_dedupe_by(rows, |left, right| {
+            for (left, right) in left.iter().zip(right) {
+                let order = state.compare_keys(left.borrowed(), right.borrowed())?;
+                if !order.is_eq() {
+                    return Ok(order);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        })
+    } else {
+        stable_dedupe_by(rows, Ord::cmp);
+        Ok(())
     }
+}
+
+fn dedupe_rows(mut rows: Vec<Row>, state: &mut State<'_>) -> Result<Vec<Row>, SemanticError> {
+    if rows.iter().any(|row| {
+        row.values()
+            .any(|value| matches!(value, BoundValue::Query(_)))
+    }) {
+        state.charge_value_bytes(rows.len().saturating_mul(3 * std::mem::size_of::<usize>()))?;
+        checked_stable_dedupe_by(&mut rows, |left, right| {
+            for ((lv, left), (rv, right)) in left.iter().zip(right) {
+                let order = lv.cmp(rv);
+                if !order.is_eq() {
+                    return Ok(order);
+                }
+                let order = state.compare_keys(left.borrowed(), right.borrowed())?;
+                if !order.is_eq() {
+                    return Ok(order);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        })?;
+    } else {
+        stable_dedupe_by(&mut rows, Ord::cmp);
+    }
+    Ok(rows)
+}
+fn dedupe_query_rows(
+    rows: &mut Vec<Vec<QueryValue>>,
+    dedupe: bool,
+    budget: &mut QueryPullBudget,
+) -> Result<(), SemanticError> {
+    if dedupe {
+        if rows
+            .iter()
+            .flatten()
+            .any(|v| !matches!(v, QueryValue::Nil | QueryValue::Scalar(_)))
+        {
+            budget
+                .charge_value_bytes(rows.len().saturating_mul(3 * std::mem::size_of::<usize>()))?;
+            checked_stable_dedupe_by(rows, |left, right| {
+                for (left, right) in left.iter().zip(right) {
+                    prepare_output_key(left, budget)?;
+                    prepare_output_key(right, budget)?;
+                    let order = left.compare_with(right, &mut |work| budget.check(work))?;
+                    if !order.is_eq() {
+                        return Ok(order);
+                    }
+                }
+                Ok(left.len().cmp(&right.len()))
+            })?;
+        } else {
+            stable_dedupe_by(rows, |left, right| {
+                left.iter()
+                    .zip(right)
+                    .map(|(l, r)| l.canonical_cmp(r))
+                    .find(|order| !order.is_eq())
+                    .unwrap_or_else(|| left.len().cmp(&right.len()))
+            });
+        }
+    }
+    Ok(())
+}
+
+fn prepare_output_key(
+    value: &QueryValue,
+    budget: &mut QueryPullBudget,
+) -> Result<(), SemanticError> {
+    let size = value.measure_with(&mut |work| budget.check(work))?;
+    budget.charge_value_bytes(size.canonical_bytes)
+}
+
+fn compare_bound_slices(
+    left: &[BoundValue],
+    right: &[BoundValue],
+    budget: &mut QueryPullBudget,
+) -> Result<std::cmp::Ordering, SemanticError> {
+    for (left, right) in left.iter().zip(right) {
+        if let BoundValue::Query(value) = left {
+            prepare_output_key(value, budget)?;
+        }
+        if let BoundValue::Query(value) = right {
+            prepare_output_key(value, budget)?;
+        }
+        let order = left
+            .borrowed()
+            .logical_cmp_with(right.borrowed(), &mut |work| budget.check(work))?;
+        if !order.is_eq() {
+            return Ok(order);
+        }
+    }
+    Ok(left.len().cmp(&right.len()))
+}
+
+/// Stable index merge-sort permits a comparison to stop immediately on a
+/// budget/cancellation error, without handing an inconsistent comparator to
+/// the standard library sort or cloning any payloads.
+fn checked_stable_dedupe_by<T>(
+    values: &mut Vec<T>,
+    mut compare: impl FnMut(&T, &T) -> Result<std::cmp::Ordering, SemanticError>,
+) -> Result<(), SemanticError> {
+    let len = values.len();
+    if len < 2 {
+        return Ok(());
+    }
+    let mut order: Vec<_> = (0..len).collect();
+    let mut next = Vec::with_capacity(len);
+    let mut width = 1_usize;
+    while width < len {
+        next.clear();
+        for start in (0..len).step_by(width.saturating_mul(2)) {
+            let middle = start.saturating_add(width).min(len);
+            let end = middle.saturating_add(width).min(len);
+            let (mut left, mut right) = (start, middle);
+            while left < middle && right < end {
+                if compare(&values[order[left]], &values[order[right]])?.is_gt() {
+                    next.push(order[right]);
+                    right += 1;
+                } else {
+                    next.push(order[left]);
+                    left += 1;
+                }
+            }
+            next.extend_from_slice(&order[left..middle]);
+            next.extend_from_slice(&order[right..end]);
+        }
+        std::mem::swap(&mut order, &mut next);
+        width = width.saturating_mul(2);
+    }
+    let mut keep = vec![false; len];
+    let mut previous = None;
+    for index in order {
+        if let Some(prior) = previous
+            && compare(&values[prior], &values[index])?.is_eq()
+        {
+            continue;
+        }
+        keep[index] = true;
+        previous = Some(index);
+    }
+    let mut index = 0;
+    values.retain(|_| {
+        let retain = keep[index];
+        index += 1;
+        retain
+    });
+    Ok(())
 }
 
 /// Set semantics with stable first-representation retention. Sorting offsets
@@ -3548,6 +4111,7 @@ fn result_len(result: &QueryResult) -> usize {
 fn clause_name(clause: &Clause) -> &'static str {
     match clause {
         Clause::Pattern(_) => "pattern",
+        Clause::RelationPattern(_) => "relation pattern",
         Clause::Predicate { .. } => "predicate",
         Clause::Function { .. } => "function",
         Clause::Not { .. } => "not",
@@ -3567,6 +4131,58 @@ fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
 }
 
 impl State<'_> {
+    fn compare_keys(
+        &mut self,
+        left: QueryValueRef<'_>,
+        right: QueryValueRef<'_>,
+    ) -> Result<std::cmp::Ordering, SemanticError> {
+        if !matches!(left, QueryValueRef::Query(_)) && !matches!(right, QueryValueRef::Query(_)) {
+            return Ok(left.logical_cmp(right));
+        }
+        self.prepare_key(left)?;
+        self.prepare_key(right)?;
+        left.logical_cmp_with(right, &mut |work| self.check(work))
+    }
+    fn validate_general(&mut self, value: &QueryValue) -> Result<(), SemanticError> {
+        let size: QueryValueSize = value.measure_with(&mut |work| self.check(work))?;
+        if size.retained_bytes
+            > self
+                .max_value_bytes
+                .saturating_sub(self.stats.allocated_value_bytes)
+        {
+            return Err(resource(
+                "query/value-byte-limit",
+                "general query value exceeds remaining byte allowance",
+            ));
+        }
+        self.charge_value_bytes(size.canonical_bytes)?;
+        value.validate_with(&mut |work| self.check(work))
+    }
+
+    fn prepare_key(&mut self, value: QueryValueRef<'_>) -> Result<(), SemanticError> {
+        if let QueryValueRef::Query(value) = value {
+            self.validate_general(value)?;
+            // Validation and the subsequent comparison/hash each build their
+            // own bounded canonical arena; no borrowed corpus bytes are copied.
+            let size = value.measure_with(&mut |work| self.check(work))?;
+            self.charge_value_bytes(size.canonical_bytes)?;
+        }
+        Ok(())
+    }
+
+    fn admit_ref(&mut self, value: QueryValueRef<'_>) -> Result<(), SemanticError> {
+        match value {
+            QueryValueRef::Nil => self.charge_value_bytes(std::mem::size_of::<BoundValue>()),
+            QueryValueRef::Stored(value) => self.charge_value_bytes(
+                std::mem::size_of::<BoundValue>()
+                    .saturating_add(value.retained_heap_bytes() as usize),
+            ),
+            QueryValueRef::Query(value) => {
+                self.validate_general(value)?;
+                self.charge_value_bytes(value.retained_bytes())
+            }
+        }
+    }
     fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
         self.work = self.work.saturating_add(amount);
         if self.control.cancel.load(AtomicOrdering::Relaxed)
@@ -3622,7 +4238,7 @@ impl State<'_> {
 
     fn push_row(&mut self, rows: &mut Vec<Row>, row: Row) -> Result<(), SemanticError> {
         if rows.len() >= self.control.max_intermediate_rows {
-            *rows = dedupe_rows(std::mem::take(rows));
+            *rows = dedupe_rows(std::mem::take(rows), self)?;
             if rows.iter().any(|existing| existing == &row) {
                 return Ok(());
             }

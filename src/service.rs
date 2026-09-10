@@ -200,6 +200,8 @@ pub struct BackgroundIndexingStats {
 #[derive(Clone, Debug)]
 pub struct TransactionServiceConfig {
     pub connection: String,
+    /// Public catalog name at startup. A service resolves it once and retains
+    /// the resulting immutable storage ID for its lease, reader and workers.
     pub database_id: String,
     pub holder_id: String,
     pub lease_duration: Duration,
@@ -1505,6 +1507,15 @@ pub struct TransactionStandby {
     worker: Option<JoinHandle<()>>,
 }
 
+fn resolve_service_database_name(
+    connection: &PostgresConnectionConfig,
+    name: &str,
+) -> Result<String, SemanticError> {
+    let mut client = connection.connect_for("service/resolve-database")?;
+    crate::postgres::verify_schema_compatibility(&mut client)?;
+    Ok(crate::database_catalog::resolve_name_in(&mut client, name)?.database_id)
+}
+
 impl TransactionStandby {
     pub fn start(
         config: TransactionServiceConfig,
@@ -1515,7 +1526,7 @@ impl TransactionStandby {
     }
 
     pub fn start_configured(
-        config: TransactionServiceConfig,
+        mut config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
         poll_interval: Duration,
     ) -> Result<Self, SemanticError> {
@@ -1525,6 +1536,9 @@ impl TransactionStandby {
                 "standby poll interval must be positive",
             ));
         }
+        // Resolve before spawning, not on each lease attempt. A rename or name
+        // reuse while waiting must never redirect this standby to another DB.
+        config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let (sender, receiver) = mpsc::sync_channel(1);
@@ -1532,7 +1546,12 @@ impl TransactionStandby {
             .name(format!("atomic-standby-{}", config.holder_id))
             .spawn(move || {
                 while !worker_stop.load(Ordering::Acquire) {
-                    match TransactionService::start_configured(config.clone(), connection.clone()) {
+                    match TransactionService::start_identity_configured_with_execution_options(
+                        config.clone(),
+                        connection.clone(),
+                        BackgroundIndexingConfig::default(),
+                        crate::TransactionExecutionOptions::default(),
+                    ) {
                         Ok(service) => {
                             let _ = sender.send(Ok(service));
                             return;
@@ -1597,6 +1616,21 @@ impl Drop for TransactionStandby {
 }
 
 impl TransactionService {
+    /// Start a compiled Rust transactor with an immutable native deployment
+    /// registry. Accepted retries do not consult this execution configuration.
+    pub fn start_with_execution_options(
+        config: TransactionServiceConfig,
+        options: crate::TransactionExecutionOptions,
+    ) -> Result<Self, SemanticError> {
+        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
+        Self::start_configured_with_indexing_and_execution_options(
+            config,
+            connection,
+            BackgroundIndexingConfig::default(),
+            options,
+        )
+    }
+
     pub fn start(config: TransactionServiceConfig) -> Result<Self, SemanticError> {
         let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
         Self::start_configured(config, connection)
@@ -1659,6 +1693,34 @@ impl TransactionService {
         indexing_config: BackgroundIndexingConfig,
         defaults: crate::TransactionDefaults,
     ) -> Result<Self, SemanticError> {
+        Self::start_configured_with_indexing_and_execution_options(
+            config,
+            connection,
+            indexing_config,
+            crate::TransactionExecutionOptions {
+                defaults,
+                native: crate::NativeRegistry::default(),
+            },
+        )
+    }
+
+    pub fn start_configured_with_indexing_and_execution_options(
+        mut config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        indexing_config: BackgroundIndexingConfig,
+        options: crate::TransactionExecutionOptions,
+    ) -> Result<Self, SemanticError> {
+        Self::validate_config(&config)?;
+        config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
+        Self::start_identity_configured_with_execution_options(
+            config,
+            connection,
+            indexing_config,
+            options,
+        )
+    }
+
+    fn validate_config(config: &TransactionServiceConfig) -> Result<(), SemanticError> {
         if config.database_id.is_empty()
             || config.queue_capacity == 0
             || config.lease_duration.is_zero()
@@ -1670,10 +1732,23 @@ impl TransactionService {
                 "database id and queue capacity are required and renewal must precede lease expiry",
             ));
         }
+        Ok(())
+    }
+
+    // Only callers that already captured a stable ID may enter this path.
+    // Lease acquisition independently fences retired identities in PostgreSQL.
+    fn start_identity_configured_with_execution_options(
+        config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        indexing_config: BackgroundIndexingConfig,
+        options: crate::TransactionExecutionOptions,
+    ) -> Result<Self, SemanticError> {
+        Self::validate_config(&config)?;
         let indexing_config = indexing_config.validate()?;
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
-        store.set_transaction_defaults(defaults);
+        store.set_transaction_defaults(options.defaults);
+        store.set_native_registry(options.native);
         store.set_capacity_limits(config.capacity_limits)?;
         let writer_recent_limits = crate::recent::RecentLimits {
             soft_datoms: u64::MAX,
@@ -1692,7 +1767,7 @@ impl TransactionService {
         store.set_writer_recent_limits(writer_recent_limits)?;
         let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
         let mut indexer =
-            match PostgresIndexer::connect_configured(&connection, &config.database_id) {
+            match PostgresIndexer::connect_identity_configured(&connection, &config.database_id) {
                 Ok(indexer) => indexer,
                 Err(error) => {
                     let _ = store.release_lease(&lease);

@@ -464,6 +464,8 @@ fn postgres_captured_nested_tuple_join_and_maps_work_after_new_writes_and_writer
         eprintln!("SKIP PostgreSQL nested shapes: ATOMIC_POSTGRES_URL is unset");
         return;
     };
+    let fixture = common::PostgresFixture::new(&postgres, "query_nested_shapes");
+    let postgres = fixture.connection.clone();
     const NAME: u32 = 1000;
     const PAIR: u32 = 1001;
     const LEFT: u32 = 1002;

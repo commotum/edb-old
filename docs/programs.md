@@ -3,8 +3,11 @@
 `QueryTemplate::new` remains the original version-1 conjunctive query format.
 Its bytes, hashes and existing request meaning are unchanged. Use
 `QueryTemplate::native(query, input_arguments, sources)` for version 2: it embeds
-the ordinary Rust `Query` AST and selects program ABI 7 only for programs that
-contain a version-2 template. Existing ABI 4/5/6 programs remain readable.
+the ordinary Rust `Query` AST; baseline version-2 templates use program ABI 7.
+New general query literals and wide relation patterns select template version 3 /
+ABI 10. Portable data/string helpers select template 4 / ABI 11. Unchanged
+programs keep their existing bytes and version requirements.
+Existing ABI 4/5/6 programs remain readable.
 
 For example, this query program returns entity/value rows above a threshold;
 the attribute itself is a program argument, not a fixed schema assumption:
@@ -78,11 +81,16 @@ depth, node counts and the existing 4 MiB program payload limit. These are
 cooperative limits, not hard allocator or PostgreSQL preemption guarantees.
 
 This is native serializable code, not closure/JVM serialization: callback
-extensions, callback Pull transforms and random/sample aggregates are rejected.
-Query containers become existing VM vectors/maps; VM map keys remain stored
-scalar values, so non-scalar Pull aliases return `program/query-map-key`.
-Emitted query rows still contain stored scalar values; use VM operations to
-consume nested query/Pull results before emitting them.
+extensions, custom aggregate callbacks, callback Pull transforms and random/sample
+aggregates are rejected. Compiled transaction callbacks are a separate explicit
+[native deployment](application-computation.md), not program serialization.
+Ordinary query containers use VM vectors/maps where those preserve their shape.
+`RuntimeValue::Query` carries general data losslessly, including arbitrary map
+keys, sets, characters and inert tags. The existing scalar-only result variant
+remains `ProgramOutput::Query`; non-stored cells use `GeneralQuery`. These query
+carriers are not additional stored transaction-value types. Use
+`execute_query_general` for general arguments and `QueryTemplateSource::relation`
+for named raw relation arguments. See [general query data](query-data.md).
 
 [The lifecycle fixture](../tests/program_native_queries.rs) combines all five
 required capabilities in one recursive selection, exercises speculative and

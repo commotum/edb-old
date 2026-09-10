@@ -981,10 +981,32 @@ impl DatabaseValue {
         limits: SpeculationLimits,
         defaults: &crate::TransactionDefaults,
     ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        self.with_forms_with_execution_options(
+            forms,
+            tx_instant,
+            limits,
+            &crate::TransactionExecutionOptions {
+                defaults: defaults.clone(),
+                native: crate::NativeRegistry::default(),
+            },
+        )
+    }
+
+    /// Exact speculation using the same explicit native deployment snapshot
+    /// as a compiled transactor host. Every function reads one db-before;
+    /// ensured entity predicates read the complete proposed db-after.
+    pub fn with_forms_with_execution_options(
+        &self,
+        forms: &[TxForm],
+        tx_instant: i64,
+        limits: SpeculationLimits,
+        options: &crate::TransactionExecutionOptions,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
         use crate::database_value::TransactionReadContext;
         use crate::postgres::program_bindings::{
-            expand_submission_forms, persisted_predicates, transaction_program_roots,
-            validate_successor_program_bindings, visit_program_closure,
+            expand_submission_forms_with_native, persisted_predicates_with_native,
+            transaction_program_roots, validate_successor_program_bindings_with_native,
+            visit_program_closure,
         };
         use std::sync::Mutex;
         validate_forms_input(forms)?;
@@ -1051,7 +1073,13 @@ impl DatabaseValue {
                     "speculation budget mutex poisoned",
                 )
             })?;
-            expand_submission_forms(&mut resolve, &before, forms, &mut budget)?
+            expand_submission_forms_with_native(
+                &mut resolve,
+                &before,
+                forms,
+                &mut budget,
+                &options.native,
+            )?
         };
         let ops = before.normalize_persisted_forms_with_limit(&expanded, limits.max_operations)?;
         let remaining = context.remaining()?;
@@ -1063,19 +1091,21 @@ impl DatabaseValue {
                 max_read_datoms: remaining.datoms,
                 max_read_bytes: remaining.retained_bytes,
             },
-            defaults,
+            &options.defaults,
         )?;
-        validate_successor_program_bindings(
+        validate_successor_program_bindings_with_native(
             &mut resolve,
             &assessed.db_before,
             &assessed.db_after,
             &assessed.tx_data,
+            &options.native,
         )?;
-        let functions = persisted_predicates(
+        let functions = persisted_predicates_with_native(
             &mut resolve,
             &assessed.db_before,
             &assessed.predicate_requirements()?,
             Arc::clone(&budget),
+            &options.native,
         )?;
         assessed.validate_exact(Some(&functions))?;
         visit_program_closure(

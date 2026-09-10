@@ -334,6 +334,8 @@ fn native_postgres_deployed_extensions_share_query_work_at_captured_basis() {
         eprintln!("SKIP PostgreSQL: set ATOMIC_POSTGRES_URL");
         return;
     };
+    let fixture = common::PostgresFixture::new(&postgres, "query_extension_budget");
+    let postgres = fixture.connection.clone();
     let id = format!(
         "query-extension-budget-{}-{}",
         std::process::id(),

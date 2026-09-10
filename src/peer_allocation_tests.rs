@@ -193,30 +193,27 @@ fn legacy_generation_zero_retains_identity_and_legacy_allocation_on_reads_and_re
     let Some(fixture) = fixture() else {
         return;
     };
+    // Genuine populated v11 authority followed by ordinary migration, not a
+    // new generation relabeled zero. The legacy base needs a positive basis:
+    // gen0 never supplied an authenticated genesis-tree coordinate.
+    let mut sql = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
+    crate::postgres_internal_tests::install_migration_prefix(&mut sql, 11);
+    let mut schema = Schema::new();
+    schema
+        .install(Attribute::new(
+            1000,
+            Keyword::new("legacy", "n"),
+            ValueType::Long,
+            Cardinality::One,
+        ))
+        .unwrap();
+    let initial = crate::postgres_internal_tests::provision_legacy_generation_zero_database(
+        &mut sql, "legacy", schema,
+    );
     crate::PostgresMigrator::connect(&fixture.connection)
         .unwrap()
         .migrate()
         .unwrap();
-    // A genuine alias-bound genesis head, not a new generation relabeled zero.
-    // No authoritative content is rewritten and no native creation path runs.
-    let bootstrap = Database::bootstrap().unwrap();
-    let genesis = crate::encode_genesis(bootstrap.genesis_datoms()).unwrap();
-    let genesis_hash = crate::sha256(&genesis);
-    let mut sql = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let mut transaction = sql.transaction().unwrap();
-    transaction
-        .execute(
-            "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) VALUES ('legacy', $1, $2)",
-            &[&genesis, &&genesis_hash[..]],
-        )
-        .unwrap();
-    transaction
-        .execute(
-            "INSERT INTO atomic_heads (database_id, basis_t, tx_hash, log_generation) VALUES ('legacy', 0, $1, 0)",
-            &[&&genesis_hash[..]],
-        )
-        .unwrap();
-    transaction.commit().unwrap();
     PostgresIndexer::connect(&fixture.connection, "legacy")
         .unwrap()
         .consolidate()
@@ -229,38 +226,23 @@ fn legacy_generation_zero_retains_identity_and_legacy_allocation_on_reads_and_re
     assert_eq!(eager_before.reserved_allocation(), None);
     let entity_before = before.entity(crate::DB_IDENT).unwrap().unwrap();
     assert!(entity_before.identity().lineage_id().is_some());
-
-    let service = crate::TransactionService::start(crate::TransactionServiceConfig {
-        connection: fixture.connection.clone(),
-        database_id: "legacy".into(),
-        holder_id: "legacy-allocation-memo".into(),
-        lease_duration: Duration::from_secs(5),
-        renew_interval: Duration::from_millis(100),
-        queue_capacity: 8,
-        capacity_limits: crate::CapacityLimits::default(),
-    })
-    .unwrap();
-    let report = service
-        .client()
-        .transact(
-            crate::TransactionRequest::new(
-                "legacy-doc",
-                vec![TxOp::Add {
-                    entity: EntityRef::Id(crate::DB_IDENT),
-                    attribute: crate::DB_DOC as u32,
-                    value: Value::String("Legacy identity retained".into()).into(),
-                }],
-            )
-            .comparing_basis(0)
-            .with_tx_instant(1000),
-            Duration::from_secs(10),
+    let original_payload: Vec<u8> = sql
+        .query_one(
+            "SELECT payload FROM atomic_transactions WHERE database_id = 'legacy' AND basis_t = 1",
+            &[],
         )
+        .unwrap()
+        .get(0);
+    // Generation zero remains readable, but new durable writes require an
+    // explicit native-generation upgrade. Physical maintenance is not one.
+    PostgresIndexer::connect(&fixture.connection, "legacy")
+        .unwrap()
+        .consolidate()
         .unwrap();
-    service.shutdown();
-    peer.sync_compatibility().unwrap();
+    peer.refresh_index().unwrap();
     let after = peer.database_value();
+    assert_eq!(after.basis_t(), initial.basis_t());
     assert_eq!(after.reserved_allocation().unwrap(), None);
-    assert_eq!(report.db_after.reserved_allocation().unwrap(), None);
     assert_eq!(
         peer.try_db_compatibility().unwrap().reserved_allocation(),
         None
@@ -271,22 +253,25 @@ fn legacy_generation_zero_retains_identity_and_legacy_allocation_on_reads_and_re
         .recover("legacy")
         .unwrap();
     assert_eq!(recovered.reserved_allocation(), None);
-    for value in [after, recovered.database_value()] {
+    let reopened = Peer::connect(&fixture.connection, "legacy", 8).unwrap();
+    for value in [
+        after,
+        recovered.database_value(),
+        eager_before.database_value(),
+        reopened.database_value(),
+    ] {
         assert_eq!(
             value.entity(crate::DB_IDENT).unwrap().unwrap(),
             entity_before
         );
     }
     assert_eq!(before.reserved_allocation().unwrap(), None);
-    let rows: i64 = sql
+    let retained_payload: Vec<u8> = sql
         .query_one(
-            "SELECT count(*) FROM atomic_transactions WHERE database_id = 'legacy'",
+            "SELECT payload FROM atomic_transactions WHERE database_id = 'legacy' AND basis_t = 1",
             &[],
         )
         .unwrap()
         .get(0);
-    assert_eq!(
-        rows, 1,
-        "legacy commits still use their original log family"
-    );
+    assert_eq!(retained_payload, original_payload);
 }

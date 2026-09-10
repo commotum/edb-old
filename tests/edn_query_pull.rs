@@ -543,7 +543,22 @@ fn malformed_valid_edn_is_rejected_by_specific_adapter_errors_and_limits() {
     );
     let query = parse_query_edn("[:find ?x :in ?x]").unwrap();
     assert_eq!(query.bind(&[]).unwrap_err().code, "edn/query-input-arity");
-    assert!(query.bind(&[data("{:not :scalar}")]).is_err());
+    // General maps are now valid scalar query data, not malformed input. They
+    // still cannot replace the positional sequence required by a tuple binding.
+    let map = query.bind(&[data("{:kind :scalar}")]).unwrap();
+    assert_eq!(
+        map.result_to_edn(&map.execute(&QueryControl::default(), None).unwrap().result)
+            .unwrap(),
+        read_edn("#{[{:kind :scalar}]}").unwrap()
+    );
+    assert_eq!(
+        parse_query_edn("[:find ?x :in [?x]]")
+            .unwrap()
+            .bind(&[data("{:not :tuple}")])
+            .unwrap_err()
+            .code,
+        "edn/query-input-shape"
+    );
 }
 
 #[test]

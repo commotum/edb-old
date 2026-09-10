@@ -1425,6 +1425,28 @@ fn pull_value_text(
             Task::Query(QueryValue::Scalar(value), quoted) => {
                 pending.push(Task::Stored(value, quoted));
             }
+            Task::Query(QueryValue::Char(value), quoted) => {
+                if quoted {
+                    result.push('\\');
+                }
+                result.push(*value);
+            }
+            Task::Query(QueryValue::Tagged(tag, value), _) => {
+                result.push('#');
+                result.push_str(&tag.qualified_name());
+                result.push(' ');
+                pending.push(Task::Query(value, true));
+            }
+            Task::Query(QueryValue::Set(values), _) => {
+                result.push_str("#{");
+                pending.push(Task::Text("}"));
+                for (index, value) in values.iter().enumerate().rev() {
+                    pending.push(Task::Query(value, true));
+                    if index > 0 {
+                        pending.push(Task::Text(" "));
+                    }
+                }
+            }
             Task::Query(QueryValue::Collection(values) | QueryValue::Tuple(values), _) => {
                 result.push('[');
                 pending.push(Task::Text("]"));

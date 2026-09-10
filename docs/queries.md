@@ -76,6 +76,12 @@ Rows too short for a pattern do not match. Extra columns are ignored by that
 pattern. Arbitrary-width relational inputs remain available through
 `InputSpec::Relation` and `QueryInput::Relation`.
 
+For named relations of six or more columns use `RelationPattern`; it also accepts
+shorter patterns. `QueryDataSource::relation` and `QueryInput::General` extend
+cells/arguments beyond stored values to nil, maps, sets, characters and inert tags.
+See [general query data](query-data.md), including database-free queries and pure
+Rust callbacks. Existing typed tuple and datom APIs remain available.
+
 `QueryDataSource::datoms(name, datoms)` converts native `Datom` values into
 E/A/V/T/assertion tuples. Entity, attribute and transaction positions contain
 numeric refs. A query using an attribute ID can run unchanged over these tuples

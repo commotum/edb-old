@@ -16,7 +16,7 @@ observed API gaps, not automatic commands to copy every named component.
 
 ## Current state
 
-Stage 1 / Goal 2 is verified; Stage 2 / Goal 3 is now active.
+Stages 1–4 / Goals 2–5 are verified; Stage 5 / Goal 6 is now active.
 The worktree was clean at the start of this request. No audit-stage reread,
 replacement engine, recursive hierarchy or corrective parent is required.
 Only one child is active; bounded parallel tasks within it are welcome.
@@ -24,13 +24,15 @@ Only one child is active; bounded parallel tasks within it are welcome.
 Reconciled evidence:
 
 - Goal 1 delivered standard EDN, adapters, CLI and actual PostgreSQL acceptance.
-  Q02's one-/two-column failure is already repaired; six-plus columns remain.
-  Q04's EDN nil input workaround exists; general typed/query callback values remain.
+  Goal 4 completed Q02 arbitrary-width relations and Q04 general query data,
+  prepared inputs, pure callbacks and the database-free CLI path.
 - Q03, P01, P03, ST-05 and P06 are read-API seams over existing mechanisms.
 - ST-03 is reproduced through pure and actual PostgreSQL paths: named partition
   allocation fails at ordinary frontier 524,288 and schema at 1,048,577. The
-  independent reserved allocator now passes the pure million-ID workload;
-  authenticated durable upgrade/recovery/COW/backup integration is in progress.
+  independent reserved allocator now passes pure and PostgreSQL million-ID
+  workloads and upgrades the retained pre-repair database without reseeding.
+  Recovery/COW/backup/application compatibility acceptance passed, including
+  genuine pre-repair fixtures and complete generation-zero conversion.
 - Recovered composite identity ordering supports the current explicit-composite
   upsert-hint behavior (SC-01). Do not invent constituent-only upsert for parity.
   Safe native NaN replacement (SC-02) should not acquire a JVM comparison problem.
@@ -82,8 +84,10 @@ Stages 1–9 map to Goals 2–10; Goal 1 is completed EDN evidence, not renumber
 
 ### 2. Sustainable schema and identity evolution — Goal 3
 
-**Status:** Active; internal Stage 2, implementing durable allocation integration.
-SC-01/SC-02 verified; ST-01 API/PostgreSQL checks pass, final CLI check pending.
+**Status:** Complete; public behavior and integrated compatibility verified.
+SC-01/SC-02 verified; ST-01 API/PostgreSQL/CLI checks pass. ST-03 native and
+retained old-format million-ID workloads pass; old program/partition/identity
+fixtures, backup/recovery/COW, exact retries and application checks also pass.
 **Audit ownership:** ST-03, ST-01, SC-01, SC-02.
 
 **Outcome:** A long-lived database can add schema and named partitions after ordinary data growth, with safe default placement and documented identity/numeric semantics.
@@ -94,7 +98,7 @@ SC-01/SC-02 verified; ST-01 API/PostgreSQL checks pass, final CLI check pending.
 
 ### 3. General query data and relations — Goal 4
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Complete; general typed/EDN/program, PostgreSQL and application acceptance verified.
 **Audit ownership:** Q02 (six-plus columns), Q04.
 
 **Outcome:** Applications query ordinary data of arbitrary relation width and pass nil, maps, collections and other supported query-only values without forcing them into stored datom types.
@@ -105,7 +109,7 @@ SC-01/SC-02 verified; ST-01 API/PostgreSQL checks pass, final CLI check pending.
 
 ### 4. Native application computation — Goal 5
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Complete; grouped/portable/native computation and application/PostgreSQL acceptance verified.
 **Audit ownership:** Q01, Q05, ST-02.
 
 **Outcome:** Applications use grouped custom aggregates, practical standard data functions and explicitly deployed Rust transaction functions/predicates in ordinary production workflows.
@@ -116,7 +120,7 @@ SC-01/SC-02 verified; ST-01 API/PostgreSQL checks pass, final CLI check pending.
 
 ### 5. Safe logical database lifecycle — Goal 6
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Active; reconciling lifecycle identity, fencing and reclamation boundaries.
 **Audit ownership:** P02.
 
 **Outcome:** Users can idempotently create, list, rename, retire/delete and eventually reclaim logical databases through supported APIs and CLI.
@@ -210,7 +214,35 @@ Its plan records 127 optimized public/integrated passes (one opt-in benchmark ig
 actual restricted-role applications/restarts, unchanged old receipts and sampled costs.
 No canonical codecs or migrations changed. Clippy retains 24 pre-existing warnings.
 
-Continuation: finish Goal 3's versioned reserved allocation, retained pre-repair
-upgrade and integrated checks. Goals 1 and 2 are complete; the parent and later
-stages are not complete. See Goal 3 for retained fixture identities and commands.
+Verified Goal 3: independent reserved allocation with versioned ATLC v2/migration
+31, explicit execution-default placement and source-backed composite/NaN
+dispositions. Pure and actual PostgreSQL million-ID histories pass; the retained
+old history's 65 canonical transactions and 1,047,577 receipt IDs are unchanged.
+Genuine old program/partition/identity fixtures and the application pass. Legacy
+generation-zero conversion now preserves exact receipts using authenticated,
+incrementally built historical indexes; its 515-update interruption/GC/corruption/
+consolidation/restart workflow passed. The final malformed-content/receipt guards
+have separate final-build regressions; Goal 3 records artifact boundaries and costs.
+
+Verified Goal 4: additive general query values/relations, pure callbacks,
+source-free and mixed EDN application workflows; preserved old native output
+shapes/ABI bytes/receipts. Template 3/ABI 10 covers new representations. Schema32
+rebuilds complete native-query program references with quiesced upgrade/startup
+fencing and no canonical rewrite. Final configured application/query and old
+program/GC/restart checks pass; measured complete general queries include N log N
+projection costs. Its plan records exact counts, artifacts and admission limits.
+
+Verified Goal 5: borrowed grouped native aggregates, seven practical portable data
+functions and explicit versioned Rust transaction/predicate deployments. New query
+operators use template4/ABI11; migration33 fences old startups without rewriting
+canonical data. Final configured release tests passed 36/36, zero skipped/ignored,
+including compiled-host/stock-EDN clients, genuine schema32 upgrade, exact retries,
+speculation, backup/restore, durable invocation and the evolving application.
+Ignored callback budget failures are sticky; predicate-marker checks do not block
+unrelated legacy data. Goal 5 records pure regressions, measured full paths and
+cooperative callback/deployment limits.
+
+Continuation: execute Goal 6's safe logical database lifecycle. Goals 1–5 are complete;
+the parent and later stages are not. Preserve Goal 3's retained fixture identities
+and compatibility evidence rather than reseeding them for later checks.
 Optional deployment/UI scope is awaiting user preference, not blocking native work.

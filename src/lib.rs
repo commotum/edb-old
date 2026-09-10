@@ -14,6 +14,8 @@ pub(crate) mod compressed_nodes;
 mod connection;
 mod cow_generation;
 mod database;
+pub(crate) mod database_catalog;
+pub use database_catalog::{CreateDatabaseResult, DatabaseCatalog, DatabaseCatalogEntry};
 pub mod database_invoke;
 mod database_stats;
 mod database_value;
@@ -42,6 +44,7 @@ mod overlay_index;
 mod partitions;
 mod reserved_allocation;
 pub use partitions::TransactionDefaults;
+mod native_registry;
 mod peer;
 mod persistent_commitment;
 pub mod persistent_tree;
@@ -123,15 +126,20 @@ pub use index_pull::{IndexPullCursor, IndexPullOptions};
 pub use local_transport::{
     CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
 };
+pub use native_registry::{
+    NativeCallContext, NativeRegistry, NativeRegistryBuilder, TransactionExecutionOptions,
+    native_deployment_attribute, native_deployment_ident,
+};
 pub use operations::{
     ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
-    LogGenerationGarbage, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC,
-    MAX_PROGRAMS_PER_GC, MAX_RECEIPT_ARCHIVE_WORK_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
-    MAX_SEMANTIC_COMMITMENT_NODES_PER_GC, MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
-    MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC, MAX_TREE_NODES_PER_GC,
-    MAX_TREE_RETIREMENT_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics,
-    PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, ReceiptArchiveConversion,
-    RequestBaseArchiveGarbage, SemanticCommitmentRootGarbage, TreeBuildIntentGarbage,
+    LogGenerationGarbage, MAX_DATABASE_RECLAMATION_ROWS, MAX_LOG_GENERATION_ROWS_PER_GC,
+    MAX_LOG_GENERATIONS_PER_GC, MAX_PROGRAMS_PER_GC, MAX_RECEIPT_ARCHIVE_WORK_PER_GC,
+    MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC, MAX_SEMANTIC_COMMITMENT_NODES_PER_GC,
+    MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC, MAX_TREE_BUILD_INTENT_NODES_PER_GC,
+    MAX_TREE_BUILD_INTENTS_PER_GC, MAX_TREE_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC,
+    MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics, PostgresOperator,
+    RECOMMENDED_GARBAGE_COLLECTION_AGE, ReceiptArchiveConversion, RequestBaseArchiveGarbage,
+    RetiredDatabaseReclamation, SemanticCommitmentRootGarbage, TreeBuildIntentGarbage,
     TreePublicationGarbage,
 };
 pub use peer::NativeFulltextReader;
@@ -147,21 +155,24 @@ pub use postgres::{
 };
 pub use postgres_connection::{PostgresConnectionConfig, PostgresIoPolicy};
 pub use program::{
-    CallableRef, Instruction, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES,
-    NATIVE_QUERY_TEMPLATE_VERSION, PROGRAM_ABI_VERSION, Program, ProgramBudget, ProgramCall,
-    ProgramControl, ProgramHash, ProgramInvocation, ProgramKind, ProgramLimits, ProgramOutput,
-    ProgramRuntime, QUERY_TEMPLATE_VERSION, QueryPattern, QueryTemplate, QueryTemplateSource,
-    QueryTemplateTime, QueryTerm, RuntimeValue, is_exact_true, require_exact_true,
+    CallableRef, DATA_FUNCTION_QUERY_TEMPLATE_VERSION, GENERAL_QUERY_TEMPLATE_VERSION, Instruction,
+    MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, NATIVE_QUERY_TEMPLATE_VERSION, PROGRAM_ABI_VERSION,
+    Program, ProgramBudget, ProgramCall, ProgramControl, ProgramHash, ProgramInvocation,
+    ProgramKind, ProgramLimits, ProgramOutput, ProgramRuntime, QUERY_TEMPLATE_VERSION,
+    QueryPattern, QueryTemplate, QueryTemplateSource, QueryTemplateTime, QueryTerm, RuntimeValue,
+    is_exact_true, require_exact_true,
 };
 pub use pull::{
     AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl,
     PullDirection, PullLimit, PullNested, PullPattern, PullTransform,
 };
 pub use query::{
-    Aggregate, Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, PlanStep,
-    Predicate, PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats, Query, QueryControl,
+    Aggregate, AggregateArg, AggregateCall, AggregateGroup, AggregateSource, AggregateValue,
+    Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, PlanStep, Predicate,
+    PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats, Query, QueryControl,
     QueryDataSource, QueryEngine, QueryExtensions, QueryInput, QueryOutcome, QueryResult,
-    QuerySequence, QuerySource, QuerySourceValue, QueryStats, QueryValue, Rule, Term, Variable,
+    QuerySequence, QuerySource, QuerySourceValue, QueryStats, QueryValue, RelationPattern, Rule,
+    Term, Variable,
 };
 pub use query_return_maps::{ReturnMap, ReturnMapShape, ReturnMaps};
 #[cfg(unix)]

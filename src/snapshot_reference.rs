@@ -246,6 +246,10 @@ impl SnapshotReference {
         &self,
         client: &mut C,
     ) -> Result<(), SemanticError> {
+        // A reference embeds a stable storage ID, never a reusable catalog
+        // name. Rename leaves it valid; retirement forbids a new open even
+        // while an already pinned value remains readable.
+        crate::database_catalog::require_active_id_in(client, &self.database_id)?;
         if read_database_lineage(client, &self.database_id)? != self.key.lineage.as_ref() {
             return Err(wrong_identity());
         }

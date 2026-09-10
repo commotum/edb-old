@@ -86,6 +86,12 @@ transaction entity. JVM classpath functions and Clojure function definitions are
 not evaluated. A `#atomic/function` hash identifies already stored native program
 content; reading the tag does not deploy or invoke it.
 
+Qualified versioned symbol calls can invoke an explicitly deployed
+[native Rust transaction registry](application-computation.md). Custom aggregates
+and portable count/quot/subs/str/string tests use the ordinary query adapter.
+The stock CLI does not load native code; use a compiled application transactor
+for transaction callbacks and supply query registries in a Rust application.
+
 `transact` requires a caller-supplied `--request-key`. Retry the same request and
 options with the same key after a lost response. Whitespace/comments, map/set
 order and outer transaction order do not change EDN request identity. Ordered
@@ -152,10 +158,11 @@ credential boundary; raw tuples are literal data without schema resolution.
  $rows [["alice@example.com" "external information"]]}
 ```
 
-Raw source patterns support one through five columns, including short relations
-and omitted/trailing blank components. The existing native pattern representation
-does not expose positions beyond five; that is distinct from ordinary relation
-input bindings, which are not limited to datom-shaped columns.
+Raw source patterns support arbitrary positive widths, including short relations,
+six-plus-column application data and omitted/trailing blank components. General
+cells can contain nil, maps, sets, characters and inert custom tags. Data-only
+queries require neither `--database` nor PostgreSQL configuration. See
+[general query data](query-data.md) for native APIs, callbacks and source examples.
 
 ## EDN types versus stored values
 
@@ -167,10 +174,12 @@ function name does not execute it. Clojure-only reader syntax such as quoting,
 auto-resolved keywords and constructor macros is not supported as standard EDN.
 
 Parsed `EdnValue`, stored `Value`, and query `QueryValue` are distinct domains.
-Nil and characters are valid EDN, but are not new stored attribute types. Tuples
-retain their existing permitted nil slots. Query adapters preserve literal nil
-and use the engine's supported binding/value shapes; arbitrary map/character
-scalar inputs are not silently stringified into the narrower typed input domain.
+Nil and characters are valid EDN and general query values, but are not new stored
+attribute types. Stored tuples retain their existing permitted nil slots. Query
+adapters preserve general map/character/set/tag inputs without stringifying them
+or forcing them into the narrower stored-value domain. Sets are collections, not
+positional tuple bindings or relation rows. Known scalar tags retain validation;
+unknown custom query tags are inert data, not function calls.
 EDN map-key equality is not the engine's cross-numeric equality. Converting an EDN
 map whose distinct keys collapse under native query equality fails explicitly.
 

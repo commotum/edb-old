@@ -74,6 +74,28 @@ retrofit safety into old code. Schema-24 GC refuses an incomplete/obsolete
 walker marker and retains references during repair. Do not edit applied SQL
 migrations or manually set the completeness marker to true.
 
+Migration 32 advances that same completeness protocol to dependency walker 2.
+It includes function-content literals embedded in native query ASTs and their
+nested data/Pull defaults, which older marks omitted. Use the same quiesced
+administrative upgrade procedure: authenticate and rebuild derived reference
+marks before resuming writers or GC. No canonical program, transaction or request
+bytes are rewritten. Missing/corrupt referenced content fails closed; restore the
+reported content from a trusted backup and retry rather than declaring an
+incomplete database healthy. New runtime/schema checks fence older writers.
+
+Migration33 adds only a compatibility fence for portable query-template4/ABI11
+and explicit native predicate deployments. It changes no canonical bytes or
+reference-walker meaning. Quiesce older writers, preserve a backup, migrate,
+then restart current binaries with their explicit native deployment registry.
+This is not permission to mix already-running old and new writer binaries.
+
+Migration 34 separates mutable public names from immutable storage IDs and adds
+retired-database lifecycle/reclamation. Existing names are seeded one-to-one;
+canonical data and identifiers are not rewritten. Quiesce old writers and
+maintenance before migrating, then restart all processes on the new release.
+See [database lifecycle](database-lifecycle.md) for name reuse, captured values,
+identity-checked operator commands and the separate storage-reclamation process.
+
 Migration 25 adds resumable exact-receipt archive conversion for ordinary GC.
 Upgrade quiescent installations with the current binary; older binaries do not
 understand its ownership transition. Applied migration1–24 bytes and durable

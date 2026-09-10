@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 mod program_query_codec;
 #[path = "submission_codec.rs"]
 mod submission_codec;
+pub(crate) use program_query_codec::native_query_version;
 pub(crate) use program_query_codec::validate_native_query;
 pub(crate) use submission_codec::{
     WireOutcome, WireReport, decode_submission, decode_submission_outcome, encode_submission,
@@ -101,7 +102,11 @@ pub fn sha256(bytes: &[u8]) -> Digest {
 pub fn encode_program(program: &Program) -> Result<Vec<u8>, SemanticError> {
     program.validate()?;
     let mut body = Vec::new();
-    let abi_version = if program_has_fulltext(&program.instructions) {
+    let abi_version = if program_has_data_functions(&program.instructions) {
+        11
+    } else if program_has_general_queries(&program.instructions) {
+        10
+    } else if program_has_fulltext(&program.instructions) {
         9
     } else if program_has_partition_directives(&program.instructions) {
         8
@@ -153,11 +158,11 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
     let abi_version = cursor.u16()?;
     if !matches!(
         abi_version,
-        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9
+        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9 | 10 | 11
     ) {
         return Err(fault(
             "encoding/unsupported-program-abi",
-            format!("program ABI {abi_version} is unsupported; expected 4, 5, 6, 7, 8 or 9"),
+            format!("program ABI {abi_version} is unsupported; expected 4 through 11"),
         ));
     }
     let kind = match cursor.u8()? {
@@ -167,7 +172,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
         3 => ProgramKind::EntityPredicate,
         4 if matches!(
             abi_version,
-            DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9
+            DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9 | 10 | 11
         ) =>
         {
             ProgramKind::DualPredicate
@@ -276,6 +281,26 @@ pub fn encode_program_output(output: &ProgramOutput) -> Result<Vec<u8>, Semantic
         ProgramOutput::EntityPredicate(value) => {
             body.push(3);
             encode_runtime_value(&mut body, value, 0)?;
+        }
+        ProgramOutput::GeneralQuery(rows) => {
+            body.push(4);
+            let mut rows = rows
+                .iter()
+                .map(|row| {
+                    let mut bytes = Vec::new();
+                    put_len(&mut bytes, row.len())?;
+                    for value in row {
+                        program_query_codec::encode_general_value(&mut bytes, value)?;
+                    }
+                    Ok(bytes)
+                })
+                .collect::<Result<Vec<_>, SemanticError>>()?;
+            rows.sort();
+            rows.dedup();
+            put_len(&mut body, rows.len())?;
+            for row in rows {
+                put_bytes(&mut body, &row)?;
+            }
         }
     }
     encode_blob(KIND_PROGRAM_OUTPUT, &body)
@@ -1469,8 +1494,15 @@ fn encode_query_term(output: &mut Vec<u8>, term: &QueryTerm) -> Result<(), Seman
 
 fn decode_query_template(cursor: &mut Cursor<'_>) -> Result<QueryTemplate, SemanticError> {
     let version = cursor.u16()?;
-    if version == crate::program::NATIVE_QUERY_TEMPLATE_VERSION {
-        return program_query_codec::decode_template(cursor);
+    if matches!(version, 2..=4) {
+        let template = program_query_codec::decode_template(cursor, version)?;
+        if template.version() != version {
+            return Err(fault(
+                "encoding/noncanonical-query-version",
+                "query template version does not match its representations",
+            ));
+        }
+        return Ok(template);
     }
     if version != QUERY_TEMPLATE_VERSION {
         return Err(SemanticError::new(
@@ -2004,6 +2036,12 @@ fn encode_runtime_value(
             encode_entity_ref(output, entity)?;
         }
         RuntimeValue::Null => output.push(2),
+        RuntimeValue::Query(_) => {
+            return Err(SemanticError::incorrect(
+                "program/query-only-value",
+                "general query data is not a portable transaction argument or anomaly",
+            ));
+        }
         RuntimeValue::Vector(values) => {
             output.push(3);
             put_len(output, values.len())?;
@@ -2203,6 +2241,36 @@ fn program_has_native_queries(instructions: &[Instruction]) -> bool {
         Instruction::ForEach { body } => program_has_native_queries(body),
         Instruction::PredicateDispatch { attribute, entity } => {
             program_has_native_queries(attribute) || program_has_native_queries(entity)
+        }
+        _ => false,
+    })
+}
+
+fn program_has_data_functions(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|instruction| match instruction {
+        Instruction::Query(template) => template.version() == 4,
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => program_has_data_functions(then_branch) || program_has_data_functions(else_branch),
+        Instruction::ForEach { body } => program_has_data_functions(body),
+        Instruction::PredicateDispatch { attribute, entity } => {
+            program_has_data_functions(attribute) || program_has_data_functions(entity)
+        }
+        _ => false,
+    })
+}
+
+fn program_has_general_queries(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|instruction| match instruction {
+        Instruction::Query(template) => template.version() == 3,
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => program_has_general_queries(then_branch) || program_has_general_queries(else_branch),
+        Instruction::ForEach { body } => program_has_general_queries(body),
+        Instruction::PredicateDispatch { attribute, entity } => {
+            program_has_general_queries(attribute) || program_has_general_queries(entity)
         }
         _ => false,
     })

@@ -8,6 +8,8 @@ pub enum QuerySourceValue {
     /// E/A/V(/T/assertion) rows. Values are literal: raw tuples have no schema
     /// and do not perform keyword/entity/lookup-ref resolution.
     Tuples(Arc<Vec<Vec<Value>>>),
+    /// Arbitrary-width relations whose cells may be general query values.
+    Relation(Arc<Vec<Vec<QueryValue>>>),
     Log(LogValue),
 }
 
@@ -18,6 +20,12 @@ pub struct QueryDataSource {
 }
 
 impl QueryDataSource {
+    pub fn relation(name: impl Into<String>, rows: Vec<Vec<QueryValue>>) -> Self {
+        Self {
+            name: name.into(),
+            value: QuerySourceValue::Relation(Arc::new(rows)),
+        }
+    }
     pub fn database(name: impl Into<String>, database: DatabaseValue) -> Self {
         Self {
             name: name.into(),
@@ -43,6 +51,7 @@ impl QueryDataSource {
         match &self.value {
             QuerySourceValue::Database(database) => SourceRef::Database(database),
             QuerySourceValue::Tuples(tuples) => SourceRef::Tuples(tuples),
+            QuerySourceValue::Relation(rows) => SourceRef::Relation(rows),
             QuerySourceValue::Log(log) => SourceRef::Log(log),
         }
     }
@@ -52,6 +61,7 @@ impl QueryDataSource {
 pub(super) enum SourceRef<'a> {
     Database(&'a DatabaseValue),
     Tuples(&'a [Vec<Value>]),
+    Relation(&'a [Vec<QueryValue>]),
     Log(&'a LogValue),
 }
 

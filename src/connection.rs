@@ -16,9 +16,9 @@ type NoticeChannel = (
 
 /// Stable identity of one logical database catalog entry.
 ///
-/// A database name is an address chosen by an operator.  The lineage is the
-/// durable identity behind that address and prevents a long-lived connection
-/// from silently retargeting if a catalog entry is dropped and recreated.
+/// A public database name is a reusable address chosen by an operator. The
+/// storage ID and lineage captured here never change on rename and never
+/// retarget when a name is retired or reused for a new database.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DatabaseIdentity {
     database_id: String,
@@ -211,8 +211,7 @@ impl Connection {
         let observation_error = Arc::new(Mutex::new(None));
         let notices = mpsc::sync_channel(1);
         let (peer, observer) = client.observe_commits(|| {
-            let peer =
-                Peer::connect_configured(&connection, identity.database_id(), cache_capacity)?;
+            let peer = Peer::connect_identity_configured(&connection, &identity, cache_capacity)?;
             if peer.identity() != identity {
                 return Err(identity_mismatch(&identity, &peer.identity()));
             }

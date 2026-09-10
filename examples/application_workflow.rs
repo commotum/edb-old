@@ -258,6 +258,174 @@ fn read_values_workflow(before: &DatabaseValue, after: &DatabaseValue) -> Result
     Ok(())
 }
 
+/// Application-owned planning values need neither a stored schema nor a dummy
+/// database. The same query also joins them to a captured durable database value.
+fn general_query_workflow(before: &DatabaseValue, after: &DatabaseValue) -> Result<()> {
+    use atomic_core::edn::read_edn;
+    use atomic_core::edn_query::{EdnQueryArgument, parse_query_edn};
+    use atomic_core::{QueryExtensions, QuerySourceValue};
+    let measured = OperationContext::new(OperationKind::Application);
+    let _scope = measured.enter();
+    let started = Instant::now();
+    let rows = EdnQueryArgument::Data(read_edn(
+        r#"[["alpha" nil \A #app/status :planned {:note "review"} #{:local :draft} 7]]"#,
+    )?);
+    let query = parse_query_edn(
+        r#"[:find ?hours ?summary :in $ $planning
+            :where [?project :project/key ?key] [?project :project/hours ?hours]
+                   [$planning ?key ?optional ?letter ?tag ?details ?labels ?priority]
+                   [(app/summary ?details ?labels ?tag ?optional) ?summary]]"#,
+    )?;
+    let mut extensions = QueryExtensions::new();
+    extensions.register_pure("app/summary", |args, _control| {
+        let [details, labels, tag, optional] = args else {
+            return Err(SemanticError::incorrect(
+                "app/arity",
+                "summary requires four values",
+            ));
+        };
+        Ok(QueryValue::Map(vec![
+            (
+                QueryValue::Scalar(Value::Keyword(Keyword::unqualified("details"))),
+                details.clone(),
+            ),
+            (
+                QueryValue::Scalar(Value::Keyword(Keyword::unqualified("labels"))),
+                labels.clone(),
+            ),
+            (
+                QueryValue::Scalar(Value::Keyword(Keyword::unqualified("status"))),
+                tag.clone(),
+            ),
+            (
+                QueryValue::Scalar(Value::Keyword(Keyword::unqualified("optional"))),
+                optional.clone(),
+            ),
+        ]))
+    });
+    let control = QueryControl {
+        timeout: Some(WAIT),
+        max_work: 100_000,
+        ..Default::default()
+    };
+    let run = |database: &DatabaseValue| -> Result<QueryResult> {
+        let bound = query.bind(&[
+            EdnQueryArgument::Source(QuerySourceValue::Database(database.clone())),
+            rows.clone(),
+        ])?;
+        let result = bound.execute(&control, Some(&extensions))?.result;
+        let QueryResult::Relation(actual) = &result else {
+            return Err("general query shape".into());
+        };
+        require(actual.len() == 1, "general data join lost alpha")?;
+        require(
+            actual[0][0]
+                == QueryValue::Scalar(Value::Long(calculation(database)?.projects["alpha"].0)),
+            "general query changed captured hours",
+        )?;
+        require(
+            matches!(&actual[0][1], QueryValue::Map(fields) if fields.len() == 4),
+            "callback lost nested data",
+        )?;
+        Ok(result)
+    };
+    let old = run(before)?;
+    drop(run(after)?);
+    require(
+        run(before)? == old,
+        "general query changed an old database value",
+    )?;
+    drop(old);
+    drop(extensions);
+    drop(query);
+    drop(rows);
+    println!(
+        "QUERY_DATA_OK width=7 nested_values=true pure_callbacks=true old_basis=true elapsed_ms={} sql_calls={}",
+        started.elapsed().as_millis(),
+        measured.snapshot().sql_calls
+    );
+    Ok(())
+}
+
+/// Reduce related planning columns together, using one captured value and
+/// ordinary native string helpers for presentation.
+fn application_computation_workflow(before: &DatabaseValue, after: &DatabaseValue) -> Result<()> {
+    use atomic_core::edn::read_edn;
+    use atomic_core::edn_query::{EdnQueryArgument, parse_query_edn};
+    use atomic_core::{AggregateValue, QueryExtensions, QuerySourceValue};
+    let measured = OperationContext::new(OperationKind::Application);
+    let _scope = measured.enter();
+    let started = Instant::now();
+    let mut extensions = QueryExtensions::new();
+    extensions.register_aggregate("app/weighted-hours", |group, _| {
+        let Some(QueryValue::Scalar(Value::Long(scale))) = group.constant(2) else {
+            return Err(SemanticError::incorrect(
+                "app/scale",
+                "integer scale required",
+            ));
+        };
+        let mut total = 0;
+        for row in 0..group.len() {
+            group.check(1)?;
+            let integer = |arg| match group.value(row, arg) {
+                Some(AggregateValue::Stored(Value::Long(value)))
+                | Some(AggregateValue::Query(QueryValue::Scalar(Value::Long(value)))) => Ok(*value),
+                _ => Err(SemanticError::incorrect(
+                    "app/weight",
+                    "integer hours and weight required",
+                )),
+            };
+            total += integer(0)? * integer(1)? * scale;
+        }
+        Ok(QueryValue::Scalar(Value::Long(total)))
+    });
+    let query = parse_query_edn(
+        r#"[:find ?label (app/weighted-hours ?hours ?weight 10)
+        :in $ $planning
+        :where [?project :project/key ?key] [?project :project/hours ?hours]
+               [$planning ?key ?weight] [(starts-with? ?key "a")]
+               [(subs ?key 0 1) ?prefix] [(str ?prefix ":" ?key) ?label]]"#,
+    )?;
+    let plans = EdnQueryArgument::Data(read_edn(r#"[["alpha" 2] ["beta" 3]]"#)?);
+    let control = QueryControl {
+        timeout: Some(WAIT),
+        max_work: 100_000,
+        ..Default::default()
+    };
+    let evaluate = |database: &DatabaseValue| -> Result<QueryResult> {
+        let bound = query.bind(&[
+            EdnQueryArgument::Source(QuerySourceValue::Database(database.clone())),
+            plans.clone(),
+        ])?;
+        let actual = bound.execute(&control, Some(&extensions))?.result;
+        let expected = QueryResult::Relation(vec![vec![
+            QueryValue::Scalar(Value::String("a:alpha".into())),
+            QueryValue::Scalar(Value::Long(calculation(database)?.projects["alpha"].0 * 20)),
+        ]]);
+        require(
+            actual == expected,
+            "weighted application computation changed its basis or arguments",
+        )?;
+        Ok(actual)
+    };
+    let old = evaluate(before)?;
+    drop(evaluate(after)?);
+    require(
+        evaluate(before)? == old,
+        "aggregate changed old captured value",
+    )?;
+    drop(old);
+    drop(query);
+    drop(plans);
+    drop(extensions);
+    println!(
+        "COMPUTATION_OK weighted=true native_helpers=true old_basis=true elapsed_us={} sql_calls={}",
+        started.elapsed().as_micros(),
+        measured.snapshot().sql_calls
+    );
+    Ok(())
+}
+
 /// Plans retain replayable intent and a protected basis, not speculative IDs
 /// or a datom diff. Fixed request keys keep the entire example restartable.
 fn planning_workflow(
@@ -945,6 +1113,8 @@ fn run() -> Result<()> {
     // Use the exact receipt value, never substitute a newer connection capture.
     let current = updated.db_after;
     read_values_workflow(&captured, &current)?;
+    general_query_workflow(&captured, &current)?;
+    application_computation_workflow(&captured, &current)?;
     let expected = fixture.with(&update(), 2_000)?.db_after.database_value();
     require(
         calculation(&current)? == calculation(&expected)?,

@@ -88,6 +88,34 @@ fn malformed_edn_is_rejected_before_database_access_without_echoing_values() {
 }
 
 #[test]
+fn data_only_query_accepts_general_sources_without_database_configuration() {
+    let mut sources = tempfile::NamedTempFile::new().unwrap();
+    sources
+        .write_all(
+            br#"{$rows [["Alice" nil \A #app/state :ready {:priority 1} #{:blue :green} 7]]}"#,
+        )
+        .unwrap();
+    let mut command = atomic();
+    // An intentionally unusable setting proves data-only execution does not
+    // even validate PostgreSQL configuration, let alone establish a connection.
+    command.env("ATOMIC_POSTGRES_URL", "not-a-postgresql-connection");
+    let mut child = command
+        .args(["query", "--file", "-", "--sources"])
+        .arg(sources.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(br#"[:find ?name ?map ?tag ?set :in $rows :where [$rows ?name nil \A ?tag ?map ?set 7]]"#).unwrap();
+    let output = success(child.wait_with_output().unwrap());
+    assert_eq!(
+        read_edn(&output).unwrap(),
+        read_edn(r#"#{["Alice" {:priority 1} #app/state :ready #{:green :blue}]}"#).unwrap()
+    );
+}
+
+#[test]
 fn configured_partition_cli_preview_commit_and_changed_default_exact_retry() {
     let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIPPED default partition CLI: ATOMIC_POSTGRES_URL unset");
@@ -373,6 +401,23 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         read_edn(&compared).unwrap(),
         read_edn(r#"#{["Alice" "Alicia" "external"]}"#).unwrap()
     );
+    let mut general_sources = tempfile::NamedTempFile::new().unwrap();
+    general_sources.write_all(br#"{$now {:database "edn"} $extra [["alice@example.com" nil \A #app/flag :good {:context "external"} #{:blue :green} 7]]}"#).unwrap();
+    let general = data(
+        &fixture.peer_url,
+        &[
+            "query",
+            "--file",
+            "-",
+            "--sources",
+            general_sources.path().to_str().unwrap(),
+        ],
+        "[:find ?name ?context ?tag ?labels :in $now $extra :where [$now ?e :person/name ?name] [$now ?e :person/email ?email] [$extra ?email nil _ ?tag ?context ?labels 7]]",
+    );
+    assert_eq!(
+        read_edn(&general).unwrap(),
+        read_edn(r#"#{["Alicia" {:context "external"} #app/flag :good #{:blue :green}]}"#).unwrap()
+    );
     let mut rules_file = tempfile::NamedTempFile::new().unwrap();
     rules_file
         .write_all(b"[[[(named ?e ?name) [?e :person/name ?name]]]]")
@@ -427,7 +472,7 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         .contains("Alicia")
     );
     println!(
-        "EDN_APPLICATION_OK schema=true maps=true nested=true lookup=true omitted_preserved=true preview_isolated=true history=true multiple_sources=true rules=true return_maps=true independent_reads=true restart_exact_retry=true restricted_roles={}",
+        "EDN_APPLICATION_OK schema=true maps=true nested=true lookup=true omitted_preserved=true preview_isolated=true history=true multiple_sources=true general_relations=true rules=true return_maps=true independent_reads=true restart_exact_retry=true restricted_roles={}",
         fixture.roles.is_some()
     );
 

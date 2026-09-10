@@ -30,10 +30,7 @@ use std::sync::{Arc, Mutex};
 
 #[path = "program_bindings.rs"]
 pub(crate) mod program_bindings;
-use program_bindings::{
-    SharedProgramBudget, expand_submission_forms, persisted_predicates, transaction_program_roots,
-    validate_successor_program_bindings, visit_program_closure,
-};
+use program_bindings::{SharedProgramBudget, transaction_program_roots, visit_program_closure};
 
 pub(crate) type SharedProgramCache = Arc<Mutex<ProgramCache>>;
 
@@ -273,17 +270,33 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         31,
         include_str!("../migrations/0031_reserved_allocation.sql"),
     ),
+    (
+        32,
+        include_str!("../migrations/0032_query_program_references.sql"),
+    ),
+    (
+        33,
+        include_str!("../migrations/0033_native_application_computation.sql"),
+    ),
+    (
+        34,
+        concat!(
+            include_str!("../migrations/0034_logical_database_catalog.sql"),
+            "\n",
+            include_str!("../migrations/0034_retired_database_reclamation.sql")
+        ),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 31;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 34;
 
 /// Version of the authenticated fixed-dependency walker whose result GC may
 /// trust. Any future traversal change that adds roots must bump this version
 /// and install a corresponding fail-closed SQL migration before reuse.
-pub(crate) const PROGRAM_REFERENCE_WALKER_VERSION: i64 = 1;
+pub(crate) const PROGRAM_REFERENCE_WALKER_VERSION: i64 = 2;
 
 /// Oldest installed native SQL schema that this binary can upgrade in place
 /// when the catalog already contains a logical database.
@@ -297,6 +310,8 @@ pub const POSTGRES_IN_PLACE_UPGRADE_FLOOR: i64 = 6;
 
 const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_schema_migrations",
+    "atomic_database_identities",
+    "atomic_database_names",
     "atomic_databases",
     "atomic_heads",
     "atomic_transactions",
@@ -2021,6 +2036,7 @@ fn verify_lease<C: GenericClient>(
         .map_err(|error| postgres_error("postgres/lease-fence", error))?
         .is_some_and(|row| row.get::<_, bool>(0));
     if valid {
+        crate::database_catalog::require_active_id_in(client, database_id)?;
         Ok(())
     } else {
         Err(leadership_lost(lease))
@@ -2045,7 +2061,8 @@ fn renew_locked_lease<C: GenericClient>(
             "UPDATE atomic_transactor_leases \
              SET expires_at = clock_timestamp() + \
                               $4::bigint * interval '1 millisecond' \
-             WHERE lease_scope = $1 AND holder_id = $2 AND epoch = $3",
+             WHERE lease_scope = $1 AND holder_id = $2 AND epoch = $3 \
+               AND EXISTS(SELECT 1 FROM atomic_database_identities i WHERE i.database_id=$1 AND i.retired_at IS NULL)",
             &[&lease.database_id, &lease.holder_id, &epoch, &lease_millis],
         )
         .map_err(|error| postgres_error(operation, error))?;
@@ -2298,10 +2315,14 @@ pub struct PostgresStore {
     program_cache: SharedProgramCache,
     capacity_limits: CapacityLimits,
     transaction_defaults: crate::TransactionDefaults,
+    native_registry: crate::NativeRegistry,
     writer_recent_limits: RecentLimits,
 }
 
 impl PostgresStore {
+    pub(crate) fn catalog_client(&mut self) -> &mut Client {
+        &mut self.client
+    }
     /// Read-only captured state for advisory prefetch. No head lookup, writer
     /// activation or authority is delegated to the prefetch worker.
     pub(crate) fn hint_database_value(&self, database_id: &str) -> Option<crate::DatabaseValue> {
@@ -2331,6 +2352,7 @@ impl PostgresStore {
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
             transaction_defaults: crate::TransactionDefaults::default(),
+            native_registry: crate::NativeRegistry::default(),
             writer_recent_limits: RecentLimits::default(),
         }
     }
@@ -2348,12 +2370,17 @@ impl PostgresStore {
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
             transaction_defaults: crate::TransactionDefaults::default(),
+            native_registry: crate::NativeRegistry::default(),
             writer_recent_limits: RecentLimits::default(),
         }
     }
 
     pub(crate) fn set_transaction_defaults(&mut self, defaults: crate::TransactionDefaults) {
         self.transaction_defaults = defaults;
+    }
+
+    pub(crate) fn set_native_registry(&mut self, registry: crate::NativeRegistry) {
+        self.native_registry = registry;
     }
 
     pub(crate) fn set_capacity_limits(
@@ -2773,6 +2800,7 @@ impl PostgresStore {
                 &[&database_id],
             )
             .map_err(|error| postgres_error("postgres/lease-acquire-lock", error))?;
+        crate::database_catalog::require_active_id_in(&mut transaction, database_id)?;
         let epoch = match current {
             None => {
                 transaction
@@ -2840,7 +2868,8 @@ impl PostgresStore {
                  SET expires_at = clock_timestamp() + \
                                   $4::bigint * interval '1 millisecond' \
                  WHERE lease_scope = $1 AND holder_id = $2 AND epoch = $3 \
-                   AND expires_at > clock_timestamp()",
+                   AND expires_at > clock_timestamp() \
+                   AND EXISTS(SELECT 1 FROM atomic_database_identities i WHERE i.database_id=$1 AND i.retired_at IS NULL)",
                 &[&lease.database_id, &lease.holder_id, &epoch, &lease_millis],
             )
             .map_err(|error| postgres_error("postgres/lease-renew", error))?;
@@ -2870,15 +2899,51 @@ impl PostgresStore {
 
     pub fn create_database(
         &mut self,
-        database_id: &str,
+        name: &str,
         schema: Schema,
     ) -> Result<Database, SemanticError> {
-        if database_id.is_empty() {
-            return Err(SemanticError::incorrect(
-                "postgres/empty-database-id",
-                "database id cannot be empty",
-            ));
+        let (_, database) = self.create_named_database(name, schema, false)?;
+        Ok(database.expect("strict create returns a new database"))
+    }
+
+    pub fn create_database_if_absent(
+        &mut self,
+        name: &str,
+        schema: Schema,
+    ) -> Result<crate::CreateDatabaseResult, SemanticError> {
+        let (database, created) = self.create_named_database(name, schema, true)?;
+        Ok(crate::CreateDatabaseResult {
+            created: created.is_some(),
+            database,
+        })
+    }
+
+    fn create_named_database(
+        &mut self,
+        name: &str,
+        schema: Schema,
+        if_absent: bool,
+    ) -> Result<(crate::DatabaseCatalogEntry, Option<Database>), SemanticError> {
+        let mut transaction = self
+            .client
+            .transaction()
+            .map_err(|error| postgres_error("postgres/create-begin", error))?;
+        crate::database_catalog::lock_names(&mut transaction, &[name])?;
+        if let Some(entry) = crate::database_catalog::resolve_name_opt_in(&mut transaction, name)? {
+            if !if_absent {
+                return Err(SemanticError::conflict(
+                    "catalog/name-exists",
+                    "database name already exists",
+                ));
+            }
+            transaction
+                .commit()
+                .map_err(|error| postgres_error("postgres/create-existing-commit", error))?;
+            return Ok((entry, None));
         }
+        crate::database_catalog::validate_name(name)?;
+        let storage_id = crate::database_catalog::allocate_storage_id_in(&mut transaction, name)?;
+        let database_id = storage_id.as_str();
         let schema_ops: Vec<_> = schema
             .attributes()
             .cloned()
@@ -2915,10 +2980,6 @@ impl PostgresStore {
             Some((envelope, request_hash, state_hash))
         };
         let bootstrap_state_hash = checkpoint_state_hash(&bootstrap)?;
-        let mut transaction = self
-            .client
-            .transaction()
-            .map_err(|error| postgres_error("postgres/create-begin", error))?;
         let lineage_id: String = transaction
             .query_one(
                 "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
@@ -2927,6 +2988,7 @@ impl PostgresStore {
             )
             .map_err(|error| postgres_error("postgres/create-catalog", error))?
             .get(0);
+        crate::database_catalog::register_new_in(&mut transaction, name, database_id, &lineage_id)?;
         let generation_i64 = 1_i64;
         transaction
             .execute(
@@ -3087,7 +3149,15 @@ impl PostgresStore {
             .commit()
             .map_err(|error| postgres_error("postgres/create-commit", error))?;
         database.entity_origin = crate::entity_identity::DatabaseOrigin::durable(&lineage_id);
-        Ok(database)
+        Ok((
+            crate::DatabaseCatalogEntry {
+                name: Some(name.to_owned()),
+                database_id: storage_id,
+                lineage_id,
+                retired: false,
+            },
+            Some(database),
+        ))
     }
 
     pub fn recover(&mut self, database_id: &str) -> Result<Database, SemanticError> {
@@ -3418,6 +3488,7 @@ impl PostgresStore {
         fault_point: CommitFault,
     ) -> Result<CommitReceipt, SemanticError> {
         let max_primitive_ops = self.capacity_limits.max_transaction_ops;
+        let native = self.native_registry.clone();
         self.transact_generated(
             database_id,
             request_key,
@@ -3434,11 +3505,12 @@ impl PostgresStore {
                         "transaction program budget mutex was poisoned",
                     )
                 })?;
-                let forms = expand_submission_forms(
+                let forms = program_bindings::expand_submission_forms_with_native(
                     &mut |hash| resolve_program_in(transaction, program_cache, hash),
                     db_before,
                     forms,
                     &mut budget,
+                    &native,
                 )?;
                 db_before.normalize_persisted_forms_with_limit(&forms, max_primitive_ops)
             },
@@ -3758,21 +3830,23 @@ impl PostgresStore {
         assessed.db_after = assessed
             .db_after
             .with_transaction_read_context(Arc::clone(&read_context));
-        validate_successor_program_bindings(
+        program_bindings::validate_successor_program_bindings_with_native(
             &mut |hash| resolve_program_in(&mut transaction, &program_cache, hash),
             &assessed.db_before,
             &assessed.db_after,
             &assessed.tx_data,
+            &self.native_registry,
         )?;
         let persisted_functions;
         let functions = match functions {
             Some(functions) => Some(functions),
             None => {
-                persisted_functions = persisted_predicates(
+                persisted_functions = program_bindings::persisted_predicates_with_native(
                     &mut |hash| resolve_program_in(&mut transaction, &program_cache, hash),
                     &assessed.db_before,
                     &assessed.predicate_requirements()?,
                     Arc::clone(&shared_budget),
+                    &self.native_registry,
                 )?;
                 Some(&persisted_functions)
             }
@@ -4884,6 +4958,31 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
             row.get::<_, Vec<u8>>(0),
             "request base manifest hash",
         )?)
+    } else if generation > 0 {
+        // Legacy ordinary receipts have no immutable native base binding.
+        // Restore builds generation-owned checkpoint archives for those exact
+        // historical values without rewriting the receipt kind or its bytes.
+        // Select only completed same-generation predecessors; the existing
+        // exact opener authenticates and pins the selected manifest and tail.
+        // Restore archive revisions count downward, so the smallest revision
+        // at one basis has the latest completed physical projection.
+        client
+            .query_opt(
+                "SELECT archive.manifest_hash FROM atomic_request_base_archives archive \
+                  JOIN atomic_request_base_archive_completions complete \
+                    ON complete.manifest_hash = archive.manifest_hash \
+                 WHERE archive.database_id = $1 AND archive.generation = $2 \
+                   AND archive.basis_t <= $3 \
+                 ORDER BY archive.basis_t DESC, archive.archive_revision ASC LIMIT 1",
+                &[
+                    &database_id,
+                    &sql_basis(generation)?,
+                    &sql_basis(before_basis)?,
+                ],
+            )
+            .map_err(|error| postgres_error("postgres/legacy-request-base-read", error))?
+            .map(|row| digest(row.get(0), "legacy request checkpoint manifest"))
+            .transpose()?
     } else {
         None
     };

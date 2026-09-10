@@ -734,6 +734,8 @@ fn log_functions_join_provenance_and_keep_captured_basis_on_actual_postgres() {
         eprintln!("SKIP query log PostgreSQL witness: ATOMIC_POSTGRES_URL unset");
         return;
     };
+    let fixture = common::PostgresFixture::new(&url, "query_runtime_sources");
+    let url = fixture.connection.clone();
     PostgresMigrator::connect(&url).unwrap().migrate().unwrap();
     let id = format!(
         "query_log_{}_{}",

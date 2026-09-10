@@ -174,9 +174,10 @@ fn cache_material(query: &Query) -> Option<Vec<u64>> {
             return None;
         }
         let mut push = |node| pending.push((node, depth + 1));
-        fn term_value(term: &Term) -> Option<&Value> {
+        fn term_value(term: &Term) -> Option<Node<'_>> {
             match term {
-                Term::Constant(value) => Some(value),
+                Term::Constant(value) => Some(Node::Value(value)),
+                Term::QueryConstant(value) => Some(Node::Output(value)),
                 _ => None,
             }
         }
@@ -209,9 +210,29 @@ fn cache_material(query: &Query) -> Option<Vec<u64>> {
                     if let FindElement::Pull { pattern, .. } = element {
                         push(Node::Pull(pattern));
                     }
+                    if let FindElement::CustomAggregate(call) = element {
+                        if call.args.len() > 8192 {
+                            return None;
+                        }
+                        for arg in &call.args {
+                            if let AggregateArg::Constant(value) = arg {
+                                push(Node::Output(value));
+                            }
+                        }
+                    }
                 }
             }
             Node::Clause(clause) => match clause {
+                Clause::RelationPattern(pattern) => {
+                    if pattern.terms.len() > 8192 {
+                        return None;
+                    }
+                    for term in &pattern.terms {
+                        if let Some(value) = term_value(term) {
+                            push(value);
+                        }
+                    }
+                }
                 Clause::Pattern(pattern) => {
                     for term in [&pattern.entity, &pattern.attribute, &pattern.value]
                         .into_iter()
@@ -219,7 +240,7 @@ fn cache_material(query: &Query) -> Option<Vec<u64>> {
                         .chain(pattern.added.iter())
                     {
                         if let Some(value) = term_value(term) {
-                            push(Node::Value(value));
+                            push(value);
                         }
                     }
                 }
@@ -231,7 +252,7 @@ fn cache_material(query: &Query) -> Option<Vec<u64>> {
                     }
                     for term in args {
                         if let Some(value) = term_value(term) {
-                            push(Node::Value(value));
+                            push(value);
                         }
                     }
                     if let Clause::Function {
@@ -299,8 +320,11 @@ fn cache_material(query: &Query) -> Option<Vec<u64>> {
             }
             Node::Output(value) => match value {
                 QueryValue::Scalar(value) => push(Node::Value(value)),
-                QueryValue::Nil => {}
-                QueryValue::Tuple(values) | QueryValue::Collection(values) => {
+                QueryValue::Nil | QueryValue::Char(_) => {}
+                QueryValue::Tagged(_, value) => push(Node::Output(value)),
+                QueryValue::Tuple(values)
+                | QueryValue::Collection(values)
+                | QueryValue::Set(values) => {
                     if values.len() > 8192 {
                         return None;
                     }

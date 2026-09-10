@@ -53,6 +53,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+#[path = "backup_allocation_tests.rs"]
+mod allocation_tests;
+#[cfg(test)]
+#[path = "backup_tree_semantics_tests.rs"]
+mod tree_semantics_tests;
+
 const MAGIC: &[u8; 4] = b"ATBK";
 const VERSION: u16 = 4;
 const LEGACY_VERSION: u16 = 3;
@@ -66,7 +73,16 @@ const COMPLETED_EXCISION_VERSION: u16 = 1;
 const LEGACY_MEMBERSHIP_DOMAIN: &[u8] = b"atomic/backup-legacy-membership/v1\0";
 const MAX_BACKUP_ATTEMPTS: usize = 3;
 const RESTORE_BATCH_ROWS: usize = 256;
+const LEGACY_RECEIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+const LEGACY_RECEIPT_TAIL_DATOMS: u64 = 16_384;
+const RESTORE_SCRATCH_PINS: usize = 16;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    #[allow(clippy::type_complexity)]
+    static RESTORE_SCRATCH_PROBE: std::cell::RefCell<Option<Box<dyn FnMut(Digest) -> Result<(), SemanticError>>>> = const { std::cell::RefCell::new(None) };
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BackupPoint {
@@ -259,6 +275,12 @@ impl BackupAllocationReplay {
                 frontier,
                 transaction.eidx_frontier,
             )?;
+            // V2 replay records come from content.to_transaction(): these
+            // synthetic tempids encode only canonical issuance witnesses.
+            // Caller-named aliases, including upserts, remain separate in
+            // BackupRequestRecord and must not be treated as fresh here.
+            self.observed
+                .validate_fresh_witnesses(transaction.tempids.values().copied())?;
             let database = database.apply_committed_with_reserved_allocation(
                 transaction,
                 self.observed,
@@ -367,6 +389,8 @@ impl PortableBackup {
         directory: &Path,
         fault_at: BackupFault,
     ) -> Result<BackupPoint, SemanticError> {
+        let identity = crate::database_catalog::resolve_name_in(&mut self.client, database_id)?;
+        let database_id = identity.database_id.as_str();
         for attempt in 0..MAX_BACKUP_ATTEMPTS {
             if attempt > 0 {
                 match self.connection.connect_for("backup/connect") {
@@ -412,7 +436,8 @@ impl PortableBackup {
     where
         F: FnOnce(),
     {
-        self.backup_database_once_with_pin_probe(database_id, directory, BackupFault::None, probe)
+        let identity = crate::database_catalog::resolve_name_in(&mut self.client, database_id)?;
+        self.backup_database_once_with_pin_probe(&identity.database_id, directory, BackupFault::None, probe)
     }
 
     fn backup_database_once_with_pin_probe<F>(
@@ -1232,13 +1257,17 @@ impl PortableBackup {
         }
         let restored_programs = load_program_graph(directory, required_programs)?;
         let completed_excisions = load_completed_excisions(directory, &manifest)?;
-        ensure_restore_target(
+        let target_storage_id = ensure_restore_target(
             &mut self.client,
             &manifest,
             target_database_id,
             &genesis,
             genesis_hash,
         )?;
+        // Resolve the public target once. Canonical artifacts and every later
+        // retry/build operation use this immutable storage identity, not a
+        // mutable name that another operator can rename or reuse.
+        let target_database_id = target_storage_id.as_str();
         if let Some(matched_target) = target_matches_backup(
             &mut self.client,
             directory,
@@ -1308,6 +1337,16 @@ impl PortableBackup {
                 directory,
                 &manifest,
                 &log,
+                target_database_id,
+                candidate.generation,
+            )?;
+            restore_legacy_receipt_trees(
+                &self.connection,
+                &mut self.client,
+                directory,
+                &manifest,
+                &log,
+                &rows,
                 target_database_id,
                 candidate.generation,
             )?;
@@ -1402,8 +1441,10 @@ fn acquire_backup_generation_pin(
             return Err(original);
         }
         let still_active: bool = match client.query_one(
-            "SELECT EXISTS (SELECT 1 FROM atomic_heads \
-                              WHERE database_id = $1 AND log_generation = $2)",
+            "SELECT EXISTS (SELECT 1 FROM atomic_heads h \
+                              JOIN atomic_database_identities i USING(database_id) \
+                              WHERE h.database_id = $1 AND h.log_generation = $2 \
+                                AND i.retired_at IS NULL)",
             &[&database_id, &generation_sql],
         ) {
             Ok(row) => row.get(0),
@@ -1541,24 +1582,26 @@ fn ensure_restore_target(
     target_database_id: &str,
     genesis: &[u8],
     genesis_hash: Digest,
-) -> Result<(), SemanticError> {
+) -> Result<String, SemanticError> {
     let mut transaction = client
         .transaction()
         .map_err(|error| crate::postgres::postgres_error("backup/restore-catalog-begin", error))?;
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended('atomic/restore/' || $1, 0))",
-            &[&target_database_id],
-        )
-        .map_err(|error| crate::postgres::postgres_error("backup/restore-lock", error))?;
+    crate::database_catalog::lock_names(&mut transaction, &[target_database_id])?;
     if let Some(target) = transaction
         .query_opt(
-            "SELECT lineage_id, genesis, genesis_hash FROM atomic_databases \
-             WHERE database_id = $1",
+            "SELECT d.lineage_id,d.genesis,d.genesis_hash,d.database_id,i.retired_at IS NOT NULL \
+             FROM atomic_database_names n JOIN atomic_database_identities i USING(database_id) \
+             JOIN atomic_databases d USING(database_id) WHERE n.name=$1",
             &[&target_database_id],
         )
         .map_err(|error| crate::postgres::postgres_error("backup/restore-target", error))?
     {
+        if target.get::<_, bool>(4) {
+            return Err(SemanticError::conflict(
+                "backup/retired-lineage-requires-reclamation",
+                "retired database storage must be fully reclaimed before this lineage is restored in the same catalog",
+            ));
+        }
         if target.get::<_, String>(0) != manifest.lineage_id
             || target.get::<_, Vec<u8>>(1) != genesis
             || digest(target.get(2), "restore target genesis hash")? != genesis_hash
@@ -1569,30 +1612,64 @@ fn ensure_restore_target(
                 "restore target belongs to another database lineage",
             ));
         }
+        let storage_id = target.get::<_, String>(3);
         transaction.commit().map_err(|error| {
             crate::postgres::postgres_error("backup/restore-catalog-commit", error)
         })?;
-        return Ok(());
+        return Ok(storage_id);
     }
+
+    if let Some(existing) = transaction
+        .query_opt(
+            "SELECT i.retired_at IS NOT NULL FROM atomic_databases d \
+         JOIN atomic_database_identities i USING(database_id) WHERE d.lineage_id=$1",
+            &[&manifest.lineage_id],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-lineage", error))?
+    {
+        let retired: bool = existing.get(0);
+        return Err(SemanticError::conflict(
+            if retired {
+                "backup/retired-lineage-requires-reclamation"
+            } else {
+                "backup/lineage-exists"
+            },
+            if retired {
+                "retired database storage must be fully reclaimed before restoring its lineage; a different catalog remains an independent restore target"
+            } else {
+                "this database lineage already has a name in the target catalog"
+            },
+        ));
+    }
+    let storage_id = crate::database_catalog::allocate_storage_id_in(
+        &mut transaction, target_database_id,
+    )?;
 
     transaction
         .execute(
             "INSERT INTO atomic_databases (database_id, lineage_id, genesis, genesis_hash) \
              VALUES ($1, $2, $3, $4)",
             &[
-                &target_database_id,
+                &storage_id,
                 &manifest.lineage_id,
                 &genesis,
                 &&manifest.genesis_hash[..],
             ],
         )
         .map_err(restore_catalog_error)?;
+    crate::database_catalog::register_new_in(
+        &mut transaction,
+        target_database_id,
+        &storage_id,
+        &manifest.lineage_id,
+    )?;
     // Do not publish a synthetic genesis head. Until the archive has been
     // completely staged and its first head is installed atomically, runtime
     // opens see no database value and therefore fail closed.
     transaction
         .commit()
-        .map_err(|error| crate::postgres::postgres_error("backup/restore-catalog-commit", error))
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-catalog-commit", error))?;
+    Ok(storage_id)
 }
 
 fn prepare_restore_rows(
@@ -2230,10 +2307,13 @@ fn stage_restore_semantic_coordinates(
     if !prepared
         .rows
         .iter()
-        .any(|row| row.request.base_manifest_hash.is_some())
+        .any(|row| matches!(row.request.request_kind, 1 | 2))
     {
         return Ok(());
     }
+    // Legacy ordinary receipts do not carry a physical request-base hash,
+    // but their exact db-before/db-after values need these same semantic
+    // coordinates after restoration. Tombstones have no report to reopen.
     let genesis = read_object(directory, manifest.genesis_hash)?;
     let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
     let mut allocation_replay = BackupAllocationReplay::new(&database)?;
@@ -3583,11 +3663,19 @@ fn upload_backup_tree_nodes(
     directory: &Path,
     hashes: &BTreeSet<Digest>,
 ) -> Result<(), SemanticError> {
+    upload_restored_tree_nodes(store, hashes, &mut |hash| read_object(directory, *hash))
+}
+
+fn upload_restored_tree_nodes(
+    store: &mut PostgresTreeStore,
+    hashes: &BTreeSet<Digest>,
+    load_node: &mut dyn FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
+) -> Result<(), SemanticError> {
     let limits = crate::NodeUploadLimits::default();
     let mut batch = Vec::<(Digest, Vec<u8>)>::new();
     let mut bytes = 0_usize;
     for hash in hashes {
-        let payload = read_object(directory, *hash)?;
+        let payload = load_node(hash)?;
         if !batch.is_empty()
             && (batch.len() >= limits.max_nodes
                 || bytes.saturating_add(payload.len()) > limits.max_bytes)
@@ -3735,6 +3823,254 @@ fn request_base_archive_revision(offset: usize) -> Result<u64, SemanticError> {
         })
 }
 
+/// Bound old receipt reconstruction by both transaction count and owned
+/// datom/value bytes. A single historical transaction remains indivisible:
+/// checkpoint on either side rather than splitting its semantics.
+fn legacy_receipt_checkpoints(log: &LoadedBackupLog) -> Result<BTreeSet<u64>, SemanticError> {
+    let Some(last) = log
+        .entries
+        .iter()
+        .rev()
+        .find(|entry| entry.request.request_kind == 1)
+    else {
+        return Ok(BTreeSet::new());
+    };
+    let through = last.transaction.basis_t - 1;
+    let mut checkpoints = BTreeSet::from([0]);
+    let mut count = 0_usize;
+    let mut bytes = 0_u64;
+    let mut datoms = 0_u64;
+    for entry in log
+        .entries
+        .iter()
+        .take_while(|entry| entry.transaction.basis_t <= through)
+    {
+        let transaction = &entry.transaction;
+        let size = transaction.tx_data.iter().fold(
+            crate::encode_transaction(transaction)?.len() as u64,
+            |total, datom| total.saturating_add(datom.retained_bytes()),
+        );
+        let width = transaction.tx_data.len() as u64;
+        if count > 0
+            && (count == RESTORE_BATCH_ROWS
+                || bytes.saturating_add(size) > LEGACY_RECEIPT_TAIL_BYTES
+                || datoms.saturating_add(width) > LEGACY_RECEIPT_TAIL_DATOMS)
+        {
+            checkpoints.insert(transaction.basis_t - 1);
+            count = 0;
+            bytes = 0;
+            datoms = 0;
+        }
+        count += 1;
+        bytes = bytes.saturating_add(size);
+        datoms = datoms.saturating_add(width);
+        if count == RESTORE_BATCH_ROWS
+            || bytes >= LEGACY_RECEIPT_TAIL_BYTES
+            || datoms >= LEGACY_RECEIPT_TAIL_DATOMS
+        {
+            checkpoints.insert(transaction.basis_t);
+            count = 0;
+            bytes = 0;
+            datoms = 0;
+        }
+    }
+    checkpoints.insert(through);
+    Ok(checkpoints)
+}
+
+// A separate owned session gives pin cleanup an unambiguous failure boundary:
+// dropping it releases every transferred lock even if SQL unlock fails. It
+// never contaminates the reusable PortableBackup binding client.
+struct RestoreScratchPins {
+    client: Client,
+    keys: Vec<i64>,
+}
+
+impl RestoreScratchPins {
+    fn upload(
+        &mut self,
+        store: &mut PostgresTreeStore,
+        build: &crate::peer::FullNativeTreeBuild,
+    ) -> Result<(), SemanticError> {
+        debug_assert!(self.keys.len() < RESTORE_SCRATCH_PINS);
+        let hash = sha256(&build.manifest.encode()?);
+        let nodes = build.nodes.iter().map(|(hash, _)| *hash).collect();
+        // This is an archive upload, not the normal publication chain. Its
+        // deterministic private coordinate must survive unrelated indexing
+        // progress between an interrupted restore and its retry.
+        let revision = build.manifest.publication_revision - 1;
+        store.begin_build_intent(
+            &build.manifest.database_id,
+            build.manifest.excision_generation,
+            revision,
+            hash,
+            &nodes,
+        )?;
+        let staged = (|| {
+            let key = crate::tree_store::tree_build_advisory_key(&hash);
+            self.client
+                .query_one("SELECT pg_advisory_lock_shared($1)", &[&key])
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-scratch-pin", error)
+                })?;
+            self.keys.push(key);
+            store.insert_nodes(
+                build.nodes.iter().map(|(hash, bytes)| (*hash, bytes)),
+                store.node_upload_limits(),
+            )?;
+            Ok(())
+        })();
+        let release = store.release_build_intent();
+        staged?;
+        release?;
+        #[cfg(test)]
+        RESTORE_SCRATCH_PROBE.with(|probe| {
+            if let Some(probe) = probe.borrow_mut().as_mut() {
+                probe(hash)?;
+            }
+            Ok::<(), SemanticError>(())
+        })?;
+        Ok(())
+    }
+
+    fn clear(&mut self) -> Result<(), SemanticError> {
+        for key in self.keys.drain(..) {
+            if !self
+                .client
+                .query_one("SELECT pg_advisory_unlock_shared($1)", &[&key])
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-scratch-unpin", error)
+                })?
+                .get::<_, bool>(0)
+            {
+                return Err(fault(
+                    "backup/restore-scratch-pin-lost",
+                    "restore scratch upload lost its session pin",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_legacy_receipt_trees(
+    connection: &PostgresConnectionConfig,
+    client: &mut Client,
+    directory: &Path,
+    manifest: &Manifest,
+    log: &LoadedBackupLog,
+    prepared: &PreparedRestore,
+    target_database_id: &str,
+    target_generation: u64,
+) -> Result<(), SemanticError> {
+    let checkpoints = legacy_receipt_checkpoints(log)?;
+    if checkpoints.is_empty() {
+        return Ok(());
+    }
+    let mut offset = request_base_trees(log).len();
+    let mut next_revision = || {
+        let revision = request_base_archive_revision(offset)?;
+        offset += 1;
+        Ok::<_, SemanticError>(revision)
+    };
+    let genesis = Database::from_genesis(decode_genesis(&read_object(
+        directory,
+        manifest.genesis_hash,
+    )?)?)?;
+    let (mut builder, first) = crate::peer::RestoreTreeBuilder::new(
+        target_database_id,
+        target_generation,
+        manifest.genesis_hash,
+        &genesis,
+        next_revision()?,
+    )?;
+    let mut store = PostgresTreeStore::connect_configured(connection)?;
+    let mut scratch = RestoreScratchPins {
+        client: connection.connect_for("backup/restore-scratch-connect")?,
+        keys: Vec::new(),
+    };
+    let mut persist = |build: crate::peer::FullNativeTreeBuild,
+                       archive: bool,
+                       store: &mut PostgresTreeStore|
+     -> Result<(), SemanticError> {
+        scratch.upload(store, &build)?;
+        if archive || scratch.keys.len() == RESTORE_SCRATCH_PINS {
+            let revision = build.manifest.publication_revision;
+            restore_request_base_archive_from_nodes(
+                connection,
+                client,
+                manifest,
+                target_database_id,
+                target_generation,
+                revision,
+                build.manifest,
+                &[],
+                &mut |hash| {
+                    store.load_node(*hash)?.ok_or_else(|| {
+                        fault(
+                            "backup/restore-scratch-node-missing",
+                            "staged receipt checkpoint node is missing",
+                        )
+                    })
+                },
+            )?;
+            // A complete generation-owned archive now protects every reused
+            // descendant, including earlier projection-step output.
+            scratch.clear()?;
+        }
+        Ok(())
+    };
+    persist(first, true, &mut store)?;
+    builder.finish_upload(&mut store)?;
+    let mut previous = manifest.genesis_hash;
+    let mut tail = Vec::new();
+    let through = *checkpoints.last().expect("nonempty checkpoints");
+    for row in prepared
+        .rows
+        .iter()
+        .take_while(|row| row.basis_t <= through)
+    {
+        let content = LineageTransactionContent::decode(&row.content_payload)?;
+        let mut transaction = content.to_transaction(previous);
+        transaction.database_id = target_database_id.to_owned();
+        let hash = crate::log_generation::generation_transaction_hash(
+            &manifest.lineage_id,
+            target_generation,
+            row.basis_t,
+            previous,
+            row.content_hash,
+            row.state_hash,
+            row.eidx_frontier,
+        )?;
+        tail.push((hash, transaction));
+        previous = hash;
+        if checkpoints.contains(&row.basis_t) {
+            let build = builder.advance(&mut store, &tail, row.state_hash, next_revision()?)?;
+            let complete = !builder.has_pending_projection();
+            persist(build, complete, &mut store)?;
+            builder.finish_upload(&mut store)?;
+            while builder.has_pending_projection() {
+                let build = builder.advance_projection(&mut store, next_revision()?)?;
+                let complete = !builder.has_pending_projection();
+                persist(build, complete, &mut store)?;
+                builder.finish_upload(&mut store)?;
+            }
+            tail.clear();
+        }
+    }
+    debug_assert!(tail.is_empty());
+    debug_assert_eq!(builder.stats().tail_transactions, through);
+    #[cfg(test)]
+    eprintln!(
+        "legacy receipt archive restore: checkpoints={}, builder={:?}, tree_store_only={:?}",
+        checkpoints.len(),
+        builder.stats(),
+        store.stats()
+    );
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn restore_request_base_archive(
     connection: &PostgresConnectionConfig,
@@ -3746,6 +4082,31 @@ fn restore_request_base_archive(
     archive_revision: u64,
     source: PersistentTreeManifest,
     request_keys: &[Digest],
+) -> Result<(), SemanticError> {
+    restore_request_base_archive_from_nodes(
+        connection,
+        binding_client,
+        backup,
+        target_database_id,
+        target_generation,
+        archive_revision,
+        source,
+        request_keys,
+        &mut |hash| read_object(directory, *hash),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn restore_request_base_archive_from_nodes(
+    connection: &PostgresConnectionConfig,
+    binding_client: &mut Client,
+    backup: &Manifest,
+    target_database_id: &str,
+    target_generation: u64,
+    archive_revision: u64,
+    source: PersistentTreeManifest,
+    request_keys: &[Digest],
+    load_node: &mut dyn FnMut(&Digest) -> Result<Vec<u8>, SemanticError>,
 ) -> Result<(), SemanticError> {
     let generation_sql = sql_u64(target_generation, "restored request-base generation")?;
     let basis_sql = sql_u64(source.basis_t, "restored request-base basis")?;
@@ -3808,7 +4169,7 @@ fn restore_request_base_archive(
         let root_hash = tree_root.descriptor.root_hash;
         let expected_root_bytes = tree_root.root_bytes;
         let validated = persistent_tree::validate_tree_streaming(&tree_root.descriptor, |hash| {
-            let payload = read_object(directory, *hash)?;
+            let payload = load_node(hash)?;
             if *hash == root_hash && payload.len() as u64 != expected_root_bytes {
                 return Err(fault(
                     "backup/tree-root-bytes",
@@ -3903,7 +4264,7 @@ fn restore_request_base_archive(
                 })?;
         }
         let mut store = PostgresTreeStore::connect_configured(connection)?;
-        upload_backup_tree_nodes(&mut store, directory, &reachable)?;
+        upload_restored_tree_nodes(&mut store, &reachable, load_node)?;
         for root in &roots {
             let order: i16 = match root.order {
                 crate::IndexOrder::Eavt => 0,
@@ -4702,7 +5063,12 @@ fn load_backup_log(
             let mut prior_frontier =
                 Database::from_genesis(decode_genesis(&genesis)?)?.eidx_frontier();
             for entry in &entries {
-                validate_backup_receipt(&entry.transaction, &entry.request, prior_frontier)?;
+                validate_backup_receipt(
+                    &entry.transaction,
+                    &entry.request,
+                    prior_frontier,
+                    entry.reserved_frontier,
+                )?;
                 prior_frontier = entry.transaction.eidx_frontier;
             }
             1
@@ -4770,6 +5136,7 @@ fn validate_backup_receipt(
     transaction: &DurableTransaction,
     request: &BackupRequestRecord,
     prior_frontier: u64,
+    reserved_frontier: Option<u64>,
 ) -> Result<(), SemanticError> {
     crate::identity::validate_frontier(prior_frontier)?;
     if request.receipt_tempids.is_empty() {
@@ -4779,6 +5146,14 @@ fn validate_backup_receipt(
     for entity in request.receipt_tempids.values().copied() {
         let partition = crate::eid_to_part(entity)?;
         let index = crate::eid_to_eidx(entity)?;
+        if partition == crate::DB_PARTITION
+            && reserved_frontier.is_some_and(|frontier| index >= frontier)
+        {
+            return Err(fault(
+                "backup/request-chain",
+                "receipt names a reserved identity beyond its authenticated checkpoint",
+            ));
+        }
         let valid = if partition == crate::TX_PARTITION {
             entity == crate::t_to_tx(transaction.basis_t)?
         } else {
@@ -5009,19 +5384,8 @@ fn verify_tree_backup(
     database: &Database,
     expected_state_hash: Digest,
 ) -> Result<usize, SemanticError> {
-    use crate::operations::{
-        derive_index_projection, same_stored_datoms, validate_physical_history_projection,
-    };
-    use crate::{IndexOrder, View};
     let manifest =
         decode_bound_tree_manifest(directory, backup, log, tree, Some(expected_state_hash))?;
-    if database.basis_t() != manifest.basis_t {
-        return Err(fault(
-            "backup/tree-basis",
-            "tree verification requires its exact replayed database value",
-        ));
-    }
-    crate::peer::validate_avet_work_directions(&manifest.pending_avet, database.schema())?;
     let mut legacy_reachable = tree.legacy_node_hashes.as_ref().map(|_| BTreeSet::new());
     let mut objects_read: usize = 1;
     let mut load = |root: &crate::ManifestTree| {
@@ -5032,6 +5396,66 @@ fn verify_tree_backup(
         }
         Ok::<_, SemanticError>(datoms)
     };
+    verify_tree_projection_semantics(&manifest, database, &mut load)?;
+    if let (Some(expected), Some(reachable)) = (&tree.legacy_node_hashes, legacy_reachable)
+        && expected.as_slice() != reachable.into_iter().collect::<Vec<_>>()
+    {
+        return Err(fault(
+            "backup/tree-node-set",
+            "legacy tree node list is not its exact reachable closure",
+        ));
+    }
+    Ok(objects_read)
+}
+
+/// A restored legacy checkpoint has no portable expected root hash. Its
+/// structural closure and coordinate labels alone cannot prove agreement
+/// with the canonical log. Use the same semantic comparison as deep backup
+/// verification, against the caller's exact forward-replayed database value.
+/// The caller holds the generation/root lifetime fence during these reads.
+fn verify_restored_tree_semantics<C: crate::sql_io::GenericClient>(
+    client: &mut C,
+    manifest: &PersistentTreeManifest,
+    database: &Database,
+) -> Result<(), SemanticError> {
+    verify_tree_projection_semantics(manifest, database, &mut |root| {
+        read_validated_tree_with_loader(root, &mut |hash| {
+            client
+                .query_opt(
+                    "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+                    &[&&hash[..]],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-semantic-tree-node", error)
+                })?
+                .map(|row| row.get(0))
+                .ok_or_else(|| {
+                    fault(
+                        "backup/restore-semantic-tree-node",
+                        "restored checkpoint references a missing semantic tree node",
+                    )
+                })
+        })
+        .map(|(datoms, _)| datoms)
+    })
+}
+
+fn verify_tree_projection_semantics(
+    manifest: &PersistentTreeManifest,
+    database: &Database,
+    load: &mut dyn FnMut(&crate::ManifestTree) -> Result<Vec<crate::Datom>, SemanticError>,
+) -> Result<(), SemanticError> {
+    use crate::operations::{
+        derive_index_projection, same_stored_datoms, validate_physical_history_projection,
+    };
+    use crate::{IndexOrder, View};
+    if database.basis_t() != manifest.basis_t {
+        return Err(fault(
+            "backup/tree-basis",
+            "tree verification requires its exact replayed database value",
+        ));
+    }
+    crate::peer::validate_avet_work_directions(&manifest.pending_avet, database.schema())?;
     let current = database.datoms(View::Current, IndexOrder::Eavt);
     let replayed_history = database.datoms(View::History, IndexOrder::Eavt);
     let physical_history = load(
@@ -5040,7 +5464,7 @@ fn verify_tree_backup(
             .expect("manifest validates eight roots"),
     )?;
     validate_physical_history_projection(&replayed_history, &physical_history, database.basis_t())
-        .map_err(|error| tree_semantic_error(&manifest, IndexOrder::Eavt, true, error.message))?;
+        .map_err(|error| tree_semantic_error(manifest, IndexOrder::Eavt, true, error.message))?;
     for root in &manifest.trees {
         let order = root.descriptor.order;
         let history = root.descriptor.history;
@@ -5058,7 +5482,7 @@ fn verify_tree_backup(
                 &replayed_history,
                 history,
             )
-            .map_err(|error| tree_semantic_error(&manifest, order, history, error.message))?;
+            .map_err(|error| tree_semantic_error(manifest, order, history, error.message))?;
             let pending = |attribute| {
                 manifest
                     .pending_avet
@@ -5070,7 +5494,7 @@ fn verify_tree_backup(
         }
         if !same_stored_datoms(&observed, &expected) {
             return Err(tree_semantic_error(
-                &manifest,
+                manifest,
                 order,
                 history,
                 format!(
@@ -5081,15 +5505,7 @@ fn verify_tree_backup(
             ));
         }
     }
-    if let (Some(expected), Some(reachable)) = (&tree.legacy_node_hashes, legacy_reachable)
-        && expected.as_slice() != reachable.into_iter().collect::<Vec<_>>()
-    {
-        return Err(fault(
-            "backup/tree-node-set",
-            "legacy tree node list is not its exact reachable closure",
-        ));
-    }
-    Ok(objects_read)
+    Ok(())
 }
 
 /// Authenticate the entire physical graph without collecting its datoms or
@@ -5144,9 +5560,22 @@ fn read_validated_backup_tree(
     directory: &Path,
     root: &crate::ManifestTree,
 ) -> Result<(Vec<crate::Datom>, persistent_tree::StreamingTreeValidation), SemanticError> {
+    read_validated_tree_with_loader(root, &mut |hash| read_object(directory, hash))
+}
+
+fn read_validated_tree_with_loader(
+    root: &crate::ManifestTree,
+    load_node: &mut dyn FnMut(Digest) -> Result<Vec<u8>, SemanticError>,
+) -> Result<(Vec<crate::Datom>, persistent_tree::StreamingTreeValidation), SemanticError> {
     let mut datoms = Vec::new();
     let validated = persistent_tree::validate_tree_streaming(&root.descriptor, |hash| {
-        let payload = read_backup_tree_node(directory, root, *hash)?;
+        let payload = load_node(*hash)?;
+        if *hash == root.descriptor.root_hash && payload.len() as u64 != root.root_bytes {
+            return Err(fault(
+                "backup/tree-root-bytes",
+                "tree root size disagrees with its manifest",
+            ));
+        }
         if let persistent_tree::TreeNode::Leaf(leaf) =
             persistent_tree::decode_tree_node(hash, &payload)?
         {
@@ -5243,6 +5672,7 @@ fn tree_semantic_error(
 /// the active generation. This is part of ambiguous-acknowledgement replay:
 /// merely matching the log head is insufficient if its db-before values can
 /// no longer be reopened exactly.
+#[allow(clippy::too_many_arguments)]
 fn match_restored_request_base_archives<C: crate::sql_io::GenericClient>(
     client: &mut C,
     directory: &Path,
@@ -5250,6 +5680,7 @@ fn match_restored_request_base_archives<C: crate::sql_io::GenericClient>(
     log: &LoadedBackupLog,
     target_database_id: &str,
     target_generation: u64,
+    authenticated_archive_count: Option<u64>,
 ) -> Result<BTreeMap<Digest, Digest>, SemanticError> {
     let generation_sql = sql_u64(target_generation, "restored request-base generation")?;
     let mut portable_hashes = BTreeSet::new();
@@ -5281,7 +5712,7 @@ fn match_restored_request_base_archives<C: crate::sql_io::GenericClient>(
             crate::postgres::postgres_error("backup/restore-check-request-base-counts", error)
         })?;
     if unsigned(stored_counts.get(0), "restored request-base archive count")?
-        != portable_hashes.len() as u64
+        != authenticated_archive_count.unwrap_or(portable_hashes.len() as u64)
         || unsigned(stored_counts.get(1), "restored request-base binding count")?
             != expected_bindings
     {
@@ -5514,7 +5945,76 @@ fn match_restored_request_base_archives<C: crate::sql_io::GenericClient>(
     Ok(matched)
 }
 
-fn target_matches_backup<C: crate::sql_io::GenericClient>(
+fn target_matches_backup(
+    client: &mut Client,
+    directory: &Path,
+    manifest: &Manifest,
+    log: &LoadedBackupLog,
+    completed_excisions: &[(u64, u64)],
+    target_database_id: &str,
+    expected_database: &Database,
+) -> Result<Option<MatchedRestoreTarget>, SemanticError> {
+    let mut transaction = client
+        .transaction()
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-begin", error))?;
+    let Some(row) = transaction
+        .query_opt(
+            "SELECT log_generation FROM atomic_heads WHERE database_id=$1",
+            &[&target_database_id],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-check-generation", error)
+        })?
+    else {
+        return Ok(None);
+    };
+    let generation: i64 = row.get(0);
+    let key: Option<i64> = transaction
+        .query_one(
+            "SELECT atomic_log_generation_pin_key($1,$2)",
+            &[&target_database_id, &generation],
+        )
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-pin-key", error))?
+        .get(0);
+    let Some(key) = key else {
+        return Ok(None);
+    };
+    transaction
+        .query_one("SELECT pg_advisory_xact_lock_shared($1)", &[&key])
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-pin", error))?;
+    if !transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM atomic_heads WHERE database_id=$1 AND log_generation=$2)",
+            &[&target_database_id, &generation],
+        )
+        .map_err(|error| {
+            crate::postgres::postgres_error("backup/restore-check-pinned-generation", error)
+        })?
+        .get::<_, bool>(0)
+    {
+        return Ok(None);
+    }
+    // Keep this transaction-scoped shared generation fence through every
+    // historical archive read. An autocommit advisory-xact call would release
+    // the fence before its first tree node was authenticated.
+    let matched = target_matches_backup_pinned(
+        &mut transaction,
+        directory,
+        manifest,
+        log,
+        completed_excisions,
+        target_database_id,
+        expected_database,
+        generation,
+    )?;
+    transaction
+        .commit()
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-commit", error))?;
+    Ok(matched)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn target_matches_backup_pinned<C: crate::sql_io::GenericClient>(
     client: &mut C,
     directory: &Path,
     manifest: &Manifest,
@@ -5522,6 +6022,7 @@ fn target_matches_backup<C: crate::sql_io::GenericClient>(
     completed_excisions: &[(u64, u64)],
     target_database_id: &str,
     expected_database: &Database,
+    pinned_generation: i64,
 ) -> Result<Option<MatchedRestoreTarget>, SemanticError> {
     let Some(catalog) = client
         .query_opt(
@@ -5553,7 +6054,10 @@ fn target_matches_backup<C: crate::sql_io::GenericClient>(
     let target_basis = unsigned(head.get(0), "restored head basis")?;
     let target_head_hash = digest(head.get(1), "restored head hash")?;
     let target_generation = unsigned(head.get(2), "restored log generation")?;
-    if target_generation == 0 || target_basis != manifest.basis {
+    if target_generation == 0
+        || target_basis != manifest.basis
+        || head.get::<_, i64>(2) != pinned_generation
+    {
         return Ok(None);
     }
     let generation_sql = sql_u64(target_generation, "restored log generation")?;
@@ -5694,6 +6198,142 @@ fn target_matches_backup<C: crate::sql_io::GenericClient>(
     {
         return Ok(None);
     }
+    let legacy_checkpoints = legacy_receipt_checkpoints(log)?;
+    let mut authenticated_archive_count = None;
+    if !legacy_checkpoints.is_empty() {
+        let mut complete_bases = BTreeSet::new();
+        let mut legacy_trees = BTreeMap::<u64, Vec<PersistentTreeManifest>>::new();
+        let mut newest_bases = BTreeSet::new();
+        let mut archive_count = 0;
+        for row in client.query(
+            "SELECT archive.basis_t, archive.payload, archive.manifest_hash, archive.archive_revision, \
+                    archive.tx_hash, archive.state_hash, archive.eidx_frontier, archive.manifest_version, \
+                    archive.expected_node_count, archive.node_set_hash FROM atomic_request_base_archives archive \
+             JOIN atomic_request_base_archive_completions complete USING (manifest_hash) \
+             JOIN atomic_semantic_commitment_roots semantic \
+               ON semantic.database_id=archive.database_id AND semantic.generation=archive.generation \
+              AND semantic.basis_t=archive.basis_t AND semantic.tx_hash=archive.tx_hash \
+              AND semantic.state_hash=archive.state_hash AND semantic.eidx_frontier=archive.eidx_frontier \
+              AND semantic.commitment_version=2 \
+             WHERE archive.database_id=$1 AND archive.generation=$2 ORDER BY archive.basis_t DESC, archive.archive_revision ASC",
+            &[&target_database_id, &generation_sql],
+        ).map_err(|error| crate::postgres::postgres_error("backup/restore-check-legacy-archives", error))? {
+            let basis = unsigned(row.get(0), "legacy receipt archive basis")?;
+            let payload: Vec<u8> = row.get(1);
+            let archive = PersistentTreeManifest::decode(&payload)?;
+            let hash = digest(row.get(2), "legacy receipt archive hash")?;
+            if sha256(&payload) != hash || archive.database_id != target_database_id
+                || archive.excision_generation != target_generation || archive.basis_t != basis
+                || archive.publication_revision != unsigned(row.get(3), "legacy receipt archive revision")?
+                || archive.tx_hash != digest(row.get(4), "legacy receipt archive transaction")?
+                || archive.state_hash != digest(row.get(5), "legacy receipt archive state")?
+                || archive.eidx_frontier != unsigned(row.get(6), "legacy receipt archive frontier")?
+                || PersistentTreeManifest::encoded_version(&payload)? != row.get::<_, i16>(7) {
+                return Err(fault("backup/restore-check-legacy-archive", "legacy receipt archive differs from its authenticated coordinate"));
+            }
+            validate_legacy_receipt_archive(client, &archive, hash, unsigned(row.get(8), "legacy receipt archive nodes")?, digest(row.get(9), "legacy receipt archive node set")?)?;
+            archive_count += 1;
+            if newest_bases.insert(basis) && legacy_checkpoints.contains(&basis) && archive.pending_avet.is_empty() {
+                complete_bases.insert(basis);
+            }
+            legacy_trees.entry(basis).or_default().push(archive);
+        }
+        let roots: i64 = client
+            .query_one(
+                "SELECT count(*) FROM atomic_semantic_commitment_roots WHERE database_id=$1 \
+             AND generation=$2 AND basis_t<=$3 AND commitment_version=2",
+                &[
+                    &target_database_id,
+                    &generation_sql,
+                    &sql_u64(target_basis, "legacy receipt endpoint")?,
+                ],
+            )
+            .map_err(|error| {
+                crate::postgres::postgres_error("backup/restore-check-legacy-coordinates", error)
+            })?
+            .get(0);
+        if complete_bases != legacy_checkpoints || roots as u64 != target_basis + 1 {
+            // Older restores could publish a matching canonical generation
+            // without historical receipt read bases. An active generation is
+            // not an archive-upload owner: repair by staging another exactly
+            // equivalent generation, never by bypassing that ownership guard.
+            return Ok(None);
+        }
+        let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
+        let mut replay = BackupAllocationReplay::new(&database)?;
+        let mut previous = manifest.genesis_hash;
+        let verify_coordinate =
+            |client: &mut C, database: &Database, tx_hash| -> Result<(), SemanticError> {
+                let coordinate = crate::persistent_commitment::load_persistent_coordinate(
+                    client,
+                    target_database_id,
+                    target_generation,
+                    database.basis_t(),
+                )?
+                .ok_or_else(|| {
+                    fault(
+                        "backup/restore-check-legacy-coordinate",
+                        "legacy receipt semantic coordinate is missing",
+                    )
+                })?;
+                if coordinate.tx_hash != tx_hash
+                    || coordinate.state_hash != checkpoint_state_hash(database)?
+                    || coordinate.eidx_frontier != database.eidx_frontier()
+                {
+                    return Err(fault(
+                        "backup/restore-check-legacy-coordinate",
+                        "legacy receipt semantic coordinate differs from the authoritative replay",
+                    ));
+                }
+                Ok(())
+            };
+        verify_coordinate(client, &database, previous)?;
+        if let Some(trees) = legacy_trees.remove(&0) {
+            for tree in trees {
+                verify_restored_tree_semantics(client, &tree, &database)?;
+            }
+        }
+        for entry in &log.entries {
+            let content = if let Some(hash) = entry.content_hash {
+                LineageTransactionContent::decode(&read_object(directory, hash)?)?
+            } else {
+                LineageTransactionContent::from_transaction(
+                    &manifest.lineage_id,
+                    database.eidx_frontier(),
+                    &entry.transaction,
+                )?
+            };
+            let durable = content.to_transaction(previous);
+            database = replay.apply(
+                &database,
+                &durable,
+                content.reserved_frontier,
+                entry.request.request_kind == 0,
+            )?;
+            previous = crate::log_generation::generation_transaction_hash(
+                &manifest.lineage_id,
+                target_generation,
+                database.basis_t(),
+                previous,
+                sha256(&content.encode()?),
+                checkpoint_state_hash(&database)?,
+                database.eidx_frontier(),
+            )?;
+            verify_coordinate(client, &database, previous)?;
+            if let Some(trees) = legacy_trees.remove(&database.basis_t()) {
+                for tree in trees {
+                    verify_restored_tree_semantics(client, &tree, &database)?;
+                }
+            }
+        }
+        if !legacy_trees.is_empty() {
+            return Err(fault(
+                "backup/restore-check-legacy-archive",
+                "receipt archive is outside the authoritative restored prefix",
+            ));
+        }
+        authenticated_archive_count = Some(archive_count);
+    }
     // A different legitimate same-basis information generation can have a
     // different archive set. First establish exact canonical log/request
     // equality; only then is a missing/different archive a corrupt proof of
@@ -5705,6 +6345,7 @@ fn target_matches_backup<C: crate::sql_io::GenericClient>(
         log,
         target_database_id,
         target_generation,
+        authenticated_archive_count,
     )?;
     if request_base_bindings.into_iter().any(|(actual, portable)| {
         actual != portable.and_then(|hash| restored_request_bases.get(&hash).copied())
@@ -5795,6 +6436,75 @@ fn target_matches_backup<C: crate::sql_io::GenericClient>(
         eidx_frontier: expected_database.eidx_frontier(),
         genesis_hash: manifest.genesis_hash,
     }))
+}
+
+fn validate_legacy_receipt_archive<C: crate::sql_io::GenericClient>(
+    client: &mut C,
+    archive: &PersistentTreeManifest,
+    hash: Digest,
+    expected_count: u64,
+    expected_set: Digest,
+) -> Result<(), SemanticError> {
+    let roots = client.query("SELECT index_order,history,root_hash,datom_count,encoded_bytes FROM atomic_request_base_archive_roots WHERE manifest_hash=$1 ORDER BY history,index_order", &[&&hash[..]])
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-legacy-roots", error))?;
+    if roots.len() != archive.trees.len() {
+        return Err(fault(
+            "backup/restore-check-legacy-roots",
+            "legacy receipt archive root projection is incomplete",
+        ));
+    }
+    let mut reachable = BTreeSet::new();
+    for (row, tree) in roots.into_iter().zip(&archive.trees) {
+        if decode_tree_order(row.get(0))? != tree.descriptor.order
+            || row.get::<_, bool>(1) != tree.descriptor.history
+            || digest(row.get(2), "legacy archive root")? != tree.descriptor.root_hash
+            || unsigned(row.get(3), "legacy archive root count")? != tree.descriptor.count
+            || unsigned(row.get(4), "legacy archive root bytes")? != tree.root_bytes
+        {
+            return Err(fault(
+                "backup/restore-check-legacy-roots",
+                "legacy receipt archive root projection differs from its manifest",
+            ));
+        }
+        let validated = persistent_tree::validate_tree_streaming(&tree.descriptor, |node_hash| {
+            let payload: Vec<u8> = client
+                .query_opt(
+                    "SELECT payload FROM atomic_tree_nodes WHERE node_hash=$1",
+                    &[&&node_hash[..]],
+                )
+                .map_err(|error| {
+                    crate::postgres::postgres_error("backup/restore-check-legacy-node", error)
+                })?
+                .ok_or_else(|| {
+                    fault(
+                        "backup/restore-check-legacy-node",
+                        "legacy receipt archive references a missing node",
+                    )
+                })?
+                .get(0);
+            if *node_hash == tree.descriptor.root_hash && payload.len() as u64 != tree.root_bytes {
+                return Err(fault(
+                    "backup/restore-check-legacy-node",
+                    "legacy receipt archive root size differs from its manifest",
+                ));
+            }
+            Ok(payload)
+        })?;
+        reachable.extend(validated.node_hashes);
+    }
+    let planned = client.query("SELECT node_hash FROM atomic_request_base_archive_nodes WHERE manifest_hash=$1 ORDER BY node_hash", &[&&hash[..]])
+        .map_err(|error| crate::postgres::postgres_error("backup/restore-check-legacy-closure", error))?
+        .into_iter().map(|row| digest(row.get(0), "legacy archive planned node")).collect::<Result<BTreeSet<_>, _>>()?;
+    if planned != reachable
+        || expected_count != reachable.len() as u64
+        || expected_set != request_base_archive_node_set_hash(&reachable)
+    {
+        return Err(fault(
+            "backup/restore-check-legacy-closure",
+            "legacy receipt archive membership differs from its complete authenticated closure",
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -7927,7 +8637,8 @@ mod tests {
                 validate_backup_receipt(
                     &log.entries[0].transaction,
                     &invalid,
-                    before.eidx_frontier()
+                    before.eidx_frontier(),
+                    log.entries[0].reserved_frontier,
                 )
                 .unwrap_err()
                 .code,
@@ -7941,7 +8652,8 @@ mod tests {
                 validate_backup_receipt(
                     &log.entries[0].transaction,
                     &invalid,
-                    before.eidx_frontier()
+                    before.eidx_frontier(),
+                    log.entries[0].reserved_frontier,
                 )
                 .unwrap_err()
                 .code,
@@ -7951,6 +8663,84 @@ mod tests {
             drop(guard);
             fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[test]
+    fn legacy_receipt_checkpoint_admission_bounds_count_bytes_and_indivisible_transactions() {
+        let entry = |basis_t, datoms: Vec<crate::Datom>| LoadedBackupEntry {
+            transaction_hash: [0; 32],
+            content_hash: None,
+            reserved_frontier: None,
+            transaction: DurableTransaction {
+                database_id: "fixture".into(),
+                basis_t,
+                previous_hash: [0; 32],
+                eidx_frontier: 1_001,
+                tempids: BTreeMap::new(),
+                tx_data: datoms,
+            },
+            request: BackupRequestRecord {
+                lineage_id: "12345678-1234-4abc-8def-123456789abc".into(),
+                log_generation: 0,
+                basis: basis_t,
+                transaction_hash: [0; 32],
+                previous_hash: [0; 32],
+                request_key_hash: [0; 32],
+                digest: [0; 32],
+                request_kind: 1,
+                base_manifest_hash: None,
+                receipt_tempids: BTreeMap::new(),
+            },
+            legacy_state_hash: None,
+        };
+        let mut log = LoadedBackupLog {
+            entries: (1..=517).map(|basis| entry(basis, Vec::new())).collect(),
+            objects_read: 0,
+        };
+        assert_eq!(
+            legacy_receipt_checkpoints(&log).unwrap(),
+            BTreeSet::from([0, 256, 512, 516])
+        );
+        let datom = crate::Datom {
+            entity: 1_000,
+            attribute: 1_000,
+            value: crate::Value::Long(1),
+            tx: crate::t_to_tx(2).unwrap(),
+            added: true,
+        };
+        log.entries = vec![
+            entry(1, Vec::new()),
+            entry(
+                2,
+                (0..=LEGACY_RECEIPT_TAIL_DATOMS)
+                    .map(|index| crate::Datom {
+                        value: crate::Value::Long(index as i64),
+                        ..datom.clone()
+                    })
+                    .collect(),
+            ),
+            entry(3, Vec::new()),
+            entry(4, Vec::new()),
+        ];
+        assert_eq!(
+            legacy_receipt_checkpoints(&log).unwrap(),
+            BTreeSet::from([0, 1, 2, 3])
+        );
+        log.entries[1].transaction.tx_data = vec![crate::Datom {
+            entity: 1_000,
+            attribute: 1_000,
+            value: crate::Value::String("x".repeat(LEGACY_RECEIPT_TAIL_BYTES as usize)),
+            tx: crate::t_to_tx(2).unwrap(),
+            added: true,
+        }];
+        assert_eq!(
+            legacy_receipt_checkpoints(&log).unwrap(),
+            BTreeSet::from([0, 1, 2, 3])
+        );
+        for entry in &mut log.entries {
+            entry.request.request_kind = 0;
+        }
+        assert!(legacy_receipt_checkpoints(&log).unwrap().is_empty());
     }
 
     #[test]
@@ -8003,28 +8793,98 @@ mod tests {
             ))
             .unwrap();
         let initial = provision_legacy_generation_zero_database(&mut client, "legacy", schema);
-        crate::PostgresMigrator::from_client(client)
-            .migrate()
-            .unwrap();
-        let mut store = PostgresStore::connect(&scoped).unwrap();
         let ops = [TxOp::Add {
             entity: EntityRef::Temp("original-caller-spelling".into()),
             attribute: 1_000,
             value: Value::Long(7).into(),
         }];
-        let committed = store
-            .transact_with_fault(
-                "legacy",
-                "original-request",
-                initial.basis_t(),
-                &ops,
-                1_000,
-                crate::postgres::CommitFault::None,
-            )
+        // Historical fixture construction stays before migration: current
+        // native writers intentionally refuse generation-zero new writes.
+        let first = client.query_one("SELECT tx_hash,payload FROM atomic_transactions WHERE database_id='legacy' AND basis_t=1", &[]).unwrap();
+        let first_hash = digest(first.get(0), "legacy schema transaction").unwrap();
+        let first_payload: Vec<u8> = first.get(1);
+        let legacy_initial = Database::from_genesis(initial.genesis_datoms().to_vec())
+            .unwrap()
+            .apply_committed(&decode_transaction(&first_payload).unwrap())
             .unwrap();
-        let committed_basis = committed.basis_t;
+        let committed = legacy_initial.with(&ops, 1_000).unwrap();
+        let committed_basis = committed.db_after.basis_t();
         let committed_tempids = committed.tempids.clone();
-        drop(committed);
+        let envelope = DurableTransaction {
+            database_id: "legacy".into(),
+            basis_t: committed_basis,
+            previous_hash: first_hash,
+            eidx_frontier: committed.db_after.eidx_frontier(),
+            tempids: committed.tempids,
+            tx_data: committed.tx_data,
+        };
+        let payload = crate::encode_transaction(&envelope).unwrap();
+        let tx_hash = crate::transaction_hash(&payload);
+        let state_hash = checkpoint_state_hash(&committed.db_after).unwrap();
+        let request_hash = crate::request_digest(&ops, 1_000, initial.basis_t()).unwrap();
+        let mut historical = client.transaction().unwrap();
+        historical.execute("INSERT INTO atomic_transactions(database_id,basis_t,previous_hash,tx_hash,payload,state_hash) VALUES ('legacy',2,$1,$2,$3,$4)", &[&&first_hash[..], &&tx_hash[..], &payload, &&state_hash[..]]).unwrap();
+        historical.execute("INSERT INTO atomic_requests(database_id,request_key,request_digest,basis_t,tx_hash) VALUES ('legacy','original-request',$1,2,$2)", &[&&request_hash[..], &&tx_hash[..]]).unwrap();
+        historical.execute("UPDATE atomic_heads SET basis_t=2,tx_hash=$1 WHERE database_id='legacy' AND basis_t=1", &[&&tx_hash[..]]).unwrap();
+        historical.commit().unwrap();
+        let original_entity = committed_tempids["original-caller-spelling"];
+        let mut last_before = committed.db_after.clone();
+        let mut last_after = committed.db_after.clone();
+        let mut last_ops = Vec::new();
+        let mut last_request_key = String::new();
+        let mut last_instant = 1_000;
+        let mut previous_hash = tx_hash;
+        let mut middle = None;
+        for step in 0..515 {
+            let mut historical = client.transaction().unwrap();
+            last_before = last_after;
+            last_ops = vec![TxOp::Add {
+                entity: EntityRef::Id(original_entity),
+                attribute: 1_000,
+                value: Value::Long(8 + step).into(),
+            }];
+            if step == 512 {
+                let mut indexed = last_before.schema().attribute(1_000).unwrap().clone();
+                indexed.indexed = true;
+                last_ops.push(TxOp::AlterAttribute(indexed));
+            }
+            last_instant = 1_001 + step;
+            last_request_key = format!("later-request-{step}");
+            let next = last_before.with(&last_ops, last_instant).unwrap();
+            let envelope = DurableTransaction {
+                database_id: "legacy".into(),
+                basis_t: next.db_after.basis_t(),
+                previous_hash,
+                eidx_frontier: next.db_after.eidx_frontier(),
+                tempids: next.tempids,
+                tx_data: next.tx_data,
+            };
+            let payload = crate::encode_transaction(&envelope).unwrap();
+            let next_hash = crate::transaction_hash(&payload);
+            let next_state = checkpoint_state_hash(&next.db_after).unwrap();
+            let next_digest =
+                crate::request_digest(&last_ops, last_instant, last_before.basis_t()).unwrap();
+            let basis = i64::try_from(next.db_after.basis_t()).unwrap();
+            historical.execute("INSERT INTO atomic_transactions(database_id,basis_t,previous_hash,tx_hash,payload,state_hash) VALUES ('legacy',$1,$2,$3,$4,$5)", &[&basis, &&previous_hash[..], &&next_hash[..], &payload, &&next_state[..]]).unwrap();
+            historical.execute("INSERT INTO atomic_requests(database_id,request_key,request_digest,basis_t,tx_hash) VALUES ('legacy',$1,$2,$3,$4)", &[&last_request_key, &&next_digest[..], &basis, &&next_hash[..]]).unwrap();
+            assert_eq!(historical.execute("UPDATE atomic_heads SET basis_t=$1,tx_hash=$2 WHERE database_id='legacy' AND basis_t=$3", &[&basis, &&next_hash[..], &(basis - 1)]).unwrap(), 1);
+            historical.commit().unwrap();
+            previous_hash = next_hash;
+            last_after = next.db_after;
+            if step == 256 {
+                middle = Some((
+                    last_request_key.clone(),
+                    last_ops.clone(),
+                    last_instant,
+                    last_before.clone(),
+                    last_after.clone(),
+                ));
+            }
+        }
+        crate::PostgresMigrator::from_client(client)
+            .migrate()
+            .unwrap();
+        let mut store = PostgresStore::connect(&scoped).unwrap();
         let original = store.recover("legacy").unwrap();
         let mut inspect = client_in_schema(&connection, &isolated);
         let before_rows = inspect.query("SELECT basis_t,tx_hash,payload FROM atomic_transactions WHERE database_id='legacy' ORDER BY basis_t", &[]).unwrap().into_iter().map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1), row.get::<_, Vec<u8>>(2))).collect::<Vec<_>>();
@@ -8049,9 +8909,85 @@ mod tests {
         let point = backup.backup_database("legacy", &directory).unwrap();
         assert_eq!(point.log_generation, 0);
         PortableBackup::verify_backup_point(&directory, point.basis_t, 0, true).unwrap();
+        let probe_count = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed_count = std::rc::Rc::clone(&probe_count);
+        let mut garbage = client_in_schema(&connection, &isolated);
+        RESTORE_SCRATCH_PROBE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |hash| {
+                assert!(!garbage.query_one("SELECT atomic_collect_tree_build_intent($1,0,4096)", &[&&hash[..]]).unwrap().get::<_, bool>(0));
+                let retained = garbage.query_one("SELECT expected_node_count, (SELECT count(*) FROM atomic_tree_build_intent_nodes planned JOIN atomic_tree_nodes stored USING(node_hash) WHERE planned.manifest_hash=$1) FROM atomic_tree_build_intents WHERE manifest_hash=$1", &[&&hash[..]]).unwrap();
+                assert_eq!(retained.get::<_, i64>(0), retained.get::<_, i64>(1));
+                observed_count.set(observed_count.get() + 1);
+                Ok(())
+            }));
+        });
+        struct ClearProbe;
+        impl Drop for ClearProbe {
+            fn drop(&mut self) {
+                RESTORE_SCRATCH_PROBE.with(|slot| slot.borrow_mut().take());
+            }
+        }
+        let _clear_probe = ClearProbe;
+        let restore_started = std::time::Instant::now();
+        let restore_io = crate::OperationContext::new(crate::OperationKind::Administration);
+        let restore_scope = restore_io.enter();
+        let interrupted = backup
+            .restore_backup_with_fault(
+                &directory,
+                point.basis_t,
+                "legacy",
+                RestoreFault::BeforeCommit,
+            )
+            .unwrap_err();
+        assert_eq!(interrupted.code, "backup/restore-before-activation");
+        assert!(probe_count.get() >= 4);
+        let intent_hashes = inspect
+            .query(
+                "SELECT manifest_hash FROM atomic_tree_build_intents WHERE database_id='legacy'",
+                &[],
+            )
+            .unwrap();
+        let mut teardown = inspect.transaction().unwrap();
+        for row in intent_hashes {
+            let key = crate::tree_store::tree_build_advisory_key(
+                &digest(row.get(0), "scratch intent").unwrap(),
+            );
+            assert!(
+                teardown
+                    .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                    .unwrap()
+                    .get::<_, bool>(0),
+                "failed restore leaked a scratch session pin"
+            );
+        }
+        teardown.rollback().unwrap();
         let restored = backup
             .restore_backup_point(&directory, point.basis_t, 0, "legacy")
             .unwrap();
+        drop(restore_scope);
+        let restore_sql = restore_io.snapshot();
+        eprintln!(
+            "gen0 restore interrupted+retry: basis={}, elapsed={:?}, zero-age GC probes={}, attributed_driver_calls={}, returned_cell_bytes={}",
+            point.basis_t,
+            restore_started.elapsed(),
+            probe_count.get(),
+            restore_sql.calls,
+            restore_sql.result_cell_bytes,
+        );
+        RESTORE_SCRATCH_PROBE.with(|slot| slot.borrow_mut().take());
+        let middle = middle.unwrap();
+        assert!(inspect.query_one("SELECT count(DISTINCT basis_t) FROM atomic_request_base_archives a JOIN atomic_request_base_archive_completions c USING(manifest_hash) WHERE a.database_id='legacy' AND a.generation=1", &[]).unwrap().get::<_, i64>(0) >= 4);
+        let final_archive: Vec<u8> = inspect.query_one("SELECT payload FROM atomic_request_base_archives a JOIN atomic_request_base_archive_completions c USING(manifest_hash) WHERE a.database_id='legacy' AND a.generation=1 ORDER BY basis_t DESC,archive_revision ASC LIMIT 1", &[]).unwrap().get(0);
+        let final_archive = PersistentTreeManifest::decode(&final_archive).unwrap();
+        assert!(final_archive.pending_avet.is_empty());
+        assert!(
+            final_archive
+                .tree(crate::IndexOrder::Avet, true)
+                .unwrap()
+                .descriptor
+                .count
+                > 512
+        );
         assert!(original.same_information_as(&restored));
         assert_eq!(
             inspect
@@ -8088,7 +9024,164 @@ mod tests {
         assert!(replayed.replayed);
         assert_eq!(replayed.basis_t, committed_basis);
         assert_eq!(replayed.tempids, committed_tempids);
+        assert_eq!(replayed.db_before.basis_t(), legacy_initial.basis_t());
+        assert_eq!(replayed.database.basis_t(), committed_basis);
+        assert_eq!(
+            replayed
+                .db_before
+                .datoms_with_prefix(&crate::IndexPrefix::Eavt {
+                    entity: original_entity,
+                    attribute: Some(1_000),
+                    value: None,
+                })
+                .unwrap(),
+            Vec::<crate::Datom>::new()
+        );
+        assert_eq!(
+            replayed
+                .database
+                .datoms_with_prefix(&crate::IndexPrefix::Eavt {
+                    entity: original_entity,
+                    attribute: Some(1_000),
+                    value: None,
+                })
+                .unwrap(),
+            committed
+                .db_after
+                .datoms_with_prefix(&crate::IndexPrefix::Eavt {
+                    entity: original_entity,
+                    attribute: Some(1_000),
+                    value: None,
+                })
+                .unwrap()
+        );
         drop(replayed);
+        let later = store
+            .transact_with_fault(
+                "legacy",
+                &last_request_key,
+                last_before.basis_t(),
+                &last_ops,
+                last_instant,
+                crate::postgres::CommitFault::None,
+            )
+            .unwrap();
+        assert!(later.replayed);
+        assert_eq!(later.db_before.basis_t(), last_before.basis_t());
+        assert_eq!(later.database.basis_t(), last_after.basis_t());
+        assert_eq!(
+            later.db_before.datoms(crate::IndexOrder::Eavt).unwrap(),
+            last_before.datoms(crate::View::Current, crate::IndexOrder::Eavt)
+        );
+        assert_eq!(
+            later.database.datoms(crate::IndexOrder::Eavt).unwrap(),
+            last_after.datoms(crate::View::Current, crate::IndexOrder::Eavt)
+        );
+        drop(later);
+        let middle_receipt = store
+            .transact_with_fault(
+                "legacy",
+                &middle.0,
+                middle.3.basis_t(),
+                &middle.1,
+                middle.2,
+                crate::postgres::CommitFault::None,
+            )
+            .unwrap();
+        assert!(middle_receipt.replayed);
+        assert_eq!(
+            middle_receipt
+                .db_before
+                .datoms(crate::IndexOrder::Eavt)
+                .unwrap(),
+            middle
+                .3
+                .datoms(crate::View::Current, crate::IndexOrder::Eavt)
+        );
+        assert_eq!(
+            middle_receipt
+                .database
+                .datoms(crate::IndexOrder::Eavt)
+                .unwrap(),
+            middle
+                .4
+                .datoms(crate::View::Current, crate::IndexOrder::Eavt)
+        );
+        drop(middle_receipt);
+        // Matching canonical rows are not permission to trust a damaged
+        // derived archive. Exercise both absence and content corruption in
+        // this isolated catalog, restoring the exact bytes between probes.
+        let (damaged_hash, pristine) = inspect.query("SELECT n.node_hash,n.payload FROM atomic_request_base_archive_nodes a JOIN atomic_tree_nodes n USING(node_hash) WHERE a.manifest_hash=(SELECT manifest_hash FROM atomic_request_base_archives WHERE database_id='legacy' AND generation=1 ORDER BY basis_t DESC,archive_revision ASC LIMIT 1)", &[]).unwrap().into_iter().find_map(|row| {
+            let hash = digest(row.get(0), "legacy archive probe node").unwrap();
+            let payload: Vec<u8> = row.get(1);
+            matches!(persistent_tree::decode_tree_node(&hash, &payload).unwrap(), persistent_tree::TreeNode::Leaf(_)).then_some((hash, payload))
+        }).expect("legacy archive contains a leaf");
+        for missing in [true, false] {
+            let mut damage = inspect.transaction().unwrap();
+            damage
+                .batch_execute("ALTER TABLE atomic_tree_nodes DISABLE TRIGGER USER")
+                .unwrap();
+            if missing {
+                damage
+                    .execute(
+                        "DELETE FROM atomic_tree_nodes WHERE node_hash=$1",
+                        &[&&damaged_hash[..]],
+                    )
+                    .unwrap();
+            } else {
+                let mut corrupted = pristine.clone();
+                let last = corrupted.len() - 1;
+                corrupted[last] ^= 1;
+                damage
+                    .execute(
+                        "UPDATE atomic_tree_nodes SET payload=$2 WHERE node_hash=$1",
+                        &[&&damaged_hash[..], &corrupted],
+                    )
+                    .unwrap();
+            }
+            damage
+                .batch_execute("ALTER TABLE atomic_tree_nodes ENABLE TRIGGER USER")
+                .unwrap();
+            damage.commit().unwrap();
+            let error = backup
+                .restore_backup_point(&directory, point.basis_t, 0, "legacy")
+                .unwrap_err();
+            assert_eq!(error.category, ErrorCategory::Fault);
+            if missing {
+                assert_eq!(error.code, "backup/restore-check-legacy-node");
+            }
+            let mut repair = inspect.transaction().unwrap();
+            repair
+                .batch_execute("ALTER TABLE atomic_tree_nodes DISABLE TRIGGER USER")
+                .unwrap();
+            repair.execute("INSERT INTO atomic_tree_nodes(node_hash,payload) VALUES($1,$2) ON CONFLICT(node_hash) DO UPDATE SET payload=EXCLUDED.payload", &[&&damaged_hash[..], &pristine]).unwrap();
+            repair
+                .batch_execute("ALTER TABLE atomic_tree_nodes ENABLE TRIGGER USER")
+                .unwrap();
+            repair.commit().unwrap();
+        }
+        let repaired = backup
+            .restore_backup_point(&directory, point.basis_t, 0, "legacy")
+            .unwrap();
+        assert!(repaired.same_information_as(&last_after));
+        assert_eq!(
+            inspect
+                .query_one(
+                    "SELECT log_generation FROM atomic_heads WHERE database_id='legacy'",
+                    &[]
+                )
+                .unwrap()
+                .get::<_, i64>(0),
+            1
+        );
+        // This archive intentionally contains no ordinary main tree. Keep
+        // the existing explicit operator boundary: generation conversion is
+        // followed by administrative consolidation, not a full scan hidden
+        // inside ordinary writer activation.
+        let mut indexer = crate::PostgresIndexer::connect(&scoped, "legacy").unwrap();
+        let consolidated = indexer.consolidate().unwrap();
+        assert_eq!(consolidated.basis_t, last_after.basis_t());
+        drop(indexer);
         let service = crate::TransactionService::start(crate::TransactionServiceConfig {
             connection: scoped.clone(),
             database_id: "legacy".into(),
@@ -8115,6 +9208,81 @@ mod tests {
         drop(retry);
         drop(installed);
         service.shutdown();
+        drop(store);
+        let mut reopened = PostgresStore::connect(&scoped).unwrap();
+        for (key, basis, operations, instant, before, after) in [
+            (
+                "original-request",
+                legacy_initial.basis_t(),
+                ops.as_slice(),
+                1_000,
+                &legacy_initial,
+                &committed.db_after,
+            ),
+            (
+                last_request_key.as_str(),
+                last_before.basis_t(),
+                last_ops.as_slice(),
+                last_instant,
+                &last_before,
+                &last_after,
+            ),
+            (
+                middle.0.as_str(),
+                middle.3.basis_t(),
+                middle.1.as_slice(),
+                middle.2,
+                &middle.3,
+                &middle.4,
+            ),
+        ] {
+            let started = std::time::Instant::now();
+            let io = crate::OperationContext::new(crate::OperationKind::TransactionReport);
+            let scope = io.enter();
+            let receipt = reopened
+                .transact_with_fault(
+                    "legacy",
+                    key,
+                    basis,
+                    operations,
+                    instant,
+                    crate::postgres::CommitFault::None,
+                )
+                .unwrap();
+            assert!(receipt.replayed);
+            if key == "original-request" {
+                assert_eq!(receipt.tempids, committed_tempids);
+            }
+            assert_eq!(receipt.db_before.basis_t(), before.basis_t());
+            assert_eq!(receipt.database.basis_t(), after.basis_t());
+            assert_eq!(
+                receipt.db_before.datoms(crate::IndexOrder::Eavt).unwrap(),
+                before.datoms(crate::View::Current, crate::IndexOrder::Eavt)
+            );
+            assert_eq!(
+                receipt.database.datoms(crate::IndexOrder::Eavt).unwrap(),
+                after.datoms(crate::View::Current, crate::IndexOrder::Eavt)
+            );
+            let before_native = receipt.db_before.native_tiered_snapshot().unwrap();
+            let after_native = receipt.database.native_tiered_snapshot().unwrap();
+            let before_tail = before_native.recent_stats();
+            let after_tail = after_native.recent_stats();
+            assert!(before_tail.transactions <= RESTORE_BATCH_ROWS as u64);
+            assert!(after_tail.transactions <= RESTORE_BATCH_ROWS as u64 + 1);
+            assert!(before_tail.datoms <= LEGACY_RECEIPT_TAIL_DATOMS);
+            drop(before_native);
+            drop(after_native);
+            drop(receipt);
+            drop(scope);
+            eprintln!(
+                "gen0 reopened exact receipt {key}: before_tail_txs={}, after_tail_txs={}, before_tail_datoms={}, complete_query_check_drop_us={}, attributed_driver_calls={}",
+                before_tail.transactions,
+                after_tail.transactions,
+                before_tail.datoms,
+                started.elapsed().as_micros(),
+                io.snapshot().calls
+            );
+        }
     }
 
     #[test]

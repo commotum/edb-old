@@ -43,6 +43,9 @@ mod merge_preload_tests;
 #[cfg(test)]
 #[path = "peer_readiness_tests.rs"]
 mod readiness_tests;
+#[cfg(test)]
+#[path = "peer_restore_tests.rs"]
+mod restore_tree_tests;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -956,6 +959,12 @@ pub struct PostgresIndexer {
 }
 
 impl PostgresIndexer {
+    /// Immutable storage identity captured at connection time. This is not a
+    /// public name and must not be sent back through a named connect API.
+    pub fn database_id(&self) -> &str {
+        &self.database_id
+    }
+
     pub fn connect(
         connection: &str,
         database_id: impl Into<String>,
@@ -970,15 +979,36 @@ impl PostgresIndexer {
         connection: &PostgresConnectionConfig,
         database_id: impl Into<String>,
     ) -> Result<Self, SemanticError> {
+        Self::connect_catalog_target(connection, database_id.into(), false)
+    }
+
+    /// Already-resolved storage identity, never looked up as a reusable name.
+    pub(crate) fn connect_identity_configured(
+        connection: &PostgresConnectionConfig,
+        database_id: impl Into<String>,
+    ) -> Result<Self, SemanticError> {
+        Self::connect_catalog_target(connection, database_id.into(), true)
+    }
+
+    fn connect_catalog_target(
+        connection: &PostgresConnectionConfig,
+        target: String,
+        stable_identity: bool,
+    ) -> Result<Self, SemanticError> {
         let mut client = connection.connect_for("index/connect")?;
         verify_schema_compatibility(&mut client)?;
+        let database = if stable_identity {
+            crate::database_catalog::require_active_id_in(&mut client, &target)?
+        } else {
+            crate::database_catalog::resolve_name_in(&mut client, &target)?
+        };
         let tree_store = PostgresTreeStore::connect_configured(connection)?;
         Ok(Self {
             client,
             tree_store,
             source_pin_client: None,
             connection: connection.clone(),
-            database_id: database_id.into(),
+            database_id: database.database_id,
             segment_datoms: DEFAULT_SEGMENT_DATOMS,
             tree_config: TreeConfig::default(),
             fulltext_build_limits: crate::FulltextBuildLimits::default(),
@@ -1096,6 +1126,7 @@ impl PostgresIndexer {
     pub fn reconnect(&mut self) -> Result<(), SemanticError> {
         let mut client = self.connection.connect_for("index/reconnect")?;
         verify_schema_compatibility(&mut client)?;
+        crate::database_catalog::require_active_id_in(&mut client, &self.database_id)?;
         self.tree_store.reconnect()?;
         self.client = client;
         self.source_pin_client = None;
@@ -1144,6 +1175,7 @@ impl PostgresIndexer {
             .client
             .transaction()
             .map_err(|error| postgres_error("index/build-begin", error))?;
+        crate::database_catalog::require_active_id_in(&mut transaction, &self.database_id)?;
         let (basis_t, tx_hash) = read_head(&mut transaction, &self.database_id)?;
         let excision_generation = read_excision_generation(&mut transaction, &self.database_id)?;
         if basis_t == 0 && excision_generation == 0 {
@@ -1683,6 +1715,232 @@ struct NativeIndexBuild {
 pub(crate) struct FullNativeTreeBuild {
     pub(crate) manifest: PersistentTreeManifest,
     pub(crate) nodes: TreeNodeSet,
+}
+
+/// Restore reuses the ordinary path-copy and AVET projection kernels. Only
+/// bootstrap is built broadly; later calls contain a caller-bounded slice of
+/// authenticated log membership. In particular, metadata is not re-derived
+/// from an ever-growing eager database at each historical receipt checkpoint.
+pub(crate) struct RestoreTreeBuilder {
+    manifest: PersistentTreeManifest,
+    metadata: MetadataProjection,
+    config: TreeConfig,
+    upload_pending: bool,
+    completed_avet_sort: Option<Digest>,
+    stats: RestoreTreeBuildStats,
+}
+
+/// Kernel work only. Restore separately accounts for PostgreSQL reads,
+/// scratch protection, uploads, and archive reachability inventories.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RestoreTreeBuildStats {
+    pub(crate) steps: u64,
+    pub(crate) projection_steps: u64,
+    pub(crate) tail_transactions: u64,
+    pub(crate) tail_datoms: u64,
+    pub(crate) input_datoms: u64,
+    pub(crate) node_outputs: u64,
+    pub(crate) encoded_bytes: u64,
+    pub(crate) reused_subtrees: u64,
+}
+
+impl RestoreTreeBuilder {
+    pub(crate) fn new(
+        database_id: &str,
+        generation: u64,
+        genesis_hash: Digest,
+        genesis: &Database,
+        archive_revision: u64,
+    ) -> Result<(Self, FullNativeTreeBuild), SemanticError> {
+        if genesis.basis_t() != 0
+            || sha256(&encode_genesis(genesis.genesis_datoms())?) != genesis_hash
+        {
+            return Err(fault(
+                "backup/restore-tree-genesis",
+                "incremental restore trees require the authenticated genesis value",
+            ));
+        }
+        let config = TreeConfig::default();
+        let metadata = MetadataProjection::from_database(genesis)?;
+        let build = build_initial_native(genesis, &config)?;
+        let manifest = PersistentTreeManifest {
+            database_id: database_id.to_owned(),
+            publication_revision: archive_revision,
+            index_basis_t: 0,
+            basis_t: 0,
+            tx_hash: genesis_hash,
+            state_hash: crate::state_commitment::checkpoint_state_hash(genesis)?,
+            excision_generation: generation,
+            eidx_frontier: build.eidx_frontier,
+            trees: build.trees.clone(),
+            pending_avet: Vec::new(),
+        };
+        let mut builder = Self {
+            manifest,
+            metadata,
+            config,
+            upload_pending: false,
+            completed_avet_sort: None,
+            stats: RestoreTreeBuildStats::default(),
+        };
+        let output = builder.accept(build, 0, false);
+        Ok((builder, output))
+    }
+
+    pub(crate) fn has_pending_projection(&self) -> bool {
+        !self.manifest.pending_avet.is_empty()
+    }
+
+    pub(crate) fn stats(&self) -> RestoreTreeBuildStats {
+        self.stats
+    }
+
+    /// Acknowledge durable, protected storage of the preceding returned node
+    /// set. A failed upload must abort the builder, not continue from roots
+    /// that might be missing. Sort scratch is disposable only after this ack.
+    pub(crate) fn finish_upload(
+        &mut self,
+        store: &mut PostgresTreeStore,
+    ) -> Result<(), SemanticError> {
+        if let Some(key) = self.completed_avet_sort {
+            store.discard_avet_sort(key)?;
+            self.completed_avet_sort = None;
+        }
+        self.upload_pending = false;
+        Ok(())
+    }
+
+    fn ready_for_step(&self) -> Result<(), SemanticError> {
+        if self.upload_pending {
+            return Err(fault(
+                "backup/restore-tree-upload-pending",
+                "restore must persist and protect the prior tree output before advancing",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The caller authenticates the generation envelope and bounds content
+    /// plus retained value bytes to 4 MiB before constructing each slice.
+    /// These additional structural bounds guard accidental whole-prefix
+    /// calls. One indivisible large transaction is allowed as its own slice.
+    pub(crate) fn advance(
+        &mut self,
+        store: &mut PostgresTreeStore,
+        tail: &[(Digest, DurableTransaction)],
+        state_hash: Digest,
+        archive_revision: u64,
+    ) -> Result<FullNativeTreeBuild, SemanticError> {
+        self.ready_for_step()?;
+        if self.has_pending_projection() {
+            return Err(fault(
+                "backup/restore-tree-projection-pending",
+                "restore must complete AVET projection before advancing logical time",
+            ));
+        }
+        let tail_datoms = tail.iter().try_fold(0_u64, |total, (_, transaction)| {
+            total
+                .checked_add(transaction.tx_data.len() as u64)
+                .ok_or_else(|| {
+                    fault(
+                        "backup/restore-tree-tail-size",
+                        "restore tail datom count overflow",
+                    )
+                })
+        })?;
+        if tail.is_empty() || tail.len() > 256 || (tail.len() > 1 && tail_datoms > 16_384) {
+            return Err(fault(
+                "backup/restore-tree-tail-size",
+                "restore tree chunks must contain 1–256 transactions and at most 16,384 datoms unless a single transaction is larger",
+            ));
+        }
+        let transactions = tail
+            .iter()
+            .map(|(_, transaction)| transaction.clone())
+            .collect::<Vec<_>>();
+        let hashes = tail.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+        let metadata = self.metadata.apply(&transactions)?;
+        let (tx_hash, endpoint) = tail.last().expect("nonempty tail checked above");
+        let build = build_incremental_native(
+            store,
+            &self.manifest,
+            sha256(&self.manifest.encode()?),
+            &transactions,
+            &hashes,
+            &self.metadata,
+            metadata.clone(),
+            endpoint.eidx_frontier,
+            &self.config,
+            TreeNodeSet::default(),
+        )?;
+        self.metadata = metadata;
+        self.manifest.publication_revision = archive_revision;
+        self.manifest.basis_t = endpoint.basis_t;
+        self.manifest.tx_hash = *tx_hash;
+        self.manifest.state_hash = state_hash;
+        Ok(self.accept(build, tail.len() as u64, false))
+    }
+
+    /// One fixed-size physical projection step at the same logical basis.
+    /// The caller may checkpoint intermediate progress to cap scratch pins,
+    /// but must keep stepping until all AVET work completes before advance().
+    pub(crate) fn advance_projection(
+        &mut self,
+        store: &mut PostgresTreeStore,
+        archive_revision: u64,
+    ) -> Result<FullNativeTreeBuild, SemanticError> {
+        self.ready_for_step()?;
+        let build = build_avet_projection_step(
+            store,
+            &self.manifest,
+            sha256(&self.manifest.encode()?),
+            &self.metadata,
+            &self.config,
+            TreeNodeSet::default(),
+        )?;
+        self.manifest.publication_revision = archive_revision;
+        Ok(self.accept(build, 0, true))
+    }
+
+    fn accept(
+        &mut self,
+        build: NativeIndexBuild,
+        tail_transactions: u64,
+        projection_step: bool,
+    ) -> FullNativeTreeBuild {
+        self.stats.steps = self.stats.steps.saturating_add(1);
+        self.stats.projection_steps = self
+            .stats
+            .projection_steps
+            .saturating_add(u64::from(projection_step));
+        self.stats.tail_transactions = self
+            .stats
+            .tail_transactions
+            .saturating_add(tail_transactions);
+        self.stats.tail_datoms = self.stats.tail_datoms.saturating_add(build.tail_datoms);
+        self.stats.input_datoms = self.stats.input_datoms.saturating_add(build.input_datoms);
+        self.stats.node_outputs = self
+            .stats
+            .node_outputs
+            .saturating_add(build.nodes.len() as u64);
+        self.stats.encoded_bytes = self.stats.encoded_bytes.saturating_add(build.encoded_bytes);
+        self.stats.reused_subtrees = self
+            .stats
+            .reused_subtrees
+            .saturating_add(build.reused_subtrees);
+        if build.pending_avet.is_empty() {
+            self.manifest.index_basis_t = self.manifest.basis_t;
+        }
+        self.manifest.eidx_frontier = build.eidx_frontier;
+        self.manifest.trees = build.trees;
+        self.manifest.pending_avet = build.pending_avet;
+        self.completed_avet_sort = build.completed_avet_sort;
+        self.upload_pending = true;
+        FullNativeTreeBuild {
+            manifest: self.manifest.clone(),
+            nodes: build.nodes,
+        }
+    }
 }
 
 fn build_initial_native(
@@ -4907,6 +5165,7 @@ impl Peer {
             cache_bytes,
             recent_limits,
             false,
+            false,
         )
     }
 
@@ -4936,7 +5195,34 @@ impl Peer {
             cache_entries.saturating_mul(512 * 1024),
             RecentLimits::default(),
             true,
+            false,
         )
+    }
+
+    /// Internal attachment to a writer's captured storage identity. Public
+    /// named opens must never fall back from an absent name to this route.
+    pub(crate) fn connect_identity_configured(
+        connection: &PostgresConnectionConfig,
+        identity: &DatabaseIdentity,
+        cache_entries: usize,
+    ) -> Result<Self, SemanticError> {
+        let peer = Self::connect_with_mode(
+            connection,
+            identity.database_id().to_owned(),
+            cache_entries,
+            cache_entries.saturating_mul(512 * 1024),
+            RecentLimits::default(),
+            false,
+            true,
+        )?;
+        if peer.identity() != *identity {
+            return Err(SemanticError::new(
+                ErrorCategory::Forbidden,
+                "peer/identity-mismatch",
+                "captured writer identity no longer matches the database lineage",
+            ));
+        }
+        Ok(peer)
     }
 
     fn connect_with_mode(
@@ -4946,11 +5232,18 @@ impl Peer {
         cache_bytes: usize,
         recent_limits: RecentLimits,
         allow_compatibility: bool,
+        stable_identity: bool,
     ) -> Result<Self, SemanticError> {
         let mut client = connection.connect_for("peer/connect")?;
         // Fail before reading a head or any derived value when this peer does
         // not understand the installed PostgreSQL schema.
         verify_schema_compatibility(&mut client)?;
+        let database = if stable_identity {
+            crate::database_catalog::require_active_id_in(&mut client, &database_id)?
+        } else {
+            crate::database_catalog::resolve_name_in(&mut client, &database_id)?
+        };
+        let database_id = database.database_id;
         let lineage_id = read_database_lineage(&mut client, &database_id)?;
         let (head_basis, head_hash) = read_head(&mut client, &database_id)?;
         let excision_generation = read_excision_generation(&mut client, &database_id)?;
@@ -5120,6 +5413,9 @@ impl Peer {
         let root_pins = RootPinManager::connect(connection, &database_id, &lineage_id)?;
         let generation_pin = root_pins.acquire_generation(excision_generation)?;
         let root_pin = root_pins.acquire(tree_base.as_deref())?;
+        // The active check after pin admission closes retirement/reclamation
+        // races without ever resolving the original public name a second time.
+        crate::database_catalog::require_active_id_in(&mut client, &database_id)?;
         let compatibility = Arc::new(PeerCompatibility {
             value: compatibility,
             segments: Arc::new(Mutex::new(cache)),

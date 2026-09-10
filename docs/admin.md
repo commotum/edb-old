@@ -41,6 +41,12 @@ Authenticated pending maintenance is not by itself corruption. Do not infer
 global storage health from one database's status, or force an unhealthy report
 to green by suppressing a problem.
 
+Create is idempotent (`CREATED` or `EXISTS`) without loading an existing database.
+For paginated listing, identity-preserving rename, retirement and separate bounded
+reclamation, see [database lifecycle](database-lifecycle.md). Destructive lifecycle
+commands preview by default and require the previewed lineage when applying a
+name-based action; they never erase the entire PostgreSQL catalog.
+
 ## Back up and verify
 
 ```sh

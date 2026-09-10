@@ -148,15 +148,7 @@ impl LineageTransactionContent {
                 "reserved allocation checkpoint regresses from its predecessor",
             ));
         }
-        if self.allocations.iter().any(|entity| {
-            eid_to_part(*entity).ok() == Some(crate::DB_PARTITION)
-                && eid_to_eidx(*entity).is_ok_and(|index| index < prior.frontier())
-        }) {
-            return Err(incorrect(
-                "generation/reserved-allocation-not-fresh",
-                "reserved allocation witness was already below the predecessor frontier",
-            ));
-        }
+        prior.validate_fresh_witnesses(self.allocations.iter().copied())?;
         Ok(after)
     }
 

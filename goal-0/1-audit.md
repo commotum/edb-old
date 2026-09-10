@@ -19,13 +19,13 @@ does not turn the historical audit into a test report.
 
 | Findings | Current disposition |
 | --- | --- |
-| Q02 | Goal 1 already repaired one-/two-column EDN/raw patterns. Six-plus columns remain in Goal 4. |
-| Q04 | EDN nil input adaptation exists; general typed/query-only values remain in Goal 4. |
+| Q01, Q05, ST-02 | Verified in Goal 5: grouped native aggregates, seven portable data functions, versioned Rust transaction/predicate deployments, stock EDN clients and exact speculation/retries. Final configured release acceptance 36/36 including genuine old-binary upgrade, durable ABI11 invocation, backup/restore and application/restart; see its measured costs and trusted callback contract. |
+| Q02, Q04 | Verified in Goal 4: arbitrary-width relations, general typed/EDN values, pure callbacks, source-free CLI and persisted query bridge. Actual PostgreSQL/application, old ABI/receipt and reference-retention compatibility pass; see complete-path costs and explicit native semantics in its plan. |
 | Q03, P01, P03, ST-05, P06 | Verified in Goal 2 with public PostgreSQL regressions, restricted-role application/restart workflow, existing EDN/program compatibility and unchanged old receipts. See its final acceptance for commands and measured costs. |
-| ST-03, ST-01 | Goal 3 owns reserved allocation/frontier reproduction and default placement. |
-| SC-01 | Recovered 1.0.7705 ordering supports the existing explicit composite-upsert hint contract; Goal 3 will verify/document, not invent constituent-only upsert. |
-| SC-02 | Preserve sound native NaN replacement; Goal 3 owns focused regression and disposition. |
-| Remaining IDs | Explicitly assigned to Goals 4–10 or the parent's optional/platform decision table; none silently disappears. |
+| ST-03, ST-01 | Verified in Goal 3: independent reserved allocation, native/retained-old million-ID histories, explicit defaults, application and old receipt/backup/upgrade compatibility. See its recorded artifact boundaries and complete-path costs. |
+| SC-01 | Verified/documented in Goal 3: recovered 1.0.7705 ordering supports the existing explicit composite-upsert hint contract; no invented constituent-only upsert. |
+| SC-02 | Verified in Goal 3: sound native NaN replacement retained, with permanent eager/native PostgreSQL regressions and documented JVM difference. |
+| Remaining IDs | Explicitly assigned to Goals 6–10 or the parent's optional/platform decision table; none silently disappears. |
 
 ## Where to start
 

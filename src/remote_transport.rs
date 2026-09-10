@@ -353,6 +353,9 @@ impl RemoteTransactionServer {
         }
         let mut sql = connection.connect_for("remote/register-connect")?;
         verify_schema_compatibility(&mut sql)?;
+        // Transport discovery and handshakes always carry the captured stable
+        // identity; public names are resolved only when a Connection is made.
+        crate::database_catalog::require_active_id_in(&mut sql, self.identity.database_id())?;
         sql.execute("INSERT INTO atomic_remote_writer_endpoints(database_id,lineage_id,holder_id,lease_epoch,instance_id,network_address,tls_server_name,protocol_version) VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(database_id) DO UPDATE SET lineage_id=EXCLUDED.lineage_id,holder_id=EXCLUDED.holder_id,lease_epoch=EXCLUDED.lease_epoch,instance_id=EXCLUDED.instance_id,network_address=EXCLUDED.network_address,tls_server_name=EXCLUDED.tls_server_name,protocol_version=EXCLUDED.protocol_version", &[&self.identity.database_id(),&self.identity.lineage_id(),&self.lease.holder_id,&sql_epoch(self.lease.epoch)?,&&self.instance_id[..],&address.to_string(),&tls_server_name]).map_err(|e|postgres_error("remote/register",e))?;
         Ok(RemoteWriterEndpoint {
             identity: self.identity.clone(),
@@ -380,6 +383,7 @@ impl Connection {
     ) -> Result<RemoteWriterEndpoint, SemanticError> {
         let mut sql = connection.connect_for("remote/discover-connect")?;
         verify_schema_compatibility(&mut sql)?;
+        crate::database_catalog::require_active_id_in(&mut sql, self.identity().database_id())?;
         let row=sql.query_opt("SELECT holder_id,lease_epoch,instance_id,network_address,tls_server_name,protocol_version FROM atomic_discover_remote_writer($1,$2)", &[&self.identity().database_id(),&self.identity().lineage_id()]).map_err(|e|postgres_error("remote/discover",e))?
             .ok_or_else(||SemanticError::new(ErrorCategory::Unavailable,"remote/no-writer","no published remote endpoint has a current lease for this database lineage"))?;
         let address: SocketAddr = row.get::<_, String>(3).parse().map_err(|_| {

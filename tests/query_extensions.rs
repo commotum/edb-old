@@ -149,6 +149,8 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
     let Some(connection) = connection() else {
         return;
     };
+    let fixture = common::PostgresFixture::new(&connection, "query_extensions");
+    let connection = fixture.connection.clone();
     let database_id = unique("query_program");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();

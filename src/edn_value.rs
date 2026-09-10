@@ -14,19 +14,23 @@ use std::collections::BTreeMap;
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 1_000_000;
 const MAX_BYTES: usize = 64 * 1024 * 1024;
+const MAX_WORK: usize = 64 * 1024 * 1024;
 
 struct Budget {
     nodes: usize,
     bytes: usize,
+    work: usize,
 }
 impl Budget {
     fn new() -> Self {
         Self {
             nodes: MAX_NODES,
             bytes: MAX_BYTES,
+            work: MAX_WORK,
         }
     }
     fn node(&mut self, depth: usize) -> Result<(), SemanticError> {
+        self.work(1)?;
         if depth > MAX_DEPTH || self.nodes == 0 {
             return Err(limit());
         }
@@ -37,11 +41,15 @@ impl Budget {
         self.bytes = self.bytes.checked_sub(bytes).ok_or_else(limit)?;
         Ok(())
     }
+    fn work(&mut self, amount: usize) -> Result<(), SemanticError> {
+        self.work = self.work.checked_sub(amount).ok_or_else(limit)?;
+        Ok(())
+    }
 }
 fn limit() -> SemanticError {
     SemanticError::incorrect(
         "edn/conversion-limit",
-        "value conversion exceeds its depth, node or accounted-byte limit",
+        "value conversion exceeds its depth, node, work or accounted-byte limit",
     )
 }
 fn invalid(message: &str) -> SemanticError {
@@ -368,8 +376,8 @@ fn to_edn(value: &Value, budget: &mut Budget, depth: usize) -> Result<EdnValue, 
     })
 }
 
-/// Convert general EDN data into the query-only value domain. This does not
-/// manufacture new stored scalar types for unsupported EDN characters/tags.
+/// Convert general EDN data into the query-only value domain. Characters,
+/// sets and inert custom tags remain query data, never stored datom types.
 pub fn edn_to_query_value(value: &EdnValue) -> Result<QueryValue, SemanticError> {
     to_query(value, &mut Budget::new(), 0)
 }
@@ -381,12 +389,13 @@ fn to_query(
     budget.node(depth)?;
     Ok(match value {
         EdnValue::Nil => QueryValue::Nil,
+        EdnValue::Char(value) => QueryValue::Char(*value),
         EdnValue::List(v) | EdnValue::Vector(v) => QueryValue::Tuple(
             v.iter()
                 .map(|v| to_query(v, budget, depth + 1))
                 .collect::<Result<_, _>>()?,
         ),
-        EdnValue::Set(v) => QueryValue::Collection(
+        EdnValue::Set(v) => QueryValue::Set(
             v.iter()
                 .map(|v| to_query(v, budget, depth + 1))
                 .collect::<Result<_, _>>()?,
@@ -401,20 +410,78 @@ fn to_query(
                     ))
                 })
                 .collect::<Result<Vec<_>, SemanticError>>()?;
-            entries.sort_by(|(left, _), (right, _)| left.canonical_cmp(right));
-            if entries
-                .windows(2)
-                .any(|pair| pair[0].0.canonical_cmp(&pair[1].0).is_eq())
-            {
-                return Err(SemanticError::incorrect(
-                    "edn/query-key-collision",
-                    "distinct EDN keys collapse under native query-value equality",
-                ));
+            // Conversion has admitted the owned keys, but ordering arbitrary
+            // map/set keys also traverses them and creates canonical scratch.
+            // Admit that scratch before each checked comparison, including the
+            // final duplicate-key pass. A failed comparison is latched just as
+            // in set conversion; no further key work is done after failure.
+            budget.bytes(
+                entries
+                    .len()
+                    .saturating_mul(std::mem::size_of::<(QueryValue, QueryValue)>()),
+            )?;
+            let mut compare = |left: &QueryValue, right: &QueryValue| {
+                let left_size = left.measure_with(&mut |work| budget.work(work))?;
+                let right_size = right.measure_with(&mut |work| budget.work(work))?;
+                budget.bytes(
+                    left_size
+                        .canonical_bytes
+                        .saturating_add(right_size.canonical_bytes),
+                )?;
+                left.compare_with(right, &mut |work| budget.work(work))
+            };
+            let mut failure = None;
+            entries.sort_by(|(left, _), (right, _)| {
+                if failure.is_some() {
+                    return std::cmp::Ordering::Equal;
+                }
+                compare(left, right).unwrap_or_else(|error| {
+                    failure = Some(error);
+                    std::cmp::Ordering::Equal
+                })
+            });
+            if let Some(error) = failure {
+                return Err(error);
+            }
+            for pair in entries.windows(2) {
+                if compare(&pair[0].0, &pair[1].0)?.is_eq() {
+                    return Err(SemanticError::incorrect(
+                        "edn/query-key-collision",
+                        "distinct EDN keys collapse under native query-value equality",
+                    ));
+                }
             }
             QueryValue::Map(entries)
         }
+        EdnValue::Tagged(name, payload) if !stored_tag(name) => {
+            budget.bytes(name.name.len() + name.namespace.as_ref().map_or(0, String::len))?;
+            QueryValue::Tagged(
+                name.clone(),
+                Box::new(to_query(payload, budget, depth + 1)?),
+            )
+        }
         _ => QueryValue::Scalar(from_edn(value, budget, depth)?),
     })
+}
+
+// Known native/scalar tags retain their precise existing interpretation and
+// validation. An invalid known tag must not become an inert custom tag instead.
+fn stored_tag(name: &Symbol) -> bool {
+    matches!(
+        (name.namespace.as_deref(), name.name.as_str()),
+        (None, "uuid" | "inst")
+            | (
+                Some("atomic"),
+                "instant-millis"
+                    | "ref"
+                    | "uri"
+                    | "bytes"
+                    | "function"
+                    | "float"
+                    | "float-bits"
+                    | "double-bits"
+            )
+    )
 }
 
 /// Encode a query/pull value without flattening nested maps or nil values.
@@ -429,6 +496,7 @@ fn from_query(
     budget.node(depth)?;
     Ok(match value {
         QueryValue::Nil => EdnValue::Nil,
+        QueryValue::Char(value) => EdnValue::Char(*value),
         QueryValue::Scalar(v) => to_edn(v, budget, depth)?,
         QueryValue::Collection(v) | QueryValue::Tuple(v) => EdnValue::Vector(
             v.iter()
@@ -445,7 +513,85 @@ fn from_query(
                 })
                 .collect::<Result<_, SemanticError>>()?,
         ),
+        QueryValue::Set(values) => {
+            let members = canonical_query_set_members(values, budget)?;
+            EdnValue::Set(
+                members
+                    .into_iter()
+                    .map(|value| from_query(value, budget, depth + 1))
+                    .collect::<Result<_, _>>()?,
+            )
+        }
+        QueryValue::Tagged(name, payload) => {
+            budget.bytes(name.name.len() + name.namespace.as_ref().map_or(0, String::len))?;
+            EdnValue::Tagged(
+                name.clone(),
+                Box::new(from_query(payload, budget, depth + 1)?),
+            )
+        }
     })
+}
+
+// Borrowed members are admitted before sorting: even members discarded by
+// deduplication consume input traversal, comparison and scratch allowances.
+// Canonical comparison uses heap frames, not host-stack recursion.
+fn canonical_query_set_members<'a>(
+    values: &'a [QueryValue],
+    budget: &mut Budget,
+) -> Result<Vec<&'a QueryValue>, SemanticError> {
+    budget.bytes(
+        values
+            .len()
+            .saturating_mul(2 * std::mem::size_of::<(&QueryValue, usize)>()),
+    )?;
+    let mut members = Vec::with_capacity(values.len());
+    for value in values {
+        let size = value.measure_with(&mut |work| {
+            budget.work(work)?;
+            budget.nodes = budget.nodes.checked_sub(work).ok_or_else(limit)?;
+            Ok(())
+        })?;
+        budget.bytes(size.retained_bytes.saturating_add(size.canonical_bytes))?;
+        value.validate_with(&mut |work| budget.work(work))?;
+        members.push((value, size.canonical_bytes));
+    }
+    let mut compare = |left: &(&QueryValue, usize), right: &(&QueryValue, usize)| {
+        budget.bytes(left.1.saturating_add(right.1))?;
+        left.0.compare_with(right.0, &mut |work| budget.work(work))
+    };
+    let mut failure = None;
+    members.sort_by(|left, right| {
+        if failure.is_some() {
+            return std::cmp::Ordering::Equal;
+        }
+        compare(left, right).unwrap_or_else(|error| {
+            failure = Some(error);
+            std::cmp::Ordering::Equal
+        })
+    });
+    if let Some(error) = failure.take() {
+        return Err(error);
+    }
+    members.dedup_by(|left, right| {
+        if failure.is_some() {
+            return false;
+        }
+        compare(left, right)
+            .map(|order| order.is_eq())
+            .unwrap_or_else(|error| {
+                failure = Some(error);
+                false
+            })
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    budget.bytes(
+        members
+            .len()
+            .saturating_mul(std::mem::size_of::<&QueryValue>()),
+    )?;
+    Ok(members.into_iter().map(|(value, _)| value).collect())
 }
 
 /// Relation results are EDN sets of tuples; collection/tuple find results are
@@ -568,6 +714,7 @@ mod tests {
         Budget {
             nodes: MAX_NODES,
             bytes,
+            work: MAX_WORK,
         }
     }
 
@@ -626,5 +773,147 @@ mod tests {
             };
             assert_eq!(value.to_bits(), (-0.0f32).to_bits());
         }
+    }
+
+    #[test]
+    fn typed_set_conversion_admits_discarded_duplicates_and_comparison_work() {
+        let scalar = QueryValue::Scalar(Value::String("x".repeat(512)));
+        let value = QueryValue::Set(vec![scalar; 32]);
+        assert_eq!(
+            from_query(&value, &mut budget(2048), 0).unwrap_err().code,
+            "edn/conversion-limit"
+        );
+        let result = from_query(&value, &mut Budget::new(), 0).unwrap();
+        assert_eq!(
+            result,
+            EdnValue::Set(vec![EdnValue::String("x".repeat(512))])
+        );
+        let mut limited = Budget {
+            work: 16,
+            ..Budget::new()
+        };
+        assert_eq!(
+            from_query(&value, &mut limited, 0).unwrap_err().code,
+            "edn/conversion-limit"
+        );
+    }
+
+    #[test]
+    fn query_map_conversion_admits_key_ordering_and_collision_comparisons() {
+        let entries: Vec<_> = (1..=40)
+            .rev()
+            .map(|index| {
+                (
+                    EdnValue::Set(vec![EdnValue::Long(index), EdnValue::Long(0)]),
+                    EdnValue::Nil,
+                )
+            })
+            .collect();
+        // The flat vector performs exactly the same value conversion as the
+        // map, without sorting or comparing its keys. That traversal allowance
+        // alone must not admit the map's additional canonical key work.
+        let flat = EdnValue::Vector(
+            entries
+                .iter()
+                .flat_map(|(key, value)| [key.clone(), value.clone()])
+                .collect(),
+        );
+        let mut traversal = Budget::new();
+        to_query(&flat, &mut traversal, 0).unwrap();
+        let traversal_work = MAX_WORK - traversal.work;
+        let value = EdnValue::Map(entries);
+        let mut limited = Budget {
+            work: traversal_work,
+            ..Budget::new()
+        };
+        assert_eq!(
+            to_query(&value, &mut limited, 0).unwrap_err().code,
+            "edn/conversion-limit"
+        );
+
+        let mut complete = Budget::new();
+        let result = to_query(&value, &mut complete, 0).unwrap();
+        let complete_work = MAX_WORK - complete.work;
+        assert!(complete_work > traversal_work);
+        let expected = QueryValue::Map(
+            (1..=40)
+                .map(|index| {
+                    (
+                        QueryValue::Set(vec![
+                            QueryValue::Scalar(Value::Long(0)),
+                            QueryValue::Scalar(Value::Long(index)),
+                        ]),
+                        QueryValue::Nil,
+                    )
+                })
+                .collect(),
+        );
+        assert_eq!(result, expected);
+        let QueryValue::Map(entries) = &result else {
+            panic!("map shape changed")
+        };
+        assert!(
+            entries
+                .windows(2)
+                .all(|pair| pair[0].0.canonical_cmp(&pair[1].0).is_lt())
+        );
+        let mut one_short = Budget {
+            work: complete_work - 1,
+            ..Budget::new()
+        };
+        assert_eq!(
+            to_query(&value, &mut one_short, 0).unwrap_err().code,
+            "edn/conversion-limit"
+        );
+        assert_eq!(edn_to_query_value(&value).unwrap(), expected);
+
+        // Native equality still rejects both cross-numeric collisions and
+        // unordered set keys that would otherwise silently overwrite values.
+        for collision in [
+            EdnValue::Map(vec![
+                (EdnValue::Long(1), EdnValue::Nil),
+                (EdnValue::BigInt(1.into()), EdnValue::Nil),
+            ]),
+            EdnValue::Map(vec![
+                (
+                    EdnValue::Set(vec![EdnValue::Long(0), EdnValue::Long(1)]),
+                    EdnValue::Nil,
+                ),
+                (
+                    EdnValue::Set(vec![EdnValue::Long(1), EdnValue::Long(0)]),
+                    EdnValue::Nil,
+                ),
+            ]),
+        ] {
+            assert_eq!(
+                edn_to_query_value(&collision).unwrap_err().code,
+                "edn/query-key-collision"
+            );
+        }
+    }
+
+    #[test]
+    fn typed_deep_set_members_are_checked_iteratively_before_sorting() {
+        std::thread::Builder::new()
+            .stack_size(96 * 1024)
+            .spawn(|| {
+                let mut child = QueryValue::Nil;
+                for _ in 0..12_000 {
+                    child = QueryValue::Tagged(Symbol::unqualified("t"), Box::new(child));
+                }
+                let value = QueryValue::Set(vec![child.clone(), child]);
+                let mut limited = Budget {
+                    work: 128,
+                    ..Budget::new()
+                };
+                assert_eq!(
+                    from_query(&value, &mut limited, 0).unwrap_err().code,
+                    "edn/conversion-limit"
+                );
+                drop(value);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

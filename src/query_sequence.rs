@@ -152,7 +152,7 @@ impl QueryEngine {
                 ));
             }
         }
-        validate_consumed_sources(query, &source_map)?;
+        validate_consumed_sources(query, &source_map, extensions)?;
         let mut prepared = query.clone();
         let elements = find_elements(&query.find).to_vec();
         let replace = |element: &mut FindElement| {

@@ -333,6 +333,79 @@ pub(super) fn binary<F: FnMut(usize, usize) -> Result<(), SemanticError>>(
     }
 }
 
+/// Integer quotient, truncated toward zero, without converting exact operands
+/// through floating point. Decimal integer results may retain a compact negative
+/// scale, so `quot(1e100000, 2)` need not allocate one hundred thousand zeros.
+pub(super) fn quotient<F: FnMut(usize, usize) -> Result<(), SemanticError>>(
+    left: &Value,
+    right: &Value,
+    budget: &mut Budget<F>,
+) -> Result<Value, SemanticError> {
+    match domain(left)?.max(domain(right)?) {
+        Domain::Long | Domain::BigInt => binary(&Function::Divide, left, right, budget),
+        Domain::Float => {
+            budget.tick()?;
+            let a = to_float(left, budget)?;
+            let b = to_float(right, budget)?;
+            if !a.is_finite() || !b.is_finite() {
+                return Err(arithmetic("quot requires finite numeric operands"));
+            }
+            if b == 0.0 {
+                return Err(arithmetic("division by zero"));
+            }
+            let quotient = (a / b).trunc();
+            if !quotient.is_finite() {
+                return Err(range());
+            }
+            Ok(Value::Double(quotient))
+        }
+        Domain::Decimal => {
+            budget.tick()?;
+            let (a, sa) = coefficient(left);
+            let (b, sb) = coefficient(right);
+            budget.admit(u128::from(a.bits()) + u128::from(b.bits()) + 1, false)?;
+            if b.is_zero() {
+                return Err(arithmetic("division by zero"));
+            }
+            // Exact comparison is exponent-bounded; zero quotients must not
+            // expand a denominator with a compact extreme exponent.
+            let magnitude_a = Value::BigDec(BigDecimal::new(a.abs(), sa));
+            let magnitude_b = Value::BigDec(BigDecimal::new(b.abs(), sb));
+            if magnitude_a.index_cmp(&magnitude_b).is_lt() {
+                return decimal_result(BigInt::zero(), 0, budget);
+            }
+            match decimal(&Function::Divide, left, right, budget) {
+                Ok(Value::BigDec(exact)) => {
+                    let (coefficient, scale) = exact.as_bigint_and_scale();
+                    if scale <= 0 {
+                        return Ok(Value::BigDec(exact));
+                    }
+                    let power = power(10, scale as u64, budget)?;
+                    budget.admit(u128::from(coefficient.bits()), true)?;
+                    decimal_result(coefficient.as_ref() / power, 0, budget)
+                }
+                Ok(_) => unreachable!("decimal arithmetic returns a decimal"),
+                Err(error) if error.code == "query/non-terminating-decimal-division" => {
+                    let shift = i128::from(sb) - i128::from(sa);
+                    let places = u64::try_from(shift.unsigned_abs()).map_err(|_| capacity())?;
+                    budget.admit(
+                        u128::from(a.bits()) + u128::from(b.bits()) + u128::from(places) * 4,
+                        true,
+                    )?;
+                    let factor = power(10, places, budget)?;
+                    let quotient = if shift >= 0 {
+                        (a.as_ref() * factor) / b.as_ref()
+                    } else {
+                        a.as_ref() / (b.as_ref() * factor)
+                    };
+                    decimal_result(quotient, 0, budget)
+                }
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
 fn scientific<F: FnMut(usize, usize) -> Result<(), SemanticError>>(
     coefficient: &BigInt,
     scale: i128,

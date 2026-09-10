@@ -20,6 +20,16 @@ impl fmt::Debug for QueryValue {
             match frame {
                 Frame::Value(Self::Nil) => formatter.write_str("Nil")?,
                 Frame::Value(Self::Scalar(value)) => write!(formatter, "Scalar({value:?})")?,
+                Frame::Value(Self::Char(value)) => write!(formatter, "Char({value:?})")?,
+                Frame::Value(Self::Tagged(tag, value)) => {
+                    write!(formatter, "Tagged({tag:?}, ")?;
+                    pending.push(Frame::Text(")"));
+                    pending.push(Frame::Value(value));
+                }
+                Frame::Value(Self::Set(values)) => {
+                    formatter.write_str("Set([")?;
+                    pending.push(Frame::Sequence(values, 0));
+                }
                 Frame::Value(Self::Collection(values)) => {
                     formatter.write_str("Collection([")?;
                     pending.push(Frame::Sequence(values, 0));

@@ -1,6 +1,6 @@
 //! Version-2 persisted query authoring over the existing native query engine.
 //! No evaluator or source authority lives in this module.
-use super::{ProgramBudget, ProgramRead, RuntimeValue, incorrect, query_value};
+use super::{ProgramBudget, ProgramRead, RuntimeValue, incorrect};
 use crate::{
     DatabaseValue, InputSpec, Query, QueryDataSource, QueryEngine, QueryInput, QueryResult,
     QueryValue, SemanticError, TimePoint, Value,
@@ -25,6 +25,9 @@ pub struct QueryTemplateSource {
     pub log: bool,
     pub as_of: Option<QueryTemplateTime>,
     pub since: Option<QueryTemplateTime>,
+    /// A finite general relation supplied by this program argument. This
+    /// source is data, not a view of the invocation's database.
+    pub relation_argument: Option<u8>,
 }
 
 impl QueryTemplateSource {
@@ -35,6 +38,7 @@ impl QueryTemplateSource {
             log: false,
             as_of: None,
             since: None,
+            relation_argument: None,
         }
     }
     pub fn history(name: impl Into<String>) -> Self {
@@ -46,6 +50,12 @@ impl QueryTemplateSource {
     pub fn log(name: impl Into<String>) -> Self {
         Self {
             log: true,
+            ..Self::current(name)
+        }
+    }
+    pub fn relation(name: impl Into<String>, argument: u8) -> Self {
+        Self {
+            relation_argument: Some(argument),
             ..Self::current(name)
         }
     }
@@ -67,6 +77,20 @@ pub(crate) struct NativeQueryTemplate {
 }
 
 impl NativeQueryTemplate {
+    pub(crate) fn version(&self) -> Result<u16, SemanticError> {
+        let version = crate::encoding::native_query_version(&self.query)?;
+        Ok(
+            if self
+                .sources
+                .iter()
+                .any(|source| source.relation_argument.is_some())
+            {
+                version.max(3)
+            } else {
+                version
+            },
+        )
+    }
     pub(crate) fn new(
         query: Query,
         input_arguments: Vec<u8>,
@@ -109,7 +133,12 @@ impl NativeQueryTemplate {
             ));
         }
         if self.sources.iter().any(|source| {
-            source.log && (source.history || source.as_of.is_some() || source.since.is_some())
+            (source.log && (source.history || source.as_of.is_some() || source.since.is_some()))
+                || (source.relation_argument.is_some()
+                    && (source.log
+                        || source.history
+                        || source.as_of.is_some()
+                        || source.since.is_some()))
         }) {
             return Err(incorrect(
                 "program/query-log-view",
@@ -137,6 +166,11 @@ impl NativeQueryTemplate {
             .iter()
             .copied()
             .chain(bounds)
+            .chain(
+                self.sources
+                    .iter()
+                    .filter_map(|source| source.relation_argument),
+            )
             .any(|index| index >= arity)
         {
             return Err(incorrect(
@@ -170,29 +204,38 @@ fn time_point(
 }
 
 fn input(spec: &InputSpec, argument: &RuntimeValue) -> Result<QueryInput, SemanticError> {
-    let scalar = |value: &RuntimeValue| query_value(value.clone());
-    let vector = |value: &RuntimeValue| match value {
-        RuntimeValue::Vector(values) => values.iter().map(scalar).collect(),
-        _ => Err(incorrect(
-            "program/query-input-shape",
-            "query collection/tuple input needs a runtime vector",
-        )),
-    };
-    Ok(match spec {
-        InputSpec::Scalar(_) => QueryInput::Scalar(scalar(argument)?),
-        InputSpec::Tuple(_) => QueryInput::Tuple(vector(argument)?),
-        InputSpec::Collection(_) => QueryInput::Collection(vector(argument)?),
-        InputSpec::Relation(_) => match argument {
-            RuntimeValue::Vector(rows) => {
-                QueryInput::Relation(rows.iter().map(vector).collect::<Result<_, _>>()?)
-            }
-            _ => {
-                return Err(incorrect(
-                    "program/query-input-shape",
-                    "query relation input needs a vector of row vectors",
-                ));
-            }
-        },
+    let _ = spec; // The shared query evaluator validates each declared shape.
+    Ok(QueryInput::General(runtime_query_value(argument)?))
+}
+
+pub(crate) fn runtime_query_value(value: &RuntimeValue) -> Result<QueryValue, SemanticError> {
+    Ok(match value {
+        RuntimeValue::Null => QueryValue::Nil,
+        RuntimeValue::Scalar(value) => QueryValue::Scalar(value.clone()),
+        RuntimeValue::Entity(crate::EntityRef::Id(entity)) => {
+            QueryValue::Scalar(Value::Ref(*entity))
+        }
+        RuntimeValue::Query(value) => value.clone(),
+        RuntimeValue::Vector(values) => QueryValue::Tuple(
+            values
+                .iter()
+                .map(runtime_query_value)
+                .collect::<Result<_, _>>()?,
+        ),
+        RuntimeValue::Map(entries) => QueryValue::Map(
+            entries
+                .iter()
+                .map(|(key, value)| {
+                    Ok((QueryValue::Scalar(key.clone()), runtime_query_value(value)?))
+                })
+                .collect::<Result<_, SemanticError>>()?,
+        ),
+        RuntimeValue::Entity(_) => {
+            return Err(incorrect(
+                "program/query-value",
+                "query data requires resolved entity references",
+            ));
+        }
     })
 }
 
@@ -203,42 +246,35 @@ fn runtime_value(value: QueryValue, depth: usize) -> Result<RuntimeValue, Semant
             "query result exceeds the runtime value nesting limit",
         ));
     }
-    // QueryValue has a stack-safe Drop, so take containers through its public
-    // moving accessors instead of destructuring their owned children.
     match &value {
-        QueryValue::Nil => Ok(RuntimeValue::Null),
-        QueryValue::Scalar(scalar) => Ok(RuntimeValue::Scalar(scalar.clone())),
-        QueryValue::Tuple(_) => value
-            .into_tuple()
-            .unwrap()
-            .into_iter()
-            .map(|value| runtime_value(value, depth + 1))
-            .collect::<Result<Vec<_>, _>>()
-            .map(RuntimeValue::Vector),
-        QueryValue::Collection(_) => value
-            .into_collection()
-            .unwrap()
-            .into_iter()
-            .map(|value| runtime_value(value, depth + 1))
-            .collect::<Result<Vec<_>, _>>()
-            .map(RuntimeValue::Vector),
-        QueryValue::Map(_) => {
-            let entries = value
-                .into_map()
-                .unwrap()
+        QueryValue::Tuple(_) => Ok(RuntimeValue::Vector(
+            value
+                .into_tuple()
+                .expect("tuple")
                 .into_iter()
-                .map(|(key, value)| {
-                    let QueryValue::Scalar(key) = &key else {
-                        return Err(incorrect(
-                            "program/query-map-key",
-                            "runtime map keys must be stored scalar values",
-                        ));
-                    };
-                    Ok((key.clone(), runtime_value(value, depth + 1)?))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            RuntimeValue::map(entries)
+                .map(|value| runtime_value(value, depth + 1))
+                .collect::<Result<_, _>>()?,
+        )),
+        QueryValue::Map(entries)
+            if entries
+                .iter()
+                .all(|(key, _)| matches!(key, QueryValue::Scalar(_))) =>
+        {
+            RuntimeValue::map(
+                value
+                    .into_map()
+                    .expect("map")
+                    .into_iter()
+                    .map(|(key, value)| {
+                        Ok((
+                            key.into_scalar().expect("scalar key"),
+                            runtime_value(value, depth + 1)?,
+                        ))
+                    })
+                    .collect::<Result<_, SemanticError>>()?,
+            )
         }
+        _ => Ok(RuntimeValue::from_query_value(value)),
     }
 }
 
@@ -259,6 +295,34 @@ pub(super) fn execute(
     let mut sources = Vec::with_capacity(template.sources.len());
     for source in &template.sources {
         budget.charge(1)?;
+        if let Some(argument) = source.relation_argument {
+            let value = runtime_query_value(&arguments[usize::from(argument)])?;
+            let rows = match &value {
+                QueryValue::Tuple(rows) | QueryValue::Collection(rows) | QueryValue::Set(rows) => {
+                    rows
+                }
+                _ => {
+                    return Err(incorrect(
+                        "program/query-relation-shape",
+                        "relation source needs a finite collection of row sequences",
+                    ));
+                }
+            };
+            let rows = rows
+                .iter()
+                .map(|row| match row {
+                    QueryValue::Tuple(values) | QueryValue::Collection(values) => {
+                        Ok(values.clone())
+                    }
+                    _ => Err(incorrect(
+                        "program/query-relation-shape",
+                        "relation source rows must be sequences",
+                    )),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            sources.push(QueryDataSource::relation(source.name.clone(), rows));
+            continue;
+        }
         if source.log {
             sources.push(QueryDataSource::log(
                 source.name.clone(),

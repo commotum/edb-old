@@ -186,7 +186,7 @@ fn term_ready(term: &Term, bound: &Bindings) -> bool {
     match term {
         Term::Variable(variable) => bound.contains(variable),
         Term::Blank => false,
-        Term::Constant(_) | Term::Nil => true,
+        Term::Constant(_) | Term::QueryConstant(_) | Term::Nil => true,
     }
 }
 
@@ -303,7 +303,7 @@ fn clause_bindings(
         Clause::Function { binding, .. } => Ok(Some(
             binding_variables(binding).into_iter().cloned().collect(),
         )),
-        Clause::Pattern(_) => Ok(Some(
+        Clause::Pattern(_) | Clause::RelationPattern(_) => Ok(Some(
             variables_in_clauses(std::slice::from_ref(clause))
                 .into_iter()
                 .collect(),

@@ -30,6 +30,10 @@ mod receipt_archive;
 mod receipt_archive_hash;
 pub use receipt_archive::{MAX_RECEIPT_ARCHIVE_WORK_PER_GC, ReceiptArchiveConversion};
 
+#[path = "database_reclamation.rs"]
+mod database_reclamation;
+pub use database_reclamation::{MAX_DATABASE_RECLAMATION_ROWS, RetiredDatabaseReclamation};
+
 /// Recommended grace period for routine garbage collection.
 ///
 /// Datomic's capacity guidance recommends roughly a month outside an initial

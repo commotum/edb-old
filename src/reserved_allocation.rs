@@ -44,6 +44,24 @@ impl ReservedAllocation {
         self.frontier
     }
 
+    /// Canonical ATLC v2 allocations are fresh issuance witnesses, not the
+    /// caller-named receipt map (which may also contain existing-ID upserts).
+    /// Share this predecessor check with recovery, COW, and portable replay.
+    pub(crate) fn validate_fresh_witnesses(
+        self,
+        allocations: impl IntoIterator<Item = u64>,
+    ) -> Result<(), SemanticError> {
+        for entity in allocations {
+            if eid_to_part(entity)? == DB_PARTITION && eid_to_eidx(entity)? < self.frontier {
+                return Err(SemanticError::incorrect(
+                    "generation/reserved-allocation-not-fresh",
+                    "reserved allocation witness was already below the predecessor frontier",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Reserve every previously observed partition-zero ID, including ones
     /// above schema/partition installation capacity. Clamping would permit
     /// reuse or hide genuine exhaustion.

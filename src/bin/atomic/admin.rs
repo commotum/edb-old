@@ -1,7 +1,7 @@
 //! Explicit operator commands. Runtime startup never routes through this module.
 use atomic_core::sql_io::SqlClient;
 use atomic_core::{
-    BackupPoint, ErrorCategory, FulltextStore, GarbageInventory, PortableBackup,
+    BackupPoint, DatabaseCatalog, ErrorCategory, FulltextStore, GarbageInventory, PortableBackup,
     PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresOperator, PostgresStore,
     Schema, SemanticError, postgres_config_from_env,
 };
@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 
 pub const HELP: &str = "
 Administrative commands (explicit credentials/targets; no automatic provisioning):
+  atomic create --database NAME
+  atomic list-databases [--retired] [--after NAME-OR-STORAGE-ID] [--limit N]
+  atomic rename --database NAME --new-name NAME [--lineage UUID --apply]
+  atomic delete --database NAME [--lineage UUID --apply]
+  atomic gc-deleted --storage-id ID --lineage UUID --postgres-database NAME
+    --catalog-schema NAME --older-than-seconds N [--apply --batches N]
   atomic backup --database ID --repository PATH
   atomic list-backups --repository PATH
   atomic verify-backup --repository PATH --basis N --generation N [--presence-only]
@@ -34,6 +40,14 @@ Offline list/verify need no PostgreSQL environment. Verification is deep unless
 SIGINT/SIGTERM may leave committed resumable work: retry the same exact target
 and point. Rebuild preserves facts; explicit discard removes derived search data
 and may interrupt cold search readers. See docs/admin.md and docs/operations.md.
+
+Create is idempotent; list is paginated (default 1000, maximum 4096). Rename/delete
+preview by default. Apply requires the lineage printed by preview to guard name
+reuse. Delete retires and fences a database; it does not reclaim storage. Already
+captured pinned values remain readable. gc-deleted targets one retired storage
+ID/lineage, waits for pins and preserves shared content. Each reclamation batch
+bounds removed rows, not all inspected metadata or elapsed time. See
+docs/database-lifecycle.md. These mutations require catalog owner authority.
 ";
 
 pub fn dispatch(arguments: &[String]) -> Option<Result<(), SemanticError>> {
@@ -41,6 +55,20 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), SemanticError>> {
     let (values, switches): (&[&str], &[&str]) = match command {
         "migrate" => (&["--writer-role", "--peer-role"], &[]),
         "create" | "status" | "consolidate" => (&["--database"], &[]),
+        "list-databases" => (&["--after", "--limit"], &["--retired"]),
+        "rename" => (&["--database", "--new-name", "--lineage"], &["--apply"]),
+        "delete" => (&["--database", "--lineage"], &["--apply"]),
+        "gc-deleted" => (
+            &[
+                "--storage-id",
+                "--lineage",
+                "--postgres-database",
+                "--catalog-schema",
+                "--older-than-seconds",
+                "--batches",
+            ],
+            &["--apply"],
+        ),
         "backup" => (&["--database", "--repository"], &[]),
         "list-backups" => (&["--repository"], &[]),
         "verify-backup" => (
@@ -114,6 +142,16 @@ impl Arguments {
         }
         let required: &[&str] = match command {
             "migrate" => &[],
+            "list-databases" => &[],
+            "rename" => &["--database", "--new-name"],
+            "delete" => &["--database"],
+            "gc-deleted" => &[
+                "--storage-id",
+                "--lineage",
+                "--postgres-database",
+                "--catalog-schema",
+                "--older-than-seconds",
+            ],
             "create" | "status" | "consolidate" | "inspect" | "fulltext-rebuild" => &["--database"],
             "backup" => &["--database", "--repository"],
             "list-backups" => &["--repository"],
@@ -136,7 +174,7 @@ impl Arguments {
         for flag in required {
             parsed.required(flag)?;
         }
-        for flag in ["--basis", "--generation", "--older-than-seconds"] {
+        for flag in ["--basis", "--generation", "--older-than-seconds", "--limit"] {
             if parsed.values.contains_key(flag) {
                 parsed.number(flag)?;
             }
@@ -156,7 +194,16 @@ impl Arguments {
                 return Err(usage("writer and peer roles must be distinct"));
             }
         }
-        if command == "gc" {
+        if matches!(command, "rename" | "delete") && parsed.has("--apply") {
+            parsed.required("--lineage")?;
+        }
+        if command == "list-databases"
+            && parsed.values.contains_key("--limit")
+            && !(1..=4096).contains(&parsed.number("--limit")?)
+        {
+            return Err(usage("--limit must be between 1 and 4096"));
+        }
+        if matches!(command, "gc" | "gc-deleted") {
             if parsed.number("--older-than-seconds")? > (i64::MAX as u64) / 1000 {
                 return Err(usage(
                     "retention interval exceeds PostgreSQL millisecond range",
@@ -213,6 +260,13 @@ impl Arguments {
 
 fn usage(message: impl Into<String>) -> SemanticError {
     SemanticError::incorrect("cli/usage", message)
+}
+
+fn catalog_entry(label: &str, entry: &atomic_core::DatabaseCatalogEntry) {
+    println!(
+        "{label} name={:?} storage_id={:?} lineage={} retired={}",
+        entry.name, entry.database_id, entry.lineage_id, entry.retired
+    );
 }
 fn process_io() -> SemanticError {
     SemanticError::new(ErrorCategory::Unavailable, "cli/io", "process I/O failed")
@@ -348,13 +402,100 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         }
         "create" => {
             let id = args.required("--database")?;
-            let db =
-                PostgresStore::connect_configured(&config)?.create_database(id, Schema::new())?;
-            println!("CREATED database={id:?} basis_t={}", db.basis_t());
+            let result = DatabaseCatalog::connect_configured(&config)?
+                .create_if_absent(id, Schema::new())?;
+            catalog_entry(
+                if result.created { "CREATED" } else { "EXISTS" },
+                &result.database,
+            );
+        }
+        "list-databases" => {
+            let mut catalog = DatabaseCatalog::connect_configured(&config)?;
+            let after = args.values.get("--after").map(String::as_str);
+            let limit = if args.values.contains_key("--limit") {
+                args.number("--limit")? as usize
+            } else {
+                1000
+            };
+            let entries = if args.has("--retired") {
+                catalog.list_retired(after, limit)?
+            } else {
+                catalog.list(after, limit)?
+            };
+            for entry in &entries {
+                catalog_entry("DATABASE", entry);
+            }
+            println!(
+                "DATABASE_PAGE entries={} limit={limit} retired={} full_page={}",
+                entries.len(),
+                args.has("--retired"),
+                entries.len() == limit
+            );
+        }
+        "rename" | "delete" => {
+            let mut catalog = DatabaseCatalog::connect_configured(&config)?;
+            let name = args.required("--database")?;
+            if !args.has("--apply") {
+                let entry = catalog.resolve(name)?;
+                catalog_entry("LIFECYCLE_PREVIEW", &entry);
+                println!(
+                    "LIFECYCLE action={} new_name={:?} applied=false",
+                    args.command,
+                    args.values.get("--new-name")
+                );
+            } else if args.command == "rename" {
+                let entry = catalog.rename_checked(
+                    name,
+                    args.required("--new-name")?,
+                    args.required("--lineage")?,
+                )?;
+                catalog_entry("RENAMED", &entry);
+            } else if let Some(entry) = catalog.retire_checked(name, args.required("--lineage")?)? {
+                catalog_entry("RETIRED", &entry);
+                println!("DELETED reclaimed=false");
+            } else {
+                println!("DELETE unchanged=true active_name_absent=true");
+            }
+        }
+        "gc-deleted" => {
+            verify_target(&config, &args)?;
+            let mut operator = PostgresOperator::connect_configured(&config)?;
+            let storage_id = args.required("--storage-id")?;
+            let lineage = args.required("--lineage")?;
+            let age = Duration::from_secs(args.number("--older-than-seconds")?);
+            let batches = if args.has("--apply") {
+                args.batches()?
+            } else {
+                1
+            };
+            for batch in 1..=batches {
+                let report = if args.has("--apply") {
+                    operator.reclaim_retired_database(storage_id, lineage, age)?
+                } else {
+                    operator.preview_retired_database_reclamation(storage_id, lineage, age)?
+                };
+                println!(
+                    "RECLAMATION storage_id={:?} lineage={} batch={batch} phase={} rows_selected={} rows_removed={} pins_checked={} complete={} applied={}",
+                    report.storage_id,
+                    report.lineage_id,
+                    report.phase,
+                    report.rows_selected,
+                    report.rows_removed,
+                    report.pins_checked,
+                    report.complete,
+                    report.applied
+                );
+                std::io::stdout().flush().map_err(|_| process_io())?;
+                if report.complete {
+                    break;
+                }
+            }
         }
         "status" => {
-            let status = PostgresStore::connect_configured(&config)?
-                .database_status(args.required("--database")?)?;
+            let entry = DatabaseCatalog::connect_configured(&config)?
+                .resolve(args.required("--database")?)?;
+            let status =
+                PostgresStore::connect_configured(&config)?.database_status(&entry.database_id)?;
             println!(
                 "STATUS database={:?} lineage={} basis_t={} generation={}",
                 args.required("--database")?,
@@ -427,8 +568,10 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         "inspect" => {
             progress("inspect", "consistent-snapshot")?;
             let deep = !args.has("--shallow");
+            let entry = DatabaseCatalog::connect_configured(&config)?
+                .resolve(args.required("--database")?)?;
             let report = PostgresOperator::connect_configured(&config)?
-                .inspect_database(args.required("--database")?, deep)?;
+                .inspect_database(&entry.database_id, deep)?;
             let m = &report.metrics;
             println!(
                 "INSPECT healthy={} deep_derived={} basis_t={} index_basis_t={} index_lag={} problems={} pending_avet_projections={} pending_tree_publications={} pending_tree_membership_nodes={} shared_reachability_uncertain={} elapsed_ms={}",
@@ -534,7 +677,7 @@ fn rebuild(config: &PostgresConnectionConfig, args: &Arguments) -> Result<(), Se
     let mut indexer = PostgresIndexer::connect_configured(config, database)?;
     // Missing publication is a diagnosis, not a successful no-op (and includes
     // misspelled/absent logical database names). Never consolidate implicitly.
-    let current_manifest = latest_manifest(config, database)?;
+    let current_manifest = latest_manifest(config, indexer.database_id())?;
     if let Some(hash) = args.values.get("--discard-manifest") {
         let selected = parse_digest(hash)?;
         if current_manifest != selected {
@@ -561,7 +704,7 @@ fn rebuild(config: &PostgresConnectionConfig, args: &Arguments) -> Result<(), Se
             println!("FULLTEXT_REPAIR status=pending action=repeat-same-command");
             return Ok(());
         }
-        if latest_manifest(config, database)? != selected {
+        if latest_manifest(config, indexer.database_id())? != selected {
             return Err(SemanticError::new(
                 ErrorCategory::Conflict,
                 "cli/repair-target-advanced",

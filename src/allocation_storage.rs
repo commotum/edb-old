@@ -108,10 +108,11 @@ impl LegacyExcisionProof {
             .tx_data
             .iter()
             .find_map(|d| {
-                if d.added && d.attribute == DB_TX_INSTANT as u32 {
-                    if let Value::Instant(t) = d.value {
-                        return Some(t);
-                    }
+                if d.added
+                    && d.attribute == DB_TX_INSTANT as u32
+                    && let Value::Instant(t) = d.value
+                {
+                    return Some(t);
                 }
                 None
             })
@@ -122,99 +123,6 @@ impl LegacyExcisionProof {
                 )
             })?;
         Ok(instant < before)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Datom, DurableTransaction, t_to_tx};
-
-    fn transaction(t: u64, instant: i64, facts: &[(u64, u32, Value, bool)]) -> DurableTransaction {
-        let tx = t_to_tx(t).unwrap();
-        let mut tx_data = vec![Datom {
-            entity: tx,
-            attribute: DB_TX_INSTANT as u32,
-            value: Value::Instant(instant),
-            tx,
-            added: true,
-        }];
-        tx_data.extend(facts.iter().map(|(e, a, v, added)| Datom {
-            entity: *e,
-            attribute: *a,
-            value: v.clone(),
-            tx,
-            added: *added,
-        }));
-        DurableTransaction {
-            database_id: "proof".into(),
-            basis_t: t,
-            previous_hash: [0; 32],
-            eidx_frontier: 1000 + t * 100_000,
-            tempids: BTreeMap::new(),
-            tx_data,
-        }
-    }
-
-    #[test]
-    fn late_excision_with_early_cutoff_does_not_reserve_later_growth() {
-        let mut proof = LegacyExcisionProof::new(BTreeSet::from([(10, 200)]));
-        proof
-            .observe(&transaction(
-                1,
-                1,
-                &[(200, DB_EXCISE_BEFORE_T as u32, Value::Long(2), true)],
-            ))
-            .unwrap();
-        proof
-            .observe(&transaction(
-                10,
-                10,
-                &[(200, DB_EXCISE as u32, Value::Ref(201), true)],
-            ))
-            .unwrap();
-        // A later edit of request metadata cannot reinterpret its frozen cutoff.
-        proof
-            .observe(&transaction(
-                11,
-                11,
-                &[(200, DB_EXCISE_BEFORE_T as u32, Value::Long(11), true)],
-            ))
-            .unwrap();
-        assert!(proof.pending.is_empty());
-        assert!(proof.includes(&transaction(1, 1, &[])).unwrap());
-        assert!(!proof.includes(&transaction(2, 2, &[])).unwrap());
-        assert!(!proof.includes(&transaction(9, 9, &[])).unwrap());
-    }
-
-    #[test]
-    fn instant_cutoff_union_is_exclusive_and_capped_by_request_basis() {
-        let mut proof = LegacyExcisionProof::new(BTreeSet::from([(3, 200), (5, 201)]));
-        proof
-            .observe(&transaction(
-                3,
-                30,
-                &[
-                    (200, DB_EXCISE_BEFORE as u32, Value::Instant(50), true),
-                    (200, DB_EXCISE as u32, Value::Ref(300), true),
-                ],
-            ))
-            .unwrap();
-        proof
-            .observe(&transaction(
-                5,
-                50,
-                &[
-                    (201, DB_EXCISE_BEFORE as u32, Value::Instant(20), true),
-                    (201, DB_EXCISE as u32, Value::Ref(301), true),
-                ],
-            ))
-            .unwrap();
-        assert!(proof.includes(&transaction(1, 10, &[])).unwrap());
-        assert!(proof.includes(&transaction(2, 20, &[])).unwrap());
-        // Request 3 no longer applies, and request 5's time bound is exclusive.
-        assert!(!proof.includes(&transaction(3, 30, &[])).unwrap());
-        assert!(!proof.includes(&transaction(5, 50, &[])).unwrap());
     }
 }
 
@@ -393,4 +301,97 @@ pub(crate) fn load_reserved_allocation<C: GenericClient>(
         reserved.frontier(),
         endpoint.eidx_frontier,
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Datom, DurableTransaction, t_to_tx};
+
+    fn transaction(t: u64, instant: i64, facts: &[(u64, u32, Value, bool)]) -> DurableTransaction {
+        let tx = t_to_tx(t).unwrap();
+        let mut tx_data = vec![Datom {
+            entity: tx,
+            attribute: DB_TX_INSTANT as u32,
+            value: Value::Instant(instant),
+            tx,
+            added: true,
+        }];
+        tx_data.extend(facts.iter().map(|(e, a, v, added)| Datom {
+            entity: *e,
+            attribute: *a,
+            value: v.clone(),
+            tx,
+            added: *added,
+        }));
+        DurableTransaction {
+            database_id: "proof".into(),
+            basis_t: t,
+            previous_hash: [0; 32],
+            eidx_frontier: 1000 + t * 100_000,
+            tempids: BTreeMap::new(),
+            tx_data,
+        }
+    }
+
+    #[test]
+    fn late_excision_with_early_cutoff_does_not_reserve_later_growth() {
+        let mut proof = LegacyExcisionProof::new(BTreeSet::from([(10, 200)]));
+        proof
+            .observe(&transaction(
+                1,
+                1,
+                &[(200, DB_EXCISE_BEFORE_T as u32, Value::Long(2), true)],
+            ))
+            .unwrap();
+        proof
+            .observe(&transaction(
+                10,
+                10,
+                &[(200, DB_EXCISE as u32, Value::Ref(201), true)],
+            ))
+            .unwrap();
+        // A later edit of request metadata cannot reinterpret its frozen cutoff.
+        proof
+            .observe(&transaction(
+                11,
+                11,
+                &[(200, DB_EXCISE_BEFORE_T as u32, Value::Long(11), true)],
+            ))
+            .unwrap();
+        assert!(proof.pending.is_empty());
+        assert!(proof.includes(&transaction(1, 1, &[])).unwrap());
+        assert!(!proof.includes(&transaction(2, 2, &[])).unwrap());
+        assert!(!proof.includes(&transaction(9, 9, &[])).unwrap());
+    }
+
+    #[test]
+    fn instant_cutoff_union_is_exclusive_and_capped_by_request_basis() {
+        let mut proof = LegacyExcisionProof::new(BTreeSet::from([(3, 200), (5, 201)]));
+        proof
+            .observe(&transaction(
+                3,
+                30,
+                &[
+                    (200, DB_EXCISE_BEFORE as u32, Value::Instant(50), true),
+                    (200, DB_EXCISE as u32, Value::Ref(300), true),
+                ],
+            ))
+            .unwrap();
+        proof
+            .observe(&transaction(
+                5,
+                50,
+                &[
+                    (201, DB_EXCISE_BEFORE as u32, Value::Instant(20), true),
+                    (201, DB_EXCISE as u32, Value::Ref(301), true),
+                ],
+            ))
+            .unwrap();
+        assert!(proof.includes(&transaction(1, 10, &[])).unwrap());
+        assert!(proof.includes(&transaction(2, 20, &[])).unwrap());
+        // Request 3 no longer applies, and request 5's time bound is exclusive.
+        assert!(!proof.includes(&transaction(3, 30, &[])).unwrap());
+        assert!(!proof.includes(&transaction(5, 50, &[])).unwrap());
+    }
 }

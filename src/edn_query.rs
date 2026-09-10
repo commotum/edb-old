@@ -4,11 +4,12 @@ use crate::edn_pull::{
     EdnAdapterLimits, EdnPullTransforms, admission_size, admit, form_error,
     pull_pattern_from_edn_with_limits, sequential, symbol_name,
 };
-use crate::edn_value::{edn_to_value, query_result_to_edn, return_maps_to_edn};
+use crate::edn_value::{edn_to_query_value, edn_to_value, query_result_to_edn, return_maps_to_edn};
 use crate::{
-    Aggregate, Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, Keyword,
-    Predicate, PreparedQuery, Query, QueryControl, QueryDataSource, QueryExtensions, QueryInput,
-    QueryOutcome, QueryResult, QuerySourceValue, Rule, SemanticError, Term, Value, Variable,
+    Aggregate, AggregateArg, AggregateCall, Binding, Clause, DataPattern, FindElement, FindSpec,
+    Function, InputSpec, Keyword, Predicate, PreparedQuery, Query, QueryControl, QueryDataSource,
+    QueryExtensions, QueryInput, QueryOutcome, QueryResult, QuerySourceValue, QueryValue,
+    RelationPattern, Rule, SemanticError, Term, Value, Variable,
 };
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -96,7 +97,6 @@ impl EdnQuery {
         let mut sources = Vec::new();
         let mut inputs = Vec::new();
         let mut native_specs = Vec::new();
-        let mut grounded_inputs = Vec::new();
         let mut patterns = BTreeMap::new();
         let mut rules = None;
         for (index, (spec, argument)) in self.inputs.iter().zip(arguments).enumerate() {
@@ -111,26 +111,12 @@ impl EdnQuery {
                 (EdnQueryInput::Source(name), EdnQueryArgument::Data(value)) => {
                     sources.push(QueryDataSource {
                         name: name.clone(),
-                        value: QuerySourceValue::Tuples(Arc::new(rows(value, &path)?)),
+                        value: relation_source(value, &path)?,
                     })
                 }
                 (EdnQueryInput::Binding(spec), EdnQueryArgument::Data(value)) => {
-                    if input_contains_nil(spec, value) {
-                        grounded_inputs.push(Clause::Function {
-                            function: Function::Ground,
-                            source: "$".into(),
-                            args: vec![ground_input(spec, value)?],
-                            binding: match spec {
-                                InputSpec::Scalar(v) => Binding::Scalar(v.clone()),
-                                InputSpec::Tuple(v) => Binding::Tuple(v.clone()),
-                                InputSpec::Collection(v) => Binding::Collection(v.clone()),
-                                InputSpec::Relation(v) => Binding::Relation(v.clone()),
-                            },
-                        });
-                    } else {
-                        inputs.push(input_value(spec, value, &path)?);
-                        native_specs.push(spec.clone());
-                    }
+                    inputs.push(input_value(spec, value, &path)?);
+                    native_specs.push(spec.clone());
                 }
                 (EdnQueryInput::Pattern(name), EdnQueryArgument::Data(value)) => {
                     patterns.insert(name.clone(), value);
@@ -154,11 +140,8 @@ impl EdnQuery {
         let (mut query, return_keys) =
             compiler.query(&self.template, &patterns, rules, &BTreeMap::new())?;
         query.inputs = native_specs;
-        grounded_inputs.append(&mut query.clauses);
-        query.clauses = grounded_inputs;
         // Preparation and execution remain the existing native mechanisms.
         let prepared = PreparedQuery::new(&query)?;
-        sources.append(&mut compiler.synthetic_sources);
         Ok(BoundEdnQuery {
             prepared,
             sources,
@@ -393,32 +376,57 @@ fn plain(name: &str) -> bool {
     !name.is_empty() && !name.starts_with(['?', '$', '%']) && !matches!(name, "_" | "." | "...")
 }
 
-fn values(value: &EdnValue, path: &str) -> Result<Vec<Value>, SemanticError> {
-    let items = match value {
+fn collection<'a>(value: &'a EdnValue, path: &str) -> Result<&'a [EdnValue], SemanticError> {
+    Ok(match value {
         EdnValue::List(v) | EdnValue::Vector(v) | EdnValue::Set(v) => v,
         _ => {
             return Err(form_error(
                 "edn/query-input-shape",
-                "expected collection input",
+                "expected a list, vector or set",
                 path,
             ));
         }
-    };
-    items.iter().map(edn_to_value).collect()
+    })
 }
 
-fn rows(value: &EdnValue, path: &str) -> Result<Vec<Vec<Value>>, SemanticError> {
-    let items = match value {
-        EdnValue::List(v) | EdnValue::Vector(v) | EdnValue::Set(v) => v,
-        _ => {
-            return Err(form_error(
-                "edn/query-input-shape",
-                "expected a collection of tuple rows",
-                path,
-            ));
-        }
-    };
-    items.iter().map(|v| values(v, path)).collect()
+fn positional<'a>(value: &'a EdnValue, path: &str) -> Result<&'a [EdnValue], SemanticError> {
+    sequential(value).ok_or_else(|| {
+        form_error(
+            "edn/query-input-shape",
+            "positional tuple rows require a list or vector, not an unordered set",
+            path,
+        )
+    })
+}
+
+fn relation_source(value: &EdnValue, path: &str) -> Result<QuerySourceValue, SemanticError> {
+    let rows = collection(value, path)?
+        .iter()
+        .map(|row| {
+            positional(row, path)?
+                .iter()
+                .map(edn_to_query_value)
+                .collect()
+        })
+        .collect::<Result<Vec<Vec<QueryValue>>, SemanticError>>()?;
+    if rows
+        .iter()
+        .flatten()
+        .all(|value| matches!(value, QueryValue::Scalar(_)))
+    {
+        // Retain the existing borrowed scalar-tuple fast path for ordinary data.
+        Ok(QuerySourceValue::Tuples(Arc::new(
+            rows.into_iter()
+                .map(|row| {
+                    row.into_iter()
+                        .map(|value| value.into_scalar().expect("checked scalar"))
+                        .collect()
+                })
+                .collect(),
+        )))
+    } else {
+        Ok(QuerySourceValue::Relation(Arc::new(rows)))
+    }
 }
 
 fn input_value(
@@ -426,77 +434,23 @@ fn input_value(
     value: &EdnValue,
     path: &str,
 ) -> Result<QueryInput, SemanticError> {
-    Ok(match spec {
-        InputSpec::Scalar(_) => QueryInput::Scalar(edn_to_value(value)?),
-        InputSpec::Tuple(_) => QueryInput::Tuple(values(value, path)?),
-        InputSpec::Collection(_) => QueryInput::Collection(values(value, path)?),
-        InputSpec::Relation(_) => QueryInput::Relation(rows(value, path)?),
-    })
-}
-
-// The typed input enum stores facts, not standalone query nil. Lower only
-// nil-bearing bindings to the existing query-value Ground operation; ordinary
-// arguments remain parameters and continue to share prepared query plans.
-fn input_contains_nil(spec: &InputSpec, value: &EdnValue) -> bool {
-    let items = |value: &EdnValue| match value {
-        EdnValue::List(v) | EdnValue::Vector(v) | EdnValue::Set(v) => {
-            v.iter().any(|v| matches!(v, EdnValue::Nil))
-        }
-        _ => false,
-    };
     match spec {
-        InputSpec::Scalar(_) => matches!(value, EdnValue::Nil),
-        InputSpec::Tuple(_) | InputSpec::Collection(_) => items(value),
-        InputSpec::Relation(_) => match value {
-            EdnValue::List(v) | EdnValue::Vector(v) | EdnValue::Set(v) => v.iter().any(items),
-            _ => false,
-        },
-    }
-}
-
-fn ground_input(spec: &InputSpec, value: &EdnValue) -> Result<Term, SemanticError> {
-    if matches!(value, EdnValue::Nil) {
-        return Ok(Term::Nil);
-    }
-    fn tuple(value: &EdnValue) -> Result<Value, SemanticError> {
-        let items = match value {
-            EdnValue::List(v) | EdnValue::Vector(v) | EdnValue::Set(v) => v,
-            _ => {
-                return Err(form_error(
-                    "edn/query-input-shape",
-                    "expected sequential nil-bearing input",
-                    "query/:in",
-                ));
+        InputSpec::Scalar(_) => {}
+        InputSpec::Tuple(_) => {
+            positional(value, path)?;
+        }
+        InputSpec::Collection(_) => {
+            collection(value, path)?;
+        }
+        InputSpec::Relation(_) => {
+            for row in collection(value, path)? {
+                positional(row, path)?;
             }
-        };
-        Ok(Value::Tuple(
-            items
-                .iter()
-                .map(|v| {
-                    if matches!(v, EdnValue::Nil) {
-                        Ok(None)
-                    } else {
-                        edn_to_value(v).map(Some)
-                    }
-                })
-                .collect::<Result<_, _>>()?,
-        ))
+        }
     }
-    let value = if matches!(spec, InputSpec::Relation(_)) {
-        let items = match value {
-            EdnValue::List(v) | EdnValue::Vector(v) | EdnValue::Set(v) => v,
-            _ => unreachable!("nil detection requires a collection"),
-        };
-        Value::Tuple(
-            items
-                .iter()
-                .map(|v| tuple(v).map(Some))
-                .collect::<Result<_, _>>()?,
-        )
-    } else {
-        tuple(value)?
-    };
-    Ok(Term::Constant(value))
+    // Nil and containers remain parameters, not embedded Ground clauses. A
+    // prepared query can therefore be reused with different general values.
+    Ok(QueryInput::General(edn_to_query_value(value)?))
 }
 
 struct Compiler<'a> {
@@ -504,7 +458,6 @@ struct Compiler<'a> {
     limits: &'a EdnAdapterLimits,
     used_variables: BTreeSet<String>,
     fresh: usize,
-    synthetic_sources: Vec<QueryDataSource>,
     remaining: Cell<EdnAdapterLimits>,
     rule_names: BTreeSet<String>,
     rule_data: Option<Arc<EdnValue>>,
@@ -549,7 +502,6 @@ impl<'a> Compiler<'a> {
             limits,
             used_variables,
             fresh: 0,
-            synthetic_sources: Vec::new(),
             remaining: Cell::new(*limits),
             rule_names: BTreeSet::new(),
             rule_data: None,
@@ -771,7 +723,46 @@ impl<'a> Compiler<'a> {
                 )?),
             });
         }
-        let (function, value) = aggregate(&name, args)?;
+        let builtin_name = name.strip_prefix("clojure.core/").unwrap_or(&name);
+        if !matches!(
+            builtin_name,
+            "count"
+                | "count-distinct"
+                | "min"
+                | "max"
+                | "sum"
+                | "avg"
+                | "distinct"
+                | "median"
+                | "variance"
+                | "stddev"
+                | "rand"
+                | "sample"
+        ) {
+            if args.is_empty() {
+                return Err(form_error(
+                    "edn/query-aggregate",
+                    "custom aggregate requires arguments",
+                    "query/:find",
+                ));
+            }
+            let args = args
+                .iter()
+                .map(|arg| match symbol_name(arg) {
+                    Some(name) if name.starts_with('?') => {
+                        variable(arg).map(AggregateArg::Variable)
+                    }
+                    Some(name) if name.starts_with('$') => Ok(AggregateArg::Source(
+                        sources.get(&name).cloned().unwrap_or(name),
+                    )),
+                    _ => edn_to_query_value(arg).map(AggregateArg::Constant),
+                })
+                .collect::<Result<_, SemanticError>>()?;
+            return Ok(FindElement::CustomAggregate(Box::new(AggregateCall::new(
+                name, args,
+            ))));
+        }
+        let (function, value) = aggregate(builtin_name, args)?;
         Ok(FindElement::Aggregate {
             function,
             variable: variable(value)?,
@@ -947,15 +938,19 @@ impl<'a> Compiler<'a> {
                 _ => {}
             }
         }
-        if let Some(call) = sequential(first) {
+        if let Some(call) = sequential(first)
+            && call
+                .first()
+                .and_then(symbol_name)
+                .is_some_and(|name| plain(&name))
+        {
             return self.expression(call, rest, &source, patterns, sources);
         }
         if parts.len() > 5 {
-            return Err(form_error(
-                "edn/query-pattern",
-                "native E/A/V/T/assertion patterns have at most five components",
-                "query/:where",
-            ));
+            return Ok(vec![Clause::RelationPattern(Box::new(RelationPattern {
+                source,
+                terms: parts.iter().map(term).collect::<Result<_, _>>()?,
+            }))]);
         }
         let component = |index| parts.get(index).map_or(Ok(Term::Blank), term);
         Ok(vec![Clause::Pattern(Box::new(DataPattern {
@@ -1125,26 +1120,9 @@ impl<'a> Compiler<'a> {
                 "query/:where/q",
             ));
         }
-        // Native nested queries install a default source even for source-free
-        // computations. Supply an explicit empty relation, never a connection
-        // or an unrelated ambient database. Names cannot collide with EDN.
-        let source = invocation_source.unwrap_or_else(|| {
-            if let Some(source) = self.synthetic_sources.first() {
-                return source.name.clone();
-            }
-            let name = loop {
-                let name = format!("$__atomic_edn_empty_{}", self.fresh);
-                self.fresh += 1;
-                if self.used_variables.insert(name.clone()) {
-                    break name;
-                }
-            };
-            self.synthetic_sources.push(QueryDataSource {
-                name: name.clone(),
-                value: QuerySourceValue::Tuples(Arc::new(Vec::new())),
-            });
-            name
-        });
+        // The engine validates sources actually consumed by the nested query.
+        // Source-free computations need neither a dummy database nor a relation.
+        let source = invocation_source.unwrap_or_else(|| "$".into());
         Ok((Function::Query(Box::new(query)), values, source))
     }
 
@@ -1278,7 +1256,10 @@ fn term(value: &EdnValue) -> Result<Term, SemanticError> {
             "query",
         )),
         _ if matches!(value, EdnValue::Nil) => Ok(Term::Nil),
-        _ => edn_to_value(value).map(Term::Constant),
+        _ => match edn_to_value(value) {
+            Ok(value) => Ok(Term::Constant(value)),
+            Err(_) => edn_to_query_value(value).map(Term::QueryConstant),
+        },
     }
 }
 
@@ -1296,12 +1277,29 @@ fn predicate(name: &str) -> Option<Predicate> {
 }
 
 fn function(name: &str) -> Function {
-    match name.strip_prefix("clojure.core/").unwrap_or(name) {
+    match name {
+        "clojure.string/starts-with?" => return Function::StartsWith,
+        "clojure.string/ends-with?" => return Function::EndsWith,
+        "clojure.string/includes?" => return Function::Includes,
+        "clojure.core/starts-with?" | "clojure.core/ends-with?" | "clojure.core/includes?" => {
+            return Function::Extension(name.into());
+        }
+        _ => {}
+    }
+    let native_name = name.strip_prefix("clojure.core/").unwrap_or(name);
+    match native_name {
         "ground" => Function::Ground,
         "+" => Function::Add,
         "-" => Function::Subtract,
         "*" => Function::Multiply,
         "/" => Function::Divide,
+        "count" => Function::Count,
+        "quot" => Function::Quot,
+        "subs" => Function::Subs,
+        "str" => Function::Str,
+        "starts-with?" => Function::StartsWith,
+        "ends-with?" => Function::EndsWith,
+        "includes?" => Function::Includes,
         "tuple" => Function::Tuple,
         "untuple" => Function::Untuple,
         "get-else" => Function::GetElse,

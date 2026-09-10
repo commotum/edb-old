@@ -5,7 +5,7 @@
 A long-lived database can add schema and named partitions after ordinary data growth, with safe default placement and documented identity/numeric semantics.
 
 This is Stage 2 of [Goal 0](../goal-0/0-plan.md), owning ST-03, ST-01, SC-01, SC-02.
-Status: active; internal Stage 2 (native and durable implementation).
+Status: complete; all internal stages and integrated compatibility accepted.
 Preserve completed EDN and all other child work.
 The historical audit is [goal-0/1-audit.md](../goal-0/1-audit.md).
 
@@ -52,9 +52,8 @@ old durable meaning/retries. Reopen implementation for integration gaps.
 This child finishes only when all three outcomes and its parent-stage signal hold.
 Record commands/results, material design decisions, remaining gaps and a concise
 next action here, then return to Goal 0. A scaffold or pure helper is not completion.
-Current next action: finish ATLC v2 integration through writer, recovery, peer,
-COW and backup; verify the retained pre-repair high-frontier database without
-reseeding, then run complete application/compatibility acceptance.
+Current next action: return to Goal 0 and execute Goal 4. Reopen this child only
+for an integrated gap it owns; preserve its retained fixtures and completed work.
 
 ## Verified reconciliation and implementation evidence (2026-09-10)
 
@@ -73,7 +72,8 @@ reseeding, then run complete application/compatibility acceptance.
   Four focused tests passed, including actual PostgreSQL restart/config-change
   retries (2.328s complete workflow). Three binary argument tests passed. New CLI
   placement test initially assumed query IDs print as bare Long; fixed to decode
-  typed EDN refs. Final CLI rerun is pending; not yet claimed complete.
+  typed EDN refs. The corrected CLI suite passed 3/3; its default-placement,
+  preview, explicit-force and config-change/exact-retry workflow took 7.137s.
 - ST-03 old behavior: public retract-only tempids issue IDs without live user facts.
   At frontier 524,288 named-partition installation failed
   schema/invalid-partition-install; schema installation succeeded at 1,048,576
@@ -83,7 +83,8 @@ reseeding, then run complete application/compatibility acceptance.
 - Pure repaired boundary: 1,047,577 ordinary allocations in 65 batches, both late
   installations succeed, complete 1.445s optimized. Four smaller tests pass for
   independent domains, explicit no-op reservation, typed Ref/tuple Ref witnesses
-  and numbers that are not identities. Durable acceptance is still pending.
+  and numbers that are not identities. Durable boundary results follow below;
+  broader compatibility acceptance remains required.
 
 ### Durable allocation decision
 
@@ -182,3 +183,162 @@ the finite reserved range; arbitrary hole recycling is not this repair.
   join was corrected before any migration or transaction, then the whole check
   was rerun successfully. Owning allocator files are released; this evidence
   does not by itself close the child’s other integrated compatibility work.
+
+### Compatibility acceptance in progress
+
+- Retained identity-repair receipts were checked without migrating their shared
+  source installation (253 logical databases). The pre-31 Rust library backed up
+  only `repair_old_receipt_c0bc499`, generation 1 / basis 15, from physical
+  `atomic_repair` / `public` at schema 30 (71 objects, 5.301s). Current code
+  restored it into isolated schema `identity_compat_xbpxsl` in the acceptance
+  database (4.495s), then the explicitly selected ignored `identity_upgrade`
+  verification passed 1/1 (0.76s). Both old map/program collision receipts remain
+  exact; two new requests retain the repaired behavior. Source rows and schema
+  remain unchanged. Source canonical/request/26-tempid fingerprint:
+  `3b284cb2d086f16283c6e55f2f96a8ace24d309429b664717ec816c5cfe86d10`.
+  Original receipt-file SHA256:
+  `e625cb49f32df376c9cf1e5135582347ad502de21dd7ff713f52f210dd123c32`.
+  Evidence and backup: `/tmp/atomic-identity-isolation.XbpXSl`; optimized test
+  binary SHA256 `cdbbb1a63ab519ae1aae756d9b013952be57b76103b6c6236511bf41401072a1`.
+- Exact allocation-state peer tests passed 2/2 on PostgreSQL (32.05s), including
+  native cached advancement/reopen, unchanged-basis physical refresh, independent
+  successor metadata, zero-SQL warm reads, retryable proof errors, and genuine
+  populated-v11 generation-zero read/recovery preserving original payloads.
+- A first broad parallel backup run exceeded the fixture server's 80-connection
+  cap: two backup tests failed with PostgreSQL 53300. That run is not acceptance.
+  The broad public/application suite is being rerun serially; server settings
+  were not changed and no server restart was used.
+- The genuine gen0 backup/restore regression found an existing integration gap:
+  restore created historical semantic coordinates only for native request-base
+  receipts, not older ordinary receipts. The latter then failed exact db-before
+  reopening (`postgres/request-before-root-missing`). This is an owning-child
+  blocker being repaired, not an unsupported-legacy exclusion. Initial fixture
+  attempts to write gen0 with the current writer were invalid setup and replaced
+  with historical v11 seeding before migration.
+- Clippy completed after removing three warnings introduced by this stage;
+  the existing unrelated warnings remain. Historical program-reference migration
+  tests also need genuine v1 fixture data rather than pretending current v2
+  content was produced under schema 23. Neither pending check is a pass yet.
+
+Further verified checks and remaining integration work:
+
+- The serial run passed backup-copy boundary 2/2 (55.05s), backup/restore 10/10
+  (719.90s), semantic backup integrity 4/4 (75.29s), identity repairs 5/5,
+  operations/excision 1/1, partition authoring 4/4, partition behavior/locality
+  4/4 and runtime-role/schema migration boundaries 2/2. These binaries preceded
+  the additional legacy-receipt checkpoint repair described below. The previous
+  connection-limit failures did not recur. Read-only diagnostics observed
+  DataFileImmediateSync during isolated migration setup; no durability settings
+  were weakened. The one-time old-partition test lacked its separate environment
+  and was skipped, not passed; a fresh genuine-old-binary witness is being run.
+- The application command failed because its separately built example executable
+  was still pre-schema-31. This was test setup, not a reason to relax the schema
+  fence. Both `--bin atomic --example application_workflow` were rebuilt with
+  `cargo build --offline --release -j4` (56.66s); application and remaining public
+  read/schema checks are being rerun. Do not count the earlier application as a pass.
+- Historical program-reference coverage now uses a genuine pre-31 native Rust
+  portable backup, stored as a small reviewable hex test fixture. Current-v2 tests
+  remain; only historical schema downgrade cases restore authentic v1 content.
+  Removing migration 31 first rejects non-v1 content, then removes its actual DDL;
+  canonical payloads/hashes are never rewritten to fabricate history. The target
+  passed 9/9 (eight actual PostgreSQL tests and pure fixture authentication), with
+  one explicitly ignored fixture-regeneration tool, in 167.34s. It verifies
+  schema23-to-31 checksums, canonical fingerprints, program references, corruption
+  rejection, GC resume and paused restores. Log:
+  `/tmp/atomic-program-reference-fixture.USlj4V/migration-upgrade-current.log`;
+  tested binary SHA256 `54cb90f154c004ddbfd1e268857680c3f6237b85e981115683b1ab8933282012`.
+- Legacy restore needs historical physical indexes as well as semantic roots.
+  The repair reuses incremental tree/AVET construction and generation-owned
+  completed archives, without changing old request kinds or canonical receipts.
+  Checkpoints cap receipt tails at 256 transactions, 4 MiB accounted bytes and
+  16,384 datoms (one historical transaction is indivisible). Scratch ownership
+  uses existing durable intents and at most 16 pins on one dedicated session;
+  complete archives own descendants before those pins are released. Admin retry
+  must authenticate archive structure and semantic content before claiming a
+  prior restore complete. Full backup verification still uses its existing eager
+  history representation; this is not a claim that whole restore RSS is bounded.
+  The expanded PostgreSQL/GC/corruption/restart regression remains pending.
+
+Latest acceptance reconciliation:
+
+- After rebuilding the CLI and application example together, `product_cli`
+  passed 2/2 (27.82s): restricted roles, two writer restarts, two application
+  processes, exact repeated transactions and diagnosed/recovered missing physical
+  publication. READ_VALUES_OK ran both rounds; warm queries issued zero SQL.
+  The stale-example failure above is resolved, not counted as a successful run.
+- Remaining serialized public tests passed: read entity identity 2/2, index
+  authoring 5/5, captured invocation 4/4, mixed-source sequences 7/7, schema
+  information repairs 8/8, temporal schema repairs 2/2 and successor schema 3/3.
+  Complete sequence preparation/consumption/drop samples for 32/128/512 rows
+  were 0.275/0.987/2.172ms when consuming all rows; these are local samples, not
+  a general scalability certificate. Ten thousand entity equality/hash/token
+  iterations took 1.448ms with zero SQL.
+- The previously skipped pre-partition case was explicitly exercised using the
+  genuine old executable `/tmp/atomic-pre-partition.MKkZlH/atomic`, SHA256
+  `ae81325a36a131183df02724304027df67b3f9b57bfbc79334be7bb46e02ab6d`.
+  It created a fresh schema-26 fixture, then current migration 31 and
+  `partition_upgrade` passed 1/1 (1.74s), preserving original genesis, exact
+  retry, old values and recovery. Genesis SHA256:
+  `b99d04f25079c8646fc066975d6d9b952984a68e314d9d8299db62ed511cab75`.
+  Only the newly owned `partition_goal3_egwbab` schema was removed afterward;
+  catalog verification found zero matches. Original fixtures were untouched.
+  Log: `/tmp/atomic-partition-goal3.egWBAb/upgrade.log`.
+- These public binaries preceded the final legacy receipt-archive proof changes.
+  Run the expanded legacy witness and relevant changed-path backup regressions
+  on the final build; retain the distinction between snapshots of test evidence.
+- After the archive matcher/shared semantic proof refactor, the optimized public
+  semantic-integrity target passed 4/4 (23.55s), and copy/retry boundaries passed
+  2/2 (9.03s). This includes hash-valid forged indexes, earlier request-base
+  semantics, pending AVET, noHistory and missing/corrupt unchanged-copy objects.
+  Normal-library Clippy passed (11.84s; 15 existing unrelated warnings). It first
+  caught a call to a test-only hash convenience method; production code now uses
+  the identical SHA256 of encoded content directly. A further narrow strict-v2
+  freshness check is being shared with recovery before final acceptance.
+- The latest ordinary native receipt backup → restore → backup → restore
+  regression passed 1/1 (239.25s), including exact replay with fewer index reads
+  than the complete archived tree. Its deliberately one-datom segments make this
+  a compatibility/resource-boundary witness, not a throughput benchmark.
+- The final matcher-generation-fence build passed the isolated restore
+  failure/ambiguous-commit retry regression 1/1 (21.58s). Transaction interruption,
+  partial staging and retry remain atomic. Subsequent malformed-v2 admission
+  guards have their own pure negative/valid-upsert regressions; they add no
+  archive I/O or publication behavior.
+
+### Final acceptance and handoff
+
+All three internal stages are complete. The chronological pending notes above
+record intermediate states, not current blockers.
+
+- Genuine v11 generation-zero upgrade passed 1/1 with no skips (242.46s total,
+  including observed host filesystem journal waits). It exercised 515 historical
+  updates; interrupted same-target restore and retry; 20 zero-age GC probes;
+  missing/corrupt archive rejection and repaired retry; explicit administrative
+  consolidation for the log-only backup; fresh reserved schema ID 1001 and v2
+  commit; reopening and exact first/middle/last receipts. Existing canonical
+  payloads, identities and before/after information remain intact.
+- Four historical checkpoints used ten incremental builder steps, including six
+  AVET projection steps, 102 node outputs and 741,544 encoded bytes; maximum one
+  upload was 24 nodes / 211,478 bytes. Interrupted restore plus successful retry
+  took 13.931s with 39,508 attributed driver calls and 17,556,625 returned cell
+  bytes. This is the complete measured phase, not just the favorable builder.
+  Full administrative verification still materializes history as documented.
+- Reopened exact receipt checks had bounded before/after tails of 1/2, 2/3 and
+  0/1 transactions. Complete read/check/drop samples were 44.008, 37.789 and
+  32.673ms, with 56, 56 and 54 attributed driver calls. These are local workload
+  samples, not production throughput claims.
+- The complete PostgreSQL witness used optimized binary SHA256
+  `d6899ef8a7a804fc040237da3d0508a228632ab6651446d2e31903417fb794fb`.
+  The final source adds only the malformed reserved-receipt upper-bound guard to
+  that behavior; it changes no valid receipt, codec, I/O or publication path.
+  Final optimized SHA256
+  `08ddc9de2192a783740b558fc7aa0b4e9cab61a9be251e8ed11ae07787174f1b`
+  passed 26 focused tests: allocation/receipt guards 3, portable receipt positive
+  1, reserved allocation 7, canonical lineage log 11 and COW 4. The earlier final
+  proof snapshot also passed shared tree semantics 2 and restore builder 2.
+  This explicit artifact split avoids claiming an unrun full-suite snapshot.
+- Final normal-library Clippy passed in 11.11s with 15 existing unrelated
+  warnings and no new diagnostics; `git diff --check` passed. No PostgreSQL
+  durability setting, original historical fixture or existing canonical bytes
+  were weakened/replaced to obtain acceptance.
+
+Continuation: Goal 4 is the next child. This child is complete; Goal 0 is not.

@@ -206,6 +206,7 @@ impl PostgresIndexer {
         hash: Digest,
         incremental: bool,
     ) -> Result<Option<FulltextProjection>, SemanticError> {
+        crate::database_catalog::require_active_id_in(&mut self.client, &self.database_id)?;
         self.fulltext_build_stats = crate::FulltextBuildStats::default();
         let mut store = crate::FulltextStore::connect(&self.connection)?;
         if let Some(projection) =

@@ -10,11 +10,12 @@ pub(super) fn execute(
 ) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
     validate_query(query, args.len())?;
     let mut sources = parent.sources.clone();
-    let default = parent.sources.get(source).copied().ok_or_else(|| {
-        SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
-    })?;
-    sources.insert("$", default);
-    validate_consumed_sources(query, &sources)?;
+    if let Some(default) = parent.sources.get(source).copied() {
+        sources.insert("$", default);
+    } else {
+        sources.remove("$");
+    }
+    validate_consumed_sources(query, &sources, parent.extensions)?;
     let mut child = State {
         sources,
         control: parent.control,
@@ -52,6 +53,11 @@ pub(super) fn execute(
             &child.sources,
             &mut budget,
             parent.control.max_numeric_bytes,
+            &custom_aggregate::Context {
+                extensions: parent.extensions,
+                control: parent.control,
+                deadline: parent.deadline,
+            },
         );
         child.work = budget.work();
         child.stats.allocated_value_bytes = budget.value_bytes();
@@ -112,14 +118,14 @@ fn bind_arguments(
         for row in &rows {
             for tuple in &relation {
                 state.check(1)?;
-                let bound = bind_output(row, &binding, tuple)?;
+                let bound = bind_output(row, &binding, tuple, state)?;
                 state.check(bound.len())?;
                 for row in bound {
                     state.push_row(&mut next, row)?;
                 }
             }
         }
-        rows = dedupe_rows(next);
+        rows = dedupe_rows(next, state)?;
         if rows.len() > state.control.max_intermediate_rows {
             return Err(resource(
                 "query/intermediate-limit",

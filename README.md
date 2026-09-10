@@ -27,12 +27,18 @@ newer implementation or a universal production/Datomic-parity certification.
   using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
 - [React to transactions with bounded durable consumers](docs/change-consumers.md).
 - [Back up, verify, restore, inspect and maintain databases](docs/admin.md).
+- [Create, list, rename and safely retire logical databases](docs/database-lifecycle.md),
+  with separate identity-checked storage reclamation.
 - [Interpret product acceptance and the measured operating envelope](docs/acceptance.md).
 - [Measure independent readers, cold opens and mixed analytics/write traffic](docs/read-load.md).
 - [Author persisted native query programs](docs/programs.md) with predicates,
   recursive rules, negation, historical sources and dynamic attributes.
 - [Compose native database, tuple and log queries](docs/queries.md), reuse query
   structure and configure join/resource limits.
+- [Query general application data](docs/query-data.md): wide relations, nested
+  values and pure Rust callbacks, with or without a database source.
+- [Use custom aggregates and native application logic](docs/application-computation.md):
+  portable data functions and explicitly deployed Rust transaction callbacks.
 - [Configure entity placement and partition hints](docs/partitions.md), and
   [understand composite identity and native NaN behavior](docs/schema-identity.md).
 - [The operational guide](docs/operations.md) describes provisioning,
@@ -143,7 +149,8 @@ resource policy. Tuple ref slots accept `TxValue::Tuple` with symbolic reference
 and nils; structured lookup keys use `EntityRef::LookupInput`. Stored values
 remain fully resolved. Ordinary request and program hashes remain unchanged;
 new inputs select new grammars and (for code literals) program ABI 6. Expanded
-native query templates select ABI 7 only when used, preserving earlier bytes.
+native query templates select ABI 7; general query literals/relations select
+template 3 and ABI 10. Unchanged programs preserve earlier bytes.
 Transactions
 on filtered values use the full basis and retain the filters on their result:
 `as_of` is not a branch of the past. History values cannot transact. Controlled
@@ -157,7 +164,9 @@ Queries and Pull use exact immutable `DatabaseValue`s, including temporal and
 custom-filtered values. `QueryControl` and `PullControl` default to no arbitrary
 work/row/depth/entity ceilings; configure explicit budgets and cancellation for
 untrusted or broad reads. Pull's documented default many-valued limit remains
-1,000. Limits are cooperative logical-work policies, not hard allocator or SQL
+1,000. General query allocations can also be bounded explicitly; the CLI uses a
+configurable 16 MiB allowance. See [general query data](docs/query-data.md).
+Limits are cooperative logical-work policies, not hard allocator or SQL
 preemption guarantees. Result cloning, comparison, formatting and destruction,
 unlimited Pull, explicit selector ownership, and component `Entity::touch` use
 heap traversal instead of depending on Rust call-stack depth.
