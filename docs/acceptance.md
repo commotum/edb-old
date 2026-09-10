@@ -1,9 +1,8 @@
 # Product acceptance and operating envelope
 
-All seven stages and integrated acceptance are complete as of September9,2026.
-[Archived G4 Goal0](../goal-archive/G4/goal-0/0-plan.md) records the required capability set and completion
-evidence. The results below describe the delivered native product and its tested
-operating envelope, not the historical G3 finish line.
+Integrated product acceptance was completed on September9,2026. The results
+below describe the delivered native product and its tested operating envelope;
+historical measurements are distinguished from newer verification.
 
 ## What has been exercised
 
@@ -24,10 +23,11 @@ certification, an uptime SLA or Datomic wire/storage parity.
 | Old data | Preserved pre-partition/pre-fulltext binaries created actual4588/4818-byte genesis databases. Explicit schema26→29 migration and vocabulary transactions retain genesis bytes/hash, old values and retry identity. |
 | Generated lifecycle | Final24-action V2 saved trace replays after both repairs:8writes,3interrupted uploads,3writer restarts,3exact retries and4consumer resumes. A48-step durable-versus-pure comparison preserves36accepted/12rejected outcomes across restart. Controlled failure reduces9actions→3 and passes without the injected assertion. V1 action meanings remain readable. |
 
-Source details and scoped measurements are retained in
-[G4 Goal2](../goal-archive/G4/goal-2/0-plan.md), [G4 Goal3](../goal-archive/G4/goal-3/0-plan.md),
-[G4 Goal4](../goal-archive/G4/goal-4/0-plan.md), [G4 Goal5](../goal-archive/G4/goal-5/0-plan.md),
-[G4 Goal6](../goal-archive/G4/goal-6/0-plan.md) and [G4 Goal7](../goal-archive/G4/goal-7/0-plan.md).
+Usage details and scoped measurements are in the [application guide](application.md),
+[query guide](queries.md), [fulltext guide](fulltext.md),
+[consumer guide](change-consumers.md), [operator guide](operations.md) and
+[independent-reader measurements](read-load.md). Original implementation records
+remain available in Git history at commit `d1670aeabffa92ad54fd200e86aee675351eb6e3`.
 
 ## Cost evidence to interpret separately
 
@@ -111,5 +111,5 @@ evidence that those paths executed.
 The final supported binary/example build and all-target compile passed.
 The broad library run passed341tests with1ignored; PostgreSQL was deliberately
 unset there, so its early-return tests are not counted as live PostgreSQL proof.
-The configured suites above and the child plans supply that proof. Thirty focused
+The configured suites above and the historical implementation records supply that proof. Thirty focused
 maintenance tests and ten commitment tests also passed against actual PostgreSQL.

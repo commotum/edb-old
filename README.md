@@ -5,7 +5,6 @@ database values and facts, serialized declarative transactions, schema and
 identity, history/time views, peer-local Datalog/Pull, controlled persisted
 programs, and operational recovery. Retained Datomic Pro documentation governs
 semantics; recovered source is architectural evidence, not a JVM/wire target.
-Earlier goal passes remain preserved in `goal-archive/`.
 
 The supported product includes a local or verified-TLS remote transactor,
 separate Rust applications, immutable cached peer reads, shared speculative
@@ -14,11 +13,10 @@ transaction planning, named/implicit partitions, UUID helpers and peer-local
 fulltext. Bounded restartable transaction consumers and an administrative CLI
 cover observation, backup/restore, inspection, GC and explicit recovery.
 
-[Archived G4 Goal 0](goal-archive/G4/goal-0/0-plan.md) records the completed seven-stage acceptance, including
-final operating measurements and rebuilt integration. See
-[product acceptance](docs/acceptance.md) for verified boundaries
-and limits. Historical100,000-record G3 results remain in
-[G3 Goal 6](goal-archive/G3/goal-6/0-plan.md); they are not measurements of the
+See [product acceptance](docs/acceptance.md) for verified capabilities,
+integration results, operating measurements and limits. Historical
+100,000-record import/restore/inspection results remain in the
+[operational guide](docs/operations.md); they are not measurements of the
 newer implementation or a universal production/Datomic-parity certification.
 
 ## Start here
@@ -33,25 +31,8 @@ newer implementation or a universal production/Datomic-parity certification.
   recursive rules, negation, historical sources and dynamic attributes.
 - [Compose native database, tuple and log queries](docs/queries.md), reuse query
   structure and configure join/resource limits.
-- [Archived G4 Goal 0](goal-archive/G4/goal-0/0-plan.md) records the completed
-  product objective, required capabilities and integrated acceptance;
-  [`0-loop.md`](goal-archive/G4/goal-0/0-loop.md) and
-  [`0-prompt.md`](goal-archive/G4/goal-0/0-prompt.md) preserve its execution instructions.
-- [Archived G4 Goal 1](goal-archive/G4/goal-1/0-plan.md) records the first delivered
-  stage: runnable local transactor/application, minimal explicit setup and reusable
-  verification. G4 Goal0 records the completed integration of all seven stages.
-- [`goal-archive/`](goal-archive/README.md) indexes original Goals0–8 in G1,
-  corrective Goals9–17 in G2, completed native-core Goals0–6 in G3, and
-  completed product Goals0–7 in G4.
-  Their plans and completion labels are historical evidence, not active policy.
-- [The corrective evidence ledger](goal-archive/G2/goal-9/EVIDENCE_LEDGER.md)
-  maps prior repairs and unresolved questions to the docs and recovered source.
-- [The active operational guide](docs/operations.md) describes provisioning,
-  I/O policy, backup/restore, GC and excision. The archived
-  [tiered writer architecture](goal-archive/G2/goal-16/ARCHITECTURE.md) retains
-  implementation evidence; check it against current code.
-- [`1.0.7277/`](1.0.7277/) contains the validated historical Peer and
-  Transactor reference corpus.
+- [The operational guide](docs/operations.md) describes provisioning,
+  I/O policy, backup/restore, GC and excision.
 - [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
   corpus recovered from the matched 1.0.7705 distribution.
 - [`tools/`](tools/) contains the repaired decompiler and the small set of
@@ -142,9 +123,10 @@ transaction-report queues are unbounded; consumers must drain or disable them.
 Dropping a read connection requests observer shutdown without waiting for a
 stalled storage read; its worker and pins release when that in-flight read ends.
 
-These small examples establish application paths, not scale acceptance. G3 Goal6
-records measured deployment/maintenance drivers, actual runs and
-the workload-specific operating envelope.
+These small examples establish application paths, not scale acceptance. See
+[product acceptance](docs/acceptance.md) and the
+[operational guide](docs/operations.md) for measured deployment/maintenance
+workloads and their operating limits.
 
 `DatabaseValue::with(&ops, tx_instant)` now returns a pure
 `SpeculativeTransactionReport`; its `db_after` can be extended, queried, pulled,
@@ -161,8 +143,9 @@ native query templates select ABI 7 only when used, preserving earlier bytes.
 Transactions
 on filtered values use the full basis and retain the filters on their result:
 `as_of` is not a branch of the past. History values cannot transact. Controlled
-generation follows this same docs-first native rule. Archived G3 Goal3 records
-its live semantic acceptance; G3 Goal6 records integrated load and failure acceptance.
+generation follows this same docs-first native rule. See
+[product acceptance](docs/acceptance.md) for semantic, load and failure
+verification and its limits.
 
 ## Native read access
 
@@ -208,16 +191,15 @@ Immutable PostgreSQL search projections are built in the background; every hit
 is checked against the supplied database view. Coverage may lag and is explicit;
 search is not a complete-membership correctness constraint. Schema upgrades,
 stored ABI9 programs and the separate-process application are verified on real
-PostgreSQL; archived G4 Goal5 records lifecycle and measured-cost acceptance.
-Native advisory read tracing/prefetch is implemented and verified in
-G4 Goal3; G4 Goal6 records versioned authenticated cross-host hint transport. Hints never become
+PostgreSQL; [product acceptance](docs/acceptance.md) records lifecycle checks
+and measured costs. Native advisory read tracing/prefetch and versioned
+authenticated cross-host hint transport are implemented and verified. Hints never become
 transaction meaning or durable request identity. Cold submissions may still
 incur additional index reads. Neither search lag nor missing hint transport changes
-identity, transactions, history, or local Datalog/Pull semantics. See archived
-G3 Goal4 for the earlier source-based decisions and measured read fixtures.
-G3 Goal5 records operational integrity evidence and the completed GC repair;
-G3 Goal6 records integrated
-acceptance alongside the preserved unsuccessful earlier large-run evidence.
+identity, transactions, history, or local Datalog/Pull semantics. See
+[read-load measurements](docs/read-load.md) for reader fixtures and costs, and the
+[operational guide](docs/operations.md) for integrity, recovery and GC behavior,
+including the limits and failed checks in earlier large-workload measurements.
 
 ## Working boundary
 

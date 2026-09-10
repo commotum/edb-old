@@ -1,12 +1,9 @@
 # Native PostgreSQL operations
 
-This is the active operator guide. Archived goal runbooks are historical
-evidence. Archived G3 Goal5 records integrity/recovery checks; G3 Goal6 records
-the historical core deployment envelope. [Archived G4 Goal0](../goal-archive/G4/goal-0/0-plan.md)
-records the completed product phase, including all seven stages and integrated
-operating acceptance.
-No deployment-independent throughput, recovery
-time or network-outage bound is implied.
+This guide covers the operator APIs, recovery guarantees and measured operating
+limits. See [product acceptance](acceptance.md) for current integrated verification;
+the historical core workload is recorded separately below. No deployment-independent
+throughput, recovery time or network-outage bound is implied.
 
 The supported executable commands and explicit target/preview/apply controls
 are documented in [Administrative CLI](admin.md). The API-level guarantees and
@@ -39,12 +36,12 @@ the repaired audit on that unchanged target, normal bounded publication folding,
 post-fold native comparison and separately verified unchanged source before GC.
 It does not relabel the failed parent invocation as a pass. The complete current
 small operations workflow and27 focused live publication/inspection/backup cases
-also pass. [G3 Goal6](../goal-archive/G3/goal-6/0-plan.md) retains exact fixture/hash provenance and
-other live semantic/failure evidence.
+also pass. Original fixture/hash provenance and additional semantic/failure evidence
+remain in Git history at commit `d1670aeabffa92ad54fd200e86aee675351eb6e3`.
 
 Data exceeded configured caches, not this host's physical RAM. Warm selective
 queries in that G3 scale run still performed SQL; it did not establish a zero-I/O
-warm-cache benefit. Archived G4 Goals2–6 subsequently verified zero-SQL resident native reads
+warm-cache benefit. Subsequent checks verified zero-SQL resident native reads
 and secure remote applications on their declared fixtures; those are separate
 results, not a revision of the G3 measurement. Broad restore/inspection were
 expensive and eager. Source GC ran
