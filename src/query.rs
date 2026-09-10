@@ -18,6 +18,17 @@ mod sequence;
 pub use sequence::QuerySequence;
 #[path = "query_nested.rs"]
 mod nested;
+#[path = "query_sources.rs"]
+mod sources;
+use sources::SourceRef;
+pub use sources::{QueryDataSource, QuerySourceValue};
+#[path = "query_prepare.rs"]
+mod prepare;
+pub use prepare::{PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats};
+#[path = "query_fulltext.rs"]
+mod fulltext;
+#[path = "query_join.rs"]
+mod join;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Variable(String);
@@ -106,6 +117,13 @@ pub enum Function {
     Untuple,
     GetElse,
     GetSome,
+    /// Transaction entities in the named immutable log's [start, end) range.
+    TxIds,
+    /// E/A/V/T/assertion tuples for one transaction in the named immutable log.
+    TxData,
+    /// Ranked entity/value/transaction/score hits from an eventually consistent
+    /// search index, checked against the clause's supplied database view.
+    Fulltext,
     Extension(String),
     /// Execute a native subquery against this clause's exact source (as `$`)
     /// and the enclosing named sources, sharing work, deadline and cancellation.
@@ -615,6 +633,21 @@ pub struct QueryStats {
     pub index_seeks: u64,
     pub rows_produced: u64,
     pub rule_iterations: u64,
+    pub prepared_cache_hits: u64,
+    pub hash_join_build_rows: u64,
+    pub hash_join_probes: u64,
+    pub join_candidates: u64,
+    pub grouped_probes_saved: u64,
+    /// Conservative auxiliary join-table retention estimate, not measured
+    /// allocator usage or process RSS.
+    pub peak_join_bytes: usize,
+    /// Accounted row/value allocation bytes over execution, not process RSS.
+    pub allocated_value_bytes: usize,
+    pub fulltext_searches: u64,
+    /// Search indexes can lag even when the supplied database value is fixed.
+    pub fulltext_lagging_searches: u64,
+    pub fulltext_truncated_searches: u64,
+    pub fulltext_read_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -639,9 +672,14 @@ pub struct QueryControl {
     pub max_intermediate_rows: usize,
     pub max_result_rows: usize,
     pub cancel: Arc<AtomicBool>,
-    /// Reference mode used by differential tests to disable bound-prefix
-    /// selection and evaluate every data clause through EAVT.
+    /// Reference mode used by differential tests: disable hash joins/grouped
+    /// probes and evaluate native database patterns through EAVT scans.
     pub force_scan: bool,
+    /// Auxiliary hash tables and native probe groups are chunked using this
+    /// retention allowance. One ordinary native probe is always admitted even
+    /// when its key exceeds the allowance; valid data is not rejected. Zero
+    /// disables hash joins and groups native probes one row at a time.
+    pub max_join_bytes: usize,
 }
 
 impl Default for QueryControl {
@@ -653,6 +691,7 @@ impl Default for QueryControl {
             max_result_rows: usize::MAX,
             cancel: Arc::new(AtomicBool::new(false)),
             force_scan: false,
+            max_join_bytes: 4 * 1024 * 1024,
         }
     }
 }
@@ -949,7 +988,7 @@ struct RuleInvocationKey {
 }
 
 struct State<'a> {
-    sources: BTreeMap<&'a str, &'a DatabaseValue>,
+    sources: BTreeMap<&'a str, SourceRef<'a>>,
     control: &'a QueryControl,
     deadline: Option<Instant>,
     work: usize,
@@ -958,6 +997,8 @@ struct State<'a> {
     extensions: Option<&'a QueryExtensions>,
     rule_memo: BTreeMap<RuleInvocationKey, Vec<Vec<BoundValue>>>,
     solving_rules: bool,
+    borrowed_cancel: Option<&'a AtomicBool>,
+    max_value_bytes: usize,
 }
 
 impl QueryEngine {
@@ -977,11 +1018,57 @@ impl QueryEngine {
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
     ) -> Result<QueryOutcome, SemanticError> {
-        validate_query(query, inputs.len())?;
+        let sources: Vec<_> = sources
+            .iter()
+            .map(|source| QueryDataSource::database(&source.name, source.database.clone()))
+            .collect();
+        Self::execute_sources_with_extensions(query, &sources, inputs, control, extensions)
+    }
+
+    pub fn execute_sources(
+        query: &Query,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        control: &QueryControl,
+    ) -> Result<QueryOutcome, SemanticError> {
+        Self::execute_sources_with_extensions(query, sources, inputs, control, None)
+    }
+
+    pub fn execute_sources_with_extensions(
+        query: &Query,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: Option<&QueryExtensions>,
+    ) -> Result<QueryOutcome, SemanticError> {
+        let (prepared, hit) = prepare::cached(query)?;
+        let query = prepared.as_ref().map_or(query, PreparedQuery::query);
+        let mut outcome = Self::execute_query(query, sources, inputs, control, extensions)?;
+        outcome.stats.prepared_cache_hits = u64::from(hit);
+        Ok(outcome)
+    }
+
+    fn execute_prepared(
+        prepared: &PreparedQuery,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: Option<&QueryExtensions>,
+    ) -> Result<QueryOutcome, SemanticError> {
+        Self::execute_query(prepared.query(), sources, inputs, control, extensions)
+    }
+
+    fn execute_query(
+        query: &Query,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: Option<&QueryExtensions>,
+    ) -> Result<QueryOutcome, SemanticError> {
         let mut source_map = BTreeMap::new();
         for source in sources {
             if source_map
-                .insert(source.name.as_str(), &source.database)
+                .insert(source.name.as_str(), source.borrowed())
                 .is_some()
             {
                 return Err(SemanticError::incorrect(
@@ -990,7 +1077,6 @@ impl QueryEngine {
                 ));
             }
         }
-        validate_consumed_sources(query, &source_map)?;
         let deadline = control
             .timeout
             .and_then(|timeout| Instant::now().checked_add(timeout));
@@ -1004,36 +1090,137 @@ impl QueryEngine {
             extensions,
             rule_memo: BTreeMap::new(),
             solving_rules: false,
+            borrowed_cancel: None,
+            max_value_bytes: usize::MAX,
         };
-        let initial = bind_inputs(&query.inputs, inputs, &mut state)?;
-        let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut state)?;
-        let mut pull_budget = QueryPullBudget::new(
-            Arc::clone(&control.cancel),
-            state.deadline,
-            control.max_work,
-            state.work,
-        );
-        let result = shape_results(
-            query,
-            rows,
-            control.max_result_rows,
-            &state.sources,
-            &mut pull_budget,
-        )?;
-        state.work = pull_budget.work();
-        state.stats.work = state.work as u64;
-        state.stats.rows_produced = result_len(&result) as u64;
+        let result = run_query(query, inputs, &mut state)?;
         Ok(QueryOutcome {
             result,
             stats: state.stats,
             plan: state.plan,
         })
     }
+
+    pub(crate) fn execute_program(
+        query: &Query,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        budget: &mut crate::ProgramBudget<'_>,
+    ) -> Result<QueryOutcome, SemanticError> {
+        let control = QueryControl {
+            max_work: usize::try_from(budget.remaining_fuel()).unwrap_or(usize::MAX),
+            max_intermediate_rows: budget.query_row_limit(),
+            max_result_rows: budget.query_row_limit(),
+            max_join_bytes: budget.query_remaining_value_bytes().min(4 * 1024 * 1024),
+            ..QueryControl::default()
+        };
+        let mut source_map = BTreeMap::new();
+        for source in sources {
+            if source_map
+                .insert(source.name.as_str(), source.borrowed())
+                .is_some()
+            {
+                return Err(SemanticError::incorrect(
+                    "query/duplicate-source",
+                    "duplicate program query source",
+                ));
+            }
+        }
+        let (result, work, bytes) = {
+            let mut state = State {
+                sources: source_map,
+                control: &control,
+                deadline: budget.query_deadline(),
+                work: 0,
+                stats: QueryStats::default(),
+                plan: Vec::new(),
+                extensions: None,
+                rule_memo: BTreeMap::new(),
+                solving_rules: false,
+                borrowed_cancel: budget.query_cancelled(),
+                max_value_bytes: budget.query_remaining_value_bytes(),
+            };
+            let result = (|| {
+                state.check(1)?;
+                let (prepared, hit) = prepare::cached(query)?;
+                state.stats.prepared_cache_hits = u64::from(hit);
+                let result = run_query(
+                    prepared.as_ref().map_or(query, PreparedQuery::query),
+                    inputs,
+                    &mut state,
+                )?;
+                Ok(QueryOutcome {
+                    result,
+                    stats: state.stats.clone(),
+                    plan: std::mem::take(&mut state.plan),
+                })
+            })();
+            (result, state.work as u64, state.stats.allocated_value_bytes)
+        };
+        // Debit attempted work even if cancellation, a source error, or a query
+        // limit interrupted execution. Never grant a fresh interpreter budget.
+        let work_charge = budget.charge_query_work(work);
+        let bytes_charge = budget.charge_query_bytes(bytes);
+        match result {
+            Ok(outcome) => {
+                work_charge?;
+                bytes_charge?;
+                Ok(outcome)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+pub(crate) fn validate_program_query(
+    query: &Query,
+    input_count: usize,
+) -> Result<(), SemanticError> {
+    validate_query(query, input_count)
+}
+
+fn run_query(
+    query: &Query,
+    inputs: &[QueryInput],
+    state: &mut State<'_>,
+) -> Result<QueryResult, SemanticError> {
+    state.check(0)?;
+    if query.inputs.len() != inputs.len() {
+        return Err(SemanticError::incorrect(
+            "query/input-arity",
+            "query input count does not match its bindings",
+        ));
+    }
+    // These checks depend on the invocation's sources, never cached preparation.
+    validate_consumed_sources(query, &state.sources)?;
+    let initial = bind_inputs(&query.inputs, inputs, state)?;
+    let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, state)?;
+    let mut pull_budget = QueryPullBudget::new(
+        Arc::clone(&state.control.cancel),
+        state.deadline,
+        state.control.max_work,
+        state.work,
+    )
+    .with_borrowed_cancel(state.borrowed_cancel)
+    .with_value_budget(state.stats.allocated_value_bytes, state.max_value_bytes);
+    let result = shape_results(
+        query,
+        rows,
+        state.control.max_result_rows,
+        &state.sources,
+        &mut pull_budget,
+    );
+    state.work = pull_budget.work();
+    state.stats.allocated_value_bytes = pull_budget.value_bytes();
+    state.stats.work = state.work as u64;
+    let result = result?;
+    state.stats.rows_produced = result_len(&result) as u64;
+    Ok(result)
 }
 
 fn validate_consumed_sources(
     query: &Query,
-    sources: &BTreeMap<&str, &DatabaseValue>,
+    sources: &BTreeMap<&str, SourceRef<'_>>,
 ) -> Result<(), SemanticError> {
     let mut consumed = BTreeSet::new();
     let mut visited_rules = BTreeSet::new();
@@ -1060,10 +1247,7 @@ fn validate_consumed_sources(
     }
     for element in find_elements(&query.find) {
         if let FindElement::Pull { source, .. } = element {
-            sources
-                .get(source.as_str())
-                .expect("pull source existence was validated")
-                .require_point_in_time("pull")?;
+            find_source(sources, source)?.require_point_in_time("pull")?;
         }
     }
     validate_nested_sources(
@@ -1083,18 +1267,104 @@ fn validate_nested_sources(
     clauses: &[Clause],
     rules: &[Rule],
     inherited: Option<&str>,
-    sources: &BTreeMap<&str, &DatabaseValue>,
+    sources: &BTreeMap<&str, SourceRef<'_>>,
     visited: &mut BTreeSet<(String, String)>,
 ) -> Result<(), SemanticError> {
     for clause in clauses {
         match clause {
+            Clause::Pattern(pattern) => {
+                let name = effective_source(&pattern.source, inherited);
+                match sources.get(name) {
+                    Some(SourceRef::Database(database)) => {
+                        if let Term::Constant(attribute) = &pattern.attribute {
+                            attribute_value(database, attribute)?;
+                        }
+                    }
+                    Some(SourceRef::Tuples(_)) => {}
+                    Some(SourceRef::Log(_)) => {
+                        return Err(SemanticError::incorrect(
+                            "query/source-kind",
+                            "log sources require tx-ids/tx-data",
+                        ));
+                    }
+                    None => {
+                        return Err(SemanticError::incorrect(
+                            "query/unknown-source",
+                            format!("unknown source {name}"),
+                        ));
+                    }
+                }
+            }
+            Clause::Function {
+                function: Function::TxIds | Function::TxData,
+                source,
+                ..
+            } => {
+                let name = effective_source(source, inherited);
+                if !matches!(sources.get(name), Some(SourceRef::Log(_))) {
+                    return Err(SemanticError::incorrect(
+                        "query/source-kind",
+                        "transaction functions require an immutable log source",
+                    ));
+                }
+            }
+            Clause::Function {
+                function: Function::Fulltext,
+                source,
+                args,
+                ..
+            } => {
+                let database = find_source(sources, effective_source(source, inherited))?;
+                if args.len() != 2 {
+                    return Err(SemanticError::incorrect(
+                        "query/function-arity",
+                        "fulltext requires attribute and search string",
+                    ));
+                }
+                // Per-run validation is retained even when an earlier clause
+                // produces no rows or the structural prepared query is reused.
+                if let Term::Constant(attribute) = &args[0] {
+                    let attribute = attribute_value(database, attribute)?;
+                    if !database.schema().attribute(attribute)?.fulltext {
+                        return Err(SemanticError::incorrect(
+                            "query/not-fulltext-attribute",
+                            "fulltext requires an attribute installed with fulltext enabled",
+                        ));
+                    }
+                }
+                if let Term::Constant(search) = &args[1] {
+                    if !matches!(search, Value::String(_)) {
+                        return Err(SemanticError::incorrect(
+                            "query/fulltext-search",
+                            "fulltext search must be a string",
+                        ));
+                    }
+                }
+            }
+            Clause::Predicate {
+                predicate: Predicate::Missing,
+                source,
+                ..
+            }
+            | Clause::Function {
+                function: Function::GetElse | Function::GetSome | Function::Extension(_),
+                source,
+                ..
+            } => {
+                find_source(sources, effective_source(source, inherited))?;
+            }
             Clause::Function {
                 function: Function::Query(query),
                 source,
                 ..
             } => {
                 let selected = effective_source(source, inherited);
-                let database = find_source(sources, selected)?;
+                let database = *sources.get(selected).ok_or_else(|| {
+                    SemanticError::incorrect(
+                        "query/unknown-source",
+                        format!("unknown source {selected}"),
+                    )
+                })?;
                 let mut nested = sources.clone();
                 nested.insert("$", database);
                 validate_consumed_sources(query, &nested)?;
@@ -1146,7 +1416,17 @@ fn collect_consumed_sources(
             }
             | Clause::Function {
                 function:
-                    Function::GetElse | Function::GetSome | Function::Extension(_) | Function::Query(_),
+                    Function::GetElse
+                    | Function::GetSome
+                    | Function::Extension(_)
+                    | Function::Query(_)
+                    | Function::TxIds
+                    | Function::TxData,
+                source,
+                ..
+            }
+            | Clause::Function {
+                function: Function::Fulltext,
                 source,
                 ..
             } => {
@@ -1315,6 +1595,16 @@ fn validate_ground_clauses(clauses: &[Clause]) -> Result<(), SemanticError> {
     for clause in clauses {
         match clause {
             Clause::Function {
+                function: Function::Fulltext,
+                args,
+                ..
+            } if args.len() != 2 => {
+                return Err(SemanticError::incorrect(
+                    "query/function-arity",
+                    "fulltext requires attribute and search string",
+                ));
+            }
+            Clause::Function {
                 function: Function::Tuple,
                 args,
                 ..
@@ -1402,29 +1692,7 @@ fn bind_inputs(
                 ));
             }
         };
-        let mut next = Vec::new();
-        for row in &rows {
-            for bindings in &relation {
-                state.check(1)?;
-                let mut candidate = row.clone();
-                let mut valid = true;
-                for (variable, value) in bindings {
-                    if let Some(variable) = variable
-                        && !unify_variable(
-                            &mut candidate,
-                            variable,
-                            &BoundValue::Stored((*value).clone()),
-                        )
-                    {
-                        valid = false;
-                        break;
-                    }
-                }
-                if valid {
-                    next.push(candidate);
-                }
-            }
-        }
+        let next = join::input_join(&rows, &relation, state)?;
         rows = dedupe_rows(next);
         state.check(0)?;
         if rows.len() > state.control.max_intermediate_rows {
@@ -1508,7 +1776,7 @@ fn evaluate_clause(
                     &values,
                     state,
                 )? {
-                    next.push(row);
+                    state.push_row(&mut next, row)?;
                 }
             }
             Ok((next, "predicate".into()))
@@ -1531,7 +1799,7 @@ fn evaluate_clause(
                     state,
                 )? {
                     for bound in bind_output(&row, binding, &produced)? {
-                        next.push(bound);
+                        state.push_row(&mut next, bound)?;
                     }
                 }
             }
@@ -1563,7 +1831,7 @@ fn evaluate_clause(
                 };
                 if evaluate_clauses(clauses, vec![seed], rules, inherited_source, state)?.is_empty()
                 {
-                    next.push(row);
+                    state.push_row(&mut next, row)?;
                 }
             }
             Ok((next, "set-difference".into()))
@@ -1586,10 +1854,10 @@ fn evaluate_clause(
                                     unify_variable(&mut merged, variable, value)
                                 })
                             }) {
-                                next.push(merged);
+                                state.push_row(&mut next, merged)?;
                             }
                         } else {
-                            next.push(produced);
+                            state.push_row(&mut next, produced)?;
                         }
                     }
                 }
@@ -1638,7 +1906,7 @@ fn evaluate_clause(
                         .zip(tuple)
                         .all(|(term, value)| unify_term(&mut candidate, term, value))
                     {
-                        next.push(candidate);
+                        state.push_row(&mut next, candidate)?;
                     }
                 }
             }
@@ -1654,76 +1922,108 @@ fn evaluate_pattern(
     state: &mut State<'_>,
 ) -> Result<(Vec<Row>, String), SemanticError> {
     let source = effective_source(&pattern.source, inherited_source);
-    let database = state.sources.get(source).copied().ok_or_else(|| {
+    let source_value = state.sources.get(source).copied().ok_or_else(|| {
         SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
     })?;
+    let database = match source_value {
+        SourceRef::Database(database) => database,
+        SourceRef::Tuples(tuples) => return join::evaluate_tuples(pattern, rows, tuples, state),
+        SourceRef::Log(_) => {
+            return Err(SemanticError::incorrect(
+                "query/source-kind",
+                "log sources must be consumed with tx-ids/tx-data",
+            ));
+        }
+    };
     let mut next = Vec::new();
     let mut access = "EAVT scan".to_owned();
-    for row in rows {
-        state.check(1)?;
-        let entity = resolve_entity(database, &pattern.entity, &row)?;
-        // A bound lookup ref that does not resolve denotes no entity.  Keep it
-        // distinct from a blank or unbound entity term, which intentionally
-        // leaves the E position open for an index scan.
-        if entity.is_none() && term_is_bound(&pattern.entity, &row) {
-            continue;
-        }
-        let attribute = resolve_attribute(database, &pattern.attribute, &row)?;
-        let bound_value = term_bound_value(&pattern.value, &row);
-        let value = bound_value
-            .as_ref()
-            .and_then(BoundValue::stored)
-            .map(|value| resolve_pattern_value(database, attribute, value))
-            .transpose()?;
-        let (datoms, selected) = select_datoms(
-            database,
-            entity,
-            attribute,
-            value.as_ref(),
-            state.control.force_scan,
-        )?;
-        access = selected;
-        if access != "EAVT scan" {
-            state.stats.index_seeks += 1;
-        }
-        for datom in datoms {
-            let datom = datom?;
+    let mut input = rows.into_iter().peekable();
+    while input.peek().is_some() {
+        // Group identical *resolved* probes only within a bounded batch. The
+        // selected native index remains the same as in the one-row evaluator.
+        let mut groups: BTreeMap<(Option<u64>, Option<u32>, Option<BoundValue>), Vec<Row>> =
+            BTreeMap::new();
+        let mut bytes = 0usize;
+        while let Some(row) = input.next() {
             state.check(1)?;
-            state.stats.datoms_examined = state.stats.datoms_examined.saturating_add(1);
-            let mut candidate = row.clone();
-            if unify_entity_term(
-                database,
-                &mut candidate,
-                &pattern.entity,
-                entity,
-                datom.entity,
-            )? && unify_attribute_term(
-                database,
-                &mut candidate,
-                &pattern.attribute,
-                attribute,
-                datom.attribute,
-            )? && unify_value_term(
-                database,
-                &mut candidate,
-                &pattern.value,
-                attribute,
-                value.as_ref(),
-                &datom.value,
-            )? && pattern.transaction.as_ref().is_none_or(|term| {
-                unify_term(
-                    &mut candidate,
-                    term,
-                    &BoundValue::Stored(Value::Ref(datom.tx)),
-                )
-            }) && pattern.added.as_ref().is_none_or(|term| {
-                unify_term(
-                    &mut candidate,
-                    term,
-                    &BoundValue::Stored(Value::Bool(datom.added)),
-                )
-            }) {
-                next.push(candidate);
+            let entity = resolve_entity(database, &pattern.entity, &row)?;
+            // A bound lookup ref that does not resolve denotes no entity.  Keep it
+            // distinct from a blank or unbound entity term, which intentionally
+            // leaves the E position open for an index scan.
+            if entity.is_none() && term_is_bound(&pattern.entity, &row) {
+                continue;
+            }
+            let attribute = resolve_attribute(database, &pattern.attribute, &row)?;
+            let bound_value = term_bound_value(&pattern.value, &row);
+            let value = bound_value
+                .as_ref()
+                .and_then(BoundValue::stored)
+                .map(|value| resolve_pattern_value(database, attribute, value))
+                .transpose()?;
+            let key = (entity, attribute, value.map(BoundValue::Stored));
+            bytes = bytes.saturating_add(
+                std::mem::size_of::<Row>()
+                    + std::mem::size_of_val(&key)
+                    + key.2.as_ref().map_or(0, join::bound_bytes),
+            );
+            groups.entry(key).or_default().push(row);
+            if state.control.force_scan || bytes >= state.control.max_join_bytes {
+                break;
+            }
+        }
+        state.stats.peak_join_bytes = state.stats.peak_join_bytes.max(bytes);
+        for ((entity, attribute, value), rows) in groups {
+            let value = value.as_ref().and_then(BoundValue::stored);
+            state.stats.grouped_probes_saved += rows.len().saturating_sub(1) as u64;
+            let (datoms, selected) =
+                select_datoms(database, entity, attribute, value, state.control.force_scan)?;
+            access = selected;
+            if access != "EAVT scan" {
+                state.stats.index_seeks += 1;
+            }
+            for datom in datoms {
+                let datom = datom?;
+                state.check(1)?;
+                state.stats.datoms_examined = state.stats.datoms_examined.saturating_add(1);
+                for row in &rows {
+                    state.check(1)?;
+                    state.stats.join_candidates += 1;
+                    let mut candidate = row.clone();
+                    if unify_entity_term(
+                        database,
+                        &mut candidate,
+                        &pattern.entity,
+                        entity,
+                        datom.entity,
+                    )? && unify_attribute_term(
+                        database,
+                        &mut candidate,
+                        &pattern.attribute,
+                        attribute,
+                        datom.attribute,
+                    )? && unify_value_term(
+                        database,
+                        &mut candidate,
+                        &pattern.value,
+                        attribute,
+                        value,
+                        &datom.value,
+                    )? && pattern.transaction.as_ref().is_none_or(|term| {
+                        unify_term(
+                            &mut candidate,
+                            term,
+                            &BoundValue::Stored(Value::Ref(datom.tx)),
+                        )
+                    }) && pattern.added.as_ref().is_none_or(|term| {
+                        unify_term(
+                            &mut candidate,
+                            term,
+                            &BoundValue::Stored(Value::Bool(datom.added)),
+                        )
+                    }) {
+                        state.push_row(&mut next, candidate)?;
+                    }
+                }
             }
         }
     }
@@ -1879,14 +2179,14 @@ fn solve_rule_invocation(
         ));
     }
 
-    ensure_rule_memo_entry(state, key.clone());
+    ensure_rule_memo_entry(state, key.clone())?;
     if !state.solving_rules {
         state.solving_rules = true;
         let result = stabilize_rule_memo(rules, state);
         state.solving_rules = false;
         result?;
     }
-    Ok(rule_memo_rows(state, &key))
+    rule_memo_rows(state, &key)
 }
 
 fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), SemanticError> {
@@ -1898,7 +2198,7 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), Sema
 
         for key in keys {
             let produced = evaluate_rule_key(&key, rules, state)?;
-            ensure_rule_memo_entry(state, key.clone());
+            ensure_rule_memo_entry(state, key.clone())?;
             let (length, added) = {
                 let rows = state
                     .rule_memo
@@ -1960,6 +2260,9 @@ fn evaluate_rule_key(
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            state.charge_value_bytes(tuple.iter().fold(0usize, |bytes, value| {
+                bytes.saturating_add(join::bound_bytes(value))
+            }))?;
             produced.push(tuple);
         }
     }
@@ -1967,12 +2270,35 @@ fn evaluate_rule_key(
     Ok(produced)
 }
 
-fn ensure_rule_memo_entry(state: &mut State<'_>, key: RuleInvocationKey) {
+fn ensure_rule_memo_entry(
+    state: &mut State<'_>,
+    key: RuleInvocationKey,
+) -> Result<(), SemanticError> {
+    if !state.rule_memo.contains_key(&key) {
+        state.charge_value_bytes(key.bindings.iter().flatten().fold(
+            std::mem::size_of::<RuleInvocationKey>() + key.name.len() + key.source.len(),
+            |bytes, value| bytes.saturating_add(join::bound_bytes(value)),
+        ))?;
+    }
     state.rule_memo.entry(key).or_default();
+    Ok(())
 }
 
-fn rule_memo_rows(state: &State<'_>, key: &RuleInvocationKey) -> Vec<Vec<BoundValue>> {
-    state.rule_memo.get(key).cloned().unwrap_or_default()
+fn rule_memo_rows(
+    state: &mut State<'_>,
+    key: &RuleInvocationKey,
+) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
+    let bytes = state
+        .rule_memo
+        .get(key)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .fold(0usize, |bytes, value| {
+            bytes.saturating_add(join::bound_bytes(value))
+        });
+    state.charge_value_bytes(bytes)?;
+    Ok(state.rule_memo.get(key).cloned().unwrap_or_default())
 }
 
 fn evaluate_predicate(
@@ -2012,9 +2338,7 @@ fn evaluate_predicate(
                     "missing requires entity and attribute",
                 ));
             }
-            let database = state.sources.get(source).copied().ok_or_else(|| {
-                SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
-            })?;
+            let database = source_database(state, source)?;
             let entity = entity_value(database, require_stored(&args[0], "query/entity-value")?)?
                 .ok_or_else(|| {
                 SemanticError::incorrect("query/entity-value", "missing entity must be a ref")
@@ -2034,6 +2358,10 @@ fn evaluate_function(
     state: &mut State<'_>,
 ) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
     match function {
+        Function::TxIds | Function::TxData => {
+            sources::log_function(function, source, args, binding, state)
+        }
+        Function::Fulltext => fulltext::execute(source, args, binding, state),
         Function::Query(query) => nested::execute(&query, source, args, binding, state),
         Function::Ground => ground_output(args, binding),
         Function::Tuple => Ok(vec![vec![if args
@@ -2333,7 +2661,7 @@ fn shape_results(
     query: &Query,
     rows: Vec<Row>,
     max: usize,
-    sources: &BTreeMap<&str, &DatabaseValue>,
+    sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
 ) -> Result<QueryResult, SemanticError> {
     let elements = match &query.find {
@@ -2350,12 +2678,14 @@ fn shape_results(
         let projected = basis_variables
             .iter()
             .map(|variable| {
-                row.get(variable).cloned().ok_or_else(|| {
+                let value = row.get(variable).ok_or_else(|| {
                     SemanticError::incorrect(
                         "query/unbound-find-variable",
                         format!("find variable {} is unbound", variable.name()),
                     )
-                })
+                })?;
+                pull_budget.charge_value_bytes(join::bound_bytes(value))?;
+                Ok(value.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
         basis.push(projected);
@@ -2411,7 +2741,7 @@ fn aggregate_rows(
     elements: &[FindElement],
     basis_variables: &[Variable],
     basis: &[Vec<BoundValue>],
-    sources: &BTreeMap<&str, &DatabaseValue>,
+    sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
 ) -> Result<Vec<Vec<QueryValue>>, SemanticError> {
     let group_variables: Vec<_> = elements
@@ -2765,7 +3095,7 @@ fn project_element(
     element: &FindElement,
     basis_variables: &[Variable],
     row: &[BoundValue],
-    sources: &BTreeMap<&str, &DatabaseValue>,
+    sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
 ) -> Result<QueryValue, SemanticError> {
     let variable = match element {
@@ -2793,7 +3123,10 @@ fn project_element(
             })?;
             find_source(sources, source)?.pull_for_query(pattern, entity, pull_budget)
         }
-        _ => Ok(row[index].query_value()),
+        _ => {
+            pull_budget.charge_value_bytes(join::bound_bytes(&row[index]))?;
+            Ok(row[index].query_value())
+        }
     }
 }
 fn resolve_args(args: &[Term], row: &Row) -> Result<Vec<BoundValue>, SemanticError> {
@@ -3086,18 +3419,24 @@ fn source_database<'a>(
     state: &'a State<'_>,
     source: &str,
 ) -> Result<&'a DatabaseValue, SemanticError> {
-    state.sources.get(source).copied().ok_or_else(|| {
-        SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
-    })
+    find_source(&state.sources, source)
 }
 
 fn find_source<'a>(
-    sources: &'a BTreeMap<&str, &DatabaseValue>,
+    sources: &'a BTreeMap<&str, SourceRef<'_>>,
     source: &str,
 ) -> Result<&'a DatabaseValue, SemanticError> {
-    sources.get(source).copied().ok_or_else(|| {
-        SemanticError::incorrect("query/unknown-source", format!("unknown source {source}"))
-    })
+    match sources.get(source) {
+        Some(SourceRef::Database(database)) => Ok(database),
+        Some(_) => Err(SemanticError::incorrect(
+            "query/source-kind",
+            format!("source {source} must be a database"),
+        )),
+        None => Err(SemanticError::incorrect(
+            "query/unknown-source",
+            format!("unknown source {source}"),
+        )),
+    }
 }
 fn effective_source<'a>(source: &'a str, inherited_source: Option<&'a str>) -> &'a str {
     if source == "$" {
@@ -3138,6 +3477,10 @@ fn clause_name(clause: &Clause) -> &'static str {
 fn resource(code: &'static str, message: impl Into<String>) -> SemanticError {
     SemanticError::new(ErrorCategory::Busy, code, message)
 }
+
+pub(crate) fn query_value_allocation_bytes(value: &QueryValue) -> usize {
+    join::query_value_bytes(value)
+}
 fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
     SemanticError::new(ErrorCategory::Fault, code, message)
 }
@@ -3145,7 +3488,11 @@ fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
 impl State<'_> {
     fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
         self.work = self.work.saturating_add(amount);
-        if self.control.cancel.load(AtomicOrdering::Relaxed) {
+        if self.control.cancel.load(AtomicOrdering::Relaxed)
+            || self
+                .borrowed_cancel
+                .is_some_and(|cancel| cancel.load(AtomicOrdering::Relaxed))
+        {
             return Err(SemanticError::new(
                 ErrorCategory::Interrupted,
                 "query/canceled",
@@ -3168,6 +3515,40 @@ impl State<'_> {
                 "query exceeded its work limit",
             ));
         }
+        Ok(())
+    }
+
+    fn check_row_count(&self, count: usize) -> Result<(), SemanticError> {
+        if count > self.control.max_intermediate_rows {
+            return Err(resource(
+                "query/intermediate-limit",
+                "query relation exceeded its row limit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn charge_value_bytes(&mut self, bytes: usize) -> Result<(), SemanticError> {
+        self.stats.allocated_value_bytes = self.stats.allocated_value_bytes.saturating_add(bytes);
+        if self.stats.allocated_value_bytes > self.max_value_bytes {
+            return Err(resource(
+                "query/value-byte-limit",
+                "query exceeded its shared value allocation allowance",
+            ));
+        }
+        Ok(())
+    }
+
+    fn push_row(&mut self, rows: &mut Vec<Row>, row: Row) -> Result<(), SemanticError> {
+        if rows.len() >= self.control.max_intermediate_rows {
+            *rows = dedupe_rows(std::mem::take(rows));
+            if rows.iter().any(|existing| existing == &row) {
+                return Ok(());
+            }
+        }
+        self.check_row_count(rows.len().saturating_add(1))?;
+        self.charge_value_bytes(join::row_bytes(&row))?;
+        rows.push(row);
         Ok(())
     }
 }

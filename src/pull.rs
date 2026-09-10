@@ -102,7 +102,7 @@ impl PullTransform {
     fn apply(
         &self,
         value: &QueryValue,
-        state: &mut PullState<'_>,
+        state: &mut PullState<'_, '_>,
     ) -> Result<QueryValue, SemanticError> {
         let scalar = |value| Ok(QueryValue::Scalar(value));
         match (self, value) {
@@ -344,9 +344,9 @@ impl Default for PullControl {
     }
 }
 
-struct PullState<'a> {
+struct PullState<'a, 'cancel> {
     control: &'a PullControl,
-    query_budget: Option<&'a mut QueryPullBudget>,
+    query_budget: Option<&'a mut QueryPullBudget<'cancel>>,
     /// Cycle and depth state belongs to one lexical recursive selector. An
     /// ordinary nested pull, or a different recursive selector in the same
     /// pattern, must not consume this state.
@@ -359,14 +359,17 @@ struct PullState<'a> {
 /// Datomic's query timeout covers pull work too. Keeping this state separate
 /// from the public `PullControl` lets every pull expression in one query share
 /// the already-consumed query work and the original absolute deadline.
-pub(crate) struct QueryPullBudget {
+pub(crate) struct QueryPullBudget<'a> {
     cancel: Arc<AtomicBool>,
     deadline: Option<Instant>,
     max_work: usize,
     work: usize,
+    borrowed_cancel: Option<&'a AtomicBool>,
+    value_bytes: usize,
+    max_value_bytes: usize,
 }
 
-impl QueryPullBudget {
+impl<'a> QueryPullBudget<'a> {
     pub(crate) fn new(
         cancel: Arc<AtomicBool>,
         deadline: Option<Instant>,
@@ -378,7 +381,37 @@ impl QueryPullBudget {
             deadline,
             max_work,
             work,
+            borrowed_cancel: None,
+            value_bytes: 0,
+            max_value_bytes: usize::MAX,
         }
+    }
+
+    pub(crate) fn with_borrowed_cancel(mut self, cancel: Option<&'a AtomicBool>) -> Self {
+        self.borrowed_cancel = cancel;
+        self
+    }
+
+    pub(crate) fn with_value_budget(mut self, used: usize, max: usize) -> Self {
+        self.value_bytes = used;
+        self.max_value_bytes = max;
+        self
+    }
+
+    pub(crate) fn value_bytes(&self) -> usize {
+        self.value_bytes
+    }
+
+    pub(crate) fn charge_value_bytes(&mut self, bytes: usize) -> Result<(), SemanticError> {
+        self.value_bytes = self.value_bytes.saturating_add(bytes);
+        if self.value_bytes > self.max_value_bytes {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "query/value-byte-limit",
+                "query projection exceeded its shared value allocation allowance",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn work(&self) -> usize {
@@ -387,7 +420,11 @@ impl QueryPullBudget {
 
     pub(crate) fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
         self.work = self.work.saturating_add(amount);
-        if self.cancel.load(Ordering::Relaxed) {
+        if self.cancel.load(Ordering::Relaxed)
+            || self
+                .borrowed_cancel
+                .is_some_and(|cancel| cancel.load(Ordering::Relaxed))
+        {
             return Err(SemanticError::new(
                 ErrorCategory::Interrupted,
                 "query/canceled",
@@ -415,7 +452,13 @@ impl QueryPullBudget {
     }
 }
 
-impl PullState<'_> {
+impl PullState<'_, '_> {
+    fn charge_value_bytes(&mut self, bytes: usize) -> Result<(), SemanticError> {
+        if let Some(budget) = self.query_budget.as_deref_mut() {
+            budget.charge_value_bytes(bytes)?;
+        }
+        Ok(())
+    }
     fn check(&mut self, amount: usize) -> Result<(), SemanticError> {
         if let Some(budget) = self.query_budget.as_deref_mut() {
             return budget.check(amount);
@@ -974,7 +1017,7 @@ fn pull_entity(
     entity: u64,
     pattern: &PullPattern,
     pattern_scope: &[usize],
-    state: &mut PullState<'_>,
+    state: &mut PullState<'_, '_>,
     depth: usize,
 ) -> Result<QueryValue, SemanticError> {
     let wildcard = PullPattern::wildcard();
@@ -991,6 +1034,9 @@ fn pull_entity(
         match task {
             PullTask::Entity(entity, context) => {
                 state.check(1)?;
+                state.charge_value_bytes(
+                    std::mem::size_of::<PullTask>() + std::mem::size_of::<QueryValue>() * 3,
+                )?;
                 if context.depth > state.control.max_depth {
                     return Err(SemanticError::new(
                         ErrorCategory::Busy,
@@ -1200,6 +1246,11 @@ fn pull_entity(
                         put(&mut entries, key, value);
                     }
                 }
+                state.charge_value_bytes(
+                    entries
+                        .len()
+                        .saturating_mul(std::mem::size_of::<(QueryValue, QueryValue)>()),
+                )?;
                 output.push(PullOutput::Value(QueryValue::Map(entries)));
             }
             PullTask::FinishAttribute {
@@ -1219,6 +1270,11 @@ fn pull_entity(
                         values.push(value);
                     }
                 }
+                state.charge_value_bytes(
+                    values
+                        .len()
+                        .saturating_mul(std::mem::size_of::<QueryValue>()),
+                )?;
                 let value = if multiple {
                     Some(QueryValue::Collection(values))
                 } else if values.is_empty() {
@@ -1258,7 +1314,7 @@ fn finish_attribute(
     value: Option<QueryValue>,
     default: Option<&QueryValue>,
     transform: Option<&PullTransform>,
-    state: &mut PullState<'_>,
+    state: &mut PullState<'_, '_>,
 ) -> Result<Option<(QueryValue, QueryValue)>, SemanticError> {
     let value = if let Some(transform) = transform {
         state.check(1)?;
@@ -1268,13 +1324,20 @@ fn finish_attribute(
         }))
         .map_err(|_| fault("pull/transform-panicked", "pull transform panicked"))?;
         state.check(0)?;
-        match result? {
+        let result = result?;
+        state.charge_value_bytes(crate::query::query_value_allocation_bytes(&result))?;
+        match result {
             QueryValue::Nil => None,
             value => Some(value),
         }
     } else {
         value
     };
+    if value.is_none()
+        && let Some(default) = default
+    {
+        state.charge_value_bytes(crate::query::query_value_allocation_bytes(default))?;
+    }
     Ok(value.or_else(|| default.cloned()).map(|value| (key, value)))
 }
 
@@ -1287,7 +1350,10 @@ fn pull_name_parts(value: &str) -> (Option<String>, String) {
     }
 }
 
-fn pull_value_text(value: &QueryValue, state: &mut PullState<'_>) -> Result<String, SemanticError> {
+fn pull_value_text(
+    value: &QueryValue,
+    state: &mut PullState<'_, '_>,
+) -> Result<String, SemanticError> {
     enum Task<'a> {
         Query(&'a QueryValue, bool),
         Stored(&'a Value, bool),
@@ -1371,7 +1437,7 @@ fn prepare_attribute(
     database: &DatabaseValue,
     entity: u64,
     selector: &PullAttribute,
-    state: &mut PullState<'_>,
+    state: &mut PullState<'_, '_>,
 ) -> Result<PreparedAttribute, SemanticError> {
     state.check(1)?;
     let (name, reverse) = match &selector.direction {
@@ -1426,6 +1492,12 @@ fn prepare_attribute(
         database.values(entity, attribute)?
     };
     state.check(values.len())?;
+    state.charge_value_bytes(crate::query::query_value_allocation_bytes(&key))?;
+    state.charge_value_bytes(values.iter().fold(0usize, |bytes, value| {
+        bytes
+            .saturating_add(std::mem::size_of::<Value>())
+            .saturating_add(usize::try_from(value.retained_heap_bytes()).unwrap_or(usize::MAX))
+    }))?;
     if values.is_empty() {
         return Ok(PreparedAttribute::Complete(key, None));
     }

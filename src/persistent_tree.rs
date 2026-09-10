@@ -1603,7 +1603,8 @@ fn child_refs_retained_heap_bytes(children: &[ChildRef], capacity: usize) -> u64
 pub struct TreeReadStats {
     /// Immutable node lookups satisfied by the process-local cache.
     pub cache_hits: u64,
-    /// Immutable node lookups requiring a PostgreSQL fetch.
+    /// Immutable node lookups missing the process-local cache. A native peer
+    /// may satisfy these from its optional SSD tier before PostgreSQL.
     pub cache_misses: u64,
     pub root_reads: u64,
     pub directory_reads: u64,

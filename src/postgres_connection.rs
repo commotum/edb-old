@@ -115,6 +115,7 @@ pub struct PostgresConnectionConfig {
     parameters: Arc<str>,
     root_certificates: Option<Arc<[Vec<u8>]>>,
     io_policy: PostgresIoPolicy,
+    ssd_cache: Option<crate::SsdCacheConfig>,
 }
 
 impl fmt::Debug for PostgresConnectionConfig {
@@ -137,6 +138,7 @@ impl fmt::Debug for PostgresConnectionConfig {
                     .map_or(0, |certificates| certificates.len()),
             )
             .field("io_policy", &self.io_policy)
+            .field("ssd_cache_enabled", &self.ssd_cache.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -148,6 +150,7 @@ impl PostgresConnectionConfig {
             parameters: Arc::from(parameters.into()),
             root_certificates: None,
             io_policy: PostgresIoPolicy::default(),
+            ssd_cache: None,
         }
     }
 
@@ -157,6 +160,7 @@ impl PostgresConnectionConfig {
             parameters: Arc::from(parameters.into()),
             root_certificates: Some(Arc::default()),
             io_policy: PostgresIoPolicy::default(),
+            ssd_cache: None,
         }
     }
 
@@ -184,6 +188,42 @@ impl PostgresConnectionConfig {
 
     pub fn tls_required(&self) -> bool {
         self.root_certificates.is_some()
+    }
+
+    /// Enable disposable local block reuse. Opening a native peer validates
+    /// this private, pre-existing directory; PostgreSQL still authorizes it.
+    pub fn with_ssd_cache(mut self, config: crate::SsdCacheConfig) -> Self {
+        self.ssd_cache = Some(config);
+        self
+    }
+
+    pub fn ssd_cache_config(&self) -> Option<&crate::SsdCacheConfig> {
+        self.ssd_cache.as_ref()
+    }
+
+    /// Opaque access/format separation, not an authorization credential.
+    /// Different raw connection parameters/trust roots intentionally cannot
+    /// reuse each other's cache entries, even if they name the same server.
+    pub(crate) fn ssd_access_namespace(&self, lineage: &str) -> crate::Digest {
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(b"atomic/ssd-access/canonical-node-v1/physical-envelope-v1\0");
+        let mut field = |bytes: &[u8]| {
+            digest.update((bytes.len() as u64).to_be_bytes());
+            digest.update(bytes);
+        };
+        field(self.parameters.as_bytes());
+        field(lineage.as_bytes());
+        match &self.root_certificates {
+            None => field(b"plaintext"),
+            Some(roots) => {
+                field(b"verified-tls");
+                for root in roots.iter() {
+                    field(root);
+                }
+            }
+        }
+        digest.finalize().into()
     }
 
     /// Apply explicit settings to every connection/reconnection using this
@@ -276,10 +316,13 @@ impl PostgresConnectionConfig {
 
     /// Open a caller-owned PostgreSQL client under this transport policy.
     pub fn connect(&self) -> Result<Client, SemanticError> {
-        self.connect_for("postgres/connect")
+        self.connect_raw_for_with_timeout("postgres/connect", None)
     }
 
-    pub(crate) fn connect_for(&self, operation: &'static str) -> Result<Client, SemanticError> {
+    pub(crate) fn connect_for(
+        &self,
+        operation: &'static str,
+    ) -> Result<crate::sql_io::SqlClient, SemanticError> {
         self.connect_for_with_timeout(operation, None)
     }
 
@@ -288,6 +331,16 @@ impl PostgresConnectionConfig {
     /// authentication/TLS, and multiple address attempts are not a complete
     /// wall-clock deadline; see [`PostgresIoPolicy`].
     pub(crate) fn connect_for_with_timeout(
+        &self,
+        operation: &'static str,
+        timeout: Option<Duration>,
+    ) -> Result<crate::sql_io::SqlClient, SemanticError> {
+        crate::sql_io::SqlClient::connect_with(|| {
+            self.connect_raw_for_with_timeout(operation, timeout)
+        })
+    }
+
+    fn connect_raw_for_with_timeout(
         &self,
         operation: &'static str,
         timeout: Option<Duration>,

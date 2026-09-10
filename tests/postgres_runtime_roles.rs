@@ -14,6 +14,7 @@ const TABLE_PRIVILEGES: &[&str] = &[
 ];
 const COLUMN_PRIVILEGES: &[&str] = &["SELECT", "INSERT", "UPDATE", "REFERENCES"];
 const PEER_TABLES: &[&str] = &[
+    "atomic_change_checkpoints",
     "atomic_schema_migrations",
     "atomic_databases",
     "atomic_heads",
@@ -37,6 +38,9 @@ const PEER_TABLES: &[&str] = &[
     "atomic_log_generation_retirements",
     "atomic_index_publications",
     "atomic_tree_nodes",
+    "atomic_tree_node_blocks",
+    "atomic_fulltext_blocks",
+    "atomic_fulltext_projections",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
     "atomic_tree_publications",
@@ -50,6 +54,7 @@ const PEER_TABLES: &[&str] = &[
     "atomic_semantic_commitment_roots",
 ];
 const WRITER_SELECT_TABLES: &[&str] = &[
+    "atomic_remote_writer_endpoints",
     "atomic_transactor_leases",
     "atomic_log_generation_checkpoints",
     // The existing invoker semantic-root trigger reads these GC claims to
@@ -67,10 +72,14 @@ const WRITER_SELECT_TABLES: &[&str] = &[
     "atomic_semantic_commitment_roots",
 ];
 const WRITER_INSERT_TABLES: &[&str] = &[
+    "atomic_remote_writer_endpoints",
     "atomic_transactions",
     "atomic_requests",
     "atomic_transactor_leases",
     "atomic_tree_nodes",
+    "atomic_tree_node_blocks",
+    "atomic_fulltext_blocks",
+    "atomic_fulltext_projections",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
     "atomic_programs",
@@ -88,6 +97,7 @@ const WRITER_INSERT_TABLES: &[&str] = &[
     "atomic_semantic_commitment_roots",
 ];
 const WRITER_UPDATE_TABLES: &[&str] = &[
+    "atomic_remote_writer_endpoints",
     "atomic_databases",
     "atomic_heads",
     "atomic_transactor_leases",
@@ -96,6 +106,7 @@ const WRITER_UPDATE_TABLES: &[&str] = &[
 ];
 
 const WRITER_FUNCTIONS: &[&str] = &[
+    "atomic_discover_remote_writer(text,text)",
     "atomic_apply_tree_publication_work(bytea,bigint)",
     "atomic_finish_tree_build(bytea)",
     "atomic_heartbeat_tree_build(bytea)",
@@ -104,7 +115,7 @@ const WRITER_FUNCTIONS: &[&str] = &[
     "atomic_request_base_archive_build_live(text,bigint)",
     "atomic_tree_database_build_pin_key(text)",
 ];
-const PEER_FUNCTIONS: &[&str] = &["atomic_log_generation_pin_key(text,bigint)"];
+const PEER_FUNCTIONS: &[&str] = &["atomic_log_generation_pin_key(text,bigint)","atomic_discover_remote_writer(text,text)"];
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -274,10 +285,13 @@ fn grant_matrix(
 }
 
 fn expected_peer_grants() -> BTreeSet<(String, String)> {
-    PEER_TABLES
+    let mut grants:BTreeSet<_>=PEER_TABLES
         .iter()
         .map(|table| ((*table).to_owned(), "SELECT".to_owned()))
-        .collect()
+        .collect();
+    grants.insert(("atomic_change_checkpoints".into(),"INSERT".into()));
+    grants.insert(("atomic_change_checkpoints".into(),"UPDATE".into()));
+    grants
 }
 
 fn expected_writer_grants() -> BTreeSet<(String, String)> {
@@ -795,4 +809,53 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
         assert!(connect);
         assert!(!create_schema);
     }
+    // Exercise trigger bodies and exact-source pins with actual runtime login
+    // roles, not only ACL introspection. Empty fulltext still publishes a
+    // corpus-statistics page and a source-bound immutable header.
+    let mut search_schema = Schema::new();
+    search_schema
+        .install(
+            atomic_core::Attribute::new(
+                1000,
+                atomic_core::Keyword::new("document", "body"),
+                atomic_core::ValueType::String,
+                atomic_core::Cardinality::One,
+            )
+            .fulltext(),
+        )
+        .unwrap();
+    PostgresStore::connect(&connection)
+        .unwrap()
+        .create_database("fulltext_runtime", search_schema)
+        .unwrap();
+    let mut indexer =
+        atomic_core::PostgresIndexer::connect(&writer_connection, "fulltext_runtime").unwrap();
+    indexer.consolidate().unwrap();
+    assert_eq!(indexer.fulltext_build_error(),None);
+    let projection = indexer.rebuild_fulltext().unwrap().unwrap();
+    let peer_connection = with_connection_parameter(
+        &with_connection_parameter(&connection, "user", &peer),
+        "password",
+        &password,
+    );
+    let reader =
+        atomic_core::Connection::connect(&peer_connection, "fulltext_runtime", 32).unwrap();
+    assert!(
+        reader
+            .db()
+            .fulltext(1000, "amber", &atomic_core::FulltextOptions::default())
+            .unwrap()
+            .hits
+            .is_empty()
+    );
+    let mut runtime_store = atomic_core::FulltextStore::connect(
+        &atomic_core::PostgresConnectionConfig::plaintext(&writer_connection),
+    )
+    .unwrap();
+    assert_error_code(
+        runtime_store
+            .discard_projection(projection.source_manifest, 1)
+            .unwrap_err(),
+        "fulltext/operator-required",
+    );
 }

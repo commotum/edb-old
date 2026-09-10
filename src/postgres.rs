@@ -12,18 +12,19 @@ use crate::persistent_commitment::{
 use crate::persistent_tree::{TreeNode, decode_tree_node};
 use crate::program::ValidatedProgram;
 use crate::recent::RecentLimits;
+use crate::sql_io::{GenericClient, SqlClient as Client};
 use crate::state_commitment::CommitmentWork;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
 use crate::tiered_assessor::{AssessmentLimits, assess_tiered_with_remaining_limits};
 use crate::{
-    Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory,
-    PostgresConnectionConfig, Program, ProgramBudget, ProgramHash, ProgramKind, ProgramLimits,
-    Schema, SemanticError, TxForm, TxFunctions, TxOp, Value, decode_genesis, decode_program,
-    decode_transaction, encode_genesis, encode_program, encode_transaction, request_digest, sha256,
-    transaction_hash,
+    Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, OperationContext,
+    OperationKind, PostgresConnectionConfig, Program, ProgramBudget, ProgramHash, ProgramKind,
+    ProgramLimits, Schema, SemanticError, TxForm, TxFunctions, TxOp, Value, decode_genesis,
+    decode_program, decode_transaction, encode_genesis, encode_program, encode_transaction,
+    request_digest, sha256, transaction_hash,
 };
+use postgres::IsolationLevel;
 use postgres::fallible_iterator::FallibleIterator;
-use postgres::{Client, GenericClient, IsolationLevel};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
@@ -251,12 +252,19 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         25,
         include_str!("../migrations/0025_receipt_archive_conversion.sql"),
     ),
+    (
+        26,
+        include_str!("../migrations/0026_optional_compressed_nodes.sql"),
+    ),
+    (27, include_str!("../migrations/0027_fulltext_sidecars.sql")),
+    (28, include_str!("../migrations/0028_remote_writer_endpoints.sql")),
+    (29, include_str!("../migrations/0029_change_checkpoints.sql")),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 25;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 29;
 
 /// Version of the authenticated fixed-dependency walker whose result GC may
 /// trust. Any future traversal change that adds roots must bump this version
@@ -297,6 +305,10 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_log_generation_retirements",
     "atomic_index_publications",
     "atomic_tree_nodes",
+    "atomic_tree_node_blocks",
+    "atomic_fulltext_blocks",
+    "atomic_fulltext_projections",
+    "atomic_change_checkpoints",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
     "atomic_tree_publications",
@@ -311,6 +323,7 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
 ];
 
 const WRITER_RUNTIME_TABLES: &[&str] = &[
+    "atomic_remote_writer_endpoints",
     "atomic_transactor_leases",
     // The invoker tree-manifest validation trigger authenticates a positive
     // generation's endpoint against its immutable completion checkpoint.
@@ -331,10 +344,14 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
 ];
 
 const WRITER_INSERT_TABLES: &[&str] = &[
+    "atomic_remote_writer_endpoints",
     "atomic_transactions",
     "atomic_requests",
     "atomic_transactor_leases",
     "atomic_tree_nodes",
+    "atomic_tree_node_blocks",
+    "atomic_fulltext_blocks",
+    "atomic_fulltext_projections",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
     "atomic_programs",
@@ -353,6 +370,7 @@ const WRITER_INSERT_TABLES: &[&str] = &[
 ];
 
 const WRITER_UPDATE_TABLES: &[&str] = &[
+    "atomic_remote_writer_endpoints",
     "atomic_databases",
     "atomic_heads",
     "atomic_transactor_leases",
@@ -387,8 +405,10 @@ impl PostgresMigrator {
         Ok(Self { client })
     }
 
-    pub fn from_client(client: Client) -> Self {
-        Self { client }
+    pub fn from_client(client: postgres::Client) -> Self {
+        Self {
+            client: Client::from_raw(client),
+        }
     }
 
     /// Install every known migration under one transaction-scoped advisory
@@ -1723,6 +1743,7 @@ fn grant_runtime_privileges(
         .batch_execute(&format!(
             "GRANT SELECT ON TABLE {peer_relations} TO {peer_ident}; \
              GRANT SELECT ON TABLE {peer_relations} TO {writer_ident}; \
+             GRANT INSERT, UPDATE ON TABLE {schema_ident}.atomic_change_checkpoints TO {peer_ident}, {writer_ident}; \
              GRANT SELECT ON TABLE {} TO {writer_ident}; \
              GRANT UPDATE ON TABLE {} TO {writer_ident}; \
              GRANT INSERT ON TABLE {} TO {writer_ident}; \
@@ -1734,6 +1755,7 @@ fn grant_runtime_privileges(
                                        {schema_ident}.atomic_tree_database_build_pin_key(text), \
                                        {schema_ident}.atomic_semantic_commitment_gc_pin_key(), \
                                        {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {writer_ident}; \
+             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_discover_remote_writer(text,text) TO {writer_ident}, {peer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {peer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
             relation_list(&schema_ident, WRITER_UPDATE_TABLES),
@@ -2211,6 +2233,14 @@ pub struct PostgresStore {
 }
 
 impl PostgresStore {
+    /// Read-only captured state for advisory prefetch. No head lookup, writer
+    /// activation or authority is delegated to the prefetch worker.
+    pub(crate) fn hint_database_value(&self, database_id: &str) -> Option<crate::DatabaseValue> {
+        self.current
+            .get(database_id)
+            .map(|state| state.database.database_value())
+    }
+
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
         Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
     }
@@ -2239,9 +2269,9 @@ impl PostgresStore {
     /// already control the session and its schema. Runtime callers must use a
     /// checked `connect` constructor.
     #[cfg(test)]
-    pub(crate) fn from_client(client: Client) -> Self {
+    pub(crate) fn from_client(client: postgres::Client) -> Self {
         Self {
-            client,
+            client: Client::from_raw(client),
             connection: None,
             current: BTreeMap::new(),
             receipt_read_cores: BTreeMap::new(),
@@ -2403,6 +2433,44 @@ impl PostgresStore {
     /// authority while starting.
     pub fn verify_migrations(&mut self) -> Result<(), SemanticError> {
         verify_schema_compatibility(&mut self.client)
+    }
+
+    /// Read the current catalog head without replaying data or checking a writer.
+    pub fn database_status(&mut self, database_id: &str) -> Result<DatabaseStatus, SemanticError> {
+        let row = self
+            .client
+            .query_opt(
+                "SELECT d.lineage_id, h.basis_t, h.log_generation FROM atomic_databases d \
+             JOIN atomic_heads h USING (database_id) WHERE d.database_id = $1",
+                &[&database_id],
+            )
+            .map_err(|error| postgres_error("postgres/status-read", error))?
+            .ok_or_else(|| {
+                SemanticError::new(
+                    ErrorCategory::NotFound,
+                    "postgres/database-not-found",
+                    "database not found",
+                )
+            })?;
+        let basis: i64 = row.get(1);
+        let generation: i64 = row.get(2);
+        Ok(DatabaseStatus {
+            lineage_id: row.get(0),
+            basis_t: u64::try_from(basis).map_err(|_| {
+                SemanticError::new(
+                    ErrorCategory::Fault,
+                    "postgres/invalid-head",
+                    "negative catalog basis",
+                )
+            })?,
+            log_generation: u64::try_from(generation).map_err(|_| {
+                SemanticError::new(
+                    ErrorCategory::Fault,
+                    "postgres/invalid-head",
+                    "negative catalog generation",
+                )
+            })?,
+        })
     }
 
     /// Replace a failed runtime connection without reusing potentially stale
@@ -3309,12 +3377,13 @@ impl PostgresStore {
     ) -> Result<CommitReceipt, SemanticError>
     where
         F: FnOnce(
-            &mut postgres::Transaction<'_>,
+            &mut crate::sql_io::SqlTransaction<'_>,
             &DatabaseValue,
             &SharedProgramBudget,
             &SharedProgramCache,
         ) -> Result<Vec<TxOp>, SemanticError>,
     {
+        let operation = OperationContext::current_or_process();
         if request_key.is_empty() {
             return Err(SemanticError::incorrect(
                 "postgres/empty-request-key",
@@ -3420,6 +3489,7 @@ impl PostgresStore {
             }
             let basis = pg_basis(row.get::<_, i64>(1), "request outcome")?;
             let hash = digest(row.get::<_, Vec<u8>>(2), "request transaction hash")?;
+            let report_phase = operation.phase(OperationKind::TransactionReport);
             let (receipt, replay_state) = reconstruct_exact_request_receipt(
                 &mut transaction,
                 &connection,
@@ -3440,7 +3510,12 @@ impl PostgresStore {
             } else {
                 None
             };
-            if transaction.commit().is_err() {
+            drop(report_phase);
+            let commit_result = {
+                let _phase = operation.phase(OperationKind::TransactionCommit);
+                transaction.commit()
+            };
+            if commit_result.is_err() {
                 self.current.remove(database_id);
                 return Err(unknown_outcome(
                     idem_key_hash,
@@ -3524,12 +3599,16 @@ impl PostgresStore {
         let shared_budget = Arc::new(Mutex::new(ProgramBudget::new(
             self.capacity_limits.program.control(),
         )?));
-        let ops = generate(
-            &mut transaction,
-            &observed_db_before,
-            &shared_budget,
-            &program_cache,
-        )?;
+        let ops = {
+            let _phase = operation.phase(OperationKind::TransactionExpansion);
+            generate(
+                &mut transaction,
+                &observed_db_before,
+                &shared_budget,
+                &program_cache,
+            )?
+        };
+        let assessment_phase = operation.phase(OperationKind::TransactionAssessment);
         let server_now = postgres_now_millis(&mut transaction)?;
         let tx_instant =
             select_tx_instant(&observed_db_before, server_now, tx_instant_override, &ops)?;
@@ -3577,6 +3656,10 @@ impl PostgresStore {
         };
         assessed.validate_exact(functions)?;
         let semantic_changes = exact_semantic_changes(&assessed.db_before, &assessed.tx_data)?;
+        drop(assessment_phase);
+        // Canonical encoding includes commitment preparation and the native
+        // successor whose exact coordinate must be checked before publication.
+        let encoding_phase = operation.phase(OperationKind::TransactionEncoding);
         let (next_root, mut commitment_work) = advance_persistent_commitment(
             &mut transaction,
             head_commitment.root,
@@ -3662,7 +3745,12 @@ impl PostgresStore {
                 )
             })?)
         };
+        drop(encoding_phase);
 
+        // Publication SQL and the final COMMIT are disjoint timed spans; the
+        // prebuilt report between them has its own phase. Invocation counts
+        // count spans, not transactions, and failed spans remain observable.
+        let publication_phase = operation.phase(OperationKind::TransactionCommit);
         if fault_point == CommitFault::BeforeTransactionInsert {
             return Err(injected("before transaction insert"));
         }
@@ -3840,10 +3928,12 @@ impl PostgresStore {
         if fault_point == CommitFault::AfterHeadUpdateProcessAbort {
             std::process::abort();
         }
+        drop(publication_phase);
 
         // Construct every report and process-local successor object before
         // publication. After PostgreSQL acknowledges the commit, installing
         // this already-built immutable state is infallible.
+        let report_phase = operation.phase(OperationKind::TransactionReport);
         let receipt = CommitReceipt {
             db_before: db_before.clone().without_transaction_read_context(),
             database: successor
@@ -3862,13 +3952,21 @@ impl PostgresStore {
             last_read_work: read_context.snapshot()?,
             last_commitment_work: commitment_work,
         };
-        if transaction.commit().is_err() {
+        drop(report_phase);
+        let commit_result = {
+            let _phase = operation.phase(OperationKind::TransactionCommit);
+            transaction.commit()
+        };
+        if commit_result.is_err() {
             self.current.remove(database_id);
             return Err(unknown_outcome(
                 idem_key_hash,
                 "publication",
                 "PostgreSQL did not acknowledge the transaction commit",
             ));
+        }
+        if let Some(connection)=&self.connection {
+            crate::change_notices::publish(connection,database_id);
         }
         if fault_point == CommitFault::AfterCommitBeforeResponse {
             self.current.remove(database_id);

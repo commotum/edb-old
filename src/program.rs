@@ -8,6 +8,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::time::Instant;
 
+#[path = "program_query.rs"]
+pub(crate) mod native_query;
+pub use native_query::{QueryTemplateSource, QueryTemplateTime};
+
 pub type ProgramHash = Digest;
 
 const MAX_ARITY: u8 = 10;
@@ -21,6 +25,7 @@ const MAX_BLOCK_DEPTH: usize = 32;
 pub const PROGRAM_ABI_VERSION: u16 = 4;
 pub(crate) const DUAL_PREDICATE_PROGRAM_ABI_VERSION: u16 = 5;
 pub const QUERY_TEMPLATE_VERSION: u16 = 1;
+pub const NATIVE_QUERY_TEMPLATE_VERSION: u16 = 2;
 pub const MAX_QUERY_PATTERNS: usize = 64;
 pub const MAX_QUERY_VARIABLES: usize = 32;
 
@@ -233,10 +238,8 @@ fn query_term_rank(term: &QueryTerm) -> u8 {
 
 /// Restricted Datomic data-pattern clause `[e a v]`.
 ///
-/// Keeping the attribute concrete gives the runtime an honest EAVT/AEVT/AVET
-/// access path instead of disguising collection traversal as Datalog. The IR
-/// is intentionally conjunctive for now: no predicates, rules, negation,
-/// history source, or dynamic attributes.
+/// This is the original version-1 conjunctive form. [`QueryTemplate::native`]
+/// embeds the native query AST for dynamic attributes and composable clauses.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryPattern {
     pub entity: QueryTerm,
@@ -261,17 +264,18 @@ impl QueryPattern {
     }
 }
 
-/// Canonical, versioned conjunctive query embedded in a persisted program.
+/// Canonical, versioned query embedded in a persisted program.
 ///
-/// Patterns are stored in a stable structural order. Evaluation may choose a
-/// different deterministic join order from the bindings and immutable schema;
-/// clause order therefore remains declarative rather than an imperative scan
-/// script. Results are a distinct, canonically ordered relation.
+/// Version 1 stores conjunctive patterns in stable structural order and
+/// returns a canonically ordered distinct relation. Version 2 embeds the
+/// ordinary native query AST, including its find shapes and unordered
+/// relation semantics. Both use declarative clauses, not imperative scans.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryTemplate {
     version: u16,
     find: Vec<u8>,
     patterns: Vec<QueryPattern>,
+    native: Option<Box<native_query::NativeQueryTemplate>>,
 }
 
 impl QueryTemplate {
@@ -281,6 +285,7 @@ impl QueryTemplate {
             version: QUERY_TEMPLATE_VERSION,
             find,
             patterns,
+            native: None,
         };
         template.validate_static()?;
         Ok(template)
@@ -290,16 +295,46 @@ impl QueryTemplate {
         self.version
     }
 
+    /// Explicit version 2: author ordinary native query clauses/rules and bind
+    /// their inputs to program arguments. Named sources are immutable views
+    /// of this invocation's database, never connections or alternate stores.
+    pub fn native(
+        query: crate::Query,
+        input_arguments: Vec<u8>,
+        sources: Vec<QueryTemplateSource>,
+    ) -> Result<Self, SemanticError> {
+        let native = native_query::NativeQueryTemplate::new(query, input_arguments, sources)?;
+        Ok(Self {
+            version: NATIVE_QUERY_TEMPLATE_VERSION,
+            find: Vec::new(),
+            patterns: Vec::new(),
+            native: Some(Box::new(native)),
+        })
+    }
+
+    pub fn native_query(&self) -> Option<&crate::Query> {
+        self.native.as_ref().map(|native| &native.query)
+    }
+
+    pub(crate) fn native_spec(&self) -> Option<&native_query::NativeQueryTemplate> {
+        self.native.as_deref()
+    }
+
+    /// Legacy version-1 projection slots; empty for native version-2 queries.
     pub fn find(&self) -> &[u8] {
         &self.find
     }
 
+    /// Legacy version-1 conjunction; use `native_query` for version 2.
     pub fn patterns(&self) -> &[QueryPattern] {
         &self.patterns
     }
 
     fn validate(&self, arity: u8) -> Result<(), SemanticError> {
         self.validate_static()?;
+        if let Some(native) = &self.native {
+            return native.validate_arity(arity);
+        }
         for term in self.terms() {
             if let QueryTerm::Input(index) = term
                 && *index >= arity
@@ -314,6 +349,18 @@ impl QueryTemplate {
     }
 
     fn validate_static(&self) -> Result<(), SemanticError> {
+        if let Some(native) = &self.native {
+            if self.version != NATIVE_QUERY_TEMPLATE_VERSION
+                || !self.find.is_empty()
+                || !self.patterns.is_empty()
+            {
+                return Err(incorrect(
+                    "program/query-template-version",
+                    "native query template has inconsistent version or legacy fields",
+                ));
+            }
+            return native.validate();
+        }
         if self.version != QUERY_TEMPLATE_VERSION {
             return Err(incorrect(
                 "program/query-template-version",
@@ -477,6 +524,13 @@ pub enum Instruction {
     EmitCas(u32),
     EmitRetractEntity,
     EmitEnsure,
+    /// Consume `[tempid, partition]` and emit allocation policy, not datoms.
+    /// The tempid may be a native Temp reference or a nonempty string;
+    /// a named partition may be an Ident reference or a qualified keyword.
+    EmitForcePartition,
+    /// Consume `[tempid, entity]` to place a newly allocated tempid in the
+    /// same partition as another new or existing entity.
+    EmitMatchPartition,
     /// Consume a runtime map and emit a canonical transaction entity-map.
     /// Map vectors retain their collection-of-values meaning; use explicit
     /// add/retract/CAS emission for tuples containing entity references.
@@ -716,6 +770,45 @@ impl<'a> ProgramBudget<'a> {
 
     pub fn value_bytes(&self) -> usize {
         self.value_bytes
+    }
+
+    pub(crate) fn query_cancelled(&self) -> Option<&AtomicBool> {
+        self.cancelled
+    }
+
+    pub(crate) fn query_deadline(&self) -> Option<Instant> {
+        self.deadline
+    }
+
+    pub(crate) fn query_row_limit(&self) -> usize {
+        self.max_collection_items
+    }
+
+    pub(crate) fn query_remaining_value_bytes(&self) -> usize {
+        self.max_value_bytes.saturating_sub(self.value_bytes)
+    }
+
+    /// Debit already executed native query work even on cancellation/error.
+    pub(crate) fn charge_query_work(&mut self, work: u64) -> Result<(), SemanticError> {
+        let available = self.fuel;
+        self.fuel = available.saturating_sub(work);
+        if work > available {
+            return Err(busy("program/fuel-exhausted", "program exhausted its fuel"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn charge_query_bytes(&mut self, bytes: usize) -> Result<(), SemanticError> {
+        let next = self.value_bytes.checked_add(bytes);
+        if next.is_none_or(|next| next > self.max_value_bytes) {
+            self.value_bytes = self.max_value_bytes;
+            return Err(busy(
+                "program/value-byte-limit",
+                "queries exceeded their shared runtime-value byte limit",
+            ));
+        }
+        self.value_bytes = next.unwrap();
+        Ok(())
     }
 
     fn begin_call(&mut self) -> Result<(), SemanticError> {
@@ -1197,6 +1290,8 @@ impl Validation {
                     | Instruction::EmitCas(_)
                     | Instruction::EmitRetractEntity
                     | Instruction::EmitEnsure
+                    | Instruction::EmitForcePartition
+                    | Instruction::EmitMatchPartition
                     | Instruction::EmitEntityMap
                     | Instruction::EmitCall { .. }
             )
@@ -1926,6 +2021,26 @@ impl Evaluation<'_, '_, '_, '_> {
                     let entity = entity_ref(pop(stack)?)?;
                     self.emit_op(TxOp::Ensure { entity, spec })?;
                 }
+                Instruction::EmitForcePartition | Instruction::EmitMatchPartition => {
+                    let target = entity_map_id(pop(stack)?)?;
+                    let EntityRef::Temp(tempid) = entity_map_id(pop(stack)?)? else {
+                        return Err(incorrect(
+                            "program/partition-tempid",
+                            "partition policy must target a tempid",
+                        ));
+                    };
+                    self.emit_op(if matches!(instruction, Instruction::EmitForcePartition) {
+                        TxOp::ForcePartition {
+                            tempid,
+                            partition: target,
+                        }
+                    } else {
+                        TxOp::MatchPartition {
+                            tempid,
+                            entity: target,
+                        }
+                    })?;
+                }
                 Instruction::EmitEntityMap => {
                     let map = runtime_entity_map(pop(stack)?, 0)?;
                     let form = TxForm::EntityMap(map);
@@ -2034,7 +2149,11 @@ fn stack_effect(instruction: &Instruction) -> (isize, isize) {
         | Instruction::GreaterThan
         | Instruction::And
         | Instruction::Or => (2, -1),
-        Instruction::EmitAdd(_) | Instruction::EmitRetract(_) | Instruction::EmitEnsure => (2, -2),
+        Instruction::EmitAdd(_)
+        | Instruction::EmitRetract(_)
+        | Instruction::EmitEnsure
+        | Instruction::EmitForcePartition
+        | Instruction::EmitMatchPartition => (2, -2),
         Instruction::EmitRetractAll(_) | Instruction::EmitEntityMap => (1, -1),
         Instruction::EmitCas(_) => (3, -3),
         Instruction::EmitRetractEntity => (1, -1),
@@ -2438,6 +2557,10 @@ fn execute_query_template(
             "program argument count does not fit the query-template ABI",
         )
     })?)?;
+
+    if let Some(native) = template.native_spec() {
+        return native_query::execute(database, arguments, budget, native);
+    }
 
     let plan = plan_query_patterns(database, template)?;
     let mut bindings = vec![vec![None; template.variable_count()]];
@@ -3043,6 +3166,14 @@ fn tx_op_output_bytes(operation: &TxOp) -> Result<usize, SemanticError> {
         TxOp::Ensure { entity, spec } => checked_size_add(
             checked_size_add(2, entity_ref_bytes(entity)?)?,
             entity_ref_bytes(spec)?,
+        ),
+        TxOp::ForcePartition {
+            tempid,
+            partition: entity,
+        }
+        | TxOp::MatchPartition { tempid, entity } => checked_size_add(
+            checked_size_add(6, tempid.len())?,
+            entity_ref_bytes(entity)?,
         ),
         TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => Err(incorrect(
             "program/unsupported-schema-form",

@@ -49,6 +49,7 @@ struct ConnectionCore {
     observer: Mutex<Option<crate::service::NativeObserver>>,
     notices: mpsc::SyncSender<Arc<ServiceTransactionReport>>,
     observation_error: Arc<Mutex<Option<SemanticError>>>,
+    observation_work: crate::OperationContext,
     _advancement: Advancement,
     // The embedded service owns the single-writer lease and both worker
     // lifetimes. It is intentionally retained by the last Connection clone.
@@ -143,6 +144,24 @@ impl Connection {
         cache_entries: usize,
         cache_bytes: usize,
     ) -> Result<Self, SemanticError> {
+        Self::connect_configured_with_observation(
+            connection,
+            database_id,
+            cache_entries,
+            cache_bytes,
+            crate::ObservationConfig::default(),
+        )
+    }
+
+    /// Configure durable gap-repair cadence independently of hint delivery.
+    pub fn connect_configured_with_observation(
+        connection: PostgresConnectionConfig,
+        database_id: impl Into<String>,
+        cache_entries: usize,
+        cache_bytes: usize,
+        observation: crate::ObservationConfig,
+    ) -> Result<Self, SemanticError> {
+        observation.validate()?;
         let peer = Peer::connect_configured_with_cache_limits(
             &connection,
             database_id,
@@ -151,6 +170,8 @@ impl Connection {
         )?;
         Self::from_peer(
             peer,
+            connection,
+            observation,
             None,
             None,
             None,
@@ -200,6 +221,8 @@ impl Connection {
         })?;
         Self::from_peer(
             peer,
+            connection,
+            crate::ObservationConfig::default(),
             Some(client),
             Some(observer),
             service,
@@ -210,6 +233,8 @@ impl Connection {
 
     fn from_peer(
         peer: Peer,
+        connection: PostgresConnectionConfig,
+        observation: crate::ObservationConfig,
         client: Option<TransactionClient>,
         observer: Option<crate::service::NativeObserver>,
         service: Option<TransactionService>,
@@ -220,15 +245,19 @@ impl Connection {
         let follower = peer.clone();
         let error_slot = Arc::clone(&observation_error);
         let (notice_sender, notice_receiver) = notices;
+        let observation_work = crate::OperationContext::new(crate::OperationKind::PeerObservation);
+        let operation = observation_work.clone();
+        let database_id = peer.identity().database_id().to_owned();
         let worker = std::thread::Builder::new()
             .name("atomic-peer-observer".into())
             .spawn(move || {
-                let mut refresh_at = Instant::now() + Duration::from_millis(100);
+                let _scope = operation.enter();
+                let mut listener = None;
+                let mut reconnect_at = Instant::now();
+                let mut refresh_at = Instant::now();
                 while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
                     let mut needs_catchup = false;
-                    match notice_receiver
-                        .recv_timeout(refresh_at.saturating_duration_since(Instant::now()))
-                    {
+                    match notice_receiver.try_recv() {
                         Ok(report) => {
                             if let Err(error) = follower.adopt_committed_report(&report) {
                                 *error_slot.lock().expect("observation mutex poisoned") =
@@ -236,15 +265,47 @@ impl Connection {
                                 needs_catchup = true;
                             }
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                        Err(mpsc::TryRecvError::Empty) => {}
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                    if listener.is_none() && Instant::now() >= reconnect_at {
+                        match crate::change_notices::NoticeListener::connect(
+                            &connection,
+                            &database_id,
+                        ) {
+                            Ok(connected) => {
+                                listener = Some(connected);
+                                needs_catchup = true;
+                            }
+                            Err(error) => {
+                                *error_slot.lock().expect("observation mutex poisoned") =
+                                    Some(error);
+                                reconnect_at = Instant::now() + Duration::from_secs(1);
+                            }
+                        }
+                    }
+                    if let Some(active) = listener.as_mut() {
+                        match active.wait(Duration::from_millis(25)) {
+                            Ok(notice) => needs_catchup |= notice,
+                            Err(error) => {
+                                *error_slot.lock().expect("observation mutex poisoned") =
+                                    Some(error);
+                                listener = None;
+                                reconnect_at = Instant::now() + Duration::from_secs(1);
+                                needs_catchup = true;
+                            }
+                        }
+                    } else {
+                        if stopped.recv_timeout(Duration::from_millis(25)).is_ok() {
+                            break;
+                        }
                     }
                     if needs_catchup || Instant::now() >= refresh_at {
                         let result = follower
                             .sync_database_value()
                             .and_then(|_| follower.refresh_index());
                         *error_slot.lock().expect("observation mutex poisoned") = result.err();
-                        refresh_at = Instant::now() + Duration::from_millis(100);
+                        refresh_at = Instant::now() + observation.anti_entropy_interval;
                     }
                 }
             })
@@ -263,6 +324,7 @@ impl Connection {
                 observer: Mutex::new(observer),
                 notices: notice_sender,
                 observation_error,
+                observation_work,
                 _advancement: Advancement {
                     stop,
                     worker: Some(worker),
@@ -299,6 +361,12 @@ impl Connection {
             .clone()
     }
 
+    /// All listener, reconnect and authenticated catch-up driver work.
+    /// Waiting for a network hint sends no SQL and is not counted as a call.
+    pub fn observation_sql_stats(&self) -> crate::SqlIoStats {
+        self.core.observation_work.snapshot()
+    }
+
     pub fn load_stats(&self) -> crate::PeerLoadStats {
         self.core.peer.load_stats()
     }
@@ -307,6 +375,18 @@ impl Connection {
     /// and eviction. This is representation accounting, not process RSS.
     pub fn cache_stats(&self) -> crate::CacheStats {
         self.core.peer.cache_stats()
+    }
+
+    pub fn ssd_cache_stats(&self) -> crate::SsdCacheStats {
+        self.core.peer.ssd_cache_stats()
+    }
+
+    pub fn node_block_read_stats(&self) -> crate::NodeBlockReadStats {
+        self.core.peer.node_block_read_stats()
+    }
+
+    pub fn purge_ssd_generation(&self, generation: u64) -> bool {
+        self.core.peer.purge_ssd_generation(generation)
     }
 
     /// Recent-log residency of the latest adopted value, independent of the
@@ -364,6 +444,14 @@ impl Connection {
         self.core.peer.database_value()
     }
 
+    /// Reopen an exact supported retained value, without advancing this connection.
+    pub fn reopen_snapshot(
+        &self,
+        reference: &crate::SnapshotReference,
+    ) -> Result<DatabaseValue, SemanticError> {
+        self.core.peer.reopen_snapshot(reference)
+    }
+
     /// Capture an immutable transaction log without contacting the writer.
     pub fn log(&self) -> crate::LogValue {
         self.core.peer.log()
@@ -394,6 +482,26 @@ impl Connection {
         timeout: Duration,
     ) -> Result<DatabaseValue, SemanticError> {
         self.core.peer.sync_index(target_t, timeout)
+    }
+
+    /// Schedule indexing at a finite committed target on an attached writer.
+    ///
+    /// This is asynchronous; use the returned `target_t` with `sync_index` to
+    /// observe completion. Later transactions do not extend that wait target.
+    /// A writer-independent read connection has no control endpoint and returns
+    /// `connection/no-writer`; the local transaction socket does not currently
+    /// carry maintenance requests. Dropping this receipt or timing out a wait
+    /// does not cancel shared background work.
+    pub fn request_index(&self) -> Result<crate::IndexRequest, SemanticError> {
+        let client = self.core.client.lock().expect("client mutex poisoned");
+        let client = client.as_ref().ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::Unavailable,
+                "connection/no-writer",
+                "read-only connection has no attached transaction endpoint",
+            )
+        })?;
+        client.request_index()
     }
 
     pub fn sync_schema(
@@ -431,6 +539,32 @@ impl Connection {
             ticket: client.submit(request)?,
             connection: self.clone(),
         })
+    }
+
+    /// Same admission and report adoption as submit, with separate advisory
+    /// prefetch data. The hint handle remains usable after waiting on the ticket.
+    pub fn submit_with_hints(
+        &self,
+        request: TransactionRequest,
+        hints: crate::TransactionHints,
+        options: crate::HintPrefetchOptions,
+    ) -> Result<(ConnectionTransactionTicket, crate::HintExecution), SemanticError> {
+        let client = self.core.client.lock().expect("client mutex poisoned");
+        let client = client.as_ref().ok_or_else(|| {
+            SemanticError::new(
+                crate::ErrorCategory::Unavailable,
+                "connection/no-writer",
+                "read-only connection has no attached transaction endpoint",
+            )
+        })?;
+        let (ticket, execution) = client.submit_with_hints(request, hints, options)?;
+        Ok((
+            ConnectionTransactionTicket {
+                ticket,
+                connection: self.clone(),
+            },
+            execution,
+        ))
     }
 
     pub fn transact(

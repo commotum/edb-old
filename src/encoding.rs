@@ -13,8 +13,11 @@ use num_bigint::BigInt;
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
+#[path = "program_query_codec.rs"]
+mod program_query_codec;
 #[path = "submission_codec.rs"]
 mod submission_codec;
+pub(crate) use program_query_codec::validate_native_query;
 pub(crate) use submission_codec::{
     WireOutcome, WireReport, decode_submission, decode_submission_outcome, encode_submission,
     encode_submission_outcome,
@@ -98,7 +101,13 @@ pub fn sha256(bytes: &[u8]) -> Digest {
 pub fn encode_program(program: &Program) -> Result<Vec<u8>, SemanticError> {
     program.validate()?;
     let mut body = Vec::new();
-    let abi_version = if program_has_lookup_inputs(&program.instructions) {
+    let abi_version = if program_has_fulltext(&program.instructions) {
+        9
+    } else if program_has_partition_directives(&program.instructions) {
+        8
+    } else if program_has_native_queries(&program.instructions) {
+        7
+    } else if program_has_lookup_inputs(&program.instructions) {
         6
     } else if program.kind == ProgramKind::DualPredicate {
         DUAL_PREDICATE_PROGRAM_ABI_VERSION
@@ -144,11 +153,11 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
     let abi_version = cursor.u16()?;
     if !matches!(
         abi_version,
-        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6
+        PROGRAM_ABI_VERSION | DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9
     ) {
         return Err(fault(
             "encoding/unsupported-program-abi",
-            format!("program ABI {abi_version} is unsupported; expected 4, 5 or 6"),
+            format!("program ABI {abi_version} is unsupported; expected 4, 5, 6, 7, 8 or 9"),
         ));
     }
     let kind = match cursor.u8()? {
@@ -156,7 +165,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
         1 => ProgramKind::AttributePredicate,
         2 => ProgramKind::Query,
         3 => ProgramKind::EntityPredicate,
-        4 if matches!(abi_version, DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6) => {
+        4 if matches!(abi_version, DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9) => {
             ProgramKind::DualPredicate
         }
         tag => return Err(invalid_tag("program kind", tag)),
@@ -782,11 +791,15 @@ pub(crate) fn canonical_submission_request(
     let mut body = Vec::new();
     // Submission identity has its own grammar version because these bytes are
     // hashed for idempotency but are not durable database values.
-    body.push(if crate::transaction::forms_have_extended_inputs(forms) {
-        3
-    } else {
-        2
-    });
+    body.push(
+        if crate::transaction::forms_have_partition_directives(forms) {
+            4
+        } else if crate::transaction::forms_have_extended_inputs(forms) {
+            3
+        } else {
+            2
+        },
+    );
     match compare_basis_t {
         Some(basis) => {
             body.push(1);
@@ -1249,6 +1262,8 @@ fn encode_instruction(
         }
         Instruction::EmitRetractEntity => output.push(35),
         Instruction::EmitEnsure => output.push(36),
+        Instruction::EmitForcePartition => output.push(42),
+        Instruction::EmitMatchPartition => output.push(43),
         Instruction::EmitEntityMap => output.push(39),
         Instruction::Return => output.push(19),
         Instruction::EmitRow(width) => {
@@ -1366,6 +1381,8 @@ fn decode_instruction(
         34 => Instruction::EmitCas(cursor.u32()?),
         35 => Instruction::EmitRetractEntity,
         36 => Instruction::EmitEnsure,
+        42 => Instruction::EmitForcePartition,
+        43 => Instruction::EmitMatchPartition,
         37 => Instruction::Query(decode_query_template(cursor)?),
         39 => Instruction::EmitEntityMap,
         40 => Instruction::RequireAnomaly,
@@ -1414,6 +1431,9 @@ fn encode_query_template(
     template: &QueryTemplate,
 ) -> Result<(), SemanticError> {
     output.extend_from_slice(&template.version().to_be_bytes());
+    if let Some(native) = template.native_spec() {
+        return program_query_codec::encode_template(output, native);
+    }
     put_len(output, template.find().len())?;
     output.extend_from_slice(template.find());
     put_len(output, template.patterns().len())?;
@@ -1445,6 +1465,9 @@ fn encode_query_term(output: &mut Vec<u8>, term: &QueryTerm) -> Result<(), Seman
 
 fn decode_query_template(cursor: &mut Cursor<'_>) -> Result<QueryTemplate, SemanticError> {
     let version = cursor.u16()?;
+    if version == crate::program::NATIVE_QUERY_TEMPLATE_VERSION {
+        return program_query_codec::decode_template(cursor);
+    }
     if version != QUERY_TEMPLATE_VERSION {
         return Err(SemanticError::new(
             ErrorCategory::Unsupported,
@@ -1520,6 +1543,8 @@ fn decode_datom(cursor: &mut Cursor<'_>) -> Result<Datom, SemanticError> {
 }
 
 fn encode_attribute(output: &mut Vec<u8>, attribute: &Attribute) -> Result<(), SemanticError> {
+    // Keep the historical descriptor payload exact. Fulltext=true is carried
+    // by new enclosing Install/Alter tags; false adds no byte to old requests.
     put_u32(output, attribute.id);
     encode_keyword(output, &attribute.ident)?;
     output.push(value_type_tag(attribute.value_type));
@@ -1769,12 +1794,22 @@ fn encode_tx_op(output: &mut Vec<u8>, op: &TxOp) -> Result<(), SemanticError> {
             encode_entity_ref(output, spec)?;
         }
         TxOp::InstallAttribute(attribute) => {
-            output.push(5);
+            output.push(if attribute.fulltext { 9 } else { 5 });
             encode_attribute(output, attribute)?;
         }
         TxOp::AlterAttribute(attribute) => {
-            output.push(6);
+            output.push(if attribute.fulltext { 10 } else { 6 });
             encode_attribute(output, attribute)?;
+        }
+        TxOp::ForcePartition { tempid, partition } => {
+            output.push(7);
+            put_string(output, tempid)?;
+            encode_entity_ref(output, partition)?;
+        }
+        TxOp::MatchPartition { tempid, entity } => {
+            output.push(8);
+            put_string(output, tempid)?;
+            encode_entity_ref(output, entity)?;
         }
     }
     Ok(())
@@ -2146,6 +2181,61 @@ fn program_has_lookup_inputs(instructions: &[Instruction]) -> bool {
         Instruction::PredicateDispatch { attribute, entity } => {
             program_has_lookup_inputs(attribute) || program_has_lookup_inputs(entity)
         }
+        _ => false,
+    })
+}
+
+fn program_has_native_queries(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|instruction| match instruction {
+        Instruction::Query(template) => template.native_spec().is_some(),
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => program_has_native_queries(then_branch) || program_has_native_queries(else_branch),
+        Instruction::ForEach { body } => program_has_native_queries(body),
+        Instruction::PredicateDispatch { attribute, entity } => {
+            program_has_native_queries(attribute) || program_has_native_queries(entity)
+        }
+        _ => false,
+    })
+}
+
+fn program_has_partition_directives(instructions: &[Instruction]) -> bool {
+    instructions.iter().any(|instruction| match instruction {
+        Instruction::EmitForcePartition | Instruction::EmitMatchPartition => true,
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => {
+            program_has_partition_directives(then_branch)
+                || program_has_partition_directives(else_branch)
+        }
+        Instruction::ForEach { body } => program_has_partition_directives(body),
+        Instruction::PredicateDispatch { attribute, entity } => {
+            program_has_partition_directives(attribute) || program_has_partition_directives(entity)
+        }
+        _ => false,
+    })
+}
+
+fn program_has_fulltext(instructions: &[Instruction]) -> bool {
+    fn query(query: &crate::Query) -> bool {
+        clauses(&query.clauses) || query.rules.iter().any(|rule| clauses(&rule.clauses))
+    }
+    fn clauses(input: &[crate::Clause]) -> bool {
+        input.iter().any(|clause| match clause {
+            crate::Clause::Function { function: crate::Function::Fulltext, .. } => true,
+            crate::Clause::Function { function: crate::Function::Query(inner), .. } => query(inner),
+            crate::Clause::Not { clauses: inner, .. } => clauses(inner),
+            crate::Clause::Or { branches, .. } => branches.iter().any(|branch| clauses(branch)),
+            _ => false,
+        })
+    }
+    instructions.iter().any(|instruction| match instruction {
+        Instruction::Query(template) => template.native_query().is_some_and(query),
+        Instruction::If { then_branch, else_branch } => program_has_fulltext(then_branch) || program_has_fulltext(else_branch),
+        Instruction::ForEach { body } => program_has_fulltext(body),
+        Instruction::PredicateDispatch { attribute, entity } => program_has_fulltext(attribute) || program_has_fulltext(entity),
         _ => false,
     })
 }

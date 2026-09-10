@@ -137,6 +137,26 @@ pub(crate) fn compare_tx_op(left: &TxOp, right: &TxOp) -> Ordering {
             | (TxOp::AlterAttribute(left), TxOp::AlterAttribute(right)) => {
                 compare_attribute(left, right)
             }
+            (
+                TxOp::ForcePartition {
+                    tempid: left,
+                    partition: left_ref,
+                },
+                TxOp::ForcePartition {
+                    tempid: right,
+                    partition: right_ref,
+                },
+            )
+            | (
+                TxOp::MatchPartition {
+                    tempid: left,
+                    entity: left_ref,
+                },
+                TxOp::MatchPartition {
+                    tempid: right,
+                    entity: right_ref,
+                },
+            ) => compare_text(left, right).then_with(|| compare_entity_ref(left_ref, right_ref)),
             _ => Ordering::Equal,
         })
 }
@@ -150,6 +170,8 @@ fn tx_op_rank(op: &TxOp) -> u8 {
         TxOp::Ensure { .. } => 4,
         TxOp::InstallAttribute(_) => 5,
         TxOp::AlterAttribute(_) => 6,
+        TxOp::ForcePartition { .. } => 7,
+        TxOp::MatchPartition { .. } => 8,
     }
 }
 
@@ -396,6 +418,8 @@ pub(crate) fn forms_have_extended_inputs(forms: &[TxForm]) -> bool {
         }) => entity(id) || old.as_ref().is_some_and(value) || value(new),
         TxForm::Op(TxOp::RetractEntity(id)) => entity(id),
         TxForm::Op(TxOp::Ensure { entity: id, spec }) => entity(id) || entity(spec),
+        TxForm::Op(TxOp::ForcePartition { partition, .. }) => entity(partition),
+        TxForm::Op(TxOp::MatchPartition { entity: id, .. }) => entity(id),
         TxForm::EntityMap(input) => map(input),
         TxForm::ProgramCall(call) => {
             matches!(&call.function, CallableRef::Database(input) if entity(input))
@@ -403,6 +427,15 @@ pub(crate) fn forms_have_extended_inputs(forms: &[TxForm]) -> bool {
         }
         TxForm::Call(call) => call.arguments.iter().any(value),
         _ => false,
+    })
+}
+
+pub(crate) fn forms_have_partition_directives(forms: &[TxForm]) -> bool {
+    forms.iter().any(|form| {
+        matches!(
+            form,
+            TxForm::Op(TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. })
+        )
     })
 }
 
@@ -487,6 +520,7 @@ fn compare_attribute(left: &Attribute, right: &Attribute) -> Ordering {
         .then_with(|| left.indexed.cmp(&right.indexed))
         .then_with(|| left.component.cmp(&right.component))
         .then_with(|| left.no_history.cmp(&right.no_history))
+        .then_with(|| left.fulltext.cmp(&right.fulltext))
         .then_with(|| compare_option_by(&left.tuple, &right.tuple, compare_tuple_spec))
         .then_with(|| left.tuple_discontinued.cmp(&right.tuple_discontinued))
         .then_with(|| compare_unordered_text(&left.predicates, &right.predicates))
@@ -1246,15 +1280,31 @@ impl Normalizer<'_> {
             }
             MapValue::Value(value) => {
                 if reverse {
-                    let TxValue::Entity(source) = value else {
-                        return Err(SemanticError::incorrect(
-                            "transaction/reverse-value-must-be-entity",
-                            "a reverse attribute value must identify an entity",
-                        ));
+                    // Installation maps naturally name the database partition
+                    // with a keyword, including maps emitted by stored programs.
+                    // This does not install vocabulary absent from db-before.
+                    let source = match value {
+                        TxValue::Entity(source) => source.clone(),
+                        TxValue::Scalar(Value::Keyword(ident))
+                            if u64::from(attribute) == crate::DB_INSTALL_PARTITION =>
+                        {
+                            EntityRef::Ident(ident.clone())
+                        }
+                        TxValue::Scalar(Value::Ref(id))
+                            if u64::from(attribute) == crate::DB_INSTALL_PARTITION =>
+                        {
+                            EntityRef::Id(*id)
+                        }
+                        _ => {
+                            return Err(SemanticError::incorrect(
+                                "transaction/reverse-value-must-be-entity",
+                                "a reverse attribute value must identify an entity",
+                            ));
+                        }
                     };
                     self.push(
                         TxOp::Add {
-                            entity: source.clone(),
+                            entity: source,
                             attribute,
                             value: TxValue::Entity(owner),
                         },
@@ -1302,6 +1352,20 @@ impl Normalizer<'_> {
                         ));
                     }
                     let child = self.expand_map(nested, None, depth + 1, output)?;
+                    // The source's map expander gives nested component maps
+                    // affinity with their owner. Ordinary primitive ref edges
+                    // deliberately do not acquire this authoring policy.
+                    if component {
+                        if let EntityRef::Temp(tempid) = &child {
+                            self.push(
+                                TxOp::MatchPartition {
+                                    tempid: tempid.clone(),
+                                    entity: owner.clone(),
+                                },
+                                output,
+                            )?;
+                        }
+                    }
                     self.push(
                         TxOp::Add {
                             entity: owner,
@@ -1340,7 +1404,14 @@ impl Normalizer<'_> {
             AttributeRef::Id(id) => Ok((*id, false)),
             AttributeRef::ReverseId(id) => Ok((*id, true)),
             AttributeRef::Ident(ident) | AttributeRef::ReverseIdent(ident) => {
-                let entity = self.db_before.entid(ident).ok_or_else(|| {
+                let installation_reverse = matches!(attribute, AttributeRef::Ident(_))
+                    && ident == &Keyword::new("db.install", "_partition");
+                let normalized = if installation_reverse {
+                    Keyword::new("db.install", "partition")
+                } else {
+                    ident.clone()
+                };
+                let entity = self.db_before.entid(&normalized).ok_or_else(|| {
                     SemanticError::incorrect(
                         "schema/unknown-attribute",
                         format!("unknown attribute {}", ident.qualified_name()),
@@ -1348,7 +1419,10 @@ impl Normalizer<'_> {
                 })?;
                 let id = crate::schema_eid_to_attr_id(entity)?;
                 self.db_before.schema().attribute(id)?;
-                Ok((id, matches!(attribute, AttributeRef::ReverseIdent(_))))
+                Ok((
+                    id,
+                    installation_reverse || matches!(attribute, AttributeRef::ReverseIdent(_)),
+                ))
             }
         }
     }
@@ -1365,6 +1439,108 @@ mod tests {
 
     fn scalar(value: Value) -> MapValue {
         MapValue::Value(TxValue::Scalar(value))
+    }
+
+    #[test]
+    fn nested_component_maps_emit_partition_affinity_but_primitive_edges_do_not() {
+        let mut schema = crate::Schema::new();
+        schema
+            .install(Attribute::new(
+                KEY,
+                Keyword::new("person", "name"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        schema
+            .install(
+                Attribute::new(
+                    CHILD,
+                    Keyword::new("person", "child"),
+                    ValueType::Ref,
+                    Cardinality::One,
+                )
+                .component(),
+            )
+            .unwrap();
+        let db = Database::new(schema).unwrap();
+        let forms = [TxForm::EntityMap(EntityMap {
+            id: Some(EntityRef::Temp("parent".into())),
+            attributes: vec![(
+                AttributeRef::Id(CHILD),
+                MapValue::Nested(Box::new(EntityMap {
+                    id: Some(EntityRef::Temp("child".into())),
+                    attributes: vec![(
+                        AttributeRef::Id(KEY),
+                        scalar(Value::String("child".into())),
+                    )],
+                })),
+            )],
+        })];
+        let normalized = db.normalize_forms(&forms, &TxFunctions::new()).unwrap();
+        assert!(normalized.iter().any(|op| matches!(op, TxOp::MatchPartition { tempid, entity: EntityRef::Temp(parent) } if tempid == "child" && parent == "parent")));
+        let exact = db
+            .database_value()
+            .normalize_persisted_forms_with_limit(&forms, 16)
+            .unwrap();
+        assert_eq!(normalized.len(), exact.len());
+        assert!(
+            normalized
+                .iter()
+                .zip(&exact)
+                .all(|(a, b)| compare_tx_op(a, b) == Ordering::Equal)
+        );
+        let primitives = [TxForm::Op(TxOp::Add {
+            entity: EntityRef::Temp("parent".into()),
+            attribute: CHILD,
+            value: TxValue::Entity(EntityRef::Temp("child".into())),
+        })];
+        assert_eq!(
+            db.normalize_forms(&primitives, &TxFunctions::new())
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn partition_install_maps_lower_to_ordinary_installation_facts() {
+        let db = Database::bootstrap().unwrap();
+        for attribute in [
+            AttributeRef::ReverseId(crate::DB_INSTALL_PARTITION as u32),
+            AttributeRef::ReverseIdent(Keyword::new("db.install", "partition")),
+            AttributeRef::Ident(Keyword::new("db.install", "_partition")),
+        ] {
+            let forms = [TxForm::EntityMap(EntityMap {
+                id: Some(EntityRef::Temp("partition".into())),
+                attributes: vec![
+                    (
+                        AttributeRef::Id(crate::DB_IDENT as u32),
+                        scalar(Value::Keyword(Keyword::new("part", "customers"))),
+                    ),
+                    (
+                        attribute,
+                        scalar(Value::Keyword(Keyword::new("db.part", "db"))),
+                    ),
+                ],
+            })];
+            let ops = db.normalize_forms(&forms, &TxFunctions::new()).unwrap();
+            assert_eq!(ops.len(), 2);
+            assert!(ops.iter().any(|op| matches!(op, TxOp::Add { entity: EntityRef::Ident(ident), attribute, value: TxValue::Entity(EntityRef::Temp(tempid)) } if ident == &Keyword::new("db.part", "db") && u64::from(*attribute) == crate::DB_INSTALL_PARTITION && tempid == "partition")));
+            assert!(!ops.iter().any(|op| matches!(
+                op,
+                TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. }
+            )));
+            let exact = db
+                .database_value()
+                .normalize_persisted_forms_with_limit(&forms, 16)
+                .unwrap();
+            assert!(
+                ops.iter()
+                    .zip(&exact)
+                    .all(|(a, b)| compare_tx_op(a, b) == Ordering::Equal)
+            );
+        }
     }
 
     #[test]

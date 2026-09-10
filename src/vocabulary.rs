@@ -3,8 +3,7 @@
 //! The numeric IDs mirror Datomic Pro 1.0.7705 where they are fixed or can be
 //! recovered deterministically from the bootstrap transactions.  The native
 //! kernel replaces JVM function objects with immutable native program hashes
-//! and deliberately omits full-text behavior; the remaining schema is
-//! represented by ordinary datoms, not by this
+//! while schema, including native fulltext policy, is represented by ordinary datoms, not by this
 //! module's Rust descriptors.  The descriptors are only a compact way to
 //! construct and verify those canonical datoms.
 
@@ -25,6 +24,20 @@ pub(crate) const PRE_EXCISION_GENESIS_HASH: [u8; 32] = [
     0x11, 0x55, 0xc4, 0x3d, 0x98, 0x13, 0x9d, 0xa0, 0x8e, 0xc3, 0xfb, 0x3f, 0xaf, 0x3a, 0x88, 0xdb,
 ];
 
+/// Independently captured from the existing PostgreSQL fixture before partition
+/// vocabulary was added (4588 encoded bytes). Do not redefine old root identity.
+pub(crate) const PRE_PARTITION_GENESIS_HASH: [u8; 32] = [
+    0xb9, 0x9d, 0x04, 0xf2, 0x50, 0x79, 0xc8, 0x64, 0x6f, 0xc0, 0x66, 0x97, 0x5d, 0x6d, 0x9b, 0x95,
+    0x29, 0x84, 0xa6, 0x8e, 0x31, 0x4d, 0x9d, 0x82, 0x99, 0xdb, 0x62, 0xed, 0x51, 0x1c, 0xab, 0x75,
+];
+
+/// Independently captured from the Goal4 library before fulltext installation.
+/// ATMC format3,4818 bytes; not recomputed from the new genesis at runtime.
+pub(crate) const PRE_FULLTEXT_GENESIS_HASH: [u8; 32] = [
+    0x90, 0x74, 0xce, 0xe4, 0xe4, 0xbb, 0xf8, 0x35, 0x8e, 0xf3, 0xfc, 0xd8, 0x04, 0xde, 0x6e, 0xf2,
+    0x18, 0xfe, 0x7e, 0x55, 0xe5, 0x71, 0x0d, 0x5f, 0xd6, 0x0a, 0x20, 0x5d, 0x09, 0xec, 0x24, 0x3a,
+];
+
 pub const DB_PART_DB: u64 = 0;
 pub const DB_ADD: u64 = 1;
 pub const DB_RETRACT: u64 = 2;
@@ -32,6 +45,7 @@ pub const DB_PART_TX: u64 = 3;
 pub const DB_PART_USER: u64 = 4;
 
 pub const DB_IDENT: u64 = 10;
+pub const DB_INSTALL_PARTITION: u64 = 11;
 pub const DB_INSTALL_ATTRIBUTE: u64 = 13;
 /// Excision request target. Recovered fixed id from Datomic Pro 1.0.7705
 /// `datomic.db/BOOT-IDS` and `bootstrap-data-upgrades`.
@@ -62,8 +76,7 @@ pub const DB_IS_COMPONENT: u64 = 43;
 pub const DB_INDEX: u64 = 44;
 pub const DB_NO_HISTORY: u64 = 45;
 pub const DB_TX_INSTANT: u64 = 50;
-/// The recovered ID remains reserved so persisted data can never reinterpret
-/// it as an unrelated native attribute.  Full-text semantics are unsupported.
+/// Boolean immutable schema property enabling analyzed fulltext indexing.
 pub const DB_FULLTEXT: u64 = 51;
 pub const DB_FN: u64 = 52;
 
@@ -194,9 +207,8 @@ pub const fn unique_for_entity(entity: u64) -> Option<Unique> {
 
 /// Every system entity whose ident is retained by the native kernel.
 ///
-/// This includes the reserved `:db/fulltext` name but not an Attribute for
-/// ID 51. JVM Fressian tags, language/code metadata, install-function, and
-/// dynamic partition-install machinery are intentionally absent. `:db/fn`
+/// JVM Fressian tags, language/code metadata, install-function, and
+/// JVM install-function machinery are intentionally absent. `:db/fn`
 /// remains as an ordinary attribute whose value is a native program hash.
 pub fn supported_system_idents() -> Vec<(u64, Keyword)> {
     SYSTEM_IDENT_SPECS
@@ -218,6 +230,7 @@ pub fn supported_system_attributes() -> Vec<Attribute> {
             Cardinality::One,
         )
         .unique(Unique::Identity),
+        partition_install_attribute(),
         Attribute::new(
             attr_id(DB_INSTALL_ATTRIBUTE),
             kw("db.install", "attribute"),
@@ -296,6 +309,7 @@ pub fn supported_system_attributes() -> Vec<Attribute> {
             ValueType::Instant,
             Cardinality::One,
         )),
+        fulltext_attribute(),
         Attribute::new(
             attr_id(DB_FN),
             kw("db", "fn"),
@@ -431,6 +445,14 @@ pub fn canonical_genesis_datoms() -> Vec<Datom> {
         ));
     }
 
+    for part in [DB_PART_DB, DB_PART_TX, DB_PART_USER] {
+        datoms.push(assertion(
+            DB_PART_DB,
+            DB_INSTALL_PARTITION,
+            Value::Ref(part),
+            tx,
+        ));
+    }
     datoms.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
     debug_assert!(datoms.windows(2).all(|pair| pair[0] != pair[1]));
     datoms
@@ -446,7 +468,7 @@ pub fn canonical_genesis_datoms() -> Vec<Datom> {
 /// intentionally crate-private and exact; it is not another supported way to
 /// create a database.
 pub(crate) fn pre_excision_genesis_datoms() -> Vec<Datom> {
-    canonical_genesis_datoms()
+    pre_partition_genesis_datoms()
         .into_iter()
         .filter(|datom| {
             !(matches!(
@@ -460,6 +482,115 @@ pub(crate) fn pre_excision_genesis_datoms() -> Vec<Datom> {
                 ))
         })
         .collect()
+}
+
+/// Exact pre-partition profile, not a supported new-database constructor.
+pub(crate) fn pre_partition_genesis_datoms() -> Vec<Datom> {
+    pre_fulltext_genesis_datoms()
+        .into_iter()
+        .filter(|datom| {
+            datom.entity != DB_INSTALL_PARTITION
+                && u64::from(datom.attribute) != DB_INSTALL_PARTITION
+                && !(datom.entity == DB_PART_DB
+                    && u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE
+                    && datom.value == Value::Ref(DB_INSTALL_PARTITION))
+        })
+        .collect()
+}
+
+pub(crate) fn pre_fulltext_genesis_datoms() -> Vec<Datom> {
+    canonical_genesis_datoms()
+        .into_iter()
+        .filter(|datom| {
+            !(datom.entity == DB_FULLTEXT && u64::from(datom.attribute) != DB_IDENT)
+                && !(datom.entity == DB_PART_DB
+                    && u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE
+                    && datom.value == Value::Ref(DB_FULLTEXT))
+        })
+        .collect()
+}
+
+pub(crate) fn fulltext_attribute() -> Attribute {
+    Attribute::new(
+        DB_FULLTEXT as u32,
+        kw("db", "fulltext"),
+        ValueType::Boolean,
+        Cardinality::One,
+    )
+}
+
+/// Explicit ordinary vocabulary installation for an older native database.
+/// Use a stable durable request key for exact retry after uncertain outcomes.
+pub fn fulltext_vocabulary_upgrade_ops() -> Vec<crate::TxOp> {
+    vec![crate::TxOp::InstallAttribute(fulltext_attribute())]
+}
+
+pub(crate) fn is_exact_fulltext_upgrade_ops(schema: &crate::Schema, ops: &[crate::TxOp]) -> bool {
+    schema.attribute(DB_FULLTEXT as u32).is_err()
+        && matches!(ops, [crate::TxOp::InstallAttribute(attribute)] if attribute == &fulltext_attribute())
+}
+
+pub(crate) fn validate_fulltext_upgrade_transition(
+    before: &crate::Schema,
+    after: &crate::Schema,
+    ops: &[crate::TxOp],
+) -> Result<(), SemanticError> {
+    if before.attribute(DB_FULLTEXT as u32).is_err()
+        && after.attribute(DB_FULLTEXT as u32).is_ok()
+        && !is_exact_fulltext_upgrade_ops(before, ops)
+    {
+        return Err(SemanticError::incorrect(
+            "schema/fulltext-upgrade-required",
+            "fulltext vocabulary requires its exact explicit upgrade transaction",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn partition_install_attribute() -> Attribute {
+    Attribute::new(
+        DB_INSTALL_PARTITION as u32,
+        kw("db.install", "partition"),
+        ValueType::Ref,
+        Cardinality::Many,
+    )
+}
+
+/// Explicit ordinary transaction for a database created before partition support.
+/// Requires absent partition vocabulary; retry the same durable request key after
+/// an uncertain outcome. Newly created databases already contain these facts.
+pub fn partition_vocabulary_upgrade_ops() -> Vec<crate::TxOp> {
+    let mut ops = vec![crate::TxOp::InstallAttribute(partition_install_attribute())];
+    ops.extend(
+        [DB_PART_DB, DB_PART_TX, DB_PART_USER]
+            .into_iter()
+            .map(|part| crate::TxOp::Add {
+                entity: crate::EntityRef::Id(DB_PART_DB),
+                attribute: DB_INSTALL_PARTITION as u32,
+                value: Value::Ref(part).into(),
+            }),
+    );
+    ops
+}
+
+pub(crate) fn is_exact_partition_upgrade_ops(schema: &crate::Schema, ops: &[crate::TxOp]) -> bool {
+    if schema.attribute(DB_INSTALL_PARTITION as u32).is_ok() {
+        return false;
+    }
+    let expected = partition_vocabulary_upgrade_ops();
+    ops.len() == expected.len()
+        && expected.iter().all(|expected| {
+            ops.iter()
+                .any(|actual| crate::transaction::compare_tx_op(actual, expected).is_eq())
+        })
+}
+
+pub(crate) fn is_partition_upgrade_marker(op: &crate::TxOp) -> bool {
+    matches!(op, crate::TxOp::Add {
+        entity: crate::EntityRef::Id(DB_PART_DB),
+        attribute,
+        value: crate::TxValue::Scalar(Value::Ref(DB_PART_DB | DB_PART_TX | DB_PART_USER)),
+    } if u64::from(*attribute) == DB_INSTALL_PARTITION)
 }
 
 fn indexed(mut attribute: Attribute) -> Attribute {
@@ -502,6 +633,7 @@ const SYSTEM_IDENT_SPECS: &[(u64, &str, &str)] = &[
     (DB_PART_TX, "db.part", "tx"),
     (DB_PART_USER, "db.part", "user"),
     (DB_IDENT, "db", "ident"),
+    (DB_INSTALL_PARTITION, "db.install", "partition"),
     (DB_INSTALL_ATTRIBUTE, "db.install", "attribute"),
     (DB_EXCISE, "db", "excise"),
     (DB_EXCISE_ATTRS, "db.excise", "attrs"),
@@ -554,6 +686,189 @@ const SYSTEM_IDENT_SPECS: &[(u64, &str, &str)] = &[
 mod tests {
     use super::*;
     use crate::identity::{TX_PARTITION, USER_PARTITION, make_eid};
+
+    #[test]
+    fn fulltext_upgrade_preserves_every_exact_older_genesis_profile() {
+        for (genesis, size, hash) in [
+            (
+                pre_excision_genesis_datoms(),
+                4051,
+                PRE_EXCISION_GENESIS_HASH,
+            ),
+            (
+                pre_partition_genesis_datoms(),
+                4588,
+                PRE_PARTITION_GENESIS_HASH,
+            ),
+            (
+                pre_fulltext_genesis_datoms(),
+                4818,
+                PRE_FULLTEXT_GENESIS_HASH,
+            ),
+        ] {
+            let encoded = crate::encode_genesis(&genesis).unwrap();
+            assert_eq!(encoded.len(), size);
+            assert_eq!(crate::sha256(&encoded), hash);
+            let before = crate::Database::from_genesis(genesis.clone()).unwrap();
+            assert!(before.schema().attribute(DB_FULLTEXT as u32).is_err());
+            let ops = fulltext_vocabulary_upgrade_ops();
+            let mut altered = fulltext_attribute();
+            altered.indexed = true;
+            assert!(
+                before
+                    .with(&[crate::TxOp::InstallAttribute(altered)], 10)
+                    .is_err()
+            );
+            let raw = [
+                crate::TxOp::Add {
+                    entity: crate::EntityRef::Id(DB_FULLTEXT),
+                    attribute: DB_VALUE_TYPE as u32,
+                    value: Value::Ref(DB_TYPE_BOOLEAN).into(),
+                },
+                crate::TxOp::Add {
+                    entity: crate::EntityRef::Id(DB_FULLTEXT),
+                    attribute: DB_CARDINALITY as u32,
+                    value: Value::Ref(DB_CARDINALITY_ONE).into(),
+                },
+            ];
+            assert_eq!(
+                before.with(&raw, 10).unwrap_err().code,
+                "schema/fulltext-upgrade-required"
+            );
+            assert_eq!(
+                before.database_value().with(&raw, 10).unwrap_err().code,
+                "schema/fulltext-upgrade-required"
+            );
+            let report = before.with(&ops, 10).unwrap();
+            let native = before.database_value().with(&ops, 10).unwrap();
+            assert_eq!(native.tx_data, report.tx_data);
+            assert_eq!(native.db_after.schema(), report.db_after.schema());
+            assert_eq!(report.db_after.genesis_datoms(), genesis);
+            assert_eq!(
+                report
+                    .db_after
+                    .schema()
+                    .attribute(DB_FULLTEXT as u32)
+                    .unwrap(),
+                &fulltext_attribute()
+            );
+            let durable = crate::DurableTransaction {
+                database_id: "fulltext-upgrade".into(),
+                basis_t: report.db_after.basis_t(),
+                previous_hash: hash,
+                eidx_frontier: report.db_after.eidx_frontier(),
+                tempids: report.tempids.clone(),
+                tx_data: report.tx_data.clone(),
+            };
+            assert!(
+                before
+                    .apply_committed(&durable)
+                    .unwrap()
+                    .same_information_as(&report.db_after)
+            );
+            let attr = Attribute::new(
+                1000,
+                kw("search", "text"),
+                ValueType::String,
+                Cardinality::One,
+            )
+            .fulltext();
+            let installed = report
+                .db_after
+                .with(&[crate::TxOp::InstallAttribute(attr.clone())], 20)
+                .unwrap();
+            assert_eq!(installed.db_after.schema().attribute(1000).unwrap(), &attr);
+            let mut extra = ops;
+            extra.push(crate::TxOp::Add {
+                entity: crate::EntityRef::Id(DB_PART_USER),
+                attribute: DB_DOC as u32,
+                value: Value::String("extra".into()).into(),
+            });
+            assert!(before.with(&extra, 10).is_err());
+            let mut smuggled = durable;
+            smuggled.tx_data.push(Datom {
+                entity: DB_PART_USER,
+                attribute: DB_DOC as u32,
+                value: Value::String("extra".into()),
+                tx: crate::t_to_tx(1).unwrap(),
+                added: true,
+            });
+            smuggled
+                .tx_data
+                .sort_by(|a, b| a.cmp_in(b, IndexOrder::Eavt));
+            assert_eq!(
+                before.apply_committed(&smuggled).unwrap_err().code,
+                "recovery/noncanonical-fulltext-bootstrap-upgrade"
+            );
+        }
+    }
+
+    #[test]
+    fn partition_upgrade_preserves_exact_legacy_genesis_and_replay() {
+        let encoded = crate::encode_genesis(&pre_partition_genesis_datoms()).unwrap();
+        assert_eq!(encoded.len(), 4588);
+        assert_eq!(crate::sha256(&encoded), PRE_PARTITION_GENESIS_HASH);
+        for genesis in [
+            pre_partition_genesis_datoms(),
+            pre_excision_genesis_datoms(),
+        ] {
+            let before = crate::Database::from_genesis(genesis.clone()).unwrap();
+            assert!(
+                before
+                    .schema()
+                    .attribute(DB_INSTALL_PARTITION as u32)
+                    .is_err()
+            );
+            let ops = partition_vocabulary_upgrade_ops();
+            let report = before.with(&ops, 10).unwrap();
+            assert_eq!(report.db_after.genesis_datoms(), genesis);
+            assert_eq!(report.tx_data.len(), 8);
+            let durable = crate::DurableTransaction {
+                database_id: "legacy-partition-upgrade".into(),
+                basis_t: report.db_after.basis_t(),
+                previous_hash: [0; 32],
+                eidx_frontier: report.db_after.eidx_frontier(),
+                tempids: report.tempids.clone(),
+                tx_data: report.tx_data.clone(),
+            };
+            let replayed = before.apply_committed(&durable).unwrap();
+            assert!(replayed.same_information_as(&report.db_after));
+            for part in [DB_PART_DB, DB_PART_TX, DB_PART_USER] {
+                replayed
+                    .schema()
+                    .validate_partition_bits(part as u32)
+                    .unwrap();
+            }
+            assert!(before.with(&ops[..3], 10).is_err());
+            let mut modified = ops.clone();
+            let crate::TxOp::InstallAttribute(attribute) = &mut modified[0] else {
+                unreachable!()
+            };
+            attribute.indexed = true;
+            assert!(before.with(&modified, 10).is_err());
+            let mut missing_marker = durable.clone();
+            missing_marker.tx_data.retain(|datom| {
+                !(datom.attribute == DB_INSTALL_PARTITION as u32
+                    && datom.value == Value::Ref(DB_PART_USER))
+            });
+            assert!(before.apply_committed(&missing_marker).is_err());
+            let mut smuggled = durable;
+            smuggled.tx_data.push(Datom {
+                entity: DB_PART_USER,
+                attribute: DB_DOC as u32,
+                value: Value::String("unrelated bootstrap payload".into()),
+                tx: crate::t_to_tx(1).unwrap(),
+                added: true,
+            });
+            smuggled
+                .tx_data
+                .sort_by(|a, b| a.cmp_in(b, IndexOrder::Eavt));
+            assert_eq!(
+                before.apply_committed(&smuggled).unwrap_err().code,
+                "recovery/noncanonical-partition-bootstrap-upgrade"
+            );
+        }
+    }
 
     #[test]
     fn schema_entity_conversion_checks_partition_and_bound() {
@@ -717,7 +1032,7 @@ mod tests {
             }));
         }
         assert!(
-            !supported_system_attributes()
+            supported_system_attributes()
                 .iter()
                 .any(|attribute| u64::from(attribute.id) == DB_FULLTEXT)
         );

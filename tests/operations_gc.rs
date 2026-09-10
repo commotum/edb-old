@@ -1930,6 +1930,8 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     // fetch directories/leaves after GC, not merely return a cached answer.
     let peer = Peer::connect_with_cache_limits(&connection, &database_id, 0, 0).unwrap();
     let old_snapshot = peer.snapshot();
+    let old_reference = old_snapshot.database_value().snapshot_reference().unwrap();
+    let old_key = old_reference.key().clone();
     let snapshot_clones = (0..128).map(|_| old_snapshot.clone()).collect::<Vec<_>>();
     let publication_two = republish_same_basis(&connection, &database_id);
     assert_eq!(publication_two.basis_t, publication_one.basis_t);
@@ -1945,6 +1947,14 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     );
     assert_eq!(publication_three.basis_t, created.basis_t());
     assert!(peer.refresh_index().unwrap());
+    assert_eq!(peer.database_value().snapshot_key().unwrap(), old_key);
+    assert_eq!(
+        peer.reopen_snapshot(&old_reference)
+            .unwrap()
+            .snapshot_key()
+            .unwrap(),
+        old_key
+    );
     assert_eq!(
         peer.durable_base_revision(),
         publication_three.publication_revision
@@ -2123,6 +2133,14 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     expected_released.applied = true;
     let released = operator.collect_garbage(Duration::ZERO).unwrap();
     assert_eq!(released, expected_released);
+    // A serialized reference is not a retention pin. Do not silently replace
+    // its collected physical witness with another publication of the same key.
+    let unavailable = peer.reopen_snapshot(&old_reference).unwrap_err();
+    assert_eq!(
+        unavailable.category,
+        atomic_core::ErrorCategory::Unavailable
+    );
+    assert_eq!(unavailable.code, "peer/exact-manifest-absent");
     assert!(released.tree_publications.iter().any(|candidate| {
         candidate.database_id == database_id
             && candidate.publication_revision == publication_one.publication_revision

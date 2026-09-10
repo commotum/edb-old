@@ -6,13 +6,14 @@
 //! does not define a storage trait; PostgreSQL is the only durable boundary.
 
 use crate::postgres::{postgres_error, verify_schema_compatibility};
+use crate::sql_io::{OperationContext, OperationKind, SqlClient as Client};
 use crate::{Digest, ErrorCategory, IndexOrder, PostgresConnectionConfig, SemanticError, sha256};
-use postgres::Client;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 const ROOT_BINDING_COUNT: usize = 8;
 const DELTA_INSERT_BATCH: usize = 512;
@@ -392,13 +393,31 @@ fn read_avet_sort_workspace_page(
 
 /// Measured physical work performed by one tree-store handle.
 ///
-/// Attempts include failed/missing reads. Row and byte counters include only
-/// content successfully verified after PostgreSQL returned it.
+/// Attempts include failed/missing reads. Canonical node row and byte counters
+/// include only successfully verified content; upload input watermarks include
+/// attempted batches. Optional compression has independent physical counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TreeStoreStats {
     pub build_intent_node_batches: u64,
     pub build_intent_node_writes: u64,
     pub node_insert_attempts: u64,
+    pub node_upload_batches: u64,
+    /// Largest submitted batch, including repeated input hashes. These are
+    /// input-resource counts, not estimates of driver or process resident memory.
+    pub node_upload_peak_nodes: u64,
+    pub node_upload_peak_bytes: u64,
+    pub node_block_writes: crate::NodeBlockWriteStats,
+    pub node_block_write_failures: u64,
+    pub node_block_reads: crate::NodeBlockReadStats,
+    pub node_block_encoding_workers: u64,
+    /// Maximum simultaneous preparation workers for one upload call (not
+    /// process-wide concurrency across independent indexers).
+    pub node_block_encoding_peak_workers: u64,
+    /// Measured intersection of preparation and canonical upload intervals.
+    /// These overlapping durations are not additive exclusive phase times.
+    pub node_block_encoding_overlap_nanos: u64,
+    pub node_block_preparation_nanos: u64,
+    pub node_block_overlapped_upload_nanos: u64,
     pub node_writes: u64,
     pub node_reuses: u64,
     pub node_write_bytes: u64,
@@ -414,6 +433,36 @@ pub struct TreeStoreStats {
     pub publication_writes: u64,
     pub delta_insert_batches: u64,
     pub delta_node_writes: u64,
+}
+
+/// Bounds one immutable-node upload request, not a database or scalar value.
+/// A node larger than `max_bytes` travels alone; canonical tree construction
+/// retains its existing node-size limits. Neither budget changes datom semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NodeUploadLimits {
+    pub max_nodes: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for NodeUploadLimits {
+    fn default() -> Self {
+        Self {
+            max_nodes: 128,
+            max_bytes: 8 * 1024 * 1024,
+        }
+    }
+}
+
+impl NodeUploadLimits {
+    fn validate(self) -> Result<(), SemanticError> {
+        if self.max_nodes == 0 || self.max_bytes == 0 {
+            return Err(SemanticError::incorrect(
+                "tree/invalid-upload-limits",
+                "node upload count and byte budgets must be positive",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// One of the eight roots named by a persistent-tree manifest.
@@ -490,6 +539,9 @@ pub struct PostgresTreeStore {
     client: Client,
     connection: PostgresConnectionConfig,
     stats: TreeStoreStats,
+    compressed_node_blocks: bool,
+    node_block_encoding_overlap_min_bytes: Option<usize>,
+    node_upload_limits: NodeUploadLimits,
     active_build_intent: Option<Digest>,
     active_build_database_lock: Option<i64>,
     avet_sort_workspace: AvetSortWorkspace,
@@ -510,6 +562,9 @@ impl PostgresTreeStore {
             client,
             connection: connection.clone(),
             stats: TreeStoreStats::default(),
+            compressed_node_blocks: true,
+            node_block_encoding_overlap_min_bytes: Some(64 * 1024),
+            node_upload_limits: NodeUploadLimits::default(),
             active_build_intent: None,
             active_build_database_lock: None,
             avet_sort_workspace: AvetSortWorkspace::default(),
@@ -517,8 +572,8 @@ impl PostgresTreeStore {
         })
     }
 
-    pub fn into_client(self) -> Client {
-        self.client
+    pub fn into_client(self) -> postgres::Client {
+        self.client.into_raw()
     }
 
     pub fn stats(&self) -> TreeStoreStats {
@@ -527,6 +582,38 @@ impl PostgresTreeStore {
 
     pub fn reset_stats(&mut self) {
         self.stats = TreeStoreStats::default();
+    }
+
+    /// Enable or disable best-effort compressed transfer projections for
+    /// subsequent uploads (enabled by default). Canonical storage, validation,
+    /// and root publication are unchanged; existing projections are retained.
+    pub fn with_compressed_node_blocks(mut self, enabled: bool) -> Self {
+        self.compressed_node_blocks = enabled;
+        self
+    }
+
+    /// Overlap pure optional block encoding with a batch's canonical upload
+    /// using at most one scoped worker. `None` selects serial preparation;
+    /// the default minimum is 64 KiB. Tiny batches avoid thread-start overhead.
+    /// A batch exceeding the codec's work budget follows bounded serial chunks.
+    pub fn with_node_block_encoding_overlap(mut self, minimum_bytes: Option<usize>) -> Self {
+        self.node_block_encoding_overlap_min_bytes = minimum_bytes;
+        self
+    }
+
+    /// Default upload policy used by indexer and generation-building callers.
+    /// Direct `insert_nodes` calls may still provide their own explicit limits.
+    pub fn with_node_upload_limits(
+        mut self,
+        limits: NodeUploadLimits,
+    ) -> Result<Self, SemanticError> {
+        limits.validate()?;
+        self.node_upload_limits = limits;
+        Ok(self)
+    }
+
+    pub fn node_upload_limits(&self) -> NodeUploadLimits {
+        self.node_upload_limits
     }
 
     /// Place disposable external-index runs on an operator-selected local
@@ -889,6 +976,8 @@ impl PostgresTreeStore {
     ) -> Result<(), SemanticError> {
         self.stats.node_insert_attempts = self.stats.node_insert_attempts.saturating_add(1);
         validate_content_hash(expected_hash, payload, "tree/node-hash-mismatch")?;
+        let context = OperationContext::current_or_process();
+        context.record_payload_write(payload.len() as u64);
 
         let inserted = self
             .client
@@ -906,6 +995,7 @@ impl PostgresTreeStore {
             )
             .map_err(|error| postgres_error("tree/node-verify", error))?;
         let stored: Vec<u8> = row.get(0);
+        context.record_payload_read(stored.len() as u64);
         if stored.as_slice() != payload || sha256(&stored) != expected_hash {
             return Err(fault(
                 "tree/node-hash-conflict",
@@ -922,25 +1012,307 @@ impl PostgresTreeStore {
         } else {
             self.stats.node_reuses = self.stats.node_reuses.saturating_add(1);
         }
+        self.write_node_blocks_best_effort(&[(expected_hash, payload)]);
         Ok(())
+    }
+
+    /// Upload a stream of canonical nodes in bounded batches. Each nonempty
+    /// batch makes one array INSERT and one verification SELECT, including
+    /// exact verification of already-present content. Payloads are borrowed;
+    /// this method never collects the complete stream.
+    ///
+    /// Successful batches (and valid new nodes from a failed verification)
+    /// may remain as immutable orphans after an error. As with `insert_node`,
+    /// callers retain their build-intent pin and publish the manifest only
+    /// after every node has been verified. This method never publishes roots.
+    pub fn insert_nodes<'a>(
+        &mut self,
+        nodes: impl IntoIterator<Item = (Digest, &'a [u8])>,
+        limits: NodeUploadLimits,
+    ) -> Result<(), SemanticError> {
+        limits.validate()?;
+        let mut batch = Vec::new();
+        let mut batch_bytes = 0_usize;
+        for (hash, payload) in nodes {
+            if !batch.is_empty()
+                && (batch.len() >= limits.max_nodes
+                    || batch_bytes.saturating_add(payload.len()) > limits.max_bytes)
+            {
+                self.insert_node_batch(&batch, batch_bytes)?;
+                batch.clear();
+                batch_bytes = 0;
+            }
+            self.stats.node_insert_attempts = self.stats.node_insert_attempts.saturating_add(1);
+            validate_content_hash(hash, payload, "tree/node-hash-mismatch")?;
+            batch.push((hash, payload));
+            batch_bytes = batch_bytes.saturating_add(payload.len());
+            // Flush a full/oversized batch without pulling another input item.
+            if batch.len() >= limits.max_nodes || batch_bytes >= limits.max_bytes {
+                self.insert_node_batch(&batch, batch_bytes)?;
+                batch.clear();
+                batch_bytes = 0;
+            }
+        }
+        if !batch.is_empty() {
+            self.insert_node_batch(&batch, batch_bytes)?;
+        }
+        Ok(())
+    }
+
+    fn insert_node_batch(
+        &mut self,
+        batch: &[(Digest, &[u8])],
+        batch_bytes: usize,
+    ) -> Result<(), SemanticError> {
+        let overlap = self.compressed_node_blocks
+            && self
+                .node_block_encoding_overlap_min_bytes
+                .is_some_and(|minimum| batch_bytes >= minimum)
+            && batch.len() <= crate::compressed_nodes::MAX_BATCH_NODES
+            && batch_bytes <= crate::compressed_nodes::MAX_BATCH_BYTES;
+        if !overlap {
+            self.insert_node_batch_canonical(batch, batch_bytes)?;
+            self.write_node_blocks_best_effort(batch);
+            return Ok(());
+        }
+        let context = OperationContext::current_or_process();
+        std::thread::scope(|scope| {
+            let worker = std::thread::Builder::new()
+                .name("atomic-node-encode".into())
+                .spawn_scoped(scope, move || {
+                    let _phase = context.phase(OperationKind::NodeCompression);
+                    let start = Instant::now();
+                    let prepared = crate::compressed_nodes::prepare_node_blocks(batch);
+                    (start, Instant::now(), prepared)
+                });
+            let Ok(worker) = worker else {
+                // Resource exhaustion of an optional accelerator cannot turn
+                // an otherwise valid canonical upload into a semantic failure.
+                self.insert_node_batch_canonical(batch, batch_bytes)?;
+                self.write_node_blocks_best_effort(batch);
+                return Ok(());
+            };
+            self.stats.node_block_encoding_workers =
+                self.stats.node_block_encoding_workers.saturating_add(1);
+            self.stats.node_block_encoding_peak_workers = 1;
+            let upload_start = Instant::now();
+            let canonical = self.insert_node_batch_canonical(batch, batch_bytes);
+            let upload_end = Instant::now();
+            // Join on success AND error: no worker can outlive this batch or
+            // race a later root publication. It performs no SQL itself.
+            let prepared = match worker.join() {
+                Ok((start, end, result)) => {
+                    let nanos = |duration: std::time::Duration| {
+                        duration.as_nanos().min(u64::MAX as u128) as u64
+                    };
+                    self.stats.node_block_preparation_nanos = self
+                        .stats
+                        .node_block_preparation_nanos
+                        .saturating_add(nanos(end.duration_since(start)));
+                    self.stats.node_block_overlapped_upload_nanos = self
+                        .stats
+                        .node_block_overlapped_upload_nanos
+                        .saturating_add(nanos(upload_end.duration_since(upload_start)));
+                    let overlap = end
+                        .min(upload_end)
+                        .saturating_duration_since(start.max(upload_start));
+                    self.stats.node_block_encoding_overlap_nanos = self
+                        .stats
+                        .node_block_encoding_overlap_nanos
+                        .saturating_add(nanos(overlap));
+                    result.ok()
+                }
+                Err(_) => None,
+            };
+            canonical?;
+            if let Some(prepared) = prepared {
+                let context = OperationContext::current_or_process();
+                let _phase = context.phase(OperationKind::NodeCompression);
+                let result =
+                    crate::compressed_nodes::store_prepared_node_blocks(&mut self.client, prepared);
+                self.record_node_block_write(result);
+            } else {
+                self.stats.node_block_write_failures =
+                    self.stats.node_block_write_failures.saturating_add(1);
+            }
+            Ok(())
+        })
+    }
+
+    fn insert_node_batch_canonical(
+        &mut self,
+        batch: &[(Digest, &[u8])],
+        batch_bytes: usize,
+    ) -> Result<(), SemanticError> {
+        let mut expected = BTreeMap::new();
+        for (hash, payload) in batch {
+            if let Some(previous) = expected.insert(*hash, *payload)
+                && previous != *payload
+            {
+                return Err(fault(
+                    "tree/node-hash-conflict",
+                    "upload repeats a hash with different bytes",
+                ));
+            }
+        }
+        let hashes: Vec<&[u8]> = expected.keys().map(|hash| hash.as_slice()).collect();
+        let payloads: Vec<&[u8]> = expected.values().copied().collect();
+        self.stats.node_upload_batches = self.stats.node_upload_batches.saturating_add(1);
+        self.stats.node_upload_peak_nodes =
+            self.stats.node_upload_peak_nodes.max(batch.len() as u64);
+        self.stats.node_upload_peak_bytes =
+            self.stats.node_upload_peak_bytes.max(batch_bytes as u64);
+        let context = OperationContext::current_or_process();
+        context.record_payload_write(payloads.iter().map(|bytes| bytes.len() as u64).sum());
+        let inserted = self
+            .client
+            .query(
+                "INSERT INTO atomic_tree_nodes (node_hash, payload) \
+             SELECT node_hash, payload \
+             FROM unnest($1::bytea[], $2::bytea[]) AS incoming(node_hash, payload) \
+             ON CONFLICT (node_hash) DO NOTHING RETURNING node_hash",
+                &[&hashes, &payloads],
+            )
+            .map_err(|error| postgres_error("tree/node-batch-insert", error))?;
+        let mut inserted_hashes = BTreeSet::new();
+        for row in inserted {
+            let hash = digest(row.get(0), "inserted node hash")?;
+            if !expected.contains_key(&hash) || !inserted_hashes.insert(hash) {
+                return Err(fault(
+                    "tree/node-hash-conflict",
+                    "node insertion returned unexpected hashes",
+                ));
+            }
+        }
+        let rows = self.client.query(
+            "SELECT node_hash, payload FROM atomic_tree_nodes WHERE node_hash = ANY($1::bytea[])",
+            &[&hashes],
+        ).map_err(|error| postgres_error("tree/node-batch-verify", error))?;
+        let mut verified = BTreeSet::new();
+        for row in rows {
+            let hash = digest(row.get(0), "stored node hash")?;
+            let stored: &[u8] = row.get(1);
+            context.record_payload_read(stored.len() as u64);
+            if expected.get(&hash).copied() != Some(stored)
+                || sha256(stored) != hash
+                || !verified.insert(hash)
+            {
+                return Err(fault(
+                    "tree/node-hash-conflict",
+                    "tree node hash is already bound to different or corrupt bytes",
+                ));
+            }
+        }
+        if verified.len() != expected.len() {
+            return Err(fault(
+                "tree/node-batch-incomplete",
+                "not every uploaded node is present and verified",
+            ));
+        }
+        let writes = inserted_hashes.len() as u64;
+        let write_bytes = inserted_hashes
+            .iter()
+            .map(|hash| expected[hash].len() as u64)
+            .sum::<u64>();
+        self.stats.node_writes = self.stats.node_writes.saturating_add(writes);
+        self.stats.node_write_bytes = self.stats.node_write_bytes.saturating_add(write_bytes);
+        self.stats.node_reuses = self
+            .stats
+            .node_reuses
+            .saturating_add(batch.len() as u64 - writes);
+        Ok(())
+    }
+
+    fn write_node_blocks_best_effort(&mut self, nodes: &[(Digest, &[u8])]) {
+        if !self.compressed_node_blocks {
+            return;
+        }
+        // Projection resource policy is independent of the caller's canonical
+        // upload budgets. Never turn optional compression limits into a new
+        // limit on an otherwise legal node or database.
+        let mut chunk = Vec::new();
+        let mut bytes = 0_usize;
+        for &(hash, payload) in nodes {
+            if !chunk.is_empty()
+                && (chunk.len() >= crate::compressed_nodes::MAX_BATCH_NODES
+                    || bytes.saturating_add(payload.len())
+                        > crate::compressed_nodes::MAX_BATCH_BYTES)
+            {
+                self.write_node_block_chunk(&chunk);
+                chunk.clear();
+                bytes = 0;
+            }
+            chunk.push((hash, payload));
+            bytes = bytes.saturating_add(payload.len());
+        }
+        if !chunk.is_empty() {
+            self.write_node_block_chunk(&chunk);
+        }
+    }
+
+    fn write_node_block_chunk(&mut self, nodes: &[(Digest, &[u8])]) {
+        let context = OperationContext::current_or_process();
+        let _phase = context.phase(OperationKind::NodeCompression);
+        let result = crate::compressed_nodes::store_node_blocks(&mut self.client, nodes);
+        self.record_node_block_write(result);
+    }
+
+    fn record_node_block_write(
+        &mut self,
+        result: Result<crate::NodeBlockWriteStats, SemanticError>,
+    ) {
+        match result {
+            Ok(work) => {
+                let total = &mut self.stats.node_block_writes;
+                total.considered = total.considered.saturating_add(work.considered);
+                total.skipped_not_smaller = total
+                    .skipped_not_smaller
+                    .saturating_add(work.skipped_not_smaller);
+                total.inserted = total.inserted.saturating_add(work.inserted);
+                total.reused = total.reused.saturating_add(work.reused);
+                total.inserted_physical_bytes = total
+                    .inserted_physical_bytes
+                    .saturating_add(work.inserted_physical_bytes);
+                total.physical_write_bytes = total
+                    .physical_write_bytes
+                    .saturating_add(work.physical_write_bytes);
+                total.encode_elapsed_nanos = total
+                    .encode_elapsed_nanos
+                    .saturating_add(work.encode_elapsed_nanos);
+            }
+            Err(_) => {
+                self.stats.node_block_write_failures =
+                    self.stats.node_block_write_failures.saturating_add(1);
+            }
+        }
     }
 
     /// Load and authenticate an immutable node. A missing hash is distinct
     /// from corrupt bytes so a tree walker can report the owning reference.
     pub fn load_node(&mut self, expected_hash: Digest) -> Result<Option<Vec<u8>>, SemanticError> {
         self.stats.node_read_attempts = self.stats.node_read_attempts.saturating_add(1);
-        let row = self
-            .client
-            .query_opt(
-                "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
-                &[&&expected_hash[..]],
-            )
-            .map_err(|error| postgres_error("tree/node-read", error))?;
-        let Some(row) = row else {
+        let Some(loaded) =
+            crate::compressed_nodes::load_node_block(&mut self.client, expected_hash)?
+        else {
             return Ok(None);
         };
-        let payload: Vec<u8> = row.get(0);
-        validate_content_hash(expected_hash, &payload, "tree/node-content-corrupt")?;
+        // The loader authenticates both the canonical authority and any
+        // optional compressed representation before returning these bytes.
+        let payload = loaded.canonical;
+        let work = loaded.stats;
+        let total = &mut self.stats.node_block_reads;
+        total.compressed_hits = total.compressed_hits.saturating_add(work.compressed_hits);
+        total.canonical_reads = total.canonical_reads.saturating_add(work.canonical_reads);
+        total.corrupt_projections = total
+            .corrupt_projections
+            .saturating_add(work.corrupt_projections);
+        total.canonical_bytes = total.canonical_bytes.saturating_add(work.canonical_bytes);
+        total.physical_read_bytes = total
+            .physical_read_bytes
+            .saturating_add(work.physical_read_bytes);
+        total.decode_elapsed_nanos = total
+            .decode_elapsed_nanos
+            .saturating_add(work.decode_elapsed_nanos);
         self.stats.node_rows_read = self.stats.node_rows_read.saturating_add(1);
         self.stats.node_read_bytes = self
             .stats
@@ -1444,6 +1816,8 @@ impl PostgresTreeStore {
         transaction
             .commit()
             .map_err(|error| postgres_error("tree/publication-commit", error))?;
+
+        crate::change_notices::publish(&self.connection,&manifest.database_id);
 
         self.stats.manifest_writes = self.stats.manifest_writes.saturating_add(manifest_inserted);
         self.stats.root_binding_writes = self
@@ -2196,7 +2570,7 @@ fn insert_delta_nodes(
 }
 
 fn stage_unknown_delta(
-    client: &mut postgres::Transaction<'_>,
+    client: &mut crate::sql_io::SqlTransaction<'_>,
     manifest_hash: Digest,
     predecessor_manifest_hash: Option<Digest>,
 ) -> Result<(), SemanticError> {
@@ -2242,7 +2616,7 @@ pub(crate) fn publication_delta_set_hash(
 }
 
 fn verify_published_delta(
-    client: &mut postgres::Transaction<'_>,
+    client: &mut crate::sql_io::SqlTransaction<'_>,
     manifest: &TreeManifestRecord,
     delta: &TreePublicationDelta,
 ) -> Result<(), SemanticError> {
@@ -2311,7 +2685,7 @@ fn verify_published_delta(
 }
 
 fn verify_manifest_row(
-    client: &mut postgres::Transaction<'_>,
+    client: &mut crate::sql_io::SqlTransaction<'_>,
     expected: &TreeManifestRecord,
 ) -> Result<(), SemanticError> {
     let row = client
@@ -2374,7 +2748,7 @@ fn verify_manifest_row(
 }
 
 fn verify_root_row(
-    client: &mut postgres::Transaction<'_>,
+    client: &mut crate::sql_io::SqlTransaction<'_>,
     manifest_hash: Digest,
     expected: &TreeRootBinding,
 ) -> Result<(), SemanticError> {
@@ -2403,7 +2777,7 @@ fn verify_root_row(
 }
 
 fn verify_publication_row(
-    client: &mut postgres::Transaction<'_>,
+    client: &mut crate::sql_io::SqlTransaction<'_>,
     expected: &TreeManifestRecord,
 ) -> Result<(), SemanticError> {
     let row = client
@@ -2437,7 +2811,7 @@ fn verify_publication_row(
 }
 
 fn verify_root_nodes(
-    client: &mut postgres::Transaction<'_>,
+    client: &mut crate::sql_io::SqlTransaction<'_>,
     manifest: &TreeManifestRecord,
 ) -> Result<(), SemanticError> {
     for root in &manifest.roots {
@@ -2636,6 +3010,10 @@ fn digest(bytes: Vec<u8>, label: &str) -> Result<Digest, SemanticError> {
 fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
     SemanticError::new(ErrorCategory::Fault, code, message)
 }
+
+#[cfg(test)]
+#[path = "tree_upload_protocol_tests.rs"]
+mod protocol_tests;
 
 #[cfg(test)]
 mod tests {

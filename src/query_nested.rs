@@ -25,24 +25,55 @@ pub(super) fn execute(
         extensions: parent.extensions,
         rule_memo: BTreeMap::new(),
         solving_rules: false,
+        borrowed_cancel: parent.borrowed_cancel,
+        max_value_bytes: parent
+            .max_value_bytes
+            .saturating_sub(parent.stats.allocated_value_bytes),
     };
-    let initial = bind_arguments(&query.inputs, args, &mut child)?;
-    let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut child)?;
-    let mut budget = QueryPullBudget::new(
-        Arc::clone(&parent.control.cancel),
-        parent.deadline,
-        parent.control.max_work,
-        child.work,
-    );
-    let result = shape_results(
-        query,
-        rows,
-        parent.control.max_result_rows,
-        &child.sources,
-        &mut budget,
-    )?;
+    let result = (|| {
+        let initial = bind_arguments(&query.inputs, args, &mut child)?;
+        let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut child)?;
+        let mut budget = QueryPullBudget::new(
+            Arc::clone(&parent.control.cancel),
+            parent.deadline,
+            parent.control.max_work,
+            child.work,
+        )
+        .with_borrowed_cancel(parent.borrowed_cancel)
+        .with_value_budget(child.stats.allocated_value_bytes, child.max_value_bytes);
+        let result = shape_results(
+            query,
+            rows,
+            parent.control.max_result_rows,
+            &child.sources,
+            &mut budget,
+        );
+        child.work = budget.work();
+        child.stats.allocated_value_bytes = budget.value_bytes();
+        result
+    })();
+    parent.work = child.work;
     // q returns one value in its find-selected shape. The enclosing function
     // binding decides whether to keep that value or destructure it once.
+    let bytes_charge = parent.charge_value_bytes(child.stats.allocated_value_bytes);
+    parent.stats.clauses_executed += child.stats.clauses_executed;
+    parent.stats.datoms_examined += child.stats.datoms_examined;
+    parent.stats.index_seeks += child.stats.index_seeks;
+    parent.stats.rule_iterations += child.stats.rule_iterations;
+    parent.stats.hash_join_build_rows += child.stats.hash_join_build_rows;
+    parent.stats.hash_join_probes += child.stats.hash_join_probes;
+    parent.stats.join_candidates += child.stats.join_candidates;
+    parent.stats.grouped_probes_saved += child.stats.grouped_probes_saved;
+    parent.stats.fulltext_searches += child.stats.fulltext_searches;
+    parent.stats.fulltext_lagging_searches += child.stats.fulltext_lagging_searches;
+    parent.stats.fulltext_truncated_searches += child.stats.fulltext_truncated_searches;
+    parent.stats.fulltext_read_bytes += child.stats.fulltext_read_bytes;
+    parent.stats.peak_join_bytes = parent
+        .stats
+        .peak_join_bytes
+        .max(child.stats.peak_join_bytes);
+    let result = result?;
+    bytes_charge?;
     let value = match result {
         QueryResult::Relation(rows) => {
             QueryValue::Collection(rows.into_iter().map(QueryValue::Tuple).collect())
@@ -51,11 +82,6 @@ pub(super) fn execute(
         QueryResult::Collection(values) => QueryValue::Collection(values),
         QueryResult::Scalar(value) => value.unwrap_or(QueryValue::Nil),
     };
-    parent.work = budget.work();
-    parent.stats.clauses_executed += child.stats.clauses_executed;
-    parent.stats.datoms_examined += child.stats.datoms_examined;
-    parent.stats.index_seeks += child.stats.index_seeks;
-    parent.stats.rule_iterations += child.stats.rule_iterations;
     parent.plan.extend(child.plan.into_iter().map(|mut step| {
         step.clause.insert_str(0, "nested/");
         step
@@ -83,7 +109,9 @@ fn bind_arguments(
                 state.check(1)?;
                 let bound = bind_output(row, &binding, tuple)?;
                 state.check(bound.len())?;
-                next.extend(bound);
+                for row in bound {
+                    state.push_row(&mut next, row)?;
+                }
             }
         }
         rows = dedupe_rows(next);

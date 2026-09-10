@@ -85,6 +85,13 @@ pub(crate) struct TieredAssessment {
 }
 
 impl TieredAssessment {
+    fn is_partition_bootstrap_marker(&self, datom: &Datom) -> bool {
+        datom.attribute == crate::DB_INSTALL_PARTITION as u32
+            && self.db_before.schema().attribute(datom.attribute).is_err()
+            && self.successor_schema.attribute(datom.attribute).is_ok_and(|attribute|
+                attribute == &crate::vocabulary::partition_install_attribute())
+    }
+
     /// Resolve only predicates this assessed transaction can execute.  As in
     /// the eager oracle, missing required attributes short-circuit before
     /// persisted predicate bindings are looked up.
@@ -94,6 +101,7 @@ impl TieredAssessment {
         self.validate_ensure_attributes()?;
         let mut required = BTreeMap::new();
         for datom in self.tx_data.iter().filter(|datom| datom.added) {
+            if self.is_partition_bootstrap_marker(datom) { continue; }
             let attribute = self.db_before.schema().attribute(datom.attribute)?;
             for predicate in &attribute.predicates {
                 insert_predicate_role(
@@ -123,6 +131,7 @@ impl TieredAssessment {
         functions: Option<&TxFunctions>,
     ) -> Result<(), SemanticError> {
         for datom in self.tx_data.iter().filter(|datom| datom.added) {
+            if self.is_partition_bootstrap_marker(datom) { continue; }
             let attribute = self.db_before.schema().attribute(datom.attribute)?;
             for predicate in &attribute.predicates {
                 let result = functions
@@ -444,6 +453,7 @@ pub(crate) fn assess_tiered_with_remaining_limits(
 
     let mut ordered = ops.to_vec();
     ordered.sort_by(crate::transaction::compare_tx_op);
+    let partition_upgrade = crate::vocabulary::is_exact_partition_upgrade_ops(base.schema(), &ordered);
     validate_tx_instant_forms(&ordered, tx_instant)?;
     let mut reader = Reader::new(base, limits);
     let (mut logical, allocation_start) =
@@ -452,6 +462,7 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     let mut ensures = Vec::new();
     let mut touched = BTreeSet::new();
     for op in &ordered {
+        if partition_upgrade && crate::vocabulary::is_partition_upgrade_marker(op) { continue; }
         expand_op(
             &mut reader,
             op,
@@ -483,7 +494,17 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     dedupe(&mut logical);
     validate_same_transaction(base.schema(), &logical)?;
 
+    if partition_upgrade {
+        for part in [crate::DB_PART_DB, crate::DB_PART_TX, crate::DB_PART_USER] {
+            logical.push(LogicalDatom {
+                entity: crate::DB_PART_DB, attribute: crate::DB_INSTALL_PARTITION as u32,
+                value: Value::Ref(part), added: true,
+            });
+        }
+        dedupe(&mut logical);
+    }
     let successor_schema = derive_successor_schema(&mut reader, &logical, tx)?;
+    crate::vocabulary::validate_fulltext_upgrade_transition(base.schema(), &successor_schema, &ordered)?;
     validate_schema_transition(&mut reader, &successor_schema, &logical)?;
     validate_delta_successor(&mut reader, &successor_schema, &logical)?;
     validate_ensure_attributes(&mut reader, &logical, &ensures)?;
@@ -533,7 +554,9 @@ fn prepare_schema_information(
     // resident schema merely to discover that it did not change.
     let mut candidate = reader.base.schema().clone();
     let mut changes = Vec::<(crate::Attribute, bool)>::new();
-    let exact_upgrade = is_exact_excision_bootstrap_ops(reader.base.schema(), ops);
+    let exact_upgrade = is_exact_excision_bootstrap_ops(reader.base.schema(), ops)
+        || crate::vocabulary::is_exact_partition_upgrade_ops(reader.base.schema(), ops)
+        || crate::vocabulary::is_exact_fulltext_upgrade_ops(reader.base.schema(), ops);
 
     for op in ops {
         let (attribute, install) = match op {
@@ -598,6 +621,7 @@ fn prepare_schema_information(
         DB_IS_COMPONENT as u32,
         DB_INDEX as u32,
         DB_NO_HISTORY as u32,
+        crate::DB_FULLTEXT as u32,
         DB_TUPLE_TYPE as u32,
         DB_TUPLE_TYPES as u32,
         DB_TUPLE_ATTRS as u32,
@@ -839,6 +863,21 @@ fn derive_successor_schema(
     }
 
     let mut current = Vec::new();
+    // Reserved vocabulary may already have its ident before its attribute
+    // descriptor is explicitly installed. Lowering correctly omits that
+    // nonmaterial assertion; retain the authenticated existing ident here.
+    for datom in logical.iter().filter(|datom| datom.added && u64::from(datom.attribute) == DB_INSTALL_ATTRIBUTE) {
+        if let Value::Ref(entity) = datom.value
+            && reader.base.schema().attribute(u32::try_from(entity).unwrap_or(u32::MAX)).is_err()
+            && let Some(ident) = reader.base.ident(entity)
+        {
+            current.push(ident_datom(entity, ident.clone(), 0));
+        }
+    }
+    for (partition, _) in reader.base.schema().partitions() {
+        current.push(Datom { entity: DB_PART_DB, attribute: crate::DB_INSTALL_PARTITION as u32,
+            value: Value::Ref(u64::from(partition)), tx: 0, added: true });
+    }
     for attribute in reader.base.schema().attributes() {
         current.push(Datom {
             entity: DB_PART_DB,
@@ -896,10 +935,25 @@ fn derive_successor_schema(
         }
     }
 
-    // Only attribute and system aliases are required to derive Schema. The
+    // Only attribute, partition and system aliases are required to derive Schema. The
     // full general ident cache remains resident in the concrete tiered value
     // and is updated delta-first by TransactionOverlay.
     let mut ident_assertions = Vec::new();
+    for (partition, ident) in reader.base.schema().partitions() {
+        ident_assertions.push(ident_datom(u64::from(partition), ident.clone(), 0));
+    }
+    // A partition can receive its ident in an earlier transaction. Its
+    // ordinary current ident is already resident authenticated metadata;
+    // installing the later marker must not require repeating the ident fact.
+    for datom in logical.iter().filter(|datom| datom.added
+        && u64::from(datom.attribute) == crate::DB_INSTALL_PARTITION)
+    {
+        if let Value::Ref(entity) = datom.value
+            && let Some(ident) = reader.base.ident(entity)
+        {
+            ident_assertions.push(ident_datom(entity, ident.clone(), 0));
+        }
+    }
     for (entity, ident) in supported_system_idents() {
         ident_assertions.push(ident_datom(entity, ident, 0));
     }
@@ -944,6 +998,7 @@ fn validate_schema_transition(
     successor: &Schema,
     logical: &[LogicalDatom],
 ) -> Result<(), SemanticError> {
+    reader.base.schema().validate_partition_successor(successor)?;
     for required in crate::canonical_genesis_datoms() {
         if logical.iter().any(|datom| {
             !datom.added
@@ -989,6 +1044,9 @@ fn validate_schema_transition(
                         "schema/value-type-immutable",
                         "an installed attribute's value type cannot change",
                     ));
+                }
+                if current.fulltext != proposed.fulltext {
+                    return Err(SemanticError::incorrect("schema/fulltext-immutable", "an installed attribute's fulltext property cannot change"));
                 }
                 if current.tuple != proposed.tuple {
                     return Err(SemanticError::incorrect(
@@ -1267,6 +1325,7 @@ fn schema_information_attribute(attribute: u32) -> bool {
     matches!(
         u64::from(attribute),
         DB_IDENT
+            | crate::DB_INSTALL_PARTITION
             | DB_INSTALL_ATTRIBUTE
             | DB_ALTER_ATTRIBUTE
             | DB_VALUE_TYPE
@@ -1275,6 +1334,7 @@ fn schema_information_attribute(attribute: u32) -> bool {
             | DB_IS_COMPONENT
             | DB_INDEX
             | DB_NO_HISTORY
+            | crate::DB_FULLTEXT
             | DB_TUPLE_TYPE
             | DB_TUPLE_TYPES
             | DB_TUPLE_ATTRS
@@ -1292,6 +1352,7 @@ fn is_attribute_hook_property(attribute: u32) -> bool {
             | DB_IS_COMPONENT
             | DB_INDEX
             | DB_NO_HISTORY
+            | crate::DB_FULLTEXT
             | DB_TUPLE_TYPE
             | DB_TUPLE_TYPES
             | DB_TUPLE_ATTRS
@@ -1313,6 +1374,7 @@ fn attribute_property_changed(
         DB_IS_COMPONENT => current.component != proposed.component,
         DB_INDEX => current.indexed != proposed.indexed,
         DB_NO_HISTORY => current.no_history != proposed.no_history,
+        crate::DB_FULLTEXT => current.fulltext != proposed.fulltext,
         DB_TUPLE_TYPE | DB_TUPLE_TYPES | DB_TUPLE_ATTRS => current.tuple != proposed.tuple,
         DB_ATTR_PREDS => current.predicates != proposed.predicates,
         DB_TUPLE_DISCONTINUED => current.tuple_discontinued != proposed.tuple_discontinued,
@@ -1333,6 +1395,9 @@ fn resolve_tempids(
     allocation_start: u64,
 ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
     let names = validated_entity_tempids(ops)?;
+    let base = reader.base;
+    let policy = crate::partitions::PartitionPolicy::new(ops, &names, base.schema(),
+        |entity| resolve_entity(reader, entity, tx, &BTreeMap::new()))?;
     let names = names.into_iter().collect::<Vec<_>>();
     let positions = names
         .iter()
@@ -1389,6 +1454,16 @@ fn resolve_tempids(
         }
     }
 
+    let mut partitions = BTreeMap::new();
+    for (index, name) in names.iter().enumerate() {
+        let root = union.root(index);
+        if existing_by_root.contains_key(&root) { continue; }
+        if let Some(partition) = policy.explicit_partition(name)? {
+            if partitions.insert(root, partition).is_some_and(|previous| previous != partition) {
+                return Err(SemanticError::conflict("transaction/partition-conflict", "unified tempids request distinct partitions"));
+            }
+        }
+    }
     let mut next = allocation_start;
     let mut allocated_by_root = BTreeMap::new();
     let mut result = BTreeMap::new();
@@ -1399,13 +1474,14 @@ fn resolve_tempids(
         } else if let Some(allocated) = allocated_by_root.get(&root) {
             *allocated
         } else {
-            let allocated = make_eid(USER_PARTITION, next)?;
-            next = next.checked_add(1).ok_or_else(|| {
+            let partition = partitions.get(&root).copied().unwrap_or(USER_PARTITION);
+            let allocated = if partition == TX_PARTITION { tx } else { make_eid(partition, next)? };
+            if partition != TX_PARTITION { next = next.checked_add(1).ok_or_else(|| {
                 SemanticError::incorrect(
                     "transaction/entity-id-overflow",
                     "tempid allocation exhausted the entity-index space",
                 )
-            })?;
+            })?; }
             allocated_by_root.insert(root, allocated);
             allocated
         };
@@ -1680,7 +1756,8 @@ fn expand_op(
             let spec = resolve_entity(reader, spec, tx, tempids)?;
             ensures.push(resolve_entity_spec(reader, entity, spec)?);
         }
-        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
+        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_)
+        | TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. } => {}
     }
     Ok(())
 }
@@ -1779,6 +1856,7 @@ fn resolve_entity(
 
 fn validate_explicit_entity_id(base: &DatabaseValue, entity: u64) -> Result<(), SemanticError> {
     validate_supported_eid(entity)?;
+    base.schema().validate_partition_bits(eid_to_part(entity)?)?;
     let eidx = eid_to_eidx(entity)?;
     if eidx >= base.eidx_frontier() {
         return Err(SemanticError::incorrect(

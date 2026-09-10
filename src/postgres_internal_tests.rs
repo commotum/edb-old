@@ -694,6 +694,99 @@ fn fresh_administrative_install_is_complete_and_idempotent() {
 }
 
 #[test]
+fn v25_canonical_nodes_upgrade_without_reencoding_or_checksum_changes() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let isolated = create_isolated_schema(&connection, "migration_blocks");
+    let mut client = client_in_schema(&connection, &isolated);
+    install_migration_prefix(&mut client, 25);
+    let checksums = client
+        .query(
+            "SELECT version,checksum FROM atomic_schema_migrations ORDER BY version",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)))
+        .collect::<Vec<_>>();
+    let database = Database::new(schema())
+        .unwrap()
+        .with(
+            &[TxOp::Add {
+                entity: EntityRef::Temp("legacy".into()),
+                attribute: ITEM_NAME,
+                value: Value::String("legacy-preserved-".repeat(100)).into(),
+            }],
+            1000,
+        )
+        .unwrap()
+        .db_after;
+    let build = crate::persistent_tree::build_tree(
+        IndexOrder::Eavt,
+        true,
+        database.datoms(View::History, IndexOrder::Eavt),
+        &Default::default(),
+    )
+    .unwrap();
+    for (hash, bytes) in build.nodes.iter() {
+        client
+            .execute(
+                "INSERT INTO atomic_tree_nodes(node_hash,payload) VALUES($1,$2)",
+                &[&&hash[..], &bytes.as_ref()],
+            )
+            .unwrap();
+    }
+    let mut migrator = crate::PostgresMigrator::from_client(client);
+    migrator.migrate().unwrap();
+    let mut client = client_in_schema(&connection, &isolated);
+    let after = client.query("SELECT version,checksum FROM atomic_schema_migrations WHERE version <= 25 ORDER BY version", &[])
+        .unwrap().into_iter().map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1))).collect::<Vec<_>>();
+    assert_eq!(checksums, after);
+    assert_eq!(
+        client
+            .query_one("SELECT count(*) FROM atomic_tree_node_blocks", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        0
+    );
+    for (hash, bytes) in build.nodes.iter() {
+        let loaded = crate::compressed_nodes::load_node_block(&mut client, *hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.canonical, bytes.as_ref());
+        assert_eq!(loaded.stats.compressed_hits, 0);
+    }
+    let batch = build
+        .nodes
+        .iter()
+        .map(|(hash, bytes)| (*hash, bytes.as_ref()))
+        .collect::<Vec<_>>();
+    let compressed = crate::compressed_nodes::store_node_blocks(&mut client, &batch).unwrap();
+    assert!(compressed.inserted > 0);
+    for (hash, bytes) in build.nodes.iter() {
+        let raw: Vec<u8> = client
+            .query_one(
+                "SELECT payload FROM atomic_tree_nodes WHERE node_hash=$1",
+                &[&&hash[..]],
+            )
+            .unwrap()
+            .get(0);
+        assert_eq!(raw, bytes.as_ref());
+        assert_eq!(
+            crate::compressed_nodes::load_node_block(&mut client, *hash)
+                .unwrap()
+                .unwrap()
+                .canonical,
+            raw
+        );
+    }
+    drop(client);
+    drop(migrator);
+    drop_isolated_schema(&connection, &isolated);
+}
+
+#[test]
 fn already_current_migrate_does_not_lock_live_log_tables_for_repair() {
     let Some(connection) = connection() else {
         return;

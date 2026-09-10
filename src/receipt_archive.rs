@@ -4,8 +4,8 @@
 use super::receipt_archive_hash::ReceiptArchiveHash;
 use super::{digest, operation_error, positive_or_zero};
 use crate::persistent_tree::{ChildRef, TreeNode, decode_tree_node};
+use crate::sql_io::GenericClient;
 use crate::{Digest, ErrorCategory, PersistentTreeManifest, SemanticError};
-use postgres::GenericClient;
 use std::collections::BTreeSet;
 
 pub const MAX_RECEIPT_ARCHIVE_WORK_PER_GC: usize = 512;

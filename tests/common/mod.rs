@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[cfg(unix)]
+pub mod product_support;
+
 use atomic_core::{
     CapacityLimits, Database, DatabaseValue, Datom, IndexOrder, Schema, SemanticError,
     ServiceTransactionReport, TransactionClient, TransactionRequest, TransactionService,
@@ -13,6 +16,58 @@ use std::sync::{
 use std::time::Duration;
 
 static NEXT_HOLDER: AtomicU64 = AtomicU64::new(1);
+
+/// Disposable schema-scoped PostgreSQL fixture. Fault tests must not mutate
+/// shared catalogs or invoke global reclamation against unrelated databases.
+pub struct PostgresFixture {
+    admin: Client,
+    pub schema: String,
+    pub connection: String,
+}
+
+impl PostgresFixture {
+    pub fn new(connection: &str, label: &str) -> Self {
+        assert!(
+            label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        );
+        let schema = format!(
+            "{label}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut admin = Client::connect(connection, postgres::NoTls).unwrap();
+        admin
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
+            .unwrap();
+        let scoped =
+            if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+                format!(
+                    "{connection}{}options=-csearch_path%3D{schema}%2Cpg_catalog",
+                    if connection.contains('?') { "&" } else { "?" }
+                )
+            } else {
+                format!("{connection} options='-csearch_path={schema},pg_catalog'")
+            };
+        Self {
+            admin,
+            schema,
+            connection: scoped,
+        }
+    }
+}
+
+impl Drop for PostgresFixture {
+    fn drop(&mut self) {
+        let _ = self
+            .admin
+            .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema));
+    }
+}
 
 /// Uniform test-only observation of eager oracle values and native report
 /// values. Production code deliberately has no eager materialization escape

@@ -1,4 +1,6 @@
 //! Supported local runtime and explicit administrative entry points.
+#[path = "atomic/admin.rs"]
+mod admin;
 use atomic_core::{
     BackgroundIndexingConfig, CapacityLimits, ErrorCategory, LocalTransactionEndpoint,
     LocalTransportConfig, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, SemanticError,
@@ -25,6 +27,8 @@ Usage:
   atomic status --database ID
   atomic consolidate --database ID
   atomic transactor --database ID --endpoint PATH [OPTIONS]
+  atomic transactor --database ID --listen IP:PORT --advertise IP:PORT
+    --tls-server-name NAME [OPTIONS]
 
 Required environment (all commands except help/version):
   ATOMIC_POSTGRES_URL          PostgreSQL connection string; never printed
@@ -33,6 +37,12 @@ Optional: ATOMIC_POSTGRES_TLS_ROOT (PEM); ATOMIC_CONNECT_TIMEOUT_MS,
   ATOMIC_STATEMENT_TIMEOUT_MS, ATOMIC_LOCK_TIMEOUT_MS, ATOMIC_TCP_USER_TIMEOUT_MS,
   ATOMIC_KEEPALIVES=true|false, ATOMIC_KEEPALIVES_IDLE_SECONDS,
   ATOMIC_KEEPALIVES_INTERVAL_SECONDS, ATOMIC_KEEPALIVES_RETRIES.
+  ATOMIC_SSD_CACHE_DIR opts into a private disposable cache; optional positive
+  ATOMIC_SSD_CACHE_ENTRIES and ATOMIC_SSD_CACHE_BYTES bound its shared directory.
+Remote TLS: ATOMIC_REMOTE_TLS_CERT (PEM chain), ATOMIC_REMOTE_TLS_KEY (private
+  PKCS8 PEM), ATOMIC_REMOTE_TOKEN_FILE (private file containing64 hex digits).
+Clients use the same token file and optional ATOMIC_REMOTE_TLS_ROOT PEM trust
+  anchor; certificate/name verification is mandatory. No plaintext TCP mode.
 
 Transactor options (positive integers):
   --holder ID                  lease holder label (default: process-specific)
@@ -72,6 +82,9 @@ impl Arguments {
             "transactor" => &[
                 "--database",
                 "--endpoint",
+                "--listen",
+                "--advertise",
+                "--tls-server-name",
                 "--holder",
                 "--lease-ms",
                 "--renew-ms",
@@ -121,12 +134,23 @@ impl Arguments {
             _ => {}
         }
         if parsed.command == "transactor" {
-            parsed.required("--endpoint")?;
+            let local=parsed.options.contains_key("--endpoint");
+            let remote=parsed.options.contains_key("--listen");
+            if local==remote {return Err(usage("choose exactly one of --endpoint or --listen"));}
+            if remote {
+                parsed.required("--advertise")?.parse::<std::net::SocketAddr>()
+                    .map_err(|_|usage("--advertise requires a numeric IP:port"))?;
+                parsed.required("--listen")?.parse::<std::net::SocketAddr>()
+                    .map_err(|_|usage("--listen requires a numeric IP:port"))?;
+                parsed.required("--tls-server-name")?;
+            } else if parsed.options.contains_key("--advertise") || parsed.options.contains_key("--tls-server-name") {
+                return Err(usage("remote address/name options require --listen"));
+            }
             // Validate every numeric setting before touching the database.
             for flag in parsed
                 .options
                 .keys()
-                .filter(|key| !matches!(key.as_str(), "--database" | "--endpoint" | "--holder"))
+                .filter(|key| !matches!(key.as_str(), "--database" | "--endpoint" | "--holder" | "--listen" | "--advertise" | "--tls-server-name"))
             {
                 parsed.number(flag, 1)?;
             }
@@ -171,7 +195,7 @@ fn io_error() -> SemanticError {
 fn run(args: Arguments) -> Result<(), SemanticError> {
     match args.command.as_str() {
         "--help" | "help" => {
-            print!("{HELP}");
+            print!("{HELP}{}",admin::HELP);
             return Ok(());
         }
         "--version" => {
@@ -204,45 +228,31 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
             println!("CREATED database={id:?} basis_t={}", db.basis_t());
         }
         "status" => {
-            // Check the existing schema using the same non-migrating runtime path.
-            drop(PostgresStore::connect_configured(&connection)?);
-            let mut client = connection.connect()?;
-            let row = client
-                .query_opt(
-                    "SELECT d.lineage_id, h.basis_t, h.log_generation FROM atomic_databases d \
-                 JOIN atomic_heads h USING (database_id) WHERE d.database_id = $1",
-                    &[&args.required("--database")?],
-                )
-                .map_err(|_| {
-                    SemanticError::new(
-                        ErrorCategory::Unavailable,
-                        "cli/status-read",
-                        "catalog status unavailable",
-                    )
-                })?
-                .ok_or_else(|| {
-                    SemanticError::new(
-                        ErrorCategory::NotFound,
-                        "cli/database-not-found",
-                        "database not found",
-                    )
-                })?;
+            let status = PostgresStore::connect_configured(&connection)?
+                .database_status(args.required("--database")?)?;
             println!(
                 "STATUS database={:?} lineage={} basis_t={} generation={}",
                 args.required("--database")?,
-                row.get::<_, String>(0),
-                row.get::<_, i64>(1),
-                row.get::<_, i64>(2)
+                status.lineage_id,
+                status.basis_t,
+                status.log_generation
             );
         }
         "consolidate" => {
-            let receipt =
-                PostgresIndexer::connect_configured(&connection, args.required("--database")?)?
-                    .consolidate()?;
+            let mut indexer = PostgresIndexer::connect_configured(&connection, args.required("--database")?)?;
+            let receipt = indexer.consolidate()?;
             println!(
                 "INDEXED basis_t={} input_datoms={}",
                 receipt.basis_t, receipt.input_datoms
             );
+            if let Some(error) = indexer.fulltext_build_error() {
+                println!(
+                    "SEARCH basis_t={} status=failed category={:?} code={}",
+                    receipt.basis_t, error.category, error.code
+                );
+            } else {
+                println!("SEARCH basis_t={} status=checked", receipt.basis_t);
+            }
         }
         "transactor" => {
             let mut capacity = CapacityLimits::default();
@@ -283,34 +293,58 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                     .size("--max-frame-bytes", default_transport.max_frame_bytes)?,
             };
             transport.validate()?;
-            let endpoint =
-                LocalTransactionEndpoint::bind_at(Path::new(args.required("--endpoint")?))?;
+            let local_endpoint=args.options.get("--endpoint").map(|path|
+                LocalTransactionEndpoint::bind_at(Path::new(path))).transpose()?;
+            let remote_endpoint=if let Some(listen)=args.options.get("--listen") {
+                let (identity,token)=atomic_core::remote_server_credentials_from_env()?;
+                let endpoint=atomic_core::RemoteTransactionEndpoint::bind(listen.parse().map_err(|_|usage("invalid listen address"))?,identity)?;
+                let mut advertised:std::net::SocketAddr=args.required("--advertise")?.parse().map_err(|_|usage("invalid advertised address"))?;
+                if advertised.port()==0 {advertised.set_port(endpoint.local_addr()?.port());}
+                Some((endpoint,token,advertised,args.required("--tls-server-name")?.to_owned()))
+            } else {None};
             install_signals()?;
             let service =
-                TransactionService::start_configured_with_indexing(config, connection, index)?;
-            let server = match endpoint.start(service.client(), transport) {
-                Ok(server) => server,
+                TransactionService::start_configured_with_indexing(config, connection.clone(), index)?;
+            let started=(||->Result<_,SemanticError> {
+                let local=local_endpoint.map(|endpoint|endpoint.start(service.client(),transport.clone())).transpose()?;
+                let remote=if let Some((endpoint,token,advertised,name))=remote_endpoint {
+                    let config=atomic_core::RemoteTransportConfig {
+                        max_in_flight:transport.max_in_flight,
+                        request_timeout:transport.request_timeout,
+                        max_frame_bytes:transport.max_frame_bytes,
+                        ..Default::default()
+                    };
+                    let server=endpoint.start(service.client(),config,token)?;
+                    server.publish(&connection,advertised,&name)?;
+                    Some(server)
+                } else {None};
+                Ok((local,remote))
+            })();
+            let (local_server,remote_server) = match started {
+                Ok(servers) => servers,
                 Err(error) => {
                     service.shutdown();
                     return Err(error);
                 }
             };
-            println!(
-                "READY database={:?} endpoint={:?} lineage={}",
-                service.identity().database_id(),
-                server.endpoint(),
-                service.identity().lineage_id()
-            );
+            if let Some(server)=&local_server {
+                println!("READY database={:?} endpoint={:?} lineage={}",service.identity().database_id(),server.endpoint(),service.identity().lineage_id());
+            } else {
+                println!("READY database={:?} transport=tls authenticated_discovery=true lineage={}",service.identity().database_id(),service.identity().lineage_id());
+            }
             std::io::stdout().flush().map_err(|_| io_error())?;
             let mut lost_authority = false;
             while !STOP.load(Ordering::Relaxed) {
-                if !service.client().is_available() || !server.is_available() {
+                if !service.client().is_available()
+                    || local_server.as_ref().is_some_and(|server|!server.is_available())
+                    || remote_server.as_ref().is_some_and(|server|!server.is_available()) {
                     lost_authority = true;
                     break;
                 }
                 std::thread::sleep(Duration::from_millis(25));
             }
-            drop(server);
+            drop(local_server);
+            drop(remote_server);
             service.shutdown();
             if lost_authority {
                 return Err(SemanticError::new(
@@ -344,7 +378,9 @@ fn install_signals() -> Result<(), SemanticError> {
 }
 
 fn main() -> ExitCode {
-    match Arguments::parse(std::env::args().skip(1)).and_then(run) {
+    let raw:Vec<String>=std::env::args().skip(1).collect();
+    let result=admin::dispatch(&raw).unwrap_or_else(||Arguments::parse(raw).and_then(run));
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Never print arbitrary server errors, anomalies, transaction data,

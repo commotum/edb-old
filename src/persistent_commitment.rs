@@ -6,13 +6,13 @@
 //! one update retains only the paths it reads/rebuilds. The eager in-memory
 //! commitment remains the semantic oracle while the writer is converted.
 
+use crate::sql_io::GenericClient;
 use crate::state_commitment::{
     CommitmentWork, SEMANTIC_STATE_VERSION, SemanticDatomKey, SemanticRootMetadata,
     semantic_datom_key, semantic_empty_hash, semantic_key_priority, semantic_node_hash,
     semantic_state_digest,
 };
 use crate::{Database, Datom, Digest, ErrorCategory, IndexOrder, SemanticError, View};
-use postgres::GenericClient;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 

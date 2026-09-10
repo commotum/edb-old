@@ -15,6 +15,39 @@ pub const MAX_EID: u64 = ((MAX_PARTITION as u64) << EIDX_BITS) | MAX_EIDX;
 pub const DB_PARTITION: u32 = 0;
 pub const TX_PARTITION: u32 = 3;
 pub const USER_PARTITION: u32 = 4;
+/// The high half of the partition-bit space names implicit partitions.
+pub const IMPLICIT_PARTITION_BASE: u32 = 1 << (PARTITION_BITS - 1);
+
+/// Return one of 524288 implicit partition entity IDs without an installation
+/// transaction. This is an entity ID, not the raw high-bit partition number.
+pub fn implicit_part(number: u32) -> Result<u64, SemanticError> {
+    if number >= IMPLICIT_PARTITION_BASE {
+        return Err(SemanticError::incorrect(
+            "identity/implicit-part-out-of-range",
+            "implicit partition number must be below 524288",
+        ));
+    }
+    make_eid(IMPLICIT_PARTITION_BASE | number, 0)
+}
+
+/// Invert `implicit_part`; ordinary entities and named partitions return None.
+pub fn implicit_part_id(partition: u64) -> Result<Option<u32>, SemanticError> {
+    let bits = eid_to_part(partition)?;
+    Ok(
+        (bits >= IMPLICIT_PARTITION_BASE && eid_to_eidx(partition)? == 0)
+            .then_some(bits ^ IMPLICIT_PARTITION_BASE),
+    )
+}
+
+/// Return the partition's entity ID, distinct from its raw `eid_to_part` bits.
+pub fn partition_eid(entity: u64) -> Result<u64, SemanticError> {
+    let bits = eid_to_part(entity)?;
+    if bits < IMPLICIT_PARTITION_BASE {
+        Ok(u64::from(bits))
+    } else {
+        make_eid(bits, 0)
+    }
+}
 
 /// Initial exclusive issued-index frontier. This preserves the documented
 /// ability to use previously issued small IDs while preventing callers from
@@ -86,15 +119,9 @@ pub(crate) fn validate_permanent_eid(eid: u64) -> Result<(), SemanticError> {
 }
 
 pub(crate) fn validate_supported_eid(eid: u64) -> Result<(), SemanticError> {
-    let partition = eid_to_part(eid)?;
-    if !matches!(partition, DB_PARTITION | TX_PARTITION | USER_PARTITION) {
-        return Err(SemanticError::new(
-            ErrorCategory::Unsupported,
-            "identity/unsupported-partition",
-            format!("partition {partition} is not supported by the PostgreSQL-only kernel"),
-        ));
-    }
-    Ok(())
+    // Representation checks cannot consult a database. Allocation/transaction
+    // admission additionally check named partition installation at db-before.
+    validate_permanent_eid(eid)
 }
 
 pub(crate) fn validate_frontier(frontier: u64) -> Result<(), SemanticError> {

@@ -5,6 +5,8 @@ use crate::state_commitment::{CommitmentWork, SemanticStateCommitment};
 use crate::vocabulary::{
     DB_EXCISE, DB_EXCISE_ATTRS, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_IDENT, DB_TX_INSTANT,
     PRE_EXCISION_GENESIS_HASH, canonical_genesis_datoms, pre_excision_genesis_datoms,
+    PRE_PARTITION_GENESIS_HASH, pre_partition_genesis_datoms, is_exact_partition_upgrade_ops,
+    is_partition_upgrade_marker, partition_install_attribute, partition_vocabulary_upgrade_ops,
     supported_system_attributes, supported_system_idents,
 };
 use crate::{
@@ -185,6 +187,18 @@ pub enum TxOp {
     Ensure {
         entity: EntityRef,
         spec: EntityRef,
+    },
+    /// Transaction-local allocation policy, never a stored datom. Existing
+    /// upsert identities keep their entity IDs regardless of this directive.
+    ForcePartition {
+        tempid: String,
+        partition: EntityRef,
+    },
+    /// Assign a new tempid to the partition of an existing entity or another
+    /// transaction tempid's assignment. Affinity cycles are invalid.
+    MatchPartition {
+        tempid: String,
+        entity: EntityRef,
     },
     /// Native normalized form of an ordinary schema installation transaction.
     InstallAttribute(crate::Attribute),
@@ -593,8 +607,8 @@ impl Database {
                     "current index base contains a retraction or invalid transaction",
                 ));
             }
-            validate_stored_entity(datom.entity, eidx_frontier, basis_t)?;
-            validate_stored_value(&datom.value, eidx_frontier, basis_t)?;
+            validate_stored_entity(datom.entity, eidx_frontier, basis_t, &derived_schema)?;
+            validate_stored_value(&datom.value, eidx_frontier, basis_t, &derived_schema)?;
             derived_schema
                 .validate_value(derived_schema.attribute(datom.attribute)?, &datom.value)?;
             current.push(CurrentFact {
@@ -1104,8 +1118,8 @@ impl Database {
             }
         }
         for datom in self.genesis.iter() {
-            validate_stored_entity(datom.entity, self.eidx_frontier, self.basis_t)?;
-            validate_stored_value(&datom.value, self.eidx_frontier, self.basis_t)?;
+            validate_stored_entity(datom.entity, self.eidx_frontier, self.basis_t, &self.schema)?;
+            validate_stored_value(&datom.value, self.eidx_frontier, self.basis_t, &self.schema)?;
         }
         for datom in self.history.iter().flat_map(|chunk| chunk.iter()) {
             let datom_t = tx_to_t(datom.tx).map_err(|error| {
@@ -1122,8 +1136,8 @@ impl Database {
                     "history contains a datom outside the positive database basis",
                 ));
             }
-            validate_stored_entity(datom.entity, self.eidx_frontier, self.basis_t)?;
-            validate_stored_value(&datom.value, self.eidx_frontier, self.basis_t)?;
+            validate_stored_entity(datom.entity, self.eidx_frontier, self.basis_t, &self.schema)?;
+            validate_stored_value(&datom.value, self.eidx_frontier, self.basis_t, &self.schema)?;
         }
         Ok(())
     }
@@ -1175,6 +1189,9 @@ impl Database {
                 "schema/value-type-immutable",
                 "an installed attribute's value type cannot change",
             ));
+        }
+        if current.fulltext != proposed.fulltext {
+            return Err(SemanticError::incorrect("schema/fulltext-immutable", "an installed attribute's fulltext property cannot change"));
         }
         if current.tuple != proposed.tuple && !allow_discontinued_ident_retarget {
             return Err(SemanticError::incorrect(
@@ -1229,6 +1246,7 @@ impl Database {
         final_current: &[CurrentFact],
         logical: &[LogicalDatom],
     ) -> Result<Vec<SchemaChange>, SemanticError> {
+        self.schema.validate_partition_successor(successor)?;
         // Protect the exact stored root information, not whatever a newer
         // binary now emits for newly created databases. Recovered Datomic
         // installs bootstrap data upgrades as ordinary transactions; mutating
@@ -1299,7 +1317,9 @@ impl Database {
                     let reserved = supported_system_idents()
                         .iter()
                         .any(|(entity, _)| *entity == u64::from(proposed.id));
-                    if reserved && !self.is_exact_excision_bootstrap_upgrade(successor, proposed) {
+                    if reserved && !self.is_exact_excision_bootstrap_upgrade(successor, proposed)
+                        && !self.is_exact_partition_bootstrap_upgrade(successor, proposed, final_current)
+                        && !(self.schema.attribute(crate::DB_FULLTEXT as u32).is_err() && proposed == &crate::vocabulary::fulltext_attribute()) {
                         return Err(SemanticError::incorrect(
                             "schema/reserved-system-entity",
                             format!(
@@ -1342,6 +1362,18 @@ impl Database {
                             .find(|attribute| attribute.id == *id)
                             == Some(candidate)
                     })
+            })
+    }
+
+    fn is_exact_partition_bootstrap_upgrade(
+        &self, successor: &Schema, proposed: &crate::Attribute, final_current: &[CurrentFact],
+    ) -> bool {
+        proposed == &partition_install_attribute()
+            && self.schema.attribute(crate::DB_INSTALL_PARTITION as u32).is_err()
+            && successor.attribute(proposed.id).is_ok_and(|attr| attr == proposed)
+            && [crate::DB_PART_DB, crate::DB_PART_TX, crate::DB_PART_USER].iter().all(|part| {
+                contains_fact(final_current, crate::DB_PART_DB,
+                    crate::DB_INSTALL_PARTITION as u32, &Value::Ref(*part))
             })
     }
 
@@ -1473,7 +1505,17 @@ impl Database {
                     "committed datom does not name its enclosing transaction",
                 ));
             }
-            let attribute = self.schema.attribute(datom.attribute)?;
+            // Only the exact partition bootstrap may assert newly introduced
+            // attribute11 in this transaction. Authenticate its complete effect
+            // below before constructing any successor; this is not general
+            // permission to use unknown attributes during replay.
+            let partition_descriptor = partition_install_attribute();
+            let attribute = if datom.attribute == crate::DB_INSTALL_PARTITION as u32
+                && self.schema.attribute(datom.attribute).is_err() {
+                &partition_descriptor
+            } else {
+                self.schema.attribute(datom.attribute)?
+            };
             self.schema.validate_value(attribute, &datom.value)?;
             if seen.contains(datom.entity, datom.attribute, &datom.value) {
                 return Err(SemanticError::new(
@@ -1510,6 +1552,10 @@ impl Database {
             &transaction.tx_data,
             tx_instant,
         )?;
+        self.validate_exact_committed_partition_bootstrap_upgrade(
+            &logical, &transaction.tx_data, tx_instant,
+        )?;
+        self.validate_exact_committed_fulltext_bootstrap_upgrade(&logical, &transaction.tx_data, tx_instant)?;
         let before_index = StoredFactIndex::from_current(&self.current);
         for datom in &transaction.tx_data {
             let existed = before_index.contains(datom.entity, datom.attribute, &datom.value);
@@ -1546,11 +1592,12 @@ impl Database {
                     format!("committed schema transition is invalid: {error}"),
                 )
             })?;
-        let expected_frontier = expected_frontier_after_commit(
+        let (expected_frontier, allocations) = expected_frontier_after_commit(
             self.eidx_frontier,
             t,
             &transaction.tempids,
             &recovered_changes,
+            &derived_schema,
         )?;
         if transaction.eidx_frontier != expected_frontier {
             return Err(SemanticError::new(
@@ -1579,8 +1626,10 @@ impl Database {
         // optional internal consistency audit. The enclosing tx identity and
         // positive contiguous basis were checked above.
         for datom in &transaction.tx_data {
-            validate_stored_entity(datom.entity, transaction.eidx_frontier, t)?;
-            validate_stored_value(&datom.value, transaction.eidx_frontier, t)?;
+            validate_stored_entity(datom.entity, transaction.eidx_frontier, t, &derived_schema)?;
+            validate_stored_value(&datom.value, transaction.eidx_frontier, t, &derived_schema)?;
+            validate_new_entity_allocation(datom.entity, self.eidx_frontier, &allocations)?;
+            validate_new_value_allocations(&datom.value, self.eidx_frontier, &allocations)?;
         }
         final_current.sort_by(compare_current);
 
@@ -1654,6 +1703,7 @@ impl Database {
         validate_frontier(allocation_start)?;
         let mut ordered_ops = ops.to_vec();
         ordered_ops.sort_by(crate::transaction::compare_tx_op);
+        let partition_upgrade = is_exact_partition_upgrade_ops(&self.schema, &ordered_ops);
         self.validate_tx_instant_forms(&ordered_ops, tx_instant)?;
 
         // Typed schema forms are syntax only. Lower them to ordinary
@@ -1668,6 +1718,7 @@ impl Database {
         let mut touched_constituents = BTreeSet::new();
 
         for op in &ordered_ops {
+            if partition_upgrade && is_partition_upgrade_marker(op) { continue; }
             self.expand_op(
                 op,
                 tx,
@@ -1714,6 +1765,18 @@ impl Database {
 
         dedupe(&mut logical);
         validate_same_transaction(&self.schema, &logical)?;
+        // Canonical bootstrap's three known builtin markers use the attribute
+        // installed by its same transaction. Do not broaden db-before expansion
+        // for ordinary new attributes or arbitrary extra operations.
+        if partition_upgrade {
+            for part in [crate::DB_PART_DB, crate::DB_PART_TX, crate::DB_PART_USER] {
+                logical.push(LogicalDatom {
+                    entity: crate::DB_PART_DB, attribute: crate::DB_INSTALL_PARTITION as u32,
+                    value: Value::Ref(part), added: true,
+                });
+            }
+            dedupe(&mut logical);
+        }
         let mut final_current = apply_logical(&self.current, &logical, tx);
         validate_excision_requests(&final_current)?;
         let mut tx_data = material_changes(&self.current, &final_current, &logical, tx);
@@ -1729,6 +1792,7 @@ impl Database {
             &successor_current,
             &successor_idents,
         )?);
+        crate::vocabulary::validate_fulltext_upgrade_transition(&self.schema, &successor_schema, &ordered_ops)?;
         let _actual_schema_changes =
             self.schema_changes_to(&successor_schema, &final_current, &logical)?;
 
@@ -1958,6 +2022,44 @@ impl Database {
         Ok(())
     }
 
+    fn validate_exact_committed_partition_bootstrap_upgrade(
+        &self, logical: &[LogicalDatom], committed: &[Datom], tx_instant: i64,
+    ) -> Result<(), SemanticError> {
+        let id = crate::DB_INSTALL_PARTITION;
+        if self.schema.attribute(id as u32).is_ok() || !logical.iter().any(|datom| {
+            datom.entity == id || u64::from(datom.attribute) == id
+                || (matches!(u64::from(datom.attribute), crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE)
+                    && datom.value == Value::Ref(id))
+        }) { return Ok(()); }
+        let expected = self.with(&partition_vocabulary_upgrade_ops(), tx_instant).map_err(|error| {
+            SemanticError::new(ErrorCategory::Fault, "recovery/invalid-partition-bootstrap-upgrade",
+                format!("cannot construct exact partition vocabulary transaction: {error}"))
+        })?;
+        if !same_stored_datoms(committed, &expected.tx_data) {
+            return Err(SemanticError::new(ErrorCategory::Fault,
+                "recovery/noncanonical-partition-bootstrap-upgrade",
+                "partition vocabulary must be installed by its exact ordinary transaction"));
+        }
+        Ok(())
+    }
+
+    fn validate_exact_committed_fulltext_bootstrap_upgrade(
+        &self, logical: &[LogicalDatom], committed: &[Datom], tx_instant: i64,
+    ) -> Result<(), SemanticError> {
+        let id = crate::DB_FULLTEXT;
+        if self.schema.attribute(id as u32).is_ok() || !logical.iter().any(|datom| {
+            datom.entity == id || u64::from(datom.attribute) == id
+                || (matches!(u64::from(datom.attribute), crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE)
+                    && datom.value == Value::Ref(id))
+        }) { return Ok(()); }
+        let expected = self.with(&crate::vocabulary::fulltext_vocabulary_upgrade_ops(), tx_instant)?;
+        if !same_stored_datoms(committed, &expected.tx_data) {
+            return Err(SemanticError::new(ErrorCategory::Fault, "recovery/noncanonical-fulltext-bootstrap-upgrade",
+                "fulltext vocabulary must be installed by its exact ordinary transaction"));
+        }
+        Ok(())
+    }
+
     fn validate_attribute_predicates_with(
         &self,
         schema: &Schema,
@@ -1965,6 +2067,14 @@ impl Database {
         functions: Option<&crate::TxFunctions>,
     ) -> Result<(), SemanticError> {
         for datom in assessed.iter().filter(|datom| datom.added) {
+            // The exact reserved bootstrap is the sole same-transaction new
+            // attribute used by assessment. Its supported descriptor has no
+            // predicates; ordinary new-attribute data remains unavailable.
+            if datom.attribute == crate::DB_INSTALL_PARTITION as u32
+                && schema.attribute(datom.attribute).is_err()
+            {
+                continue;
+            }
             let attribute = schema.attribute(datom.attribute)?;
             for predicate in &attribute.predicates {
                 let result = functions
@@ -2010,6 +2120,8 @@ impl Database {
         let mut candidate = self.schema.as_ref().clone();
         let mut changes = Vec::new();
         let excision_bootstrap_upgrade = self.is_exact_excision_bootstrap_ops(ops);
+        let partition_upgrade = is_exact_partition_upgrade_ops(&self.schema, ops);
+        let fulltext_upgrade = crate::vocabulary::is_exact_fulltext_upgrade_ops(&self.schema, ops);
 
         // First form the complete descriptor set. This temporary Rust value
         // is only a lowering aid for composite names; it is discarded and the
@@ -2040,6 +2152,8 @@ impl Database {
                             u64::from(attribute.id),
                             DB_EXCISE | DB_EXCISE_ATTRS | DB_EXCISE_BEFORE_T | DB_EXCISE_BEFORE
                         ))
+                    && !(partition_upgrade && u64::from(attribute.id) == crate::DB_INSTALL_PARTITION)
+                    && !(fulltext_upgrade && u64::from(attribute.id) == crate::DB_FULLTEXT)
                 {
                     return Err(SemanticError::incorrect(
                         "schema/reserved-system-entity",
@@ -2084,6 +2198,7 @@ impl Database {
             crate::DB_IS_COMPONENT as u32,
             crate::DB_INDEX as u32,
             crate::DB_NO_HISTORY as u32,
+            crate::DB_FULLTEXT as u32,
             crate::DB_TUPLE_TYPE as u32,
             crate::DB_TUPLE_TYPES as u32,
             crate::DB_TUPLE_ATTRS as u32,
@@ -2181,6 +2296,8 @@ impl Database {
         allocation_start: u64,
     ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
         let names = validated_entity_tempids(ops)?;
+        let policy = crate::partitions::PartitionPolicy::new(ops, &names, &self.schema,
+            |entity| self.resolve_entity(entity, tx, &BTreeMap::new()))?;
         let names: Vec<_> = names.into_iter().collect();
         let positions: BTreeMap<_, _> = names
             .iter()
@@ -2251,6 +2368,16 @@ impl Database {
             }
         }
 
+        let mut partitions = BTreeMap::new();
+        for (index, name) in names.iter().enumerate() {
+            let root = union.root(index);
+            if existing_by_root.contains_key(&root) { continue; }
+            if let Some(partition) = policy.explicit_partition(name)? {
+                if partitions.insert(root, partition).is_some_and(|previous| previous != partition) {
+                    return Err(SemanticError::conflict("transaction/partition-conflict", "unified tempids request distinct partitions"));
+                }
+            }
+        }
         let mut next = allocation_start;
         let mut allocated_by_root = BTreeMap::new();
         let mut result = BTreeMap::new();
@@ -2261,13 +2388,14 @@ impl Database {
             } else if let Some(allocated) = allocated_by_root.get(&root) {
                 *allocated
             } else {
-                let allocated = make_eid(USER_PARTITION, next)?;
-                next = next.checked_add(1).ok_or_else(|| {
+                let partition = partitions.get(&root).copied().unwrap_or(USER_PARTITION);
+                let allocated = if partition == TX_PARTITION { tx } else { make_eid(partition, next)? };
+                if partition != TX_PARTITION { next = next.checked_add(1).ok_or_else(|| {
                     SemanticError::incorrect(
                         "transaction/entity-id-overflow",
                         "tempid allocation exhausted the entity-index space",
                     )
-                })?;
+                })?; }
                 allocated_by_root.insert(root, allocated);
                 allocated
             };
@@ -2475,7 +2603,8 @@ impl Database {
                 let spec = self.resolve_entity(spec, tx, tempids)?;
                 ensures.push(self.resolve_entity_spec(entity, spec)?);
             }
-            TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
+            TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_)
+            | TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. } => {}
         }
         Ok(())
     }
@@ -2696,6 +2825,7 @@ impl Database {
 
     fn validate_explicit_entity_id(&self, entity: u64) -> Result<(), SemanticError> {
         validate_supported_eid(entity)?;
+        self.schema.validate_partition_bits(eid_to_part(entity)?)?;
         let eidx = eid_to_eidx(entity)?;
         if eidx >= self.eidx_frontier {
             return Err(SemanticError::incorrect(
@@ -2844,7 +2974,8 @@ fn collect_tempids_op(op: &TxOp, entities: &mut BTreeSet<String>, values: &mut B
             collect_tempids_entity(entity, entities);
             collect_tempids_entity(spec, values);
         }
-        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
+        TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_)
+        | TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. } => {}
     }
 }
 
@@ -2888,6 +3019,7 @@ fn is_attribute_hook_property(attribute: u32) -> bool {
             | crate::DB_IS_COMPONENT
             | crate::DB_INDEX
             | crate::DB_NO_HISTORY
+            | crate::DB_FULLTEXT
             | crate::DB_TUPLE_TYPE
             | crate::DB_TUPLE_TYPES
             | crate::DB_TUPLE_ATTRS
@@ -2909,6 +3041,7 @@ fn attribute_property_changed(
         crate::DB_IS_COMPONENT => current.component != proposed.component,
         crate::DB_INDEX => current.indexed != proposed.indexed,
         crate::DB_NO_HISTORY => current.no_history != proposed.no_history,
+        crate::DB_FULLTEXT => current.fulltext != proposed.fulltext,
         crate::DB_TUPLE_TYPE | crate::DB_TUPLE_TYPES | crate::DB_TUPLE_ATTRS => {
             current.tuple != proposed.tuple
         }
@@ -3414,6 +3547,12 @@ fn validate_genesis_information(genesis: &[Datom]) -> Result<(), SemanticError> 
         ));
     }
     let current = canonical_genesis_datoms();
+    let pre_fulltext = crate::vocabulary::pre_fulltext_genesis_datoms();
+    let exact_pre_fulltext = same_stored_datoms(genesis, &pre_fulltext)
+        && crate::sha256(&crate::encode_genesis(genesis)?) == crate::vocabulary::PRE_FULLTEXT_GENESIS_HASH;
+    let pre_partition = pre_partition_genesis_datoms();
+    let exact_pre_partition = same_stored_datoms(genesis, &pre_partition)
+        && crate::sha256(&crate::encode_genesis(genesis)?) == PRE_PARTITION_GENESIS_HASH;
     let pre_excision = pre_excision_genesis_datoms();
     let exact_pre_excision = if same_stored_datoms(genesis, &pre_excision) {
         let encoded = crate::encode_genesis(genesis).map_err(|error| {
@@ -3427,7 +3566,7 @@ fn validate_genesis_information(genesis: &[Datom]) -> Result<(), SemanticError> 
     } else {
         false
     };
-    if !same_stored_datoms(genesis, &current) && !exact_pre_excision {
+    if !same_stored_datoms(genesis, &current) && !exact_pre_excision && !exact_pre_partition && !exact_pre_fulltext {
         return Err(SemanticError::new(
             ErrorCategory::Fault,
             "kernel/noncanonical-genesis",
@@ -3593,7 +3732,7 @@ fn replay<'a>(datoms: impl Iterator<Item = &'a Datom>) -> Vec<CurrentFact> {
     result.into_iter().flatten().collect()
 }
 
-fn validate_stored_entity(entity: u64, frontier: u64, basis_t: u64) -> Result<(), SemanticError> {
+fn validate_stored_entity(entity: u64, frontier: u64, basis_t: u64, schema: &Schema) -> Result<(), SemanticError> {
     validate_supported_eid(entity).map_err(|error| {
         SemanticError::new(
             ErrorCategory::Fault,
@@ -3601,6 +3740,9 @@ fn validate_stored_entity(entity: u64, frontier: u64, basis_t: u64) -> Result<()
             format!("stored entity id {entity} is invalid: {error}"),
         )
     })?;
+    schema.validate_partition_bits(eid_to_part(entity)?).map_err(|error| SemanticError::new(
+        ErrorCategory::Fault, "kernel/invalid-stored-partition", format!("stored entity partition is invalid: {error}"),
+    ))?;
     let eidx = eid_to_eidx(entity).expect("supported entity id was checked");
     if eidx >= frontier {
         return Err(SemanticError::new(
@@ -3622,12 +3764,12 @@ fn validate_stored_entity(entity: u64, frontier: u64, basis_t: u64) -> Result<()
     Ok(())
 }
 
-fn validate_stored_value(value: &Value, frontier: u64, basis_t: u64) -> Result<(), SemanticError> {
+fn validate_stored_value(value: &Value, frontier: u64, basis_t: u64, schema: &Schema) -> Result<(), SemanticError> {
     match value {
-        Value::Ref(entity) => validate_stored_entity(*entity, frontier, basis_t),
+        Value::Ref(entity) => validate_stored_entity(*entity, frontier, basis_t, schema),
         Value::Tuple(slots) => {
             for value in slots.iter().flatten() {
-                validate_stored_value(value, frontier, basis_t)?;
+                validate_stored_value(value, frontier, basis_t, schema)?;
             }
             Ok(())
         }
@@ -3640,7 +3782,8 @@ fn expected_frontier_after_commit(
     t: u64,
     tempids: &BTreeMap<String, u64>,
     schema_changes: &[SchemaChange],
-) -> Result<u64, SemanticError> {
+    schema: &Schema,
+) -> Result<(u64, BTreeMap<u64, u64>), SemanticError> {
     validate_frontier(current_frontier)?;
     let start = current_frontier.max(t.checked_add(1).ok_or_else(|| {
         SemanticError::new(
@@ -3651,14 +3794,14 @@ fn expected_frontier_after_commit(
     })?);
     validate_frontier(start)?;
 
-    let mut allocated = BTreeSet::new();
+    let mut allocated = BTreeMap::new();
     for change in schema_changes {
         let SchemaChange::Install(attribute) = change else {
             continue;
         };
         let eidx = u64::from(attribute.id);
         if eidx >= current_frontier {
-            allocated.insert(eidx);
+            allocated.insert(eidx, eidx);
         }
     }
     for entity in tempids.values().copied() {
@@ -3669,21 +3812,33 @@ fn expected_frontier_after_commit(
                 format!("committed tempid resolves to an invalid entity id: {error}"),
             )
         })?;
+        let partition = eid_to_part(entity).expect("supported entity id was checked");
+        schema.validate_partition_bits(partition).map_err(|error| SemanticError::new(
+            ErrorCategory::Fault, "recovery/invalid-tempid-partition", format!("committed tempid names an invalid partition: {error}"),
+        ))?;
         let eidx = eid_to_eidx(entity).expect("supported entity id was checked");
+        if partition == crate::TX_PARTITION {
+            if eidx == 0 || eidx > t {
+                return Err(SemanticError::new(ErrorCategory::Fault,
+                    "recovery/invalid-tempid-allocation", "transaction tempid is outside the committed basis"));
+            }
+            continue;
+        }
         if eidx >= current_frontier {
-            if eid_to_part(entity).expect("supported entity id was checked") != USER_PARTITION
-                || eidx < start
-            {
+            if eidx < start {
                 return Err(SemanticError::new(
                     ErrorCategory::Fault,
                     "recovery/invalid-tempid-allocation",
-                    "fresh tempid allocations must be contiguous user-partition entity ids",
+                    "fresh tempid allocations must use contiguous global entity indices",
                 ));
             }
-            allocated.insert(eidx);
+            if allocated.insert(eidx, entity).is_some_and(|prior| prior != entity) {
+                return Err(SemanticError::new(ErrorCategory::Fault,
+                    "recovery/duplicate-tempid-index", "distinct fresh entities share a global entity index"));
+            }
         }
     }
-    for (offset, actual) in allocated.iter().copied().enumerate() {
+    for (offset, actual) in allocated.keys().copied().enumerate() {
         let expected = start.checked_add(offset as u64).ok_or_else(|| {
             SemanticError::new(
                 ErrorCategory::Fault,
@@ -3707,7 +3862,29 @@ fn expected_frontier_after_commit(
         )
     })?;
     validate_frontier(frontier)?;
-    Ok(frontier)
+    Ok((frontier, allocated))
+}
+
+fn validate_new_entity_allocation(entity: u64, prior_frontier: u64, allocations: &BTreeMap<u64, u64>) -> Result<(), SemanticError> {
+    let index = eid_to_eidx(entity)?;
+    if eid_to_part(entity)? != TX_PARTITION && index >= prior_frontier
+        && allocations.get(&index) != Some(&entity)
+    {
+        return Err(SemanticError::new(ErrorCategory::Fault, "recovery/unwitnessed-entity-allocation",
+            "new entity or reference does not match its exact global allocation witness"));
+    }
+    Ok(())
+}
+
+fn validate_new_value_allocations(value: &Value, prior_frontier: u64, allocations: &BTreeMap<u64, u64>) -> Result<(), SemanticError> {
+    match value {
+        Value::Ref(entity) => validate_new_entity_allocation(*entity, prior_frontier, allocations),
+        Value::Tuple(slots) => {
+            for value in slots.iter().flatten() { validate_new_value_allocations(value, prior_frontier, allocations)?; }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 #[derive(Debug)]
@@ -4876,12 +5053,10 @@ mod excision_kernel_tests {
     #[test]
     fn protected_target_request_commits_and_freezes_at_a15_assertion() {
         let database = Database::bootstrap().unwrap();
-        // Full-text behavior itself is deliberately unsupported, so there can
-        // be no installed native full-text attribute to excise. Keep that
-        // limitation distinct from the documented behavior below: requests
-        // targeting protected db-partition information commit as recorded
-        // no-ops at the background predicate layer.
-        assert!(database.schema().attribute(DB_FULLTEXT as u32).is_err());
+        // Installed system metadata, including the fulltext property, remains
+        // protected: these requests commit as recorded no-ops at the
+        // background predicate layer.
+        assert_eq!(database.schema().attribute(DB_FULLTEXT as u32).unwrap().value_type, ValueType::Boolean);
         let request = database
             .with(
                 &[

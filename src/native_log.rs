@@ -63,6 +63,7 @@ pub struct LogCursorStats {
 /// individual transaction still requires correspondingly large memory.
 pub struct LogCursor {
     log: LogValue,
+    operation: Option<crate::OperationContext>,
     next_t: u64,
     end_t: u64,
     predecessor: Option<Digest>,
@@ -124,6 +125,7 @@ impl LogValue {
             .min(next_t);
         Ok(LogCursor {
             log: self.clone(),
+            operation: crate::OperationContext::current(),
             next_t: start,
             end_t: end,
             predecessor: None,
@@ -227,7 +229,7 @@ impl LogValue {
         if io.client.is_closed() {
             reconnect_peer_io(&self.snapshot.core, &mut io)?;
         }
-        let read = |client: &mut postgres::Client| {
+        let read = |client: &mut crate::sql_io::SqlClient| {
             let database_id = &self.snapshot.core.database_id;
             verify_database_lineage(client, database_id, &self.snapshot.core.lineage_id)?;
             let previous = match predecessor {
@@ -292,6 +294,8 @@ impl Iterator for LogCursor {
     type Item = Result<LogTransaction, SemanticError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let operation = self.operation.clone();
+        let _scope = operation.as_ref().map(crate::OperationContext::enter);
         if self.next_t >= self.end_t {
             return None;
         }

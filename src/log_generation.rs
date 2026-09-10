@@ -13,7 +13,7 @@ use crate::encoding::{
 };
 use crate::{
     Datom, Digest, DurableTransaction, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, MAX_EIDX,
-    SemanticError, USER_PARTITION, eid_to_eidx, eid_to_part, sha256,
+    SemanticError, eid_to_eidx, eid_to_part, sha256,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,7 +36,7 @@ pub(crate) struct LineageTransactionContent {
     pub(crate) lineage_id: String,
     pub(crate) basis_t: u64,
     pub(crate) eidx_frontier: u64,
-    /// Distinct newly issued user entity ids. Names are deliberately absent.
+    /// Distinct newly issued non-transaction entity ids. Names are absent.
     pub(crate) allocations: Vec<u64>,
     pub(crate) tx_data: Vec<Datom>,
 }
@@ -57,7 +57,7 @@ impl LineageTransactionContent {
                     format!("transaction allocation is invalid: {error}"),
                 )
             })?;
-            if entity_index >= prior_eidx_frontier {
+            if entity_index >= prior_eidx_frontier && eid_to_part(entity)? != crate::TX_PARTITION {
                 allocations.insert(entity);
             }
         }
@@ -314,13 +314,14 @@ impl LineageTransactionContent {
         let mut prior = None;
         for entity in &self.allocations {
             if prior.is_some_and(|prior| prior >= *entity)
-                || eid_to_part(*entity).ok() != Some(USER_PARTITION)
+                || eid_to_part(*entity).is_err()
+                || eid_to_part(*entity).ok() == Some(crate::TX_PARTITION)
                 || eid_to_eidx(*entity).is_err()
                 || eid_to_eidx(*entity).is_ok_and(|index| index >= self.eidx_frontier)
             {
                 return Err(incorrect(
                     "generation/content-allocations",
-                    "allocation witnesses must be sorted distinct issued user entities",
+                    "allocation witnesses must be sorted distinct issued non-transaction entities",
                 ));
             }
             prior = Some(*entity);
@@ -592,7 +593,7 @@ fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Value, make_eid, t_to_tx};
+    use crate::{USER_PARTITION, Value, make_eid, t_to_tx};
 
     const LINEAGE: &str = "01234567-89ab-4def-8123-456789abcdef";
 
@@ -662,6 +663,44 @@ mod tests {
         assert_eq!(
             invalid.encode().unwrap_err().code,
             "generation/content-allocations"
+        );
+    }
+
+    #[test]
+    fn allocation_witnesses_preserve_partition_bits_without_allocating_transaction_time() {
+        let named = make_eid(crate::DB_PARTITION, 1_001).unwrap();
+        let implicit = make_eid(
+            eid_to_part(crate::implicit_part(500).unwrap()).unwrap(),
+            1_002,
+        )
+        .unwrap();
+        let tx = t_to_tx(1_000).unwrap();
+        let transaction = DurableTransaction {
+            database_id: "alias".into(),
+            basis_t: 1_000,
+            previous_hash: [0; 32],
+            eidx_frontier: 1_003,
+            tempids: [
+                ("named".into(), named),
+                ("implicit".into(), implicit),
+                ("tx".into(), tx),
+            ]
+            .into_iter()
+            .collect(),
+            tx_data: vec![Datom {
+                entity: tx,
+                attribute: crate::DB_TX_INSTANT as u32,
+                value: Value::Instant(1_000),
+                tx,
+                added: true,
+            }],
+        };
+        let content =
+            LineageTransactionContent::from_transaction(LINEAGE, 1_000, &transaction).unwrap();
+        assert_eq!(content.allocations, vec![named, implicit]);
+        assert_eq!(
+            LineageTransactionContent::decode(&content.encode().unwrap()).unwrap(),
+            content
         );
     }
 

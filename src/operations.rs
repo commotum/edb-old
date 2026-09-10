@@ -11,12 +11,13 @@ use crate::postgres::{
     AuthenticatedLogTransaction, insert_program_generation_refs, read_authenticated_log_range,
     recover_generation_to, verify_schema_compatibility,
 };
+use crate::sql_io::{GenericClient, SqlClient as Client};
 use crate::{
     Datom, Digest, IndexOrder, PersistentTreeManifest, PostgresConnectionConfig, PostgresTreeStore,
     SemanticError, decode_genesis, decode_index_manifest, decode_index_segment, decode_transaction,
     sha256, transaction_hash,
 };
-use postgres::{Client, GenericClient, IsolationLevel};
+use postgres::IsolationLevel;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -183,6 +184,9 @@ pub struct GarbageInventory {
     pub semantic_commitment_roots: Vec<SemanticCommitmentRootGarbage>,
     /// Globally unreferenced immutable semantic nodes removed this call.
     pub semantic_commitment_node_hashes: Vec<Digest>,
+    /// Bounded orphan search blocks selected (dry run) or removed (applied).
+    /// Newly retired manifests enter the next collection's candidate set.
+    pub fulltext_blocks: u64,
     pub applied: bool,
 }
 
@@ -257,6 +261,7 @@ struct GarbageCandidates {
     log_generations: Vec<LogGenerationGarbage>,
     semantic_roots: Vec<SemanticCommitmentRootGarbage>,
     semantic_nodes: Vec<Digest>,
+    fulltext_blocks: u64,
 }
 
 impl GarbageCandidates {
@@ -277,6 +282,7 @@ impl GarbageCandidates {
             log_generations: self.log_generations,
             semantic_commitment_roots: self.semantic_roots,
             semantic_commitment_node_hashes: self.semantic_nodes,
+            fulltext_blocks: self.fulltext_blocks,
             applied,
         }
     }
@@ -847,6 +853,11 @@ impl PostgresOperator {
             .start()
             .map_err(|error| operation_error("operations/gc-begin", error))?;
         let candidates = garbage_candidates(&mut transaction, millis)?;
+        let removed: i64 = transaction.query_one("SELECT atomic_collect_fulltext_garbage(4096)", &[])
+            .map_err(|error| operation_error("operations/gc-fulltext", error))?.get(0);
+        if positive_or_zero(removed, "collected fulltext blocks")? != candidates.fulltext_blocks {
+            return Err(SemanticError::conflict("operations/gc-fulltext-preview-diverged", "search garbage collection diverged from its same-snapshot preview"));
+        }
         // A sealed build-intent ledger remains an exact liveness pin after its
         // publication delta has folded. Drain that bookkeeping before retiring
         // the matching root: otherwise the retirement can make a legitimately
@@ -1685,6 +1696,7 @@ fn build_and_activate_excision(
         })();
         match activation {
             Ok(()) => {
+                crate::change_notices::publish(connection,database_id);
                 let (manifest_hash, tree_store) = staged_tree
                     .take()
                     .map_or((None, None), |(hash, store)| (Some(hash), Some(store)));
@@ -2320,7 +2332,7 @@ struct GlobalDerivedReachability {
     tree_nodes: BTreeSet<Digest>,
 }
 
-fn inspect_semantic_commitments<C: postgres::GenericClient>(
+fn inspect_semantic_commitments<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     metrics: &mut OperationalMetrics,
@@ -2386,7 +2398,7 @@ struct AuthenticatedNativePublication {
     nodes: BTreeSet<Digest>,
 }
 
-fn inspect_native_trees<C: postgres::GenericClient>(
+fn inspect_native_trees<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     deep: bool,
@@ -2636,7 +2648,7 @@ fn inspect_native_trees<C: postgres::GenericClient>(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn inspect_native_semantic_projection<C: postgres::GenericClient>(
+fn inspect_native_semantic_projection<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     revision: u64,
@@ -3140,7 +3152,7 @@ enum NativeLiveMembership {
     Mismatch,
 }
 
-fn native_membership_hashes<C: postgres::GenericClient>(
+fn native_membership_hashes<C: crate::sql_io::GenericClient>(
     client: &mut C,
     query: &str,
     parameters: &[&(dyn postgres::types::ToSql + Sync)],
@@ -3153,7 +3165,7 @@ fn native_membership_hashes<C: postgres::GenericClient>(
         .collect()
 }
 
-fn native_live_membership_status<C: postgres::GenericClient>(
+fn native_live_membership_status<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     newest_manifest_hash: Option<Digest>,
@@ -3378,7 +3390,7 @@ fn native_live_membership_status<C: postgres::GenericClient>(
     })
 }
 
-fn native_manifest_roots_match<C: postgres::GenericClient>(
+fn native_manifest_roots_match<C: crate::sql_io::GenericClient>(
     client: &mut C,
     manifest_hash: Digest,
     manifest: &PersistentTreeManifest,
@@ -3423,7 +3435,7 @@ fn native_manifest_roots_match<C: postgres::GenericClient>(
     }))
 }
 
-fn add_reachable_tree_nodes<C: postgres::GenericClient>(
+fn add_reachable_tree_nodes<C: crate::sql_io::GenericClient>(
     client: &mut C,
     root: Digest,
     output: &mut BTreeMap<Digest, Vec<u8>>,
@@ -3462,7 +3474,7 @@ fn add_reachable_tree_nodes<C: postgres::GenericClient>(
     Ok(())
 }
 
-fn global_derived_reachability<C: postgres::GenericClient>(
+fn global_derived_reachability<C: crate::sql_io::GenericClient>(
     client: &mut C,
     excluded_tree_manifests: &BTreeSet<Digest>,
 ) -> Result<Option<GlobalDerivedReachability>, SemanticError> {
@@ -3714,7 +3726,7 @@ fn global_derived_reachability<C: postgres::GenericClient>(
     Ok(Some(reachable))
 }
 
-fn count_unreachable_hashes<C: postgres::GenericClient>(
+fn count_unreachable_hashes<C: crate::sql_io::GenericClient>(
     client: &mut C,
     sql: &str,
     reachable: &BTreeSet<Digest>,
@@ -3751,7 +3763,7 @@ fn sql_u64(value: u64, label: &str) -> Result<i64, SemanticError> {
     })
 }
 
-fn garbage_candidates<C: postgres::GenericClient>(
+fn garbage_candidates<C: crate::sql_io::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<GarbageCandidates, SemanticError> {
@@ -4096,6 +4108,9 @@ fn garbage_candidates<C: postgres::GenericClient>(
         Vec::new()
     };
     semantic_nodes.sort_unstable();
+    let fulltext_blocks: i64 = client.query_one(
+        "SELECT count(*) FROM (SELECT b.block_hash FROM atomic_fulltext_garbage g JOIN atomic_fulltext_blocks b USING(manifest_hash) WHERE NOT EXISTS (SELECT 1 FROM atomic_tree_manifests m WHERE m.manifest_hash=b.manifest_hash) ORDER BY b.manifest_hash,b.block_hash LIMIT 4096) bounded", &[])
+        .map_err(|error| operation_error("operations/gc-fulltext-candidates", error))?.get(0);
     Ok(GarbageCandidates {
         segments,
         programs,
@@ -4108,6 +4123,7 @@ fn garbage_candidates<C: postgres::GenericClient>(
         log_generations,
         semantic_roots,
         semantic_nodes,
+        fulltext_blocks: positive_or_zero(fulltext_blocks, "fulltext garbage candidates")?,
     })
 }
 
@@ -4115,7 +4131,7 @@ fn garbage_candidates<C: postgres::GenericClient>(
 /// manifest, and restore/build fences that the owner SQL function repeats.
 /// A partially released archive remains first-class work until its header is
 /// gone; only then may semantic/log generation collection advance.
-fn request_base_archive_candidates<C: postgres::GenericClient>(
+fn request_base_archive_candidates<C: crate::sql_io::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<Vec<RequestBaseArchiveGarbage>, SemanticError> {
@@ -4333,7 +4349,7 @@ fn request_base_archive_candidates<C: postgres::GenericClient>(
 /// admission. The exclusive transaction lock proves that no connected peer
 /// or backup still owns the generation; the owner SQL function takes the same
 /// lock again when the preview is applied.
-fn log_generation_candidates<C: postgres::GenericClient>(
+fn log_generation_candidates<C: crate::sql_io::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<Vec<LogGenerationGarbage>, SemanticError> {
@@ -4424,7 +4440,7 @@ fn log_generation_candidates<C: postgres::GenericClient>(
     abandoned_log_generation_candidates(client, older_than_millis)
 }
 
-fn abandoned_log_generation_candidates<C: postgres::GenericClient>(
+fn abandoned_log_generation_candidates<C: crate::sql_io::GenericClient>(
     client: &mut C,
     older_than_millis: i64,
 ) -> Result<Vec<LogGenerationGarbage>, SemanticError> {
@@ -4566,7 +4582,7 @@ fn abandoned_log_generation_candidates<C: postgres::GenericClient>(
     }
 }
 
-fn preview_abandoned_log_generation_phase<C: postgres::GenericClient>(
+fn preview_abandoned_log_generation_phase<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: String,
     generation: u64,
@@ -4703,7 +4719,7 @@ fn preview_abandoned_log_generation_phase<C: postgres::GenericClient>(
     })
 }
 
-fn preview_log_generation_phase<C: postgres::GenericClient>(
+fn preview_log_generation_phase<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: String,
     generation: u64,
@@ -4870,7 +4886,7 @@ fn preview_log_generation_phase<C: postgres::GenericClient>(
     })
 }
 
-fn bounded_generation_row_count<C: postgres::GenericClient>(
+fn bounded_generation_row_count<C: crate::sql_io::GenericClient>(
     client: &mut C,
     selection: &str,
     database_id: &str,
@@ -4885,7 +4901,7 @@ fn bounded_generation_row_count<C: postgres::GenericClient>(
     positive_or_zero(count, "previewed log-generation rows")
 }
 
-fn semantic_root_candidates<C: postgres::GenericClient>(
+fn semantic_root_candidates<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     generation: u64,
@@ -4921,7 +4937,7 @@ fn semantic_root_candidates<C: postgres::GenericClient>(
 /// hypothetically retired. This is the dry-run counterpart of the owner SQL
 /// function; it never scans node payloads or treats unmarked old content as
 /// garbage.
-fn predicted_tree_node_garbage<C: postgres::GenericClient>(
+fn predicted_tree_node_garbage<C: crate::sql_io::GenericClient>(
     client: &mut C,
     selected_retirement_nodes: &[(String, u64, Digest)],
     finishing_retirements: &[(String, u64, Digest)],
@@ -5129,7 +5145,7 @@ fn predicted_tree_node_garbage<C: postgres::GenericClient>(
         .collect()
 }
 
-fn try_lock_tree_manifest_for_gc<C: postgres::GenericClient>(
+fn try_lock_tree_manifest_for_gc<C: crate::sql_io::GenericClient>(
     client: &mut C,
     manifest_hash: Digest,
 ) -> Result<bool, SemanticError> {
@@ -5142,7 +5158,7 @@ fn try_lock_tree_manifest_for_gc<C: postgres::GenericClient>(
         .map(|row| row.get(0))
 }
 
-fn try_lock_tree_build_for_gc<C: postgres::GenericClient>(
+fn try_lock_tree_build_for_gc<C: crate::sql_io::GenericClient>(
     client: &mut C,
     manifest_hash: Digest,
 ) -> Result<bool, SemanticError> {
@@ -5182,7 +5198,7 @@ fn require_gc_collected(collected: bool, label: &str) -> Result<(), SemanticErro
 /// generations, including fixed transitive dependencies. Guessing from
 /// mutable deployment aliases could delete a superseded function still
 /// required by an as-of database value.
-fn inspect_temporal_program_references<C: postgres::GenericClient>(
+fn inspect_temporal_program_references<C: crate::sql_io::GenericClient>(
     client: &mut C,
     inspected_database_id: &str,
     problems: &mut Vec<IntegrityProblem>,
@@ -5256,7 +5272,7 @@ fn garbage_age_millis(duration: Duration) -> Result<i64, SemanticError> {
     })
 }
 
-fn count<C: postgres::GenericClient>(
+fn count<C: crate::sql_io::GenericClient>(
     client: &mut C,
     sql: &str,
     database_id: &str,
@@ -5268,7 +5284,7 @@ fn count<C: postgres::GenericClient>(
     positive_or_zero(value, "count")
 }
 
-fn count_global<C: postgres::GenericClient>(
+fn count_global<C: crate::sql_io::GenericClient>(
     client: &mut C,
     sql: &str,
 ) -> Result<u64, SemanticError> {

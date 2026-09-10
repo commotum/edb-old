@@ -6,9 +6,9 @@ use crate::postgres::{
     read_authenticated_log_range, shared_program_cache_stats,
 };
 use crate::{
-    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, PersistentTreeManifest,
-    PostgresConnectionConfig, PostgresIndexer, ProgramCacheStats, ProgramCall, RecoveryStats,
-    SemanticError, TxForm, TxOp,
+    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, OperationContext,
+    OperationKind, PersistentTreeManifest, PostgresConnectionConfig, PostgresIndexer,
+    ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::mem::size_of;
@@ -22,6 +22,9 @@ const DEFAULT_MEMORY_INDEX_MAX_BYTES: u64 = 512 * 1024 * 1024;
 // Recovered `process-request-index` permits the initial publication attempt
 // plus two retries before failing the transactor process.
 const MAX_INDEX_JOB_RETRIES: usize = 2;
+const MAX_FULLTEXT_IDLE_RETRIES: u8 = 8;
+const FULLTEXT_RETRY_INITIAL: Duration = Duration::from_millis(250);
+const FULLTEXT_RETRY_MAX: Duration = Duration::from_secs(30);
 // RecentTier retains at most four raw BTSet entries per datom. Its
 // allocator-independent conservative account reserves a fifth reference for
 // persistent-log/tree overhead; keep admission on that same bound.
@@ -78,6 +81,80 @@ pub struct BackgroundIndexingFailure {
     pub message: String,
 }
 
+/// Optional search projection observations, independent of writer authority.
+/// A successful check can also mean no fulltext attributes exist. It is not
+/// a promise that a peer has caught up with the current transaction head.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BackgroundFulltextStats {
+    /// Last successful check's source basis, or the service's adopted basis
+    /// when that check found no fulltext attributes. Not a search-ready watermark.
+    pub checked_basis_t: Option<u64>,
+    /// Observed canonical basis for the last attempt. On a failed idle check,
+    /// an externally published newer source may not yet have been identified.
+    pub attempted_basis_t: Option<u64>,
+    pub attempts: u64,
+    pub failures: u64,
+    pub idle_retries: u64,
+    /// Until the next scheduled attempt; None also covers a running attempt.
+    pub retry_in: Option<Duration>,
+    pub retry_exhausted: bool,
+    pub last_failure: Option<BackgroundIndexingFailure>,
+}
+
+#[derive(Debug, Default)]
+struct FulltextRetry {
+    stats: BackgroundFulltextStats,
+    retry_at: Option<Instant>,
+    retries: u8,
+    reconnect: bool,
+}
+
+impl FulltextRetry {
+    fn record(&mut self, basis_t: u64, error: Option<&SemanticError>, retry: bool, now: Instant) {
+        self.stats.attempts = self.stats.attempts.saturating_add(1);
+        self.stats.attempted_basis_t = Some(basis_t);
+        if retry {
+            self.retries = self.retries.saturating_add(1);
+            self.stats.idle_retries = self.stats.idle_retries.saturating_add(1);
+        } else {
+            self.retries = 0;
+        }
+        self.retry_at = None;
+        self.stats.retry_exhausted = false;
+        self.reconnect = error.is_some_and(is_postgres_connection_error);
+        if let Some(error) = error {
+            self.stats.failures = self.stats.failures.saturating_add(1);
+            self.stats.last_failure = Some(BackgroundIndexingFailure {
+                category: error.category,
+                code: error.code,
+                message: error.message.clone(),
+            });
+            if matches!(
+                error.category,
+                ErrorCategory::Busy | ErrorCategory::Unavailable | ErrorCategory::Interrupted
+            ) {
+                if self.retries < MAX_FULLTEXT_IDLE_RETRIES {
+                    let delay = FULLTEXT_RETRY_INITIAL
+                        .saturating_mul(1_u32 << self.retries)
+                        .min(FULLTEXT_RETRY_MAX);
+                    self.retry_at = now.checked_add(delay);
+                } else {
+                    self.stats.retry_exhausted = true;
+                }
+            }
+        } else {
+            self.stats.checked_basis_t = Some(basis_t);
+            self.stats.last_failure = None;
+        }
+    }
+
+    fn snapshot(&self, now: Instant) -> BackgroundFulltextStats {
+        let mut stats = self.stats.clone();
+        stats.retry_in = self.retry_at.map(|at| at.saturating_duration_since(now));
+        stats
+    }
+}
+
 /// Direct observations from the one background-indexing worker.
 ///
 /// `indexing_*` is the frozen prefix being merged and `memory_index_*` is
@@ -117,6 +194,7 @@ pub struct BackgroundIndexingStats {
     pub backpressure_rejections: u64,
     pub job_in_flight: bool,
     pub last_failure: Option<BackgroundIndexingFailure>,
+    pub fulltext: BackgroundFulltextStats,
 }
 
 #[derive(Clone, Debug)]
@@ -220,6 +298,8 @@ struct Work {
     request: TransactionRequest,
     request_hash: Digest,
     response: mpsc::SyncSender<Result<ServiceTransactionReport, SemanticError>>,
+    operation: OperationContext,
+    hints: Option<crate::transaction_hints::PendingHints>,
 }
 
 /// A deterministic seam around the response-observation boundary. Production
@@ -261,6 +341,7 @@ struct AmbiguousOutcome {
     request_key: String,
     reconnect_required: bool,
     notify_if_durable: bool,
+    operation: OperationContext,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -312,6 +393,17 @@ struct IndexingBacklog {
     needs_publication: bool,
 }
 
+/// Finite committed frontier captured by an asynchronous indexing request.
+///
+/// `scheduled` means this call added indexing demand. False means an existing
+/// request/job already covers the target, or it is already published. Neither
+/// value is a completion receipt: use `Connection::sync_index(target_t, timeout)`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct IndexRequest {
+    pub target_t: u64,
+    pub scheduled: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IndexCommand {
     Wake,
@@ -329,6 +421,7 @@ struct BackgroundIndexing {
     backpressure_stalls: AtomicU64,
     backpressure_rejections: AtomicU64,
     last_failure: Mutex<Option<SemanticError>>,
+    fulltext: Mutex<FulltextRetry>,
 }
 
 impl BackgroundIndexing {
@@ -368,6 +461,7 @@ impl BackgroundIndexing {
             backpressure_stalls: AtomicU64::new(0),
             backpressure_rejections: AtomicU64::new(0),
             last_failure: Mutex::new(None),
+            fulltext: Mutex::new(FulltextRetry::default()),
         }
     }
 
@@ -430,6 +524,43 @@ impl BackgroundIndexing {
             self.wake();
         }
         can_advance
+    }
+
+    fn request_index(&self) -> IndexRequest {
+        let request = {
+            let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
+            // Only note_commit (after durable success) and verified publications
+            // advance this frontier. Queued/unassessed transactions are excluded.
+            let target_t = backlog.target_basis_t;
+            let covered = backlog
+                .published_basis_t
+                .max(backlog.required_publication_t)
+                .max(backlog.indexing_through.unwrap_or(0));
+            let scheduled = target_t > covered;
+            if scheduled {
+                backlog.required_publication_t = target_t;
+                backlog.needs_publication = true;
+            }
+            IndexRequest {
+                target_t,
+                scheduled,
+            }
+        };
+        let retry_search = {
+            let mut fulltext = self.fulltext.lock().expect("fulltext retry mutex poisoned");
+            if fulltext.stats.last_failure.is_some() {
+                fulltext.retries = 0;
+                fulltext.stats.retry_exhausted = false;
+                fulltext.retry_at = Some(Instant::now());
+                true
+            } else {
+                false
+            }
+        };
+        if request.scheduled || retry_search {
+            self.wake();
+        }
+        request
     }
 
     fn wake(&self) {
@@ -624,6 +755,11 @@ impl BackgroundIndexing {
             backpressure_rejections: self.backpressure_rejections.load(Ordering::Relaxed),
             job_in_flight: backlog.indexing_through.is_some(),
             last_failure,
+            fulltext: self
+                .fulltext
+                .lock()
+                .expect("fulltext retry mutex poisoned")
+                .snapshot(Instant::now()),
         }
     }
 }
@@ -719,10 +855,12 @@ struct Shared {
     max_queued_report_payload_bytes: AtomicU64,
     writer_residency: Mutex<WriterResidencyStats>,
     max_request_bytes: usize,
+    hint_worker: crate::transaction_hints::HintWorkerSlot,
     indexing: Arc<BackgroundIndexing>,
     connection: PostgresConnectionConfig,
     database_id: String,
     lineage_id: String,
+    transport_lease: TransactorLease,
 }
 
 impl Shared {
@@ -733,6 +871,7 @@ impl Shared {
         connection: PostgresConnectionConfig,
         database_id: String,
         lineage_id: String,
+        transport_lease: TransactorLease,
     ) -> Self {
         Self {
             accepting: AtomicBool::new(true),
@@ -750,10 +889,12 @@ impl Shared {
             max_queued_report_payload_bytes: AtomicU64::new(0),
             writer_residency: Mutex::new(writer_residency),
             max_request_bytes,
+            hint_worker: crate::transaction_hints::HintWorkerSlot::default(),
             indexing,
             connection,
             database_id,
             lineage_id,
+            transport_lease,
         }
     }
 
@@ -940,7 +1081,41 @@ impl TransactionClient {
         )
     }
 
+    pub(crate) fn transport_lease(&self) -> TransactorLease {
+        self.shared.transport_lease.clone()
+    }
+
     pub fn submit(&self, request: TransactionRequest) -> Result<TransactionTicket, SemanticError> {
+        self.submit_advisory(request, None)
+    }
+
+    /// Admit hints separately from canonical transaction data and request
+    /// identity. The execution handle observes best-effort bounded prefetch;
+    /// canceling it cannot cancel or change the submitted transaction.
+    pub fn submit_with_hints(
+        &self,
+        request: TransactionRequest,
+        hints: crate::TransactionHints,
+        options: crate::HintPrefetchOptions,
+    ) -> Result<(TransactionTicket, crate::HintExecution), SemanticError> {
+        let execution = crate::HintExecution::default();
+        let hints = crate::transaction_hints::PendingHints::new(hints, options, execution.clone());
+        let ticket = self.submit_advisory(request, Some(hints))?;
+        Ok((ticket, execution))
+    }
+
+    fn submit_advisory(
+        &self,
+        request: TransactionRequest,
+        hints: Option<crate::transaction_hints::PendingHints>,
+    ) -> Result<TransactionTicket, SemanticError> {
+        // Attribution crosses the queue explicitly. Contexts contain counters,
+        // not storage authority; no worker automatically invokes their callback.
+        let operation = OperationContext::current().map_or_else(
+            || OperationContext::new(OperationKind::Transaction),
+            |parent| parent.child(OperationKind::Transaction),
+        );
+        let _operation_scope = operation.enter();
         if !self.shared.accepting.load(Ordering::Acquire) {
             return Err(self.shared.unavailable());
         }
@@ -975,6 +1150,8 @@ impl TransactionClient {
             request,
             request_hash,
             response: sender,
+            operation,
+            hints,
         }) {
             Ok(()) => {
                 let queued = self.shared.queued.fetch_add(1, Ordering::AcqRel) + 1;
@@ -1083,6 +1260,24 @@ impl TransactionClient {
 
     pub fn background_indexing_stats(&self) -> BackgroundIndexingStats {
         self.shared.indexing.stats()
+    }
+
+    /// Request background indexing through the currently observed committed
+    /// frontier, independent of the configured novelty threshold.
+    ///
+    /// Returns after bounded in-memory coordination with the existing index
+    /// worker; it performs no indexing or SQL on the caller. Requests coalesce,
+    /// and later commits cannot change the returned target. Service shutdown or
+    /// failure may prevent completion; a timed-out waiter does not cancel the
+    /// shared job. No separate worker or writer authority is created.
+    /// A previous optional fulltext failure is also retried, even if the
+    /// returned canonical target is already indexed. Search status is separate
+    /// and does not change this request's canonical completion semantics.
+    pub fn request_index(&self) -> Result<IndexRequest, SemanticError> {
+        if !self.shared.accepting.load(Ordering::Acquire) || self.shared.indexing.has_failure() {
+            return Err(self.shared.unavailable());
+        }
+        Ok(self.shared.indexing.request_index())
     }
 
     /// Deterministic representation-level residency of the live writer.
@@ -1543,6 +1738,7 @@ impl TransactionService {
             connection.clone(),
             config.database_id.clone(),
             lineage_id,
+            lease.clone(),
         ));
         let index_shared = Arc::clone(&shared);
         let index_worker = match thread::Builder::new()
@@ -1674,6 +1870,10 @@ fn run_worker(
     receiver: mpsc::Receiver<Work>,
     shared: &Shared,
 ) {
+    // Independent lease/adoption maintenance is not part of the last caller's
+    // transaction. Work-specific scopes below override this background scope.
+    let maintenance = OperationContext::new(OperationKind::WriterMaintenance);
+    let _maintenance_scope = maintenance.enter();
     let mut last_renewal = Instant::now();
     let mut pending: Option<Work> = None;
     let mut pending_was_stalled = false;
@@ -1692,6 +1892,8 @@ fn run_worker(
             continue;
         }
         if let Some(mut ambiguous) = ambiguous_outcome.take() {
+            let _operation_scope = ambiguous.operation.enter();
+            let _phase = ambiguous.operation.phase(OperationKind::TransactionReport);
             // The connection which returned an ambiguous COMMIT result is not
             // safe to reuse. Reconnect first, then renew the exact lease epoch
             // before observing the durable decision. This never resubmits or
@@ -1799,6 +2001,7 @@ fn run_worker(
             thread::park_timeout(wait.min(Duration::from_millis(100)));
             continue;
         }
+        let _operation_scope = work.operation.enter();
         let gate = shared.check_index_gate(&work.request.request_key, work.request_hash);
         if gate
             .as_ref()
@@ -1825,9 +2028,20 @@ fn run_worker(
             Ok(()) => {
                 let published_revision = shared.indexing.stats().published_revision;
                 match store.adopt_published_tree(database_id, published_revision) {
-                    Ok(()) => {
-                        process_work(store, lease, database_id, &work.request, work.request_hash)
-                    }
+                    Ok(()) => crate::transaction_hints::overlap(
+                        store.hint_database_value(database_id),
+                        work.hints.as_ref(),
+                        &shared.hint_worker,
+                        || {
+                            process_work(
+                                store,
+                                lease,
+                                database_id,
+                                &work.request,
+                                work.request_hash,
+                            )
+                        },
+                    ),
                     // An ambiguous commit deliberately invalidates the cached
                     // writer value. The authoritative transaction path locks
                     // the head and either reconstructs the durable receipt or
@@ -1879,6 +2093,7 @@ fn run_worker(
             .map(|error| AmbiguousOutcome {
                 request_key,
                 reconnect_required: true,
+                operation: work.operation.clone(),
                 // An acknowledgement-lost idempotent outcome read names an
                 // already-observed transaction. Resolve it to restore the
                 // connection/writer, but never duplicate its report or
@@ -1916,7 +2131,10 @@ fn run_index_worker(
     receiver: mpsc::Receiver<IndexCommand>,
     shared: &Shared,
 ) {
+    let indexing = OperationContext::new(OperationKind::Indexing);
+    let _indexing_scope = indexing.enter();
     let mut requested = shared.indexing.should_continue();
+    let mut startup_search_check = true;
     loop {
         if requested
             && shared.accepting.load(Ordering::Acquire)
@@ -1937,6 +2155,23 @@ fn run_index_worker(
                     || shared.accepting.load(Ordering::Acquire),
                 ) {
                     Ok(Some(receipt)) => {
+                        // Incomplete AVET publications deliberately skip the
+                        // optional build; its getter still names a prior
+                        // attempt and must not certify this new basis.
+                        if receipt.pending_avet_projections == 0 {
+                            shared
+                                .indexing
+                                .fulltext
+                                .lock()
+                                .expect("fulltext retry mutex poisoned")
+                                .record(
+                                    receipt.basis_t,
+                                    indexer.fulltext_build_error(),
+                                    false,
+                                    Instant::now(),
+                                );
+                            startup_search_check = false;
+                        }
                         shared.indexing.complete_job(
                             receipt.publication_revision,
                             receipt.basis_t,
@@ -1971,9 +2206,73 @@ fn run_index_worker(
                 continue;
             }
         }
-        match receiver.recv() {
+        if !shared.accepting.load(Ordering::Acquire) {
+            return;
+        }
+        let retry = {
+            let mut fulltext = shared
+                .indexing
+                .fulltext
+                .lock()
+                .expect("fulltext retry mutex poisoned");
+            if fulltext.retry_at.is_some_and(|at| at <= Instant::now()) {
+                fulltext.retry_at = None;
+                Some(fulltext.reconnect)
+            } else {
+                None
+            }
+        };
+        if startup_search_check || retry.is_some() {
+            let basis = shared
+                .indexing
+                .backlog
+                .lock()
+                .expect("index backlog mutex poisoned")
+                .published_basis_t;
+            let result = if retry == Some(true) {
+                indexer
+                    .reconnect()
+                    .and_then(|()| indexer.rebuild_fulltext())
+            } else {
+                indexer.rebuild_fulltext()
+            };
+            let checked_basis = result
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .map_or(basis, |projection| projection.source_basis_t);
+            shared
+                .indexing
+                .fulltext
+                .lock()
+                .expect("fulltext retry mutex poisoned")
+                .record(
+                    checked_basis,
+                    result.as_ref().err(),
+                    !startup_search_check,
+                    Instant::now(),
+                );
+            startup_search_check = false;
+            // Only the optional projection was attempted; its error never
+            // enters fail_job, recent-tier pressure, or lease/accepting state.
+        }
+        let wait = shared
+            .indexing
+            .fulltext
+            .lock()
+            .expect("fulltext retry mutex poisoned")
+            .retry_at
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        let command = match wait {
+            Some(wait) => receiver.recv_timeout(wait),
+            None => receiver
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match command {
             Ok(IndexCommand::Wake) => requested = true,
-            Ok(IndexCommand::Shutdown) | Err(_) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(IndexCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
 }
@@ -2022,6 +2321,9 @@ fn process_work(
     request: &TransactionRequest,
     request_hash: Digest,
 ) -> Result<ServiceTransactionReport, SemanticError> {
+    // This wall interval covers the authority attempt, not admission/queue
+    // waiting. Its phase children are reported separately and are inclusive.
+    let _phase = OperationContext::current_or_process().phase(OperationKind::Transaction);
     #[cfg(not(test))]
     let commit = store.transact_authoritative_fenced(
         lease,
@@ -2422,6 +2724,207 @@ mod tests {
             memory_index_threshold_bytes: 1_024,
             memory_index_max_bytes: 2_048,
         }
+    }
+
+    #[test]
+    fn fulltext_idle_retry_is_bounded_and_clears_only_its_own_failure() {
+        let now = Instant::now();
+        for category in [
+            ErrorCategory::Busy,
+            ErrorCategory::Unavailable,
+            ErrorCategory::Interrupted,
+        ] {
+            let error = SemanticError::new(
+                category,
+                "test/transient-search",
+                "retryable search failure",
+            );
+            let mut retry = FulltextRetry::default();
+            retry.record(3, Some(&error), false, now);
+            assert_eq!(retry.snapshot(now).retry_in, Some(FULLTEXT_RETRY_INITIAL));
+            for attempt in 1..MAX_FULLTEXT_IDLE_RETRIES {
+                retry.record(3, Some(&error), true, now);
+                assert_eq!(
+                    retry.snapshot(now).retry_in,
+                    Some(
+                        FULLTEXT_RETRY_INITIAL
+                            .saturating_mul(1 << attempt)
+                            .min(FULLTEXT_RETRY_MAX)
+                    )
+                );
+            }
+            retry.record(3, Some(&error), true, now);
+            let exhausted = retry.snapshot(now);
+            assert_eq!(exhausted.attempts, 9);
+            assert_eq!(exhausted.failures, 9);
+            assert_eq!(exhausted.idle_retries, 8);
+            assert!(exhausted.retry_exhausted);
+            assert!(exhausted.retry_in.is_none());
+            assert!(exhausted.checked_basis_t.is_none());
+            assert_eq!(exhausted.last_failure.unwrap().category, category);
+
+            retry.record(4, None, false, now);
+            let recovered = retry.snapshot(now);
+            assert_eq!(recovered.checked_basis_t, Some(4));
+            assert_eq!(recovered.attempted_basis_t, Some(4));
+            assert_eq!(recovered.failures, 9);
+            assert!(recovered.last_failure.is_none());
+            assert!(!recovered.retry_exhausted);
+            assert!(recovered.retry_in.is_none());
+        }
+    }
+
+    #[test]
+    fn fulltext_permanent_failure_is_visible_nonfatal_and_explicitly_retryable() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            test_config(),
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 1,
+                published_basis_t: 1,
+                pending_avet_projections: 0,
+                newest_observed_revision: 1,
+                target_basis_t: 1,
+                pending: VecDeque::new(),
+                publication_work_through: None,
+                required_publication_t: 0,
+                needs_publication: false,
+            },
+            sender,
+        );
+        for category in [ErrorCategory::Fault, ErrorCategory::Incorrect] {
+            let error =
+                SemanticError::new(category, "test/permanent-search", "search needs repair");
+            indexing
+                .fulltext
+                .lock()
+                .unwrap()
+                .record(1, Some(&error), false, Instant::now());
+            let stats = indexing.stats();
+            assert_eq!(stats.fulltext.last_failure.unwrap().category, category);
+            assert!(stats.fulltext.retry_in.is_none());
+            assert!(!stats.fulltext.retry_exhausted);
+            assert_eq!(stats.jobs_failed, 0);
+            assert!(stats.last_failure.is_none());
+            assert!(!indexing.has_failure());
+            assert!(indexing.limiting_error().is_none());
+            assert_eq!(
+                indexing.request_index(),
+                IndexRequest {
+                    target_t: 1,
+                    scheduled: false
+                }
+            );
+            assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
+            assert!(indexing.stats().fulltext.retry_in.is_some());
+        }
+    }
+
+    #[test]
+    fn explicit_index_requests_coalesce_and_do_not_chase_later_commits() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let indexing = BackgroundIndexing::new(
+            test_config(),
+            IndexingSeed {
+                lineage_id: "lineage".to_owned(),
+                published_revision: 1,
+                published_basis_t: 1,
+                pending_avet_projections: 0,
+                newest_observed_revision: 1,
+                target_basis_t: 1,
+                pending: VecDeque::new(),
+                publication_work_through: None,
+                required_publication_t: 0,
+                needs_publication: false,
+            },
+            sender,
+        );
+        assert_eq!(
+            indexing.request_index(),
+            IndexRequest {
+                target_t: 1,
+                scheduled: false
+            }
+        );
+        indexing.note_commit(
+            Novelty {
+                basis_t: 2,
+                datoms: 1,
+                bytes: 100,
+            },
+            false,
+        );
+        assert!(!indexing.should_continue());
+        let first = indexing.request_index();
+        assert_eq!(
+            first,
+            IndexRequest {
+                target_t: 2,
+                scheduled: true
+            }
+        );
+        assert_eq!(
+            indexing.request_index(),
+            IndexRequest {
+                target_t: 2,
+                scheduled: false
+            }
+        );
+        assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
+        assert_eq!(indexing.begin_job(), Some(2));
+        indexing.note_commit(
+            Novelty {
+                basis_t: 3,
+                datoms: 1,
+                bytes: 100,
+            },
+            false,
+        );
+        indexing.complete_job(2, 2, 0, false);
+        assert!(
+            !indexing.should_continue(),
+            "a finite request chased unrequested later novelty"
+        );
+        assert_eq!(first.target_t, 2);
+        assert_eq!(
+            indexing.request_index(),
+            IndexRequest {
+                target_t: 3,
+                scheduled: true
+            }
+        );
+        assert_eq!(indexing.begin_job(), Some(3));
+        indexing.note_commit(
+            Novelty {
+                basis_t: 4,
+                datoms: 1,
+                bytes: 100,
+            },
+            false,
+        );
+        assert_eq!(
+            indexing.request_index(),
+            IndexRequest {
+                target_t: 4,
+                scheduled: true
+            }
+        );
+        indexing.complete_job(3, 3, 0, false);
+        assert!(
+            indexing.should_continue(),
+            "older completion lost a newer explicit request"
+        );
+        assert_eq!(indexing.begin_job(), Some(4));
+        indexing.complete_job(4, 4, 0, false);
+        assert!(!indexing.should_continue());
+        assert_eq!(
+            indexing.request_index(),
+            IndexRequest {
+                target_t: 4,
+                scheduled: false
+            }
+        );
     }
 
     #[test]
@@ -2877,6 +3380,172 @@ mod tests {
             .expect("retained tuple slots must cross the hard byte limit");
         assert_eq!(limit.code, "service/index-backpressure");
         assert_eq!(indexing.stats().total_bytes, retained_account);
+    }
+
+    #[test]
+    fn submitted_context_measures_transaction_phases_retries_and_unknown_outcomes() {
+        let Some(connection) = postgres_connection() else {
+            eprintln!("SKIPPED transaction phase integration: ATOMIC_POSTGRES_URL is unset");
+            return;
+        };
+        let database_id = unique_database("transaction_phase_context");
+        PostgresMigrator::connect(&connection)
+            .unwrap()
+            .migrate()
+            .unwrap();
+        PostgresStore::connect(&connection)
+            .unwrap()
+            .create_database(&database_id, observation_schema())
+            .unwrap();
+        let service = TransactionService::start_with_indexing(
+            observation_service_config(&connection, database_id.clone()),
+            BackgroundIndexingConfig {
+                memory_index_threshold_bytes: 1 << 30,
+                memory_index_max_bytes: 2 << 30,
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let callbacks = Arc::new(AtomicUsize::new(0));
+        let delivered = Arc::clone(&callbacks);
+        let measured = OperationContext::with_callback(
+            OperationKind::Application,
+            Arc::new(move |_| {
+                delivered.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+        let request = observation_request("measured", 11);
+        // The caller's scope is gone before waiting: only explicit Work
+        // propagation can attribute calls made on the transactor thread.
+        let ticket = {
+            let _scope = measured.enter();
+            client.submit(request.clone()).unwrap()
+        };
+        let first = ticket.wait(Duration::from_secs(5)).unwrap();
+        let first_stats = measured.snapshot();
+        for kind in [
+            OperationKind::Transaction,
+            OperationKind::TransactionExpansion,
+            OperationKind::TransactionAssessment,
+            OperationKind::TransactionEncoding,
+            OperationKind::TransactionCommit,
+            OperationKind::TransactionReport,
+        ] {
+            assert!(first_stats.phases[&kind].invocations > 0);
+            assert!(first_stats.phases[&kind].elapsed_nanos > 0);
+        }
+        assert!(first_stats.by_operation[&OperationKind::TransactionAssessment].calls > 0);
+        assert!(first_stats.by_operation[&OperationKind::TransactionCommit].calls > 0);
+        assert_eq!(
+            callbacks.load(Ordering::Relaxed),
+            0,
+            "worker invoked caller metric callback"
+        );
+        assert!(measured.publish());
+        assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+
+        let replay_context = OperationContext::new(OperationKind::Application);
+        let replay = {
+            let _scope = replay_context.enter();
+            client.submit(request).unwrap()
+        }
+        .wait(Duration::from_secs(5))
+        .unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.tx_hash, first.tx_hash);
+        let replay_stats = replay_context.snapshot();
+        assert!(
+            replay_stats
+                .phases
+                .contains_key(&OperationKind::TransactionReport)
+        );
+        assert!(
+            replay_stats
+                .phases
+                .contains_key(&OperationKind::TransactionCommit)
+        );
+        for kind in [
+            OperationKind::TransactionExpansion,
+            OperationKind::TransactionAssessment,
+            OperationKind::TransactionEncoding,
+        ] {
+            assert!(
+                !replay_stats.phases.contains_key(&kind),
+                "replay fabricated an unexecuted phase"
+            );
+        }
+        assert_eq!(
+            measured.snapshot().phases,
+            first_stats.phases,
+            "sibling operation changed original phase totals"
+        );
+
+        let rejected_context = OperationContext::new(OperationKind::Application);
+        let rejected = {
+            let _scope = rejected_context.enter();
+            client
+                .submit(TransactionRequest::new(
+                    "invalid-value",
+                    vec![TxOp::Add {
+                        entity: EntityRef::Id(make_eid(USER_PARTITION, 42).unwrap()),
+                        attribute: OBSERVED_ITEM_COUNT,
+                        value: TxValue::Scalar(Value::String("not a long".into())),
+                    }],
+                ))
+                .unwrap()
+        }
+        .wait(Duration::from_secs(5))
+        .unwrap_err();
+        assert_ne!(rejected.category, ErrorCategory::UnknownOutcome);
+        let rejected_stats = rejected_context.snapshot();
+        assert!(
+            rejected_stats
+                .phases
+                .contains_key(&OperationKind::TransactionAssessment)
+        );
+        assert!(
+            !rejected_stats
+                .phases
+                .contains_key(&OperationKind::TransactionEncoding)
+        );
+        assert_eq!(
+            rejected_stats.by_kind[&crate::SqlCallKind::Rollback].calls,
+            1
+        );
+
+        let unknown_context = OperationContext::new(OperationKind::Application);
+        let reports = client.subscribe_reports();
+        let unknown_request = observation_request("measured-unknown", 22);
+        arm_observation_fault(
+            &database_id,
+            "measured-unknown",
+            CommitObservationFault::AfterCommitBeforeResponse,
+        );
+        let error = {
+            let _scope = unknown_context.enter();
+            client.submit(unknown_request.clone()).unwrap()
+        }
+        .wait(Duration::from_secs(5))
+        .unwrap_err();
+        assert_eq!(error.category, ErrorCategory::UnknownOutcome);
+        let durable = reports.recv_timeout(Duration::from_secs(5)).unwrap();
+        // A subsequent request cannot overtake reconciliation; awaiting it
+        // also makes that original context's post-response measurements final.
+        let reconciled = client
+            .transact(unknown_request, Duration::from_secs(5))
+            .unwrap();
+        assert!(reconciled.replayed);
+        assert_eq!(reconciled.tx_hash, durable.tx_hash);
+        let unknown_stats = unknown_context.snapshot();
+        assert!(unknown_stats.phases[&OperationKind::TransactionReport].invocations >= 2);
+        assert!(unknown_stats.by_operation[&OperationKind::TransactionReport].calls > 0);
+        assert_eq!(callbacks.load(Ordering::Relaxed), 1);
+        assert_eq!(service.writer_residency_stats().eager_database_values, 0);
+        println!(
+            "TRANSACTION_PHASES_OK sql_calls={} phases={:?} replay_sql_calls={} rejected_rollbacks=1 unknown_reconciled=true explicit_callbacks=1",
+            first_stats.sql_calls, first_stats.phases, replay_stats.sql_calls
+        );
+        service.shutdown();
     }
 
     #[test]

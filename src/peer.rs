@@ -15,6 +15,7 @@ use crate::recent::{
     EndpointProjection, RecentCursor, RecentCursorStats, RecentLimits, RecentRange, RecentTier,
     retained_entry_stats,
 };
+use crate::sql_io::{GenericClient, SqlClient as Client};
 use crate::state_commitment::{checkpoint_information, verify_checkpoint_state_hash};
 use crate::{
     AvetProjectionWork, Database, DatabaseIdentity, DatabaseValue, Datom, Digest,
@@ -27,7 +28,6 @@ use crate::{
 };
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
-use postgres::{Client, GenericClient};
 #[cfg(test)]
 #[path = "peer_merge_preload_tests.rs"]
 mod merge_preload_tests;
@@ -190,6 +190,14 @@ pub(crate) struct ExactEndpoint {
     pub(crate) state_hash: Digest,
     pub(crate) eidx_frontier: u64,
 }
+
+#[path = "peer_prefetch.rs"]
+mod peer_prefetch;
+#[path = "peer_fulltext.rs"]
+mod peer_fulltext;
+pub use peer_fulltext::NativeFulltextReader;
+#[path = "snapshot_reference.rs"]
+pub(crate) mod snapshot_reference;
 
 impl ExactEndpoint {
     fn validate(self) -> Result<Self, SemanticError> {
@@ -577,6 +585,23 @@ impl MetadataProjection {
         let mut current = self.schema_current.to_vec();
         let mut idents = (*self.idents).clone();
         for transaction in transactions {
+            // Older exact genesis profiles already reserve :db/fulltext's
+            // immutable t=0 ident, but the small schema working set excludes
+            // its entity until the explicit descriptor upgrade. Reattach that
+            // authenticated ident when its install marker arrives; never emit
+            // a new logical assertion or reinterpret the old root.
+            if self.schema.attribute(crate::DB_FULLTEXT as u32).is_err()
+                && transaction.tx_data.iter().any(|datom| datom.added
+                    && datom.entity == crate::DB_PART_DB
+                    && datom.attribute == crate::DB_INSTALL_ATTRIBUTE as u32
+                    && datom.value == crate::Value::Ref(crate::DB_FULLTEXT))
+                && !current.iter().any(|datom| datom.entity == crate::DB_FULLTEXT
+                    && datom.attribute == crate::DB_IDENT as u32)
+                && let Some(ident) = idents.ident(crate::DB_FULLTEXT)
+            {
+                current.push(Datom { entity: crate::DB_FULLTEXT, attribute: crate::DB_IDENT as u32,
+                    value: crate::Value::Keyword(ident.clone()), tx: crate::t_to_tx(0)?, added: true });
+            }
             let mut ident_updates = transaction
                 .tx_data
                 .iter()
@@ -747,7 +772,7 @@ fn retain_schema_working_set(current: &mut Vec<Datom>) {
                 && datom.entity == crate::DB_PART_DB
                 && matches!(
                     u64::from(datom.attribute),
-                    crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE
+                    crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE | crate::DB_INSTALL_PARTITION
                 )
             {
                 match &datom.value {
@@ -763,7 +788,7 @@ fn retain_schema_working_set(current: &mut Vec<Datom>) {
         (datom.entity == crate::DB_PART_DB
             && matches!(
                 u64::from(datom.attribute),
-                crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE
+                crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE | crate::DB_INSTALL_PARTITION
             ))
             || (installed.contains(&datom.entity) && schema_information_attribute(datom.attribute))
     });
@@ -773,6 +798,7 @@ fn schema_information_attribute(attribute: u32) -> bool {
     matches!(
         u64::from(attribute),
         crate::DB_IDENT
+            | crate::DB_INSTALL_PARTITION
             | crate::DB_INSTALL_ATTRIBUTE
             | crate::DB_ALTER_ATTRIBUTE
             | crate::DB_VALUE_TYPE
@@ -781,6 +807,7 @@ fn schema_information_attribute(attribute: u32) -> bool {
             | crate::DB_IS_COMPONENT
             | crate::DB_INDEX
             | crate::DB_NO_HISTORY
+            | crate::DB_FULLTEXT
             | crate::DB_TUPLE_TYPE
             | crate::DB_TUPLE_TYPES
             | crate::DB_TUPLE_ATTRS
@@ -819,6 +846,9 @@ pub struct PostgresIndexer {
     database_id: String,
     segment_datoms: usize,
     tree_config: TreeConfig,
+    fulltext_build_limits: crate::FulltextBuildLimits,
+    fulltext_build_stats: crate::FulltextBuildStats,
+    fulltext_build_error: Option<SemanticError>,
 }
 
 impl PostgresIndexer {
@@ -847,6 +877,9 @@ impl PostgresIndexer {
             database_id: database_id.into(),
             segment_datoms: DEFAULT_SEGMENT_DATOMS,
             tree_config: TreeConfig::default(),
+            fulltext_build_limits: crate::FulltextBuildLimits::default(),
+            fulltext_build_stats: crate::FulltextBuildStats::default(),
+            fulltext_build_error: None,
         })
     }
 
@@ -869,6 +902,30 @@ impl PostgresIndexer {
         self.segment_datoms = config.max_leaf_datoms;
         self.tree_config = config;
         Ok(self)
+    }
+
+    /// Select bounded canonical-node upload count/byte budgets.
+    pub fn with_node_upload_limits(
+        mut self,
+        limits: crate::NodeUploadLimits,
+    ) -> Result<Self, SemanticError> {
+        self.tree_store = self.tree_store.with_node_upload_limits(limits)?;
+        Ok(self)
+    }
+
+    /// Optional compressed transfer projections do not replace canonical data.
+    pub fn with_compressed_node_blocks(mut self, enabled: bool) -> Self {
+        self.tree_store = self.tree_store.with_compressed_node_blocks(enabled);
+        self
+    }
+
+    /// `None` selects serial codec preparation; larger batches otherwise use
+    /// one scoped worker at or above the supplied byte threshold.
+    pub fn with_node_block_encoding_overlap(mut self, minimum_bytes: Option<usize>) -> Self {
+        self.tree_store = self
+            .tree_store
+            .with_node_block_encoding_overlap(minimum_bytes);
+        self
     }
 
     /// Select the local work disk used by recovered-style external AVET
@@ -1045,7 +1102,8 @@ impl PostgresIndexer {
             // threshold, not to this publication's live-set completion.
             let manifest_hash = *previous_hash;
             let stats = self.tree_store.stats();
-            return Ok(Some(IndexBuildReceipt {
+            let fulltext_revision = previous.publication_revision;
+            let reused_receipt = IndexBuildReceipt {
                 publication_revision: previous.publication_revision,
                 basis_t: previous.basis_t,
                 manifest_hash,
@@ -1065,7 +1123,10 @@ impl PostgresIndexer {
                 tail_datoms: 0,
                 encoded_bytes: 0,
                 max_depth: 3,
-            }));
+            };
+            drop(transaction);
+            self.fulltext_build_error = self.ensure_fulltext_projection(fulltext_revision, manifest_hash).err();
+            return Ok(Some(reused_receipt));
         }
         let expected_publication_revision = selection.newest_observed_revision;
         let publication_revision =
@@ -1325,9 +1386,10 @@ impl PostgresIndexer {
             &upload_hashes,
         )?;
         let publication = (|| {
-            for (hash, payload) in build.nodes.iter() {
-                self.tree_store.insert_node(*hash, payload)?;
-            }
+            self.tree_store.insert_nodes(
+                build.nodes.iter().map(|(hash, payload)| (*hash, payload)),
+                self.tree_store.node_upload_limits(),
+            )?;
             if fault_point == IndexBuildFault::AfterSegments {
                 return Err(SemanticError::new(
                     ErrorCategory::Interrupted,
@@ -1370,6 +1432,9 @@ impl PostgresIndexer {
             self.tree_store.discard_avet_sort(sort_key)?;
         }
         let tree_store_stats = self.tree_store.stats();
+        if projection_complete {
+            self.fulltext_build_error = self.ensure_fulltext_projection(publication_revision, tree_manifest_hash).err();
+        }
         // Administrative consolidation preserves its one-call completion
         // contract by looping projection successors. Background work reports
         // every durable publication immediately, while explicitly retaining
@@ -1632,9 +1697,10 @@ pub(crate) fn stage_full_generation_tree(
         &upload_hashes,
     )?;
     let staged = (|| {
-        for (hash, bytes) in build.nodes.iter() {
-            store.insert_node(*hash, bytes)?;
-        }
+        store.insert_nodes(
+            build.nodes.iter().map(|(hash, bytes)| (*hash, bytes)),
+            store.node_upload_limits(),
+        )?;
         store.stage_manifest_with_delta(
             &record,
             expected_revision,
@@ -3829,7 +3895,7 @@ where
     // entity through EAVT. General entity idents and unrelated open-entity
     // facts never become a second schema projection.
     let mut schema_current = Vec::new();
-    for attribute in [crate::DB_INSTALL_ATTRIBUTE, crate::DB_ALTER_ATTRIBUTE] {
+    for attribute in [crate::DB_INSTALL_ATTRIBUTE, crate::DB_ALTER_ATTRIBUTE, crate::DB_INSTALL_PARTITION] {
         let prefix = IndexPrefix::Aevt {
             attribute: attribute as u32,
             entity: None,
@@ -4120,6 +4186,35 @@ impl TreeNodeMiss {
     }
 }
 
+struct TreeNodeMissOwner<'a> {
+    slot: &'a Mutex<Option<Arc<TreeNodeMiss>>>,
+    miss: Arc<TreeNodeMiss>,
+}
+
+impl Drop for TreeNodeMissOwner<'_> {
+    fn drop(&mut self) {
+        // An unwinding loader must not strand followers on its condition
+        // variable. Ordinary success and failure install their result first.
+        let mut result = lock(&self.miss.result);
+        if result.is_none() {
+            *result = Some(Err(fault(
+                "peer/tree-node-load-aborted",
+                "the shared tree node loader did not complete",
+            )));
+        }
+        drop(result);
+        let mut slot = lock(self.slot);
+        if slot
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, &self.miss))
+        {
+            *slot = None;
+        }
+        drop(slot);
+        self.miss.ready.notify_all();
+    }
+}
+
 /// Everything needed only by the explicit eager-oracle path. Native database
 /// values never retain this attachment or its legacy segment cache.
 struct PeerCompatibility {
@@ -4254,6 +4349,8 @@ impl RootPinManager {
     }
 
     fn ensure(&self) -> Result<(), SemanticError> {
+        let _phase = crate::OperationContext::current_or_process()
+            .phase(crate::OperationKind::PinMaintenance);
         let mut state = lock(&self.state);
         self.ensure_locked(&mut state)
     }
@@ -4499,8 +4596,38 @@ struct TieredReadCore {
     root_pins: Arc<RootPinManager>,
     programs: crate::postgres::SharedProgramCache,
     tree_cache: TreeNodeCache,
+    fulltext_cache: crate::fulltext_store::FulltextCache,
     tree_node_miss: Mutex<Option<Arc<TreeNodeMiss>>>,
+    ssd_cache: crate::SsdCache,
+    ssd_namespace: Digest,
+    block_reads: Mutex<crate::NodeBlockReadStats>,
     io: Mutex<PeerIo>,
+}
+
+fn open_ssd_cache(
+    connection: &PostgresConnectionConfig,
+    lineage: &str,
+) -> Result<(crate::SsdCache, Digest), SemanticError> {
+    let namespace = connection.ssd_access_namespace(lineage);
+    let cache = match connection.ssd_cache_config() {
+        Some(config) => crate::SsdCache::open(&config.directory, namespace, config.limits)?,
+        None => crate::SsdCache::disabled(),
+    };
+    Ok((cache, namespace))
+}
+
+impl TieredReadCore {
+    fn ssd_namespace_for_generation(&self, generation: u64) -> Digest {
+        let mut key = Vec::with_capacity(72);
+        key.extend_from_slice(b"atomic/ssd-generation/v1\0");
+        key.extend_from_slice(&self.ssd_namespace);
+        key.extend_from_slice(&generation.to_be_bytes());
+        crate::sha256(&key)
+    }
+    fn ssd_for_generation(&self, generation: u64) -> crate::SsdCache {
+        self.ssd_cache
+            .for_namespace(self.ssd_namespace_for_generation(generation))
+    }
 }
 
 struct PeerCore {
@@ -4852,6 +4979,7 @@ impl Peer {
             value: compatibility,
             segments: Arc::new(Mutex::new(cache)),
         });
+        let (ssd_cache, ssd_namespace) = open_ssd_cache(connection, &lineage_id)?;
         let read = Arc::new(TieredReadCore {
             database_id,
             lineage_id,
@@ -4861,7 +4989,11 @@ impl Peer {
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             tree_cache: tree_cache.clone(),
+            fulltext_cache: crate::fulltext_store::FulltextCache::new(tree_cache.max_entries, tree_cache.max_bytes),
             tree_node_miss: Mutex::new(None),
+            ssd_cache,
+            ssd_namespace,
+            block_reads: Mutex::new(crate::NodeBlockReadStats::default()),
             io: Mutex::new(PeerIo { client, tree_cache }),
         });
         Ok(Self {
@@ -4964,6 +5096,24 @@ impl Peer {
         stats.current_entries = stats.current_entries.saturating_add(segments.entries.len());
         stats.peak_entries = stats.peak_entries.max(stats.current_entries);
         stats
+    }
+
+    pub fn ssd_cache_stats(&self) -> crate::SsdCacheStats {
+        self.core.read.ssd_cache.stats()
+    }
+
+    pub fn node_block_read_stats(&self) -> crate::NodeBlockReadStats {
+        *lock(&self.core.read.block_reads)
+    }
+
+    /// Purge recognized local cache files for one excision generation. This
+    /// does not erase backups, OS/filesystem remnants or other cache roots.
+    /// Retained values may still hold facts in RAM; excision policy is explicit.
+    pub fn purge_ssd_generation(&self, generation: u64) -> bool {
+        self.core
+            .read
+            .ssd_cache
+            .purge_namespace(&self.core.read.ssd_namespace_for_generation(generation))
     }
 
     pub fn snapshot(&self) -> PeerSnapshot {
@@ -6331,6 +6481,7 @@ pub struct PeerCursorStats {
 /// recent tier. The cursor owns the snapshot and every currently visited
 /// node, so connection advancement and cache eviction cannot change it.
 pub struct PeerIndexCursor {
+    operation: Option<crate::sql_io::OperationContext>,
     durable: DurableTreeCursor,
     recent: RecentCursor,
     history: bool,
@@ -6963,6 +7114,7 @@ impl Iterator for PeerIndexCursor {
     type Item = Result<Datom, SemanticError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let _operation = self.operation.as_ref().map(|operation| operation.enter());
         if self.failed {
             return None;
         }
@@ -7127,6 +7279,7 @@ impl TieredSnapshot {
         )?;
         let stats = exact_open_stats(&state, scan_stats, tail_transactions, tail_range_reads)?;
         verify_database_lineage(&mut client, &database_id, &lineage_id)?;
+        let (ssd_cache, ssd_namespace) = open_ssd_cache(connection, &lineage_id)?;
         let core = Arc::new(TieredReadCore {
             database_id,
             lineage_id,
@@ -7136,7 +7289,11 @@ impl TieredSnapshot {
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             tree_cache: tree_cache.clone(),
+            fulltext_cache: crate::fulltext_store::FulltextCache::new(tree_cache.max_entries, tree_cache.max_bytes),
             tree_node_miss: Mutex::new(None),
+            ssd_cache,
+            ssd_namespace,
+            block_reads: Mutex::new(crate::NodeBlockReadStats::default()),
             io: Mutex::new(PeerIo { client, tree_cache }),
         });
         Ok((
@@ -7665,10 +7822,9 @@ impl TieredSnapshot {
         start: Option<&Datom>,
         end: Option<&Datom>,
     ) -> Result<PeerIndexCursor, SemanticError> {
-        // Amortize the session-pin health/reacquire check across the complete
-        // cursor. Individual directory/leaf loads must remain pure cache/SQL
-        // seeks, not add one PostgreSQL round trip per node.
-        self.core.root_pins.ensure()?;
+        // Resident roots, recent datoms, and authenticated cache entries remain
+        // valid independently of storage health. Cold loads check/reacquire
+        // pins before reading SQL; opening a cursor is entirely local.
         self.ensure_avet_ready(order, None)?;
         if let (Some(start), Some(end)) = (start, end)
             && !start.cmp_in(end, order).is_lt()
@@ -7690,6 +7846,7 @@ impl TieredSnapshot {
             end.cloned(),
         );
         Ok(PeerIndexCursor {
+            operation: crate::sql_io::OperationContext::current(),
             durable,
             recent,
             history,
@@ -7711,7 +7868,6 @@ impl TieredSnapshot {
         prefix: &IndexPrefix,
     ) -> Result<PeerIndexCursor, SemanticError> {
         prefix.validate()?;
-        self.core.root_pins.ensure()?;
         let requested_attribute = match prefix {
             IndexPrefix::Avet { attribute, .. } => Some(*attribute),
             _ => None,
@@ -7722,6 +7878,7 @@ impl TieredSnapshot {
         let recent = self.state.recent.prefix_cursor(history, prefix)?;
         let durable = DurableTreeCursor::new_prefix(self.clone(), root, history, prefix.clone());
         Ok(PeerIndexCursor {
+            operation: crate::sql_io::OperationContext::current(),
             durable,
             recent,
             history,
@@ -7771,7 +7928,6 @@ impl TieredSnapshot {
     ) -> Result<PeerIndexCursor, SemanticError> {
         let normalized = boundary.normalized()?;
         let order = normalized.order();
-        self.core.root_pins.ensure()?;
         let (_, root) = self.exact_tree(history, order)?;
         let recent = if reverse {
             self.state
@@ -7786,6 +7942,7 @@ impl TieredSnapshot {
             DurableTreeCursor::new_forward_boundary(self.clone(), root, history, normalized)
         };
         Ok(PeerIndexCursor {
+            operation: crate::sql_io::OperationContext::current(),
             durable,
             recent,
             history,
@@ -7830,7 +7987,6 @@ impl TieredSnapshot {
         history: bool,
         prefix: &IndexPrefix,
     ) -> Result<TreeRangeResult, SemanticError> {
-        self.core.root_pins.ensure()?;
         let requested_attribute = match prefix {
             IndexPrefix::Avet { attribute, .. } => Some(*attribute),
             _ => None,
@@ -8027,34 +8183,99 @@ impl TieredSnapshot {
         hash: Digest,
         stats: &mut TreeReadStats,
     ) -> Result<Arc<TreeNode>, SemanticError> {
-        let mut io = lock(&self.core.io);
-        if let Some(node) = io.tree_cache.get(&hash) {
+        if let Some(node) = self.core.tree_cache.get(&hash) {
             stats.cache_hits = stats.cache_hits.saturating_add(1);
             return Ok(node);
         }
         stats.cache_misses = stats.cache_misses.saturating_add(1);
-        let query = io
-            .client
-            .query_opt(
-                "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
-                &[&&hash[..]],
-            )
-            .map_err(|error| postgres_error("peer/tree-node-read", error));
-        let row = match query {
+        loop {
+            let mut slot = lock(&self.core.tree_node_miss);
+            if let Some(miss) = slot.as_ref().cloned() {
+                drop(slot);
+                let result = miss.wait();
+                if miss.hash == hash {
+                    return result;
+                }
+                // An unrelated miss or adoption may have made this node hot.
+                if let Some(node) = self.core.tree_cache.peek(&hash) {
+                    return Ok(node);
+                }
+                continue;
+            }
+            let miss = Arc::new(TreeNodeMiss {
+                hash,
+                result: Mutex::new(None),
+                ready: Condvar::new(),
+            });
+            *slot = Some(Arc::clone(&miss));
+            drop(slot);
+            let owner = TreeNodeMissOwner {
+                slot: &self.core.tree_node_miss,
+                miss,
+            };
+            let result = self.load_cold_node(hash, stats);
+            *lock(&owner.miss.result) = Some(result.clone());
+            drop(owner);
+            return result;
+        }
+    }
+
+    fn load_cold_node(
+        &self,
+        hash: Digest,
+        stats: &mut TreeReadStats,
+    ) -> Result<Arc<TreeNode>, SemanticError> {
+        let mut io = lock(&self.core.io);
+        if let Some(node) = self.core.tree_cache.peek(&hash) {
+            return Ok(node);
+        }
+        // Cache-resident reads need no heartbeat. Cold misses check the pin
+        // session; if it was lost, reacquire the exact lineage,
+        // generations, and manifests before fetching any missing bytes. GC's
+        // configured grace covers disconnection; retired content fails closed.
+        self.core.root_pins.ensure()?;
+        let ssd = self.core.ssd_for_generation(self.state.excision_generation);
+        if let Some(bytes) = ssd.get(&hash) {
+            let node = Arc::new(decode_tree_node(&hash, &bytes)?);
+            // Legacy cursor bytes describe canonical content fetched from
+            // PostgreSQL, not SSD decoding. Disk bytes have separate metrics.
+            let retained = usize::try_from(node.retained_bytes()).unwrap_or(usize::MAX);
+            self.core.tree_cache.insert(
+                hash,
+                Arc::clone(&node),
+                bytes.len().saturating_add(retained),
+            );
+            return Ok(node);
+        }
+        let query = crate::compressed_nodes::load_node_block(&mut io.client, hash);
+        let loaded = match query {
             Err(error) if is_postgres_connection_error(&error) => {
                 reconnect_peer_io(&self.core, &mut io)?;
-                io.client
-                    .query_opt(
-                        "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
-                        &[&&hash[..]],
-                    )
-                    .map_err(|error| postgres_error("peer/tree-node-read", error))?
+                self.core.root_pins.ensure()?;
+                crate::compressed_nodes::load_node_block(&mut io.client, hash)?
             }
             result => result?,
         }
         .ok_or_else(|| fault("peer/missing-tree-node", "tree child is missing"))?;
-        let bytes: Vec<u8> = row.get(0);
+        {
+            let mut total = lock(&self.core.block_reads);
+            let part = loaded.stats;
+            total.compressed_hits = total.compressed_hits.saturating_add(part.compressed_hits);
+            total.canonical_reads = total.canonical_reads.saturating_add(part.canonical_reads);
+            total.corrupt_projections = total
+                .corrupt_projections
+                .saturating_add(part.corrupt_projections);
+            total.canonical_bytes = total.canonical_bytes.saturating_add(part.canonical_bytes);
+            total.physical_read_bytes = total
+                .physical_read_bytes
+                .saturating_add(part.physical_read_bytes);
+            total.decode_elapsed_nanos = total
+                .decode_elapsed_nanos
+                .saturating_add(part.decode_elapsed_nanos);
+        }
+        let bytes = loaded.canonical;
         let node = Arc::new(decode_tree_node(&hash, &bytes)?);
+        ssd.put(&hash, &bytes);
         stats.decoded_bytes = stats.decoded_bytes.saturating_add(bytes.len() as u64);
         match node.as_ref() {
             TreeNode::Root(_) => stats.root_reads = stats.root_reads.saturating_add(1),
@@ -8078,7 +8299,9 @@ impl TieredSnapshot {
         // This is conservative—the SQL payload buffer is dropped here—but it
         // prevents compact encodings from disguising large resident values.
         let cache_weight = bytes.len().saturating_add(retained);
-        io.tree_cache.insert(hash, Arc::clone(&node), cache_weight);
+        self.core
+            .tree_cache
+            .insert(hash, Arc::clone(&node), cache_weight);
         Ok(node)
     }
 }
@@ -10210,6 +10433,20 @@ mod tests {
     use postgres::NoTls;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[test]
+    fn fulltext_upgrade_retains_the_reserved_ident_in_small_metadata() {
+        let before = Database::from_genesis(crate::vocabulary::pre_fulltext_genesis_datoms()).unwrap();
+        let metadata = MetadataProjection::from_database(&before).unwrap();
+        assert!(!metadata.schema_current.iter().any(|datom| datom.entity == crate::DB_FULLTEXT));
+        let report = before.with(&crate::fulltext_vocabulary_upgrade_ops(), 10).unwrap();
+        let transaction = DurableTransaction { database_id: "fulltext-metadata".into(), basis_t: 1,
+            previous_hash: [0;32], eidx_frontier: report.db_after.eidx_frontier(),
+            tempids: report.tempids, tx_data: report.tx_data };
+        let after = metadata.apply(&[transaction]).unwrap();
+        assert_eq!(after.schema.as_ref(), report.db_after.schema());
+        assert!(metadata.schema.attribute(crate::DB_FULLTEXT as u32).is_err());
+    }
+
     fn unique_database(prefix: &str) -> String {
         format!(
             "{prefix}_{}_{}",
@@ -10219,6 +10456,351 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         )
+    }
+
+    fn cache_isolation_fixture(entries: usize, bytes: usize) -> Option<(String, TieredSnapshot)> {
+        let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
+            eprintln!("SKIP: ATOMIC_POSTGRES_URL is required for native cache isolation");
+            return None;
+        };
+        crate::PostgresMigrator::connect(&connection)
+            .unwrap()
+            .migrate()
+            .unwrap();
+        let database = unique_database("native_cache_isolation");
+        let mut schema = Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("cache", "value"),
+                ValueType::String,
+                Cardinality::One,
+            ))
+            .unwrap();
+        crate::PostgresStore::connect(&connection)
+            .unwrap()
+            .create_database(&database, schema)
+            .unwrap();
+        PostgresIndexer::connect(&connection, &database)
+            .unwrap()
+            .consolidate()
+            .unwrap();
+        let snapshot = Peer::connect_with_cache_limits(&connection, database, entries, bytes)
+            .unwrap()
+            .tiered_snapshot();
+        Some((connection, snapshot))
+    }
+
+    #[test]
+    fn native_cache_isolation_warm_queries_ignore_sql_and_pin_mutexes() {
+        use crate::{Clause, DataPattern, FindElement, FindSpec, Term};
+        let Some((connection, snapshot)) = cache_isolation_fixture(64, 8 * 1024 * 1024) else {
+            return;
+        };
+        let query = Query::new(
+            FindSpec::Relation(vec![FindElement::Variable("entity".into())]),
+            vec![Clause::Pattern(Box::new(DataPattern::new(
+                Term::var("entity"),
+                Term::Constant(Value::Keyword(Keyword::new("db", "ident"))),
+                Term::var("ident"),
+            )))],
+        );
+        let expected = snapshot
+            .query(&query, &[], &QueryControl::default())
+            .unwrap()
+            .result;
+        let expected_datoms = snapshot.datoms(false, IndexOrder::Eavt).unwrap().datoms;
+        assert!(!expected_datoms.is_empty());
+        let before = snapshot.load_stats();
+        let core = Arc::clone(&snapshot.core);
+        let mut control = Client::connect(&connection, NoTls).unwrap();
+        let io_pid: i32 = lock(&core.io)
+            .client
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        assert!(
+            control
+                .query_one("SELECT pg_terminate_backend($1)", &[&io_pid])
+                .unwrap()
+                .get::<_, bool>(0)
+        );
+        terminate_cache_pin(&mut control, &snapshot);
+        // This is a deterministic contention witness, not a timing benchmark:
+        // neither lock can become available until after the result arrives.
+        let io = lock(&core.io);
+        let pins = lock(&core.root_pins.state);
+        let (send, receive) = std::sync::mpsc::sync_channel(1);
+        let reader = snapshot.clone();
+        let worker = std::thread::spawn(move || {
+            let operation =
+                crate::sql_io::OperationContext::new(crate::sql_io::OperationKind::Query);
+            let _scope = operation.enter();
+            let result = (|| {
+                let query_result = reader.query(&query, &[], &QueryControl::default())?;
+                let datoms = reader.datoms(false, IndexOrder::Eavt)?;
+                Ok::<_, SemanticError>((
+                    query_result.result,
+                    datoms,
+                    reader.tree_cache_stats(),
+                    operation.snapshot(),
+                ))
+            })();
+            send.send(result).unwrap();
+        });
+        let received = receive.recv_timeout(Duration::from_secs(3));
+        drop(pins);
+        drop(io);
+        worker.join().unwrap();
+        let (result, datoms, _, sql) = received
+            .expect("warm query or cache stats waited on a storage/pin mutex")
+            .unwrap();
+        assert_eq!(result, expected);
+        assert_eq!(datoms.datoms, expected_datoms);
+        assert_eq!(datoms.stats.cache_misses, 0);
+        assert_eq!(
+            sql.calls, 0,
+            "warm queries must not issue even health/metadata SQL: {sql:?}"
+        );
+        let after = snapshot.load_stats();
+        assert_eq!(after.directory_reads, before.directory_reads);
+        assert_eq!(after.leaf_reads, before.leaf_reads);
+        assert_eq!(after.cursor_sql_reads, before.cursor_sql_reads);
+        assert_eq!(after.compatibility_materializations, 0);
+    }
+
+    #[test]
+    fn native_cache_isolation_coalesces_uncacheable_identical_misses() {
+        let Some((_connection, snapshot)) = cache_isolation_fixture(0, 0) else {
+            return;
+        };
+        let (_, root) = snapshot.exact_tree(false, IndexOrder::Eavt).unwrap();
+        let hash = root.directories[0].hash;
+        let core = Arc::clone(&snapshot.core);
+        let io = lock(&core.io);
+        let count = 8;
+        let start = Arc::new(std::sync::Barrier::new(count + 1));
+        let workers: Vec<_> = (0..count)
+            .map(|_| {
+                let snapshot = snapshot.clone();
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    let operation =
+                        crate::sql_io::OperationContext::new(crate::sql_io::OperationKind::Query);
+                    let _scope = operation.enter();
+                    start.wait();
+                    let mut stats = TreeReadStats::default();
+                    let node = snapshot.load_node(hash, &mut stats).unwrap();
+                    (node, stats, operation.snapshot())
+                })
+            })
+            .collect();
+        start.wait();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let joined = loop {
+            let joined = lock(&core.tree_node_miss)
+                .as_ref()
+                .is_some_and(|miss| Arc::strong_count(miss) == count + 1);
+            if joined || Instant::now() >= deadline {
+                break joined;
+            }
+            std::thread::yield_now();
+        };
+        drop(io);
+        let results: Vec<_> = workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect();
+        assert!(
+            joined,
+            "all concurrent callers must join the same blocked miss"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|(node, _, _)| Arc::ptr_eq(node, &results[0].0))
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|(_, stats, _)| stats.directory_reads)
+                .sum::<u64>(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .map(|(_, _, sql)| sql
+                    .by_kind
+                    .get(&crate::sql_io::SqlCallKind::QueryOpt)
+                    .map_or(0, |stats| stats.calls))
+                .sum::<u64>(),
+            1
+        );
+        assert_eq!(snapshot.tree_cache_stats().current_entries, 0);
+        assert!(lock(&core.tree_node_miss).is_none());
+    }
+
+    #[test]
+    fn native_cache_isolation_lazy_cursor_retains_creation_operation() {
+        use crate::sql_io::{OperationContext, OperationKind};
+        let Some((_connection, snapshot)) = cache_isolation_fixture(0, 0) else {
+            return;
+        };
+        let operation = OperationContext::new(OperationKind::Query);
+        let mut cursor = {
+            let _scope = operation.enter();
+            snapshot
+                .range_cursor(false, IndexOrder::Eavt, None, None)
+                .unwrap()
+        };
+        assert_eq!(
+            operation.snapshot().calls,
+            0,
+            "cursor construction stays local"
+        );
+        let unrelated = OperationContext::new(OperationKind::Application);
+        {
+            let _scope = unrelated.enter();
+            assert!(cursor.next().unwrap().is_ok());
+        }
+        assert!(operation.snapshot().sql_calls > 0);
+        assert_eq!(
+            unrelated.snapshot().calls,
+            0,
+            "deferred I/O belongs to the cursor's original operation"
+        );
+    }
+
+    fn terminate_cache_pin(control: &mut Client, snapshot: &TieredSnapshot) {
+        let pid: i32 = lock(&snapshot.core.root_pins.state)
+            .client
+            .as_mut()
+            .unwrap()
+            .query_one("SELECT pg_backend_pid()", &[])
+            .unwrap()
+            .get(0);
+        assert!(
+            control
+                .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+                .unwrap()
+                .get::<_, bool>(0)
+        );
+    }
+
+    #[test]
+    fn native_cache_isolation_pin_loss_reacquires_or_refuses_retired_cold_data() {
+        let Some((connection, snapshot)) = cache_isolation_fixture(64, 8 * 1024 * 1024) else {
+            return;
+        };
+        let mut control = Client::connect(&connection, NoTls).unwrap();
+        let expected = snapshot.datoms(false, IndexOrder::Eavt).unwrap().datoms;
+        let manifest = snapshot.durable_manifest_hash().unwrap();
+        let key = tree_manifest_advisory_key(&manifest);
+        let generation = sql_basis(snapshot.endpoint().generation).unwrap();
+        let generation_key: i64 = control
+            .query_one(
+                "SELECT atomic_log_generation_pin_key($1, $2)",
+                &[&snapshot.core.database_id, &generation],
+            )
+            .unwrap()
+            .get(0);
+        terminate_cache_pin(&mut control, &snapshot);
+        assert_eq!(
+            snapshot.datoms(false, IndexOrder::Eavt).unwrap().datoms,
+            expected
+        );
+        // Warm use must not secretly reconnect. The terminated session's locks
+        // are absent until a cold fetch explicitly restores both fences.
+        let mut probe = control.transaction().unwrap();
+        assert!(
+            probe
+                .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                .unwrap()
+                .get::<_, bool>(0)
+        );
+        probe.rollback().unwrap();
+        snapshot.core.tree_cache.clear();
+        assert_eq!(
+            snapshot.datoms(false, IndexOrder::Eavt).unwrap().datoms,
+            expected
+        );
+        let mut probe = control.transaction().unwrap();
+        for key in [key, generation_key] {
+            assert!(
+                !probe
+                    .query_one("SELECT pg_try_advisory_xact_lock($1)", &[&key])
+                    .unwrap()
+                    .get::<_, bool>(0)
+            );
+        }
+        probe.rollback().unwrap();
+
+        terminate_cache_pin(&mut control, &snapshot);
+        // Model the durable collector-claim boundary after real session loss.
+        // This isolated fault does not remove any payload and never bypasses
+        // reader validation. Acquire the same exclusive fence used by GC.
+        let mut retire = control.transaction().unwrap();
+        retire
+            .query_one("SELECT pg_advisory_xact_lock($1)", &[&key])
+            .unwrap();
+        retire.execute(
+            "INSERT INTO atomic_tree_retirements \
+             (database_id,publication_revision,manifest_hash,retired_at,bookkeeping_complete,garbage_complete) \
+             SELECT database_id,publication_revision,manifest_hash,clock_timestamp(),true,true \
+             FROM atomic_tree_publications WHERE manifest_hash=$1 ON CONFLICT DO NOTHING",
+            &[&&manifest[..]],
+        ).unwrap();
+        assert_eq!(retire.execute(
+            "INSERT INTO atomic_tree_retirement_progress (database_id,publication_revision,manifest_hash) \
+             SELECT database_id,publication_revision,manifest_hash FROM atomic_tree_publications WHERE manifest_hash=$1",
+            &[&&manifest[..]],
+        ).unwrap(), 1);
+        retire.commit().unwrap();
+        assert_eq!(
+            snapshot.datoms(false, IndexOrder::Eavt).unwrap().datoms,
+            expected
+        );
+        snapshot.core.tree_cache.clear();
+        let before = snapshot.load_stats();
+        let refused = snapshot.datoms(false, IndexOrder::Eavt).unwrap_err();
+        let after = snapshot.load_stats();
+        // Remove only this test's simulated claim before asserting its result.
+        let mut restore = control.transaction().unwrap();
+        restore
+            .batch_execute("SET LOCAL session_replication_role=replica")
+            .unwrap();
+        restore
+            .execute(
+                "DELETE FROM atomic_tree_retirement_progress WHERE manifest_hash=$1",
+                &[&&manifest[..]],
+            )
+            .unwrap();
+        restore
+            .execute(
+                "DELETE FROM atomic_tree_retirements WHERE manifest_hash=$1",
+                &[&&manifest[..]],
+            )
+            .unwrap();
+        restore.commit().unwrap();
+        assert_eq!(refused.code, "peer/root-retired-during-load");
+        assert_eq!(after.directory_reads, before.directory_reads);
+        assert_eq!(after.leaf_reads, before.leaf_reads);
+        assert_eq!(
+            snapshot.datoms(false, IndexOrder::Eavt).unwrap().datoms,
+            expected
+        );
+        assert_eq!(
+            RootPinManager::connect(
+                &snapshot.core.connection,
+                &snapshot.core.database_id,
+                "wrong-lineage"
+            )
+            .err()
+            .unwrap()
+            .code,
+            "peer/database-lineage-changed"
+        );
     }
 
     #[test]
@@ -10732,7 +11314,8 @@ mod tests {
         ).unwrap();
         staging.commit().unwrap();
 
-        let pins = RootPinManager::connect(&config, &database_id).unwrap();
+        let lineage = read_database_lineage(&mut administrator, &database_id).unwrap();
+        let pins = RootPinManager::connect(&config, &database_id, &lineage).unwrap();
         let _generation = pins.acquire_generation(endpoint.generation).unwrap();
         let fence = pins.acquire_manifest(receipt.manifest_hash, false).unwrap();
         let key = tree_manifest_advisory_key(&receipt.manifest_hash);

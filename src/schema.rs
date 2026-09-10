@@ -61,6 +61,8 @@ pub struct Attribute {
     pub indexed: bool,
     pub component: bool,
     pub no_history: bool,
+    /// Eventually consistent analyzed search; immutable after installation.
+    pub fulltext: bool,
     pub tuple: Option<TupleSpec>,
     pub tuple_discontinued: bool,
     /// Names of deterministic value predicates. Implementations are supplied
@@ -84,6 +86,7 @@ impl Attribute {
             indexed: false,
             component: false,
             no_history: false,
+            fulltext: false,
             tuple: None,
             tuple_discontinued: false,
             predicates: Vec::new(),
@@ -97,6 +100,11 @@ impl Attribute {
 
     pub fn component(mut self) -> Self {
         self.component = true;
+        self
+    }
+
+    pub fn fulltext(mut self) -> Self {
+        self.fulltext = true;
         self
     }
 
@@ -123,6 +131,8 @@ pub struct Schema {
     /// transaction expansion touches only composites affected by an E/A
     /// change rather than scanning the complete schema.
     constituents: BTreeMap<AttrId, BTreeSet<AttrId>>,
+    /// Named partition installation is ordinary information, not a new store.
+    partitions: BTreeMap<u32, Keyword>,
 }
 
 fn active_composite_constituents(attribute: &Attribute) -> Vec<AttrId> {
@@ -136,6 +146,43 @@ fn active_composite_constituents(attribute: &Attribute) -> Vec<AttrId> {
 }
 
 impl Schema {
+    /// Installed named partitions, including the three builtin partitions.
+    /// Implicit partitions are computed by `implicit_part`, not enumerated.
+    pub fn partitions(&self) -> impl Iterator<Item = (u32, &Keyword)> {
+        self.partitions.iter().map(|(id, ident)| (*id, ident))
+    }
+
+    pub(crate) fn validate_partition_bits(&self, bits: u32) -> Result<(), SemanticError> {
+        if matches!(
+            bits,
+            crate::DB_PARTITION | crate::TX_PARTITION | crate::USER_PARTITION
+        ) || (crate::identity::IMPLICIT_PARTITION_BASE..=crate::MAX_PARTITION).contains(&bits)
+            || self.partitions.contains_key(&bits)
+        {
+            return Ok(());
+        }
+        Err(SemanticError::incorrect(
+            "transaction/not-a-partition",
+            format!("partition {bits} is not installed in db-before"),
+        ))
+    }
+
+    pub(crate) fn validate_partition_successor(
+        &self,
+        successor: &Self,
+    ) -> Result<(), SemanticError> {
+        if self
+            .partitions
+            .keys()
+            .any(|partition| !successor.partitions.contains_key(partition))
+        {
+            return Err(SemanticError::incorrect(
+                "schema/partition-install-immutable",
+                "installed partitions cannot be removed",
+            ));
+        }
+        Ok(())
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -214,6 +261,12 @@ impl Schema {
             return Err(SemanticError::incorrect(
                 "schema/value-type-immutable",
                 "an installed attribute's value type cannot change",
+            ));
+        }
+        if current.fulltext != proposed.fulltext {
+            return Err(SemanticError::incorrect(
+                "schema/fulltext-immutable",
+                "an installed attribute's fulltext property cannot change",
             ));
         }
         if current.tuple != proposed.tuple {
@@ -344,11 +397,17 @@ impl Schema {
                     (composites.len() as u64).saturating_mul(size_of::<AttrId>() as u64),
                 )
         });
+        let partitions = self.partitions.values().fold(0_u64, |bytes, ident| {
+            bytes
+                .saturating_add(size_of::<u32>() as u64)
+                .saturating_add(keyword_bytes(ident))
+        });
         (size_of::<Self>() as u64)
             .saturating_add(attributes)
             .saturating_add(current_idents)
             .saturating_add(ident_aliases)
             .saturating_add(constituents)
+            .saturating_add(partitions)
     }
 
     /// Active composite attributes that depend on `constituent`.
@@ -434,7 +493,7 @@ impl Schema {
                 facts.push(datom);
             }
         }
-        Self::derive_from_entity_information(installed, idents, |entity| {
+        Self::derive_from_entity_information(installed, idents, current, |entity| {
             by_entity[&entity].as_slice()
         })
     }
@@ -442,6 +501,7 @@ impl Schema {
     fn derive_from_entity_information<'a>(
         installed: BTreeSet<u64>,
         idents: &IdentIndex,
+        partition_information: &[Datom],
         entity_facts: impl Fn(u64) -> &'a [&'a Datom],
     ) -> Result<Self, SemanticError> {
         let mut schema = Self::new();
@@ -480,6 +540,8 @@ impl Schema {
                 .unwrap_or(false);
             let no_history =
                 optional_bool(current, entity, DB_NO_HISTORY, ":db/noHistory")?.unwrap_or(false);
+            let fulltext = optional_bool(current, entity, crate::DB_FULLTEXT, ":db/fulltext")?
+                .unwrap_or(false);
 
             let homogeneous = optional_keyword(current, entity, DB_TUPLE_TYPE, ":db/tupleType")?;
             let heterogeneous = optional_tuple(current, entity, DB_TUPLE_TYPES, ":db/tupleTypes")?;
@@ -562,6 +624,7 @@ impl Schema {
                 indexed: explicitly_indexed,
                 component,
                 no_history,
+                fulltext,
                 tuple,
                 tuple_discontinued,
                 predicates,
@@ -581,6 +644,61 @@ impl Schema {
             if &current.ident != ident {
                 schema.install_ident_alias(ident.clone(), attribute)?;
             }
+        }
+        // Exact older genesis profiles predate ordinary partition markers.
+        // Once their explicit vocabulary upgrade is installed, the markers
+        // themselves must remain present rather than being synthesized back.
+        if !schema
+            .attributes
+            .contains_key(&(crate::DB_INSTALL_PARTITION as u32))
+        {
+            for (id, name) in [
+                (crate::DB_PART_DB, "db"),
+                (crate::DB_PART_TX, "tx"),
+                (crate::DB_PART_USER, "user"),
+            ] {
+                schema
+                    .partitions
+                    .insert(id as u32, Keyword::new("db.part", name));
+            }
+        }
+        for datom in partition_information
+            .iter()
+            .filter(|datom| u64::from(datom.attribute) == crate::DB_INSTALL_PARTITION)
+        {
+            let Value::Ref(entity) = datom.value else {
+                return Err(schema_information_error(
+                    "schema/invalid-partition-install",
+                    "partition installation requires an entity ref",
+                ));
+            };
+            if !datom.added
+                || datom.entity != DB_PART_DB
+                || crate::eid_to_part(entity)? != crate::DB_PARTITION
+                || entity >= u64::from(crate::identity::IMPLICIT_PARTITION_BASE)
+                || schema.attributes.contains_key(&(entity as u32))
+            {
+                return Err(schema_information_error(
+                    "schema/invalid-partition-install",
+                    "named partitions require distinct system-partition entities below the implicit partition range",
+                ));
+            }
+            let ident = idents.ident(entity).ok_or_else(|| {
+                schema_information_error(
+                    "schema/partition-ident-required",
+                    "named partition needs an ident",
+                )
+            })?;
+            schema.partitions.insert(entity as u32, ident.clone());
+        }
+        if [crate::DB_PART_DB, crate::DB_PART_TX, crate::DB_PART_USER]
+            .iter()
+            .any(|part| !schema.partitions.contains_key(&(*part as u32)))
+        {
+            return Err(schema_information_error(
+                "schema/invalid-partition-install",
+                "the three builtin partition markers must remain installed",
+            ));
         }
         schema.validate_tuple_definitions()?;
         Ok(schema)
@@ -695,6 +813,12 @@ impl Schema {
     }
 
     pub(crate) fn validate_attribute(&self, attribute: &Attribute) -> Result<(), SemanticError> {
+        if attribute.fulltext && attribute.value_type != ValueType::String {
+            return Err(SemanticError::incorrect(
+                "schema/fulltext-must-be-string",
+                "fulltext indexing requires string value type",
+            ));
+        }
         if attribute.predicates.iter().any(|predicate| {
             let Some((namespace, name)) = predicate.split_once('/') else {
                 return true;
@@ -896,6 +1020,14 @@ pub(crate) fn attribute_information_datoms(
         datoms.push(information_assertion(
             entity,
             DB_NO_HISTORY,
+            Value::Bool(true),
+            tx,
+        )?);
+    }
+    if attribute.fulltext {
+        datoms.push(information_assertion(
+            entity,
+            crate::DB_FULLTEXT,
             Value::Bool(true),
             tx,
         )?);
@@ -1260,7 +1392,7 @@ mod grouped_information_tests {
             installed.insert(entity);
         }
         let all: Vec<_> = current.iter().collect();
-        Schema::derive_from_entity_information(installed, idents, |_| &all)
+        Schema::derive_from_entity_information(installed, idents, current, |_| &all)
     }
 
     fn fixture() -> (Vec<Datom>, IdentIndex) {

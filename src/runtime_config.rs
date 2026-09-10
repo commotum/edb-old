@@ -74,7 +74,7 @@ fn config_from(
             _ => Err(invalid("config/boolean", "ATOMIC_KEEPALIVES")),
         })
         .transpose()?;
-    config.with_io_policy(PostgresIoPolicy {
+    config = config.with_io_policy(PostgresIoPolicy {
         connect_timeout: number("ATOMIC_CONNECT_TIMEOUT_MS")?.map(Duration::from_millis),
         statement_timeout: number("ATOMIC_STATEMENT_TIMEOUT_MS")?.map(Duration::from_millis),
         lock_timeout: number("ATOMIC_LOCK_TIMEOUT_MS")?.map(Duration::from_millis),
@@ -88,7 +88,34 @@ fn config_from(
                     .map_err(|_| invalid("config/positive-integer", "ATOMIC_KEEPALIVES_RETRIES"))
             })
             .transpose()?,
-    })
+    })?;
+    let ssd_directory = lookup("ATOMIC_SSD_CACHE_DIR")?;
+    let ssd_entries = number("ATOMIC_SSD_CACHE_ENTRIES")?;
+    let ssd_bytes = number("ATOMIC_SSD_CACHE_BYTES")?;
+    if let Some(directory) = ssd_directory {
+        if directory.is_empty() {
+            return Err(invalid("config/environment", "ATOMIC_SSD_CACHE_DIR"));
+        }
+        let defaults = crate::SsdCacheLimits::default();
+        let max_entries = ssd_entries
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| invalid("config/positive-integer", "ATOMIC_SSD_CACHE_ENTRIES"))?
+            .unwrap_or(defaults.max_entries);
+        config = config.with_ssd_cache(crate::SsdCacheConfig {
+            directory: directory.into(),
+            limits: crate::SsdCacheLimits {
+                max_entries,
+                max_bytes: ssd_bytes.unwrap_or(defaults.max_bytes),
+            },
+        });
+    } else if ssd_entries.is_some() || ssd_bytes.is_some() {
+        return Err(invalid(
+            "config/ssd-directory-required",
+            "ATOMIC_SSD_CACHE_DIR",
+        ));
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -102,6 +129,29 @@ mod tests {
                 .find(|(k, _)| *k == key)
                 .map(|(_, v)| v.to_string()))
         })
+    }
+
+    #[test]
+    fn ssd_requires_opt_in_directory_and_positive_budgets() {
+        let mut entries = vec![
+            ("ATOMIC_POSTGRES_URL", "host=localhost"),
+            ("ATOMIC_POSTGRES_TRANSPORT", "plaintext"),
+        ];
+        assert!(parse(&entries).unwrap().ssd_cache_config().is_none());
+        entries.push(("ATOMIC_SSD_CACHE_ENTRIES", "12"));
+        assert!(parse(&entries).is_err());
+        entries.push(("ATOMIC_SSD_CACHE_DIR", "/private-cache"));
+        assert_eq!(
+            parse(&entries)
+                .unwrap()
+                .ssd_cache_config()
+                .unwrap()
+                .limits
+                .max_entries,
+            12
+        );
+        entries.push(("ATOMIC_SSD_CACHE_BYTES", "0"));
+        assert!(parse(&entries).is_err());
     }
 
     #[test]

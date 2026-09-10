@@ -2,6 +2,7 @@ use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
 use num_traits::One;
 use std::cmp::Ordering;
+use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -92,6 +93,64 @@ pub enum Value {
 }
 
 impl Value {
+    /// Hash under logical index equality (not storage identity). In particular
+    /// integral refs, decimals and binary floats share a hash when index_cmp
+    /// considers them equal. This is internal: no persisted hash format changes.
+    pub(crate) fn logical_hash(&self, state: &mut impl Hasher) {
+        if let Some(number) = Numeric::from_value(self) {
+            0u8.hash(state);
+            match number {
+                Numeric::NegativeInfinity => 0u8.hash(state),
+                Numeric::PositiveInfinity => 2u8.hash(state),
+                Numeric::NaN => 3u8.hash(state),
+                Numeric::Finite {
+                    numerator,
+                    denominator,
+                } => {
+                    1u8.hash(state);
+                    let mut left = numerator.clone();
+                    let mut right = denominator.clone();
+                    while right != BigInt::from(0) {
+                        let rest = &left % &right;
+                        left = right;
+                        right = rest;
+                    }
+                    if left < BigInt::from(0) {
+                        left = -left;
+                    }
+                    (&numerator / &left).hash(state);
+                    (&denominator / &left).hash(state);
+                }
+            }
+            return;
+        }
+        self.non_numeric_rank().hash(state);
+        match self {
+            Self::Bool(value) => value.hash(state),
+            Self::Bytes(value) => value.hash(state),
+            Self::Function(value) => value.hash(state),
+            Self::Instant(value) => value.hash(state),
+            Self::Keyword(value) => value.hash(state),
+            Self::Symbol(value) => value.hash(state),
+            Self::String(value) | Self::Uri(value) => value.hash(state),
+            Self::Uuid(value) => value.hash(state),
+            Self::Tuple(values) => {
+                values.len().hash(state);
+                for value in values {
+                    value.is_some().hash(state);
+                    if let Some(value) = value {
+                        value.logical_hash(state);
+                    }
+                }
+            }
+            Self::Long(_)
+            | Self::Ref(_)
+            | Self::BigInt(_)
+            | Self::BigDec(_)
+            | Self::Float(_)
+            | Self::Double(_) => unreachable!("numeric hash handled above"),
+        }
+    }
     /// Bytes retained outside the inline `Value` enum allocation.
     ///
     /// This is an allocator-independent capacity account used for memory-index

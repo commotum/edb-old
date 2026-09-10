@@ -9,7 +9,7 @@ pub struct QuerySequence {
     rows: std::vec::IntoIter<Vec<QueryValue>>,
     elements: Vec<FindElement>,
     sources: Vec<QuerySource>,
-    budget: QueryPullBudget,
+    budget: QueryPullBudget<'static>,
     stats: QueryStats,
     plan: Vec<PlanStep>,
     failed: bool,
@@ -111,7 +111,7 @@ impl QueryEngine {
         validate_query(query, inputs.len())?;
         let source_map = sources
             .iter()
-            .map(|source| (source.name.as_str(), &source.database))
+            .map(|source| (source.name.as_str(), SourceRef::Database(&source.database)))
             .collect();
         validate_consumed_sources(query, &source_map)?;
         let mut prepared = query.clone();

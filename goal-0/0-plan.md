@@ -16,8 +16,8 @@ equivalence are not objectives.
 
 ## Current state and execution ownership
 
-**Status:** In progress. Goal1 is complete; Goal2 is the sole active child.
-[Goal1](../goal-1/0-plan.md) records the runnable baseline; Goal2 extends it.
+**Status:** In progress. Goals1–5 are complete; Goal6 is the sole active child.
+[Goal1](../goal-1/0-plan.md) records the runnable baseline; Goal2 records storage.
 G1 (original Goals0–8), G2 (Goals9–17) and G3 (the completed native-engine pass)
 under goal-archive are historical evidence, not active instructions.
 
@@ -138,7 +138,23 @@ engine features and the complete operator CLI are not this child's finish gate.
 
 ### 2. Establish efficient immutable storage and reads
 
-**Status:** In progress in Goal2; measurement and cache/pin boundaries first.
+**Status:** Complete in Goal2. Zero-SQL warm reads, observed SQL/transaction
+phases, verified batching, versioned compressed projections, opt-in authenticated
+SSD reuse, snapshot statistics and finite index requests are implemented and
+tested. Bounded codec/upload overlap and generated storage replay/reduction pass;
+measured decision retains the ordered transaction path. Final cache-concurrency,
+corrupt-header fallback and failure-signature repairs pass. The final actual
+PostgreSQL application rerun passed2/2(5.59s). An opt-in protocol relay measured
+396 request/ready cycles for66 per-node uploads,6 batched,9 with compression;
+these are protocol cycles, not measured TCP RTTs. Driver counts were132/2/3.
+
+Compression preserves authoritative canonical rows and all earlier checksums;
+optional projections reduce suitable transfer/cache bytes but add PostgreSQL
+storage/CPU. Real SSD native check:500573 canonical/7820 compressed bytes;
+reopen3SQL retention checks versus cold6SQL. Supported app process restart reused
+18 blocks and warmed calculations made zeroSQL. Serial isolated backup suite
+10/10 passes; initial parallel global-maintenance contention is retained in
+Goal2, not counted as a passing run. Goal2 owns detailed measurements and limits.
 
 **Outcome:** Measurable, safely cached native reads and efficient immutable
 block/index I/O form a stable foundation for later features.
@@ -177,7 +193,14 @@ evidence and, if changed, dependent-failure/unknown-outcome/ordering checks.
 
 ### 3. Complete functional values and useful query/programming
 
-**Status:** Pending.
+**Status:** Complete in Goal3. Shared indexed branches, exact supported references,
+V2 native programs, tuple/log sources, prepared reuse/grouped/hash joins, bounded
+advisory hints and executable safe planning pass real PostgreSQL acceptance.
+Required-manifest retention is distinct from root-independent keys(noHistory).
+Depth4096 has height14/selective24nodes;16k-row numeric join109ms versus125s
+reference (one fixture). Warm grouped probes0SQL. Blocked hints do not delay ack;
+cold/warm hints added16SQL and showed no benefit in the small sample. Goal3 owns
+measurements, limits and failure evidence. Stage6 still owns remote transport.
 
 **Outcome:** Applications efficiently compose queries and speculative values,
 identify/reopen exact supported snapshots, and plan safe changes using native APIs.
@@ -228,7 +251,14 @@ assumptions reject/replan, and reports expose the exact committed value.
 
 ### 4. Complete partition identity and locality
 
-**Status:** Pending.
+**Status:** Complete in Goal4 (2026-09-09). Named/implicit allocation, force/match,
+component affinity and versioned program/forms are implemented. Old-binary data
+passed exact explicit upgrade without changing genesis; fresh-EID/reference and
+delayed-install regressions pass. Restricted-role application/retry/restart now
+extends throughbasis9 with stored UUID helpers. Final real PostgreSQL partition
+suite4/4 passed; grouped tenant sample16→3leaf reads and32→6SQL, warm0SQLboth.
+One global frontier/native user default and signed UUID index order are retained;
+Goal4/documents explain limits. This is measured locality, not universal speed.
 
 **Outcome:** Applications control new-entity placement using native partition
 semantics and have documented time-ordered UUID helpers.
@@ -248,7 +278,14 @@ when Stage6 delivers networking.
 
 ### 5. Add integrated peer-local fulltext
 
-**Status:** Pending.
+**Status:** Complete in Goal5. Compatible fulltext metadata/ABI9, native
+analysis/ranking, Datalog/program integration, exact-view filtering and the
+separate-process app throughbasis11 pass real PostgreSQL checks. Storage
+publication interruption/repair/restore/GC/excision, restricted roles and
+observable background failure/idle retry pass. Native402-document selective
+fixture reads10167of211095searchbytes/14SQL; warm0SQL, cache15321bytes. Full
+source-specific rebuild/spill cost and eventual coverage are explicit; no
+incremental-search or universal scale claim. Goal5 owns detailed evidence.
 
 **Outcome:** Analyzed, relevance-ranked string search composes with Datalog and
 respects the queried database view without another service.
@@ -265,7 +302,7 @@ peers over PostgreSQL-backed search data; substring matching is not fulltext.
 
 ### 6. Complete distributed applications and operator delivery
 
-**Status:** Pending.
+**Status:** Active in Goal6.
 
 **Outcome:** Secure multi-host applications and operators use the completed
 capabilities through supported deployment and administrative interfaces.
@@ -314,6 +351,10 @@ queries, cold-start bursts and scan-heavy analytics alongside ordinary traffic.
 Profile/improve material operating bottlenecks, including G3 restore/inspection,
 without weakening integrity. Revisit the pipeline decision only if new phase
 evidence warrants it; do not first introduce major test infrastructure here.
+Goal2 also identified commitment-tree point-load I/O inside transaction encoding:
+four256-operation commits used1108–1109SQL calls in that phase. Profile this
+alongside restore/inspection; it is not evidence for adding more transaction
+pipeline stages before understanding the work.
 
 **Completion signal:** Real PostgreSQL acceptance covers every stage's features
 and relevant interrupted/retry/upgrade boundaries. Publish throughput, latency
@@ -329,8 +370,12 @@ product and integrated acceptance close Goal0.
 
 ## Continuation
 
-Active: Goal2, on 2026-09-09. Goal1's executable, application, endpoint and
-seed/replay signals passed on real PostgreSQL; see its concise evidence record.
-Next: attribute total SQL and separate immutable cache reads from pin/storage
-maintenance before optimizing storage. No later stage or integrated completion
-is claimed. Keep this plan authoritative; loops/prompts are continuation guides.
+Active: Goal6, on 2026-09-09. Goals1–5 passed their real PostgreSQL/application,
+semantic/failure and measured-cost signals; see their evidence records. Goal2
+retains ordered transaction processing and records commitment-tree I/O for Stage7.
+Next: implement authenticated remote delivery, bounded durable consumers and
+administrative commands. Disposable user/network namespaces are available for
+real isolated-network acceptance (`unshare --user --map-root-user --net true`
+passed); PostgreSQL stays in the isolated fixture, reachable by private socket.
+No later stage or integrated completion is claimed. Keep this plan authoritative;
+loops/prompts are continuation guides.

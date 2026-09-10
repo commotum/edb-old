@@ -6,6 +6,10 @@ the measured core deployment envelope. The fresh Goal0 plans the next product
 and capability phase. No deployment-independent throughput, recovery
 time or network-outage bound is implied.
 
+The supported executable commands and explicit target/preview/apply controls
+are documented in [Administrative CLI](admin.md). The API-level guarantees and
+measured limits below still apply to those commands.
+
 ## Measured integrated acceptance — 2026-09-09
 
 The 100,000-record/400,000-business-fact system-of-record workload uses two

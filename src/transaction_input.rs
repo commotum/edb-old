@@ -108,6 +108,8 @@ pub(crate) fn validate_ops_input(ops: &[TxOp]) -> Result<(), SemanticError> {
                 validate_entity_input(entity)?;
                 validate_entity_input(spec)?;
             }
+            TxOp::ForcePartition { partition, .. } => validate_entity_input(partition)?,
+            TxOp::MatchPartition { entity, .. } => validate_entity_input(entity)?,
             TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
         }
     }
@@ -294,6 +296,8 @@ impl DatabaseValue {
         match value {
             Value::Ref(entity) => {
                 crate::identity::validate_supported_eid(*entity)?;
+                self.schema()
+                    .validate_partition_bits(crate::eid_to_part(*entity)?)?;
                 if crate::eid_to_eidx(*entity)? >= self.eidx_frontier() {
                     return Err(SemanticError::incorrect(
                         "transaction/invalid-entity-id",
@@ -315,6 +319,26 @@ impl DatabaseValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lookup_reference_inputs_check_installed_partitions_before_admission() {
+        let db = crate::Database::bootstrap().unwrap().database_value();
+        let invalid = Value::Ref(crate::make_eid(10, 42).unwrap());
+        for value in [invalid.clone(), Value::Tuple(vec![Some(invalid), None])] {
+            assert_eq!(
+                db.validate_lookup_stored_refs(&value).unwrap_err().code,
+                "transaction/not-a-partition"
+            );
+        }
+        db.validate_lookup_stored_refs(&Value::Ref(
+            crate::make_eid(crate::USER_PARTITION, 42).unwrap(),
+        ))
+        .unwrap();
+        db.validate_lookup_stored_refs(&Value::Ref(
+            crate::make_eid(crate::identity::IMPLICIT_PARTITION_BASE + 17, 42).unwrap(),
+        ))
+        .unwrap();
+    }
 
     fn deep_value() -> Value {
         let mut value = Value::Long(1);

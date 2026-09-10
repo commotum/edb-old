@@ -25,13 +25,23 @@ The fresh [Goal 0](goal-0/0-plan.md) owns the next phase's required capabilities
 and dependency-aware implementation order. Goal1 starts with a supported local
 transactor, separate application and reusable test baseline; storage, functional
 features, distributed delivery and full administration follow. Goal1's runnable
-path passed real PostgreSQL acceptance; Goal2 is active. Later stages remain
-planned additions, not completed capabilities or G3 completion claims.
+path, storage, functional APIs and partitions (Goals1–4) passed real PostgreSQL
+acceptance; Goal5 fulltext lifecycle acceptance also passes. Goal6 distributed
+application/operator delivery is active.
+Shared speculative indexes, exact snapshot references, expanded native query
+programs and the application's safe planning flow are implemented; functional
+integration and hint/join cost checks pass. Named/implicit partitions and UUID
+helpers are implemented. Secure remote delivery and final integrated operating
+acceptance remain required; they are not covered by the older G3 finish line.
 
 ## Start here
 
 - [Run the supported local transactor and separate application](docs/application.md)
   using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
+- [Author persisted native query programs](docs/programs.md) with predicates,
+  recursive rules, negation, historical sources and dynamic attributes.
+- [Compose native database, tuple and log queries](docs/queries.md), reuse query
+  structure and configure join/resource limits.
 - [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the next-phase objective and
   required capabilities; [`0-loop.md`](goal-0/0-loop.md) guides execution and
   [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
@@ -154,7 +164,9 @@ maps and persisted controlled calls, using durable binding/predicate checks.
 resource policy. Tuple ref slots accept `TxValue::Tuple` with symbolic references
 and nils; structured lookup keys use `EntityRef::LookupInput`. Stored values
 remain fully resolved. Ordinary request and program hashes remain unchanged;
-new inputs select new grammars and (for code literals) program ABI 6. Transactions
+new inputs select new grammars and (for code literals) program ABI 6. Expanded
+native query templates select ABI 7 only when used, preserving earlier bytes.
+Transactions
 on filtered values use the full basis and retain the filters on their result:
 `as_of` is not a branch of the past. History values cannot transact. Controlled
 generation follows this same docs-first native rule. Archived G3 Goal3 records
@@ -198,14 +210,17 @@ noHistory transactions. `DatabaseValue::index_pull` lazily projects AVET/AEVT
 ranges with forward/reverse bounds, offset and optional limit, using the exact
 captured database and documented reference/cardinality rules.
 
-Fulltext and transaction hints are not yet implemented; both are required by
-the new Goal0 plan. Fulltext requires
-an analyzed, ranked, eventually consistent search index and immutable lifecycle;
-ordinary exact string queries do not replace it. `db/fulltext` remains rejected,
-so applications needing token search must supply a separate search projection.
-Transaction hints are optional peer-to-writer segment prefetch, not transaction
-meaning. The writer has bounded read memoization but no cross-peer hint channel;
-cold submissions may incur additional index reads. Neither omission changes
+Native [fulltext search](docs/fulltext.md) provides versioned string analysis,
+phrase/Boolean/prefix expressions, BM25 ranking and structured Datalog joins.
+Immutable PostgreSQL search projections are built in the background; every hit
+is checked against the supplied database view. Coverage may lag and is explicit;
+search is not a complete-membership correctness constraint. Schema upgrades,
+stored ABI9 programs and the separate-process application are verified on real
+PostgreSQL; Goal5 records lifecycle and measured-cost acceptance.
+Native advisory read tracing/prefetch is implemented and verified in
+Goal3; versioned cross-host hint transport remains Stage6 work. Hints never become
+transaction meaning or durable request identity. Cold submissions may still
+incur additional index reads. Neither search lag nor missing hint transport changes
 identity, transactions, history, or local Datalog/Pull semantics. See archived
 G3 Goal4 for the earlier source-based decisions and measured read fixtures.
 G3 Goal5 records operational integrity evidence and the completed GC repair;

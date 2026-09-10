@@ -46,7 +46,11 @@ pub(crate) fn encode_submission(
         put_framed_bytes(&mut body, &bytes)?;
     }
     // Form encoding has already enforced shape/depth limits before this walk.
-    if crate::transaction::forms_have_extended_inputs(&request.forms) {
+    if forms_have_fulltext_attributes(&request.forms) {
+        body[0] = 4;
+    } else if crate::transaction::forms_have_partition_directives(&request.forms) {
+        body[0] = 3;
+    } else if crate::transaction::forms_have_extended_inputs(&request.forms) {
         body[0] = 2;
     }
     encode_blob(REQUEST, &body)
@@ -57,7 +61,7 @@ pub(crate) fn decode_submission(
 ) -> Result<(DatabaseIdentity, TransactionRequest), SemanticError> {
     let mut cursor = Cursor::new(decode_blob(bytes, REQUEST)?);
     let version = cursor.u8()?;
-    if ![1, 2].contains(&version) {
+    if ![1, 2, 3, 4].contains(&version) {
         return Err(fault(
             "transport/version",
             "unsupported native submission version",
@@ -83,6 +87,18 @@ pub(crate) fn decode_submission(
         form.finish()?;
     }
     cursor.finish()?;
+    if version < 4 && forms_have_fulltext_attributes(&forms) {
+        return Err(fault(
+            "transport/version",
+            "fulltext attribute descriptors require native submission version 4",
+        ));
+    }
+    if version < 3 && crate::transaction::forms_have_partition_directives(&forms) {
+        return Err(fault(
+            "transport/version",
+            "partition directives require native submission version 3",
+        ));
+    }
     if version == 1 && crate::transaction::forms_have_extended_inputs(&forms) {
         return Err(fault(
             "transport/version",
@@ -98,6 +114,11 @@ pub(crate) fn decode_submission(
             tx_instant_override,
         },
     ))
+}
+
+fn forms_have_fulltext_attributes(forms: &[TxForm]) -> bool {
+    forms.iter().any(|form| matches!(form,
+        TxForm::Op(TxOp::InstallAttribute(attribute) | TxOp::AlterAttribute(attribute)) if attribute.fulltext))
 }
 
 fn framed<'a>(cursor: &mut Cursor<'a>) -> Result<&'a [u8], SemanticError> {
@@ -169,6 +190,16 @@ fn decode_op(cursor: &mut Cursor<'_>) -> Result<TxOp, SemanticError> {
         },
         5 => TxOp::InstallAttribute(decode_attribute(cursor)?),
         6 => TxOp::AlterAttribute(decode_attribute(cursor)?),
+        9 => TxOp::InstallAttribute(decode_attribute(cursor)?.fulltext()),
+        10 => TxOp::AlterAttribute(decode_attribute(cursor)?.fulltext()),
+        7 => TxOp::ForcePartition {
+            tempid: cursor.string()?,
+            partition: decode_entity_ref(cursor)?,
+        },
+        8 => TxOp::MatchPartition {
+            tempid: cursor.string()?,
+            entity: decode_entity_ref(cursor)?,
+        },
         tag => return Err(invalid_tag("transaction operation", tag)),
     })
 }
@@ -494,6 +525,81 @@ mod tests {
     use super::*;
 
     #[test]
+    fn partition_directives_use_new_wire_grammar_and_preserve_request_identity() {
+        let identity = DatabaseIdentity::new("catalog", "lineage");
+        let forms = vec![
+            TxForm::Op(TxOp::ForcePartition {
+                tempid: "owner".into(),
+                partition: EntityRef::Ident(Keyword::new("part", "customers")),
+            }),
+            TxForm::Op(TxOp::MatchPartition {
+                tempid: "child".into(),
+                entity: EntityRef::Temp("owner".into()),
+            }),
+            TxForm::Op(TxOp::MatchPartition {
+                tempid: "lookup".into(),
+                entity: EntityRef::LookupInput {
+                    attribute: 1000,
+                    value: Box::new(TxValue::Tuple(vec![Some(Value::Long(1).into()), None])),
+                },
+            }),
+        ];
+        let digest = submission_request_digest(&forms, Some(4), Some(100)).unwrap();
+        let mut reordered = forms.clone();
+        reordered.reverse();
+        assert_eq!(
+            digest,
+            submission_request_digest(&reordered, Some(4), Some(100)).unwrap()
+        );
+        let request = TransactionRequest {
+            request_key: "partition-policy".into(),
+            forms: forms.clone(),
+            compare_basis_t: Some(4),
+            tx_instant_override: Some(100),
+        };
+        let bytes = encode_submission(&identity, &request).unwrap();
+        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], 3);
+        let (_, decoded) = decode_submission(&bytes).unwrap();
+        assert_eq!(encode_submission(&identity, &decoded).unwrap(), bytes);
+        assert_eq!(
+            submission_request_digest(
+                &decoded.forms,
+                decoded.compare_basis_t,
+                decoded.tx_instant_override
+            )
+            .unwrap(),
+            digest
+        );
+        for old_version in [1, 2] {
+            let mut body = decode_blob(&bytes, REQUEST).unwrap().to_vec();
+            body[0] = old_version;
+            assert_eq!(
+                decode_submission(&encode_blob(REQUEST, &body).unwrap())
+                    .err()
+                    .unwrap()
+                    .code,
+                "transport/version"
+            );
+        }
+        for end in 0..bytes.len() {
+            assert!(decode_submission(&bytes[..end]).is_err());
+        }
+        let mut changed = forms;
+        changed[0] = TxForm::Op(TxOp::ForcePartition {
+            tempid: "owner".into(),
+            partition: EntityRef::Id(4),
+        });
+        assert_ne!(
+            submission_request_digest(&changed, Some(4), Some(100)).unwrap(),
+            digest
+        );
+        assert_ne!(
+            submission_request_digest(&changed, Some(4), Some(100)).unwrap(),
+            submission_request_digest(&changed[1..], Some(4), Some(100)).unwrap()
+        );
+    }
+
+    #[test]
     fn tuple_input_versions_are_explicit_and_old_receipt_hashes_remain_stable() {
         // Actual pre-extension receipt hashes from the Goal 2 independent-
         // process workflow, not expectations computed by this new encoder.
@@ -574,6 +680,24 @@ mod tests {
         let operations = vec![
             TxOp::InstallAttribute(attribute.clone()),
             TxOp::AlterAttribute(attribute),
+            TxOp::InstallAttribute(
+                Attribute::new(
+                    1_001,
+                    Keyword::new("item", "text"),
+                    ValueType::String,
+                    Cardinality::One,
+                )
+                .fulltext(),
+            ),
+            TxOp::AlterAttribute(
+                Attribute::new(
+                    1_001,
+                    Keyword::new("item", "text"),
+                    ValueType::String,
+                    Cardinality::One,
+                )
+                .fulltext(),
+            ),
             TxOp::Add {
                 entity: entity.clone(),
                 attribute: 1_000,
@@ -667,6 +791,44 @@ mod tests {
         );
         for end in 0..encoded.len() {
             assert!(decode_submission(&encoded[..end]).is_err());
+        }
+    }
+
+    #[test]
+    fn fulltext_descriptors_require_new_wire_grammar_but_false_keeps_old_bytes() {
+        let identity = DatabaseIdentity::new("catalog", "lineage");
+        let attribute = Attribute::new(
+            1_000,
+            Keyword::new("item", "text"),
+            ValueType::String,
+            Cardinality::One,
+        );
+        let old = TransactionRequest::new("old", vec![TxOp::InstallAttribute(attribute.clone())]);
+        let encoded = encode_submission(&identity, &old).unwrap();
+        assert_eq!(decode_blob(&encoded, REQUEST).unwrap()[0], 1);
+        let (_, decoded) = decode_submission(&encoded).unwrap();
+        assert!(
+            matches!(&decoded.forms[0], TxForm::Op(TxOp::InstallAttribute(attribute)) if !attribute.fulltext)
+        );
+        let new =
+            TransactionRequest::new("new", vec![TxOp::InstallAttribute(attribute.fulltext())]);
+        let encoded = encode_submission(&identity, &new).unwrap();
+        let body = decode_blob(&encoded, REQUEST).unwrap();
+        assert_eq!(body[0], 4);
+        let (_, decoded) = decode_submission(&encoded).unwrap();
+        assert!(
+            matches!(&decoded.forms[0], TxForm::Op(TxOp::InstallAttribute(attribute)) if attribute.fulltext)
+        );
+        for version in [1, 2, 3] {
+            let mut downgraded = body.to_vec();
+            downgraded[0] = version;
+            assert_eq!(
+                decode_submission(&encode_blob(REQUEST, &downgraded).unwrap())
+                    .err()
+                    .unwrap()
+                    .code,
+                "transport/version"
+            );
         }
     }
 

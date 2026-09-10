@@ -35,6 +35,7 @@ use crate::log_generation::{
 };
 use crate::peer::build_full_native_tree;
 use crate::postgres::recover_generation_to;
+use crate::sql_io::SqlClient as Client;
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
     Database, Digest, DurableTransaction, ErrorCategory, PostgresConnectionConfig, PostgresStore,
@@ -43,7 +44,7 @@ use crate::{
     transaction_hash,
 };
 use crate::{PersistentTreeManifest, persistent_tree};
-use postgres::{Client, IsolationLevel};
+use postgres::IsolationLevel;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -282,7 +283,7 @@ impl PortableBackup {
         // normal compatibility gate and then open its long-lived snapshot
         // session with the identical transport policy.
         drop(PostgresStore::connect_configured(connection)?);
-        let client = connection.connect()?;
+        let client = connection.connect_for("backup/connect")?;
         Ok(Self {
             connection: connection.clone(),
             client,
@@ -310,7 +311,7 @@ impl PortableBackup {
     ) -> Result<BackupPoint, SemanticError> {
         for attempt in 0..MAX_BACKUP_ATTEMPTS {
             if attempt > 0 {
-                match self.connection.connect() {
+                match self.connection.connect_for("backup/connect") {
                     Ok(client) => self.client = client,
                     Err(_error) if attempt + 1 < MAX_BACKUP_ATTEMPTS => continue,
                     Err(error) => return Err(error),
@@ -1267,6 +1268,7 @@ impl PortableBackup {
             build_pin,
             activation_probe,
         )?;
+        crate::change_notices::publish(&self.connection,target_database_id);
         if fault_at == RestoreFault::AfterCommitBeforeResponse {
             return Err(injected("backup/restore-after-activation"));
         }
@@ -1630,7 +1632,7 @@ fn stage_restored_programs(
     Ok(())
 }
 
-fn install_restored_content<C: postgres::GenericClient>(
+fn install_restored_content<C: crate::sql_io::GenericClient>(
     client: &mut C,
     manifest: &Manifest,
     row: &PreparedRestoreRow,
@@ -2647,7 +2649,7 @@ fn cleanup_active_restore_build_if_present(
     )
 }
 
-fn install_restored_program<C: postgres::GenericClient>(
+fn install_restored_program<C: crate::sql_io::GenericClient>(
     client: &mut C,
     program_hash: &Digest,
     program: &Program,
@@ -2702,7 +2704,7 @@ struct CapturedLogTail {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn capture_log_tail<C: postgres::GenericClient>(
+fn capture_log_tail<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     lineage_id: &str,
@@ -3033,7 +3035,7 @@ fn capture_log_tail<C: postgres::GenericClient>(
     })
 }
 
-fn capture_completed_excisions<C: postgres::GenericClient>(
+fn capture_completed_excisions<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     lineage_id: &str,
@@ -3128,7 +3130,7 @@ fn complete_restored_target(
     if let Some(probe) = completion_probe {
         probe();
     }
-    let mut client = connection.connect()?;
+    let mut client = connection.connect_for("backup/connect")?;
     let mut transaction = client.transaction().map_err(|error| {
         crate::postgres::postgres_error("backup/restore-final-check-begin", error)
     })?;
@@ -3220,7 +3222,7 @@ fn restore_tree_backup(
         ));
     }
 
-    let mut client = connection.connect()?;
+    let mut client = connection.connect_for("backup/connect")?;
     let basis_sql = i64::try_from(source.basis_t).map_err(|_| {
         SemanticError::incorrect("backup/tree-basis", "tree basis exceeds PostgreSQL bigint")
     })?;
@@ -3911,7 +3913,7 @@ enum TreeCaptureSource {
     },
 }
 
-fn capture_tree_backup<C: postgres::GenericClient>(
+fn capture_tree_backup<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     lineage_id: &str,
@@ -3987,7 +3989,7 @@ fn capture_tree_backup<C: postgres::GenericClient>(
     Ok(None)
 }
 
-fn capture_tree_candidate<C: postgres::GenericClient>(
+fn capture_tree_candidate<C: crate::sql_io::GenericClient>(
     client: &mut C,
     row: &postgres::Row,
     source: TreeCaptureSource,
@@ -4212,7 +4214,7 @@ fn capture_tree_candidate<C: postgres::GenericClient>(
 /// replaceable accelerator. At this explicit administrative boundary a
 /// corrupt tree is rebuilt from the pinned immutable generation log rather
 /// than imposing unbounded replay on the ordinary writer.
-fn capture_bound_request_tree<C: postgres::GenericClient>(
+fn capture_bound_request_tree<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
     lineage_id: &str,
@@ -4428,7 +4430,7 @@ struct BoundRequestCoordinate<'a> {
     eidx_frontier: u64,
 }
 
-fn reconstruct_bound_request_tree<C: postgres::GenericClient>(
+fn reconstruct_bound_request_tree<C: crate::sql_io::GenericClient>(
     client: &mut C,
     coordinate: BoundRequestCoordinate<'_>,
     publisher: &mut ObjectPublisher<'_>,
@@ -5064,7 +5066,7 @@ fn tree_semantic_error(
 /// the active generation. This is part of ambiguous-acknowledgement replay:
 /// merely matching the log head is insufficient if its db-before values can
 /// no longer be reopened exactly.
-fn match_restored_request_base_archives<C: postgres::GenericClient>(
+fn match_restored_request_base_archives<C: crate::sql_io::GenericClient>(
     client: &mut C,
     directory: &Path,
     backup: &Manifest,
@@ -5335,7 +5337,7 @@ fn match_restored_request_base_archives<C: postgres::GenericClient>(
     Ok(matched)
 }
 
-fn target_matches_backup<C: postgres::GenericClient>(
+fn target_matches_backup<C: crate::sql_io::GenericClient>(
     client: &mut C,
     directory: &Path,
     manifest: &Manifest,
@@ -6204,7 +6206,7 @@ fn select_incremental_parent(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn authenticate_source_parent<C: postgres::GenericClient>(
+fn authenticate_source_parent<C: crate::sql_io::GenericClient>(
     client: &mut C,
     directory: &Path,
     database_id: &str,
