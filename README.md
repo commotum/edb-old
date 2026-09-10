@@ -24,11 +24,14 @@ resource limits, retained evidence, commands and deliberate differences.
 The fresh [Goal 0](goal-0/0-plan.md) owns the next phase's required capabilities
 and dependency-aware implementation order. Goal1 starts with a supported local
 transactor, separate application and reusable test baseline; storage, functional
-features, distributed delivery and full administration follow. These are planned
-additions, not newly implemented capabilities or G3 completion claims.
+features, distributed delivery and full administration follow. Goal1's runnable
+path passed real PostgreSQL acceptance; Goal2 is active. Later stages remain
+planned additions, not completed capabilities or G3 completion claims.
 
 ## Start here
 
+- [Run the supported local transactor and separate application](docs/application.md)
+  using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
 - [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the next-phase objective and
   required capabilities; [`0-loop.md`](goal-0/0-loop.md) guides execution and
   [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.

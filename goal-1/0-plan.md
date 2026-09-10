@@ -39,7 +39,8 @@ owns the complete product; this child delivers its first runnable application.
 
 ### 1. Expose the local runtime and minimal explicit setup
 
-**Status:** Pending.
+**Status:** Complete (2026-09-09). Real restricted-role CLI lifecycle, safe endpoint
+restart, peer-as-writer rejection and diagnosed index recovery passed.
 
 **Outcome:** Operators can explicitly initialize a database and run a configured
 local transactor independently of application processes.
@@ -57,7 +58,8 @@ The diagnosed missing-publication condition has an explicit recovery path.
 
 ### 2. Deliver the separate application workflow
 
-**Status:** Pending.
+**Status:** Complete (2026-09-09). Two separate application processes passed across
+a graceful writer restart using restricted writer/peer roles and public native APIs.
 
 **Outcome:** A separate Rust application uses the supported runtime and public
 APIs; its calculation works against both native and fabricated database values.
@@ -77,7 +79,8 @@ compatibility materialization substitutes for the native workflow.
 
 ### 3. Establish a reusable workload and check baseline
 
-**Status:** Pending.
+**Status:** Complete (2026-09-09). Application baseline and selectable seed/replay
+checks ran on PostgreSQL; measurement coverage and failure limits are explicit.
 
 **Outcome:** Later children can rerun a representative application workload and
 extend existing semantic/failure checks from a recorded baseline.
@@ -96,10 +99,44 @@ baseline with declared limits. Relevant PostgreSQL checks actually execute, and
 a recorded generated seed/trace replays through existing test support. Document
 observed results and remaining costs without claiming unmeasured improvements.
 
+## Verified delivery and costs
+
+- `atomic` exposes explicit migrate/create/status/consolidate and the local
+  transactor. Configuration shares verified TLS/I/O policy with the application.
+  Endpoint preparation validates/locks before writer startup; listener failure
+  stops the daemon. SIGINT/SIGTERM drain local requests and stop the writer;
+  underlying I/O policy still governs database stalls. Migration and role grants
+  are separate outcomes: `MIGRATED` survives a later grant failure.
+- `cargo build --offline --bin atomic --example application_workflow` passed.
+  With a fresh isolated PostgreSQL 15.11 fixture, `cargo test --offline --test
+  product_cli -- --nocapture` passed 2/2 (5.54s): restricted_roles=true,
+  two application processes/one restart, peer writer startup rejected without
+  publication, missing-publication diagnosis then actual CLI consolidation to
+  basis3 and restart with unchanged head. The fixture removes only its own schema
+  and roles. Application query/navigation, old/history values, exact receipt
+  replay, native/fixture calculation parity and zero eager materialization passed.
+- `local_endpoint` passed 4/4: prepared endpoint rollback, normal restart/exact
+  retry and actual SIGKILL stale-socket recovery. `--lib local_transport` passed
+  8/8 with PostgreSQL configured, including unknown outcome/confirmed-commit
+  regressions, ownership/path safety and listener health. The health unit witness
+  deliberately ends the listener loop; it does not simulate OS descriptor exhaustion.
+  Runtime configuration's two unit tests and CLI parser test passed.
+- Small application baseline: first process 828ms total, 20 calculations
+  30,964µs, RSS15,500KiB; replay process 728ms/35,169µs/RSS15,552KiB. Each reports
+  cursor reads16/44,648bytes and peak cache8 entries/77,692bytes. These omit
+  catalog/pin/lease/background/outcome SQL and are not scalability measurements.
+  Goal2 owns total attribution. Reusable commands/contracts: docs/application.md.
+- Seed42/36 generated steps and exact saved replay passed: 27 accepted,
+  9 rejected, one orderly restart (5.97s/5.48s). Default72 full differential file
+  passed5/5: 54 accepted,18 rejected,two restarts (9.59s). Failures here are
+  semantic CAS/uniqueness/type rejection, not process-kill generation/reduction.
+  Traces `/tmp/atomic-transactor-differential-1HZqi5.trace` and
+  `/tmp/atomic-transactor-differential-hi4Dcc.trace` were byte-identical, SHA256
+  `7bcfb78e2136eecd9a6d447dd831323e5c0a38a75fa371418f07394e7bd8e950`.
+  Test code retains the versioned trace format and safe new-file/replay controls.
+
 ## Continuation
 
-Scaffold rewritten; implementation has not begun. Reconcile the parent and
-current executable surfaces, then implement the supported local transactor
-entry point in Stage 1. Keep this the sole active child. Record material results
-and the next action; once its signals hold, return to Goal 0's loop and reconcile
-the next child. Completing this child does not complete the parent.
+Complete; return to Goal0 and execute Goal2. Reuse the CLI/application and
+differential driver throughout later changes. Reopen this child if integrated
+checks reveal a runnable-path gap; this delivery does not complete the parent.

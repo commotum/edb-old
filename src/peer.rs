@@ -350,10 +350,15 @@ struct CachedTreeNode {
     bytes: usize,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct TreeNodeCache {
     max_entries: usize,
     max_bytes: usize,
+    state: Arc<Mutex<TreeNodeCacheState>>,
+}
+
+#[derive(Debug, Default)]
+struct TreeNodeCacheState {
     entries: BTreeMap<Digest, CachedTreeNode>,
     recency: VecDeque<Digest>,
     stats: CacheStats,
@@ -395,12 +400,37 @@ impl TreeNodeCache {
         Self {
             max_entries,
             max_bytes,
-            entries: BTreeMap::new(),
-            recency: VecDeque::new(),
-            stats: CacheStats::default(),
+            state: Arc::new(Mutex::new(TreeNodeCacheState::default())),
         }
     }
 
+    fn get(&self, hash: &Digest) -> Option<Arc<TreeNode>> {
+        lock(&self.state).get(hash)
+    }
+
+    /// A miss owner may find that bootstrap/adoption filled the cache while
+    /// it waited for the SQL lane. Do not count that internal recheck twice.
+    fn peek(&self, hash: &Digest) -> Option<Arc<TreeNode>> {
+        lock(&self.state)
+            .entries
+            .get(hash)
+            .map(|entry| Arc::clone(&entry.node))
+    }
+
+    fn insert(&self, hash: Digest, node: Arc<TreeNode>, bytes: usize) {
+        lock(&self.state).insert(hash, node, bytes, self.max_entries, self.max_bytes);
+    }
+
+    fn stats(&self) -> CacheStats {
+        lock(&self.state).stats
+    }
+
+    fn clear(&self) {
+        *lock(&self.state) = TreeNodeCacheState::default();
+    }
+}
+
+impl TreeNodeCacheState {
     fn get(&mut self, hash: &Digest) -> Option<Arc<TreeNode>> {
         let node = self.entries.get(hash).map(|entry| Arc::clone(&entry.node));
         if node.is_some() {
@@ -413,8 +443,15 @@ impl TreeNodeCache {
         node
     }
 
-    fn insert(&mut self, hash: Digest, node: Arc<TreeNode>, bytes: usize) {
-        if self.max_entries == 0 || self.max_bytes == 0 || bytes > self.max_bytes {
+    fn insert(
+        &mut self,
+        hash: Digest,
+        node: Arc<TreeNode>,
+        bytes: usize,
+        max_entries: usize,
+        max_bytes: usize,
+    ) {
+        if max_entries == 0 || max_bytes == 0 || bytes > max_bytes {
             self.stats.oversized_bypasses = self.stats.oversized_bypasses.saturating_add(1);
             return;
         }
@@ -425,7 +462,7 @@ impl TreeNodeCache {
         self.stats.current_bytes = self.stats.current_bytes.saturating_add(bytes);
         self.recency.retain(|candidate| candidate != &hash);
         self.recency.push_back(hash);
-        while self.entries.len() > self.max_entries || self.stats.current_bytes > self.max_bytes {
+        while self.entries.len() > max_entries || self.stats.current_bytes > max_bytes {
             let Some(oldest) = self.recency.pop_front() else {
                 break;
             };
@@ -4056,7 +4093,31 @@ impl Deref for PeerState {
 
 struct PeerIo {
     client: Client,
+    // A shared handle only: each cache lookup/insertion takes its own short
+    // lock, never retaining it during SQL or bootstrap/adoption decoding.
     tree_cache: TreeNodeCache,
+}
+
+/// One active cold-node request per native core, independent of its cache.
+/// Same-hash callers share even an oversized/uncached result or an error;
+/// other misses wait without retaining an unbounded per-hash request map.
+struct TreeNodeMiss {
+    hash: Digest,
+    result: Mutex<Option<Result<Arc<TreeNode>, SemanticError>>>,
+    ready: Condvar,
+}
+
+impl TreeNodeMiss {
+    fn wait(&self) -> Result<Arc<TreeNode>, SemanticError> {
+        let mut result = lock(&self.result);
+        while result.is_none() {
+            result = self
+                .ready
+                .wait(result)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        result.as_ref().expect("completed node miss").clone()
+    }
 }
 
 /// Everything needed only by the explicit eager-oracle path. Native database
@@ -4079,6 +4140,7 @@ struct RootPinState {
 struct RootPinManager {
     connection: PostgresConnectionConfig,
     database_id: String,
+    lineage_id: String,
     application_name: String,
     state: Mutex<RootPinState>,
 }
@@ -4087,10 +4149,12 @@ impl RootPinManager {
     fn connect(
         connection: &PostgresConnectionConfig,
         database_id: &str,
+        lineage_id: &str,
     ) -> Result<Arc<Self>, SemanticError> {
         let manager = Arc::new(Self {
             connection: connection.clone(),
             database_id: database_id.to_owned(),
+            lineage_id: lineage_id.to_owned(),
             application_name: root_pin_application_name(database_id),
             state: Mutex::new(RootPinState {
                 client: None,
@@ -4220,6 +4284,7 @@ impl RootPinManager {
     fn reconnect_locked(&self, state: &mut RootPinState) -> Result<(), SemanticError> {
         let mut client = self.connection.connect_for("peer/root-pin-connect")?;
         verify_schema_compatibility(&mut client)?;
+        verify_database_lineage(&mut client, &self.database_id, &self.lineage_id)?;
         client
             .query_one(
                 "SELECT set_config('application_name', $1, false)",
@@ -4433,6 +4498,8 @@ struct TieredReadCore {
     load_counters: PeerLoadCounters,
     root_pins: Arc<RootPinManager>,
     programs: crate::postgres::SharedProgramCache,
+    tree_cache: TreeNodeCache,
+    tree_node_miss: Mutex<Option<Arc<TreeNodeMiss>>>,
     io: Mutex<PeerIo>,
 }
 
@@ -4778,7 +4845,7 @@ impl Peer {
         // multi-statement observation window before exposing a live handle;
         // every reconnect repeats this check.
         verify_database_lineage(&mut client, &database_id, &lineage_id)?;
-        let root_pins = RootPinManager::connect(connection, &database_id)?;
+        let root_pins = RootPinManager::connect(connection, &database_id, &lineage_id)?;
         let generation_pin = root_pins.acquire_generation(excision_generation)?;
         let root_pin = root_pins.acquire(tree_base.as_deref())?;
         let compatibility = Arc::new(PeerCompatibility {
@@ -4793,6 +4860,8 @@ impl Peer {
             load_counters,
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
+            tree_cache: tree_cache.clone(),
+            tree_node_miss: Mutex::new(None),
             io: Mutex::new(PeerIo { client, tree_cache }),
         });
         Ok(Self {
@@ -4886,10 +4955,9 @@ impl Peer {
         self.core.read.root_pins.hashes()
     }
     pub fn cache_stats(&self) -> CacheStats {
-        let io = lock(&self.core.read.io);
         let state = self.state();
         let segments = lock(&state.compatibility.segments);
-        let mut stats = io.tree_cache.stats;
+        let mut stats = self.core.read.tree_cache.stats();
         stats.hits = stats.hits.saturating_add(segments.stats.hits);
         stats.misses = stats.misses.saturating_add(segments.stats.misses);
         stats.evictions = stats.evictions.saturating_add(segments.stats.evictions);
@@ -5985,9 +6053,7 @@ impl Peer {
             let capacity = segments.capacity;
             *segments = SegmentCache::new(capacity);
         }
-        let tree_entries = io.tree_cache.max_entries;
-        let tree_bytes = io.tree_cache.max_bytes;
-        io.tree_cache = TreeNodeCache::new(tree_entries, tree_bytes);
+        io.tree_cache.clear();
         let tree_base = {
             let PeerIo {
                 client, tree_cache, ..
@@ -7012,7 +7078,7 @@ impl TieredSnapshot {
         let counters = PeerLoadCounters::default();
         let mut tree_cache =
             TreeNodeCache::new(configuration.cache_entries, configuration.cache_bytes);
-        let root_pins = RootPinManager::connect(connection, &database_id)?;
+        let root_pins = RootPinManager::connect(connection, &database_id, &lineage_id)?;
         let required_generation_pin = required_manifest
             .map(|_| root_pins.acquire_generation(endpoint.generation))
             .transpose()?;
@@ -7069,6 +7135,8 @@ impl TieredSnapshot {
             load_counters: counters,
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
+            tree_cache: tree_cache.clone(),
+            tree_node_miss: Mutex::new(None),
             io: Mutex::new(PeerIo { client, tree_cache }),
         });
         Ok((
@@ -7494,7 +7562,7 @@ impl TieredSnapshot {
     }
 
     pub(crate) fn tree_cache_stats(&self) -> CacheStats {
-        lock(&self.core.io).tree_cache.stats
+        self.core.tree_cache.stats()
     }
 
     pub(crate) fn load_stats(&self) -> PeerLoadStats {

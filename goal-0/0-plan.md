@@ -16,8 +16,8 @@ equivalence are not objectives.
 
 ## Current state and execution ownership
 
-**Status:** Planned. This phase's implementation has not begun.
-[Goal1](../goal-1/0-plan.md) is the first child; only that child is scaffolded.
+**Status:** In progress. Goal1 is complete; Goal2 is the sole active child.
+[Goal1](../goal-1/0-plan.md) records the runnable baseline; Goal2 extends it.
 G1 (original Goals0–8), G2 (Goals9–17) and G3 (the completed native-engine pass)
 under goal-archive are historical evidence, not active instructions.
 
@@ -112,7 +112,10 @@ but storage changes must pass backup/restore/GC checks in their owning stage.
 
 ### 1. Ship a runnable application and reusable baseline
 
-**Status:** Pending; Goal1 is scaffolded.
+**Status:** Complete (2026-09-09); evidence and commands in Goal1. Real PostgreSQL
+15.11 separate-process acceptance used restricted roles and verified restart,
+exact retry, retained values, explicit index recovery and seed/replay. The small
+application baseline was 828ms first run /728ms replay; it is not a scale claim.
 
 **Outcome:** A supported local transactor and separate Rust application run on
 actual PostgreSQL, with a reusable verification path for subsequent changes.
@@ -135,7 +138,7 @@ engine features and the complete operator CLI are not this child's finish gate.
 
 ### 2. Establish efficient immutable storage and reads
 
-**Status:** Pending.
+**Status:** In progress in Goal2; measurement and cache/pin boundaries first.
 
 **Outcome:** Measurable, safely cached native reads and efficient immutable
 block/index I/O form a stable foundation for later features.
@@ -326,8 +329,8 @@ product and integrated acceptance close Goal0.
 
 ## Continuation
 
-Resequenced on 2026-09-09; no implementation claimed. Start Goal1's supported
-executable/minimal setup slice by reconciling existing service/configuration and
-process-workflow APIs. At a session boundary record active child, last verified
-result, concrete remaining issue and next action. Keep this plan authoritative;
-loops and prompts describe continuation, not another copy of the feature list.
+Active: Goal2, on 2026-09-09. Goal1's executable, application, endpoint and
+seed/replay signals passed on real PostgreSQL; see its concise evidence record.
+Next: attribute total SQL and separate immutable cache reads from pin/storage
+maintenance before optimizing storage. No later stage or integrated completion
+is claimed. Keep this plan authoritative; loops/prompts are continuation guides.

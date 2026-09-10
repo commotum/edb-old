@@ -36,6 +36,7 @@ mod query_return_maps;
 mod query_value_debug;
 pub mod recent;
 mod recent_btset;
+mod runtime_config;
 mod schema;
 mod service;
 mod state_commitment;
@@ -71,7 +72,9 @@ pub use identity::{
 pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
 pub use index_pull::{IndexPullCursor, IndexPullOptions};
 #[cfg(unix)]
-pub use local_transport::{CommittedTransaction, LocalTransactionServer, LocalTransportConfig};
+pub use local_transport::{
+    CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
+};
 pub use operations::{
     ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
     LogGenerationGarbage, MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC,
@@ -109,6 +112,7 @@ pub use query::{
     QueryResult, QuerySequence, QuerySource, QueryStats, QueryValue, Rule, Term, Variable,
 };
 pub use query_return_maps::{ReturnMap, ReturnMapShape, ReturnMaps};
+pub use runtime_config::postgres_config_from_env;
 pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use service::{
     BackgroundIndexingConfig, BackgroundIndexingFailure, BackgroundIndexingStats,

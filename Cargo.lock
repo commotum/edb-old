@@ -18,6 +18,7 @@ name = "atomic-core"
 version = "0.1.0"
 dependencies = [
  "bigdecimal",
+ "libc",
  "native-tls",
  "num-bigint",
  "num-traits",

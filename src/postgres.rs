@@ -367,6 +367,14 @@ pub struct PostgresMigrator {
     client: Client,
 }
 
+/// Lightweight catalog coordinates, not a liveness or integrity certificate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DatabaseStatus {
+    pub lineage_id: String,
+    pub basis_t: u64,
+    pub log_generation: u64,
+}
+
 impl PostgresMigrator {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
         Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
