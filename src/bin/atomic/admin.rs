@@ -1,9 +1,9 @@
 //! Explicit operator commands. Runtime startup never routes through this module.
 use atomic_core::sql_io::SqlClient;
 use atomic_core::{
-    postgres_config_from_env, BackupPoint, ErrorCategory, FulltextStore, GarbageInventory,
-    PortableBackup, PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresOperator,
-    PostgresStore, Schema, SemanticError,
+    BackupPoint, ErrorCategory, FulltextStore, GarbageInventory, PortableBackup,
+    PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresOperator, PostgresStore,
+    Schema, SemanticError, postgres_config_from_env,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;

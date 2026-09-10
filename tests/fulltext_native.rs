@@ -107,9 +107,9 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
     );
     assert_eq!(warm.stats.read_bytes, 0);
     assert!(warm.stats.admitted_bytes > 0);
-    let cache=old.native_fulltext_reader().unwrap().unwrap().cache_stats();
-    assert!(cache.entries>0 && cache.entries<=cache.max_entries);
-    assert!(cache.retained_bytes>0 && cache.retained_bytes<=cache.max_bytes);
+    let cache = old.native_fulltext_reader().unwrap().unwrap().cache_stats();
+    assert!(cache.entries > 0 && cache.entries <= cache.max_entries);
+    assert!(cache.retained_bytes > 0 && cache.retained_bytes <= cache.max_bytes);
     assert_eq!(ids(&find(&old, "JANE")), BTreeSet::from([a, b]));
     assert_eq!(ids(&find(&old, "\"jane blue river\"")), BTreeSet::from([a]));
     assert_eq!(
@@ -222,5 +222,8 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
         warm_us,
         warm.stats.admitted_bytes
     );
-    println!("FULLTEXT_CACHE entries={} retained_bytes={} max_entries={} max_bytes={} includes_positive_headers_and_decoded_pages=true not_process_rss=true",cache.entries,cache.retained_bytes,cache.max_entries,cache.max_bytes);
+    println!(
+        "FULLTEXT_CACHE entries={} retained_bytes={} max_entries={} max_bytes={} includes_positive_headers_and_decoded_pages=true not_process_rss=true",
+        cache.entries, cache.retained_bytes, cache.max_entries, cache.max_bytes
+    );
 }

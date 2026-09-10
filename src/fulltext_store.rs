@@ -531,18 +531,27 @@ impl Page {
             },
         }
     }
-    fn count(&self)->u64 {
-        match self {Self::Leaf(records)=>records.len() as u64,Self::Branch(children)=>children.iter().map(|child|child.count).sum()}
+    fn count(&self) -> u64 {
+        match self {
+            Self::Leaf(records) => records.len() as u64,
+            Self::Branch(children) => children.iter().map(|child| child.count).sum(),
+        }
     }
     fn validate_child(&self, expected: &Child) -> Result<(), SemanticError> {
-        let (first,last)=match self {
-            Self::Leaf(records)=>(records.first().map(|r|r.key.as_slice()).unwrap_or_default(),records.last().map(|r|r.key.as_slice()).unwrap_or_default()),
-            Self::Branch(children)=>(children.first().unwrap().first.as_slice(),children.last().unwrap().last.as_slice()),
+        let (first, last) = match self {
+            Self::Leaf(records) => (
+                records
+                    .first()
+                    .map(|r| r.key.as_slice())
+                    .unwrap_or_default(),
+                records.last().map(|r| r.key.as_slice()).unwrap_or_default(),
+            ),
+            Self::Branch(children) => (
+                children.first().unwrap().first.as_slice(),
+                children.last().unwrap().last.as_slice(),
+            ),
         };
-        if first != expected.first
-            || last != expected.last
-            || self.count() != expected.count
-        {
+        if first != expected.first || last != expected.last || self.count() != expected.count {
             return Err(fault(
                 "fulltext/child-binding",
                 "search child differs from authenticated range/count",

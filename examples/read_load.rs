@@ -19,9 +19,19 @@ const KEY: u32 = 1000;
 const BALANCE: u32 = 1001;
 const PAYLOAD: u32 = 1002;
 const CACHE_ENTRIES: usize = 32;
-const CACHE_BYTES: usize = 256 * 1024;
+const DEFAULT_CACHE_BYTES: usize = 1024 * 1024;
 const MAX_SAMPLES: usize = 200_000;
 const WAIT: Duration = Duration::from_secs(180);
+
+fn cache_bytes() -> Result<usize> {
+    let bytes = std::env::var("ATOMIC_READ_CACHE_BYTES")
+        .map(|value| value.parse())
+        .unwrap_or(Ok(DEFAULT_CACHE_BYTES))?;
+    if !(64 * 1024..=16 * 1024 * 1024).contains(&bytes) {
+        return Err("ATOMIC_READ_CACHE_BYTES must be 65536..16777216".into());
+    }
+    Ok(bytes)
+}
 
 fn emit(line: impl std::fmt::Display) {
     println!("{line}");
@@ -241,6 +251,7 @@ fn analytics(
 }
 
 fn reader(database: &str, records: usize, payload: usize) -> Result<()> {
+    let cache_bytes = cache_bytes()?;
     let lifetime = Window::new();
     emit("BOOT");
     let mut input = std::io::stdin().lock().lines();
@@ -252,7 +263,7 @@ fn reader(database: &str, records: usize, payload: usize) -> Result<()> {
         postgres_config_from_env()?,
         database,
         CACHE_ENTRIES,
-        CACHE_BYTES,
+        cache_bytes,
     )?;
     let queries = (0..4).map(selective_query).collect::<Result<Vec<_>>>()?;
     let cold_context = OperationContext::new(OperationKind::Query);
@@ -300,16 +311,17 @@ fn reader(database: &str, records: usize, payload: usize) -> Result<()> {
         }
         let cache = connection.cache_stats();
         if cache.peak_entries > CACHE_ENTRIES
-            || cache.peak_bytes > CACHE_BYTES
+            || cache.peak_bytes > cache_bytes
             || connection.load_stats().compatibility_materializations != 0
         {
             return Err("native cache/materialization invariant failed".into());
         }
         window.finish(mode, &samples, &context.snapshot(), &format!(
-            "cache_entries={} cache_bytes={} cache_peak_bytes={} cache_hits={} cache_misses={} cache_evictions={} sample_cap={} scan_payload_bytes={}",
+            "cache_entries={} cache_bytes={} cache_peak_bytes={} cache_hits={} cache_misses={} cache_evictions={} cache_oversized_bypasses={} sample_cap={} scan_payload_bytes={}",
             cache.current_entries, cache.current_bytes, cache.peak_bytes,
             cache.hits - cache_before.hits, cache.misses - cache_before.misses,
-            cache.evictions - cache_before.evictions, usize::from(samples.len() == MAX_SAMPLES),
+            cache.evictions - cache_before.evictions,
+            cache.oversized_bypasses - cache_before.oversized_bypasses, usize::from(samples.len() == MAX_SAMPLES),
             if *mode == "scan" { records * payload } else { 0 },
         ));
     }
@@ -642,6 +654,7 @@ impl Drop for Fixture {
 }
 
 fn campaign(records: usize, millis: u64, payload: usize) -> Result<()> {
+    let cache_bytes = cache_bytes()?;
     let lifetime = Window::new();
     let config = postgres_config_from_env()?;
     if config.ssd_cache_config().is_some() {
@@ -702,7 +715,7 @@ fn campaign(records: usize, millis: u64, payload: usize) -> Result<()> {
     PostgresStore::connect_configured(&scoped_config)?.create_database("read-load", schema)?;
     let role_url = |role: &str| parameter(&parameter(&scoped, "user", role), "password", &password);
     emit(format!(
-        "CONFIG records={records} payload_per_record={payload} scan_payload_lower_bound={} peer_cache_entries={CACHE_ENTRIES} peer_cache_bytes={CACHE_BYTES} writer_cache_bytes={} duration_ms={millis} sample_cap={MAX_SAMPLES} release={} schema={unique} transport={} ssd=false postgres_os_cache=uncontrolled_warm",
+        "CONFIG records={records} payload_per_record={payload} scan_payload_lower_bound={} peer_cache_entries={CACHE_ENTRIES} peer_cache_bytes={cache_bytes} writer_cache_bytes={} duration_ms={millis} sample_cap={MAX_SAMPLES} release={} schema={unique} transport={} ssd=false postgres_os_cache=uncontrolled_warm",
         records * payload,
         4 * 1024 * 1024,
         !cfg!(debug_assertions),

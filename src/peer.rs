@@ -191,10 +191,10 @@ pub(crate) struct ExactEndpoint {
     pub(crate) eidx_frontier: u64,
 }
 
-#[path = "peer_prefetch.rs"]
-mod peer_prefetch;
 #[path = "peer_fulltext.rs"]
 mod peer_fulltext;
+#[path = "peer_prefetch.rs"]
+mod peer_prefetch;
 pub use peer_fulltext::NativeFulltextReader;
 #[path = "snapshot_reference.rs"]
 pub(crate) mod snapshot_reference;
@@ -591,16 +591,24 @@ impl MetadataProjection {
             // authenticated ident when its install marker arrives; never emit
             // a new logical assertion or reinterpret the old root.
             if self.schema.attribute(crate::DB_FULLTEXT as u32).is_err()
-                && transaction.tx_data.iter().any(|datom| datom.added
-                    && datom.entity == crate::DB_PART_DB
-                    && datom.attribute == crate::DB_INSTALL_ATTRIBUTE as u32
-                    && datom.value == crate::Value::Ref(crate::DB_FULLTEXT))
-                && !current.iter().any(|datom| datom.entity == crate::DB_FULLTEXT
-                    && datom.attribute == crate::DB_IDENT as u32)
+                && transaction.tx_data.iter().any(|datom| {
+                    datom.added
+                        && datom.entity == crate::DB_PART_DB
+                        && datom.attribute == crate::DB_INSTALL_ATTRIBUTE as u32
+                        && datom.value == crate::Value::Ref(crate::DB_FULLTEXT)
+                })
+                && !current.iter().any(|datom| {
+                    datom.entity == crate::DB_FULLTEXT && datom.attribute == crate::DB_IDENT as u32
+                })
                 && let Some(ident) = idents.ident(crate::DB_FULLTEXT)
             {
-                current.push(Datom { entity: crate::DB_FULLTEXT, attribute: crate::DB_IDENT as u32,
-                    value: crate::Value::Keyword(ident.clone()), tx: crate::t_to_tx(0)?, added: true });
+                current.push(Datom {
+                    entity: crate::DB_FULLTEXT,
+                    attribute: crate::DB_IDENT as u32,
+                    value: crate::Value::Keyword(ident.clone()),
+                    tx: crate::t_to_tx(0)?,
+                    added: true,
+                });
             }
             let mut ident_updates = transaction
                 .tx_data
@@ -772,7 +780,9 @@ fn retain_schema_working_set(current: &mut Vec<Datom>) {
                 && datom.entity == crate::DB_PART_DB
                 && matches!(
                     u64::from(datom.attribute),
-                    crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE | crate::DB_INSTALL_PARTITION
+                    crate::DB_INSTALL_ATTRIBUTE
+                        | crate::DB_ALTER_ATTRIBUTE
+                        | crate::DB_INSTALL_PARTITION
                 )
             {
                 match &datom.value {
@@ -788,7 +798,9 @@ fn retain_schema_working_set(current: &mut Vec<Datom>) {
         (datom.entity == crate::DB_PART_DB
             && matches!(
                 u64::from(datom.attribute),
-                crate::DB_INSTALL_ATTRIBUTE | crate::DB_ALTER_ATTRIBUTE | crate::DB_INSTALL_PARTITION
+                crate::DB_INSTALL_ATTRIBUTE
+                    | crate::DB_ALTER_ATTRIBUTE
+                    | crate::DB_INSTALL_PARTITION
             ))
             || (installed.contains(&datom.entity) && schema_information_attribute(datom.attribute))
     });
@@ -1125,7 +1137,9 @@ impl PostgresIndexer {
                 max_depth: 3,
             };
             drop(transaction);
-            self.fulltext_build_error = self.ensure_fulltext_projection(fulltext_revision, manifest_hash).err();
+            self.fulltext_build_error = self
+                .ensure_fulltext_projection(fulltext_revision, manifest_hash)
+                .err();
             return Ok(Some(reused_receipt));
         }
         let expected_publication_revision = selection.newest_observed_revision;
@@ -1433,7 +1447,9 @@ impl PostgresIndexer {
         }
         let tree_store_stats = self.tree_store.stats();
         if projection_complete {
-            self.fulltext_build_error = self.ensure_fulltext_projection(publication_revision, tree_manifest_hash).err();
+            self.fulltext_build_error = self
+                .ensure_fulltext_projection(publication_revision, tree_manifest_hash)
+                .err();
         }
         // Administrative consolidation preserves its one-call completion
         // contract by looping projection successors. Background work reports
@@ -3895,7 +3911,11 @@ where
     // entity through EAVT. General entity idents and unrelated open-entity
     // facts never become a second schema projection.
     let mut schema_current = Vec::new();
-    for attribute in [crate::DB_INSTALL_ATTRIBUTE, crate::DB_ALTER_ATTRIBUTE, crate::DB_INSTALL_PARTITION] {
+    for attribute in [
+        crate::DB_INSTALL_ATTRIBUTE,
+        crate::DB_ALTER_ATTRIBUTE,
+        crate::DB_INSTALL_PARTITION,
+    ] {
         let prefix = IndexPrefix::Aevt {
             attribute: attribute as u32,
             entity: None,
@@ -4989,7 +5009,10 @@ impl Peer {
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             tree_cache: tree_cache.clone(),
-            fulltext_cache: crate::fulltext_store::FulltextCache::new(tree_cache.max_entries, tree_cache.max_bytes),
+            fulltext_cache: crate::fulltext_store::FulltextCache::new(
+                tree_cache.max_entries,
+                tree_cache.max_bytes,
+            ),
             tree_node_miss: Mutex::new(None),
             ssd_cache,
             ssd_namespace,
@@ -7289,7 +7312,10 @@ impl TieredSnapshot {
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             tree_cache: tree_cache.clone(),
-            fulltext_cache: crate::fulltext_store::FulltextCache::new(tree_cache.max_entries, tree_cache.max_bytes),
+            fulltext_cache: crate::fulltext_store::FulltextCache::new(
+                tree_cache.max_entries,
+                tree_cache.max_bytes,
+            ),
             tree_node_miss: Mutex::new(None),
             ssd_cache,
             ssd_namespace,
@@ -10435,16 +10461,34 @@ mod tests {
 
     #[test]
     fn fulltext_upgrade_retains_the_reserved_ident_in_small_metadata() {
-        let before = Database::from_genesis(crate::vocabulary::pre_fulltext_genesis_datoms()).unwrap();
+        let before =
+            Database::from_genesis(crate::vocabulary::pre_fulltext_genesis_datoms()).unwrap();
         let metadata = MetadataProjection::from_database(&before).unwrap();
-        assert!(!metadata.schema_current.iter().any(|datom| datom.entity == crate::DB_FULLTEXT));
-        let report = before.with(&crate::fulltext_vocabulary_upgrade_ops(), 10).unwrap();
-        let transaction = DurableTransaction { database_id: "fulltext-metadata".into(), basis_t: 1,
-            previous_hash: [0;32], eidx_frontier: report.db_after.eidx_frontier(),
-            tempids: report.tempids, tx_data: report.tx_data };
+        assert!(
+            !metadata
+                .schema_current
+                .iter()
+                .any(|datom| datom.entity == crate::DB_FULLTEXT)
+        );
+        let report = before
+            .with(&crate::fulltext_vocabulary_upgrade_ops(), 10)
+            .unwrap();
+        let transaction = DurableTransaction {
+            database_id: "fulltext-metadata".into(),
+            basis_t: 1,
+            previous_hash: [0; 32],
+            eidx_frontier: report.db_after.eidx_frontier(),
+            tempids: report.tempids,
+            tx_data: report.tx_data,
+        };
         let after = metadata.apply(&[transaction]).unwrap();
         assert_eq!(after.schema.as_ref(), report.db_after.schema());
-        assert!(metadata.schema.attribute(crate::DB_FULLTEXT as u32).is_err());
+        assert!(
+            metadata
+                .schema
+                .attribute(crate::DB_FULLTEXT as u32)
+                .is_err()
+        );
     }
 
     fn unique_database(prefix: &str) -> String {

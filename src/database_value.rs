@@ -1306,15 +1306,38 @@ impl DatabaseValue {
         }
     }
 
-    pub(crate) fn fulltext_history_cursor(&self, attribute: u32) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
-        self.basis_prefix_cursor(true, &IndexPrefix::Aevt { attribute, entity: None, value: None }, None, None)
+    pub(crate) fn fulltext_history_cursor(
+        &self,
+        attribute: u32,
+    ) -> Result<DatabaseValuePrefixCursor<'_>, SemanticError> {
+        self.basis_prefix_cursor(
+            true,
+            &IndexPrefix::Aevt {
+                attribute,
+                entity: None,
+                value: None,
+            },
+            None,
+            None,
+        )
     }
 
     pub(crate) fn fulltext_overlay_cursor(&self, attribute: u32) -> Option<OverlayIndexCursor> {
-        let ReadBasis::TransactionOverlay(overlay) = &self.basis else { return None; };
-        let prefix = IndexPrefix::Aevt { attribute, entity: None, value: None };
-        Some(overlay.indexes.cursor(true, IndexOrder::Aevt,
-            |datom| compare_prefix(datom, &prefix), false, Some(prefix.clone())))
+        let ReadBasis::TransactionOverlay(overlay) = &self.basis else {
+            return None;
+        };
+        let prefix = IndexPrefix::Aevt {
+            attribute,
+            entity: None,
+            value: None,
+        };
+        Some(overlay.indexes.cursor(
+            true,
+            IndexOrder::Aevt,
+            |datom| compare_prefix(datom, &prefix),
+            false,
+            Some(prefix.clone()),
+        ))
     }
 
     #[cfg(test)]

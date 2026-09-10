@@ -1,4 +1,4 @@
-use atomic_core::persistent_tree::{TreeConfig, build_tree};
+use atomic_core::persistent_tree::{TreeConfig, build_tree, validate_tree_streaming};
 use atomic_core::{
     Attribute, CapacityLimits, Cardinality, EntityRef, ErrorCategory, IndexOrder, Keyword,
     ManifestTree, PersistentTreeManifest, PostgresIndexer, PostgresOperator, PostgresStore,
@@ -6,7 +6,7 @@ use atomic_core::{
     TreeRootBinding, TxOp, TxValue, USER_PARTITION, Value, ValueType, View, make_eid, sha256,
 };
 use postgres::{Client, NoTls};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
@@ -375,10 +375,51 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
     // A correct later publication at the same basis must not conceal this
     // retained fallback candidate. Single-pass replay may share the exact
     // immutable database prefix, but must check every physical publication.
-    PostgresIndexer::connect(&connection, &database_id)
+    let mut successor = trees
+        .load_manifest(&database_id, expected_revision)
         .unwrap()
-        .consolidate()
         .unwrap();
+    let mut successor_manifest = PersistentTreeManifest::decode(&successor.payload).unwrap();
+    successor_manifest.publication_revision = forged_manifest.publication_revision + 1;
+    successor.publication_revision = successor_manifest.publication_revision;
+    successor.payload = successor_manifest.encode().unwrap();
+    successor.manifest_hash = sha256(&successor.payload);
+    let mut successor_nodes = BTreeSet::new();
+    for tree in &successor_manifest.trees {
+        let validated = validate_tree_streaming(&tree.descriptor, |hash| {
+            trees.load_node(*hash)?.ok_or_else(|| {
+                atomic_core::SemanticError::new(
+                    ErrorCategory::Fault,
+                    "test/missing-original-node",
+                    "original authenticated node is absent",
+                )
+            })
+        })
+        .unwrap();
+        successor_nodes.extend(validated.node_hashes);
+    }
+    trees
+        .begin_build_intent(
+            &database_id,
+            generation,
+            forged_manifest.publication_revision,
+            successor.manifest_hash,
+            &successor_nodes,
+        )
+        .unwrap();
+    assert_eq!(
+        trees
+            .publish_manifest_with_delta(
+                &successor,
+                forged_manifest.publication_revision,
+                &TreePublicationDelta::Replace {
+                    live_nodes: successor_nodes
+                }
+            )
+            .unwrap(),
+        TreePublishOutcome::Published
+    );
+    trees.release_build_intent().unwrap();
     let later = operator.inspect_database(&database_id, true).unwrap();
     assert!(!later.healthy());
     assert!(later.metrics.tree_publication_revision > forged_manifest.publication_revision);
@@ -389,6 +430,63 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
                 forged_manifest.publication_revision
             ))
     }));
+}
+
+#[test]
+fn retained_publications_keep_their_own_schema_and_no_history_prefix() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let database_id = unique("inspection_replay_prefixes");
+    atomic_core::PostgresMigrator::connect(&connection)
+        .unwrap()
+        .migrate()
+        .unwrap();
+    let initial = PostgresStore::connect(&connection)
+        .unwrap()
+        .create_database(&database_id, indexed_schema())
+        .unwrap();
+    let mut basis = initial.basis_t();
+    let mut attribute = initial.schema().attribute(ITEM_VALUE).unwrap().clone();
+    drop(initial);
+    let mut retained = 1;
+    for (ordinal, no_history) in [false, true, false].into_iter().enumerate() {
+        let service = common::start_service(&connection, &database_id);
+        if attribute.no_history != no_history {
+            attribute.no_history = no_history;
+            basis = common::transact(
+                &service,
+                &format!("policy-{ordinal}"),
+                basis,
+                &[TxOp::AlterAttribute(attribute.clone())],
+                (basis as i64 + 1) * 1000,
+            )
+            .basis_t;
+        }
+        for version in 0..2 {
+            basis = common::transact(
+                &service,
+                &format!("value-{ordinal}-{version}"),
+                basis,
+                &[add(&format!("{ordinal}-{version}"))],
+                (basis as i64 + 1) * 1000,
+            )
+            .basis_t;
+        }
+        service.shutdown();
+        PostgresIndexer::connect(&connection, &database_id)
+            .unwrap()
+            .consolidate()
+            .unwrap();
+        retained += 1;
+    }
+    let report = PostgresOperator::connect(&connection)
+        .unwrap()
+        .inspect_database(&database_id, true)
+        .unwrap();
+    assert!(report.healthy(), "{:?}", report.problems);
+    assert_eq!(report.metrics.tree_publications, retained);
+    assert_eq!(report.metrics.basis_t, basis);
 }
 
 #[test]

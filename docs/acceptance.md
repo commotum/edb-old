@@ -1,9 +1,9 @@
 # Product acceptance and operating envelope
 
-Goal7 is in progress. The delivered application/security/lifecycle results below
-are established; final maintenance and independent-reader measurements are not
-yet complete. [Goal0](../goal-0/0-plan.md) owns completion, not this document or
-the historical G3 finish line.
+All seven stages and integrated acceptance are complete as of September9,2026.
+[Goal0](../goal-0/0-plan.md) owns the required capability set and completion
+evidence. The results below describe the delivered native product and its tested
+operating envelope, not the historical G3 finish line.
 
 ## What has been exercised
 
@@ -14,15 +14,15 @@ certification, an uptime SLA or Datomic wire/storage parity.
 
 | Boundary | Evidence |
 | --- | --- |
-| Supported application | Local CLI and separate application preserve fixed schema/data requests, history, safe preview/replanning, partitions/UUIDs, fulltext and exact receipts through restart. Two-process regression2/2 passed8.90s. |
-| Remote application | Two isolated network namespaces connected by veth, verified TLS, restricted roles, invalid-token rejection, writer SIGKILL/replacement/rediscovery, exact retry and cross-process snapshot reference/excision policy. Passed15.24s. |
-| Remote programs and hints | Stored query/transaction program preview agrees with commit; retry after replacement and program rebinding keeps the original receipt. Altered/stale/foreign/absent hints do not change request identity. Transport tests3/3 passed11.34s. |
-| Observation | Consumer replay/checkpoint/RLS/generation/reconnect tests6/6 passed12.68s;512-notice flood coalesced504, maximum batch64. Whole reader process0SQL over500ms idle; separate-writer observation75.474ms consumer/75.479ms peer in the final debug sample. |
+| Supported application | Local CLI and separate application preserve fixed schema/data requests, history, safe preview/replanning, partitions/UUIDs, fulltext and exact receipts through restart. Two-process regression2/2 passed8.97s. |
+| Remote application | Two isolated network namespaces connected by veth, verified TLS, restricted roles, invalid-token rejection, writer SIGKILL/replacement/rediscovery, exact retry and cross-process snapshot reference/excision policy. Passed15.43s. |
+| Remote programs and hints | Stored query/transaction program preview agrees with commit; retry after replacement and program rebinding keeps the original receipt. Altered/stale/foreign/absent hints do not change request identity. Transport tests3/3 passed13.35s. |
+| Observation | Consumer replay/checkpoint/RLS/generation/reconnect tests6/6 passed13.26s;512-notice flood coalesced504, maximum batch64. Whole reader process0SQL over500ms idle; separate-writer observation77.117ms consumer/77.121ms peer in the final debug sample. |
 | PostgreSQL TLS | Both actual asynchronous LISTEN backends verified TLS1.3 through pg_stat_ssl; missing trust and plaintext rejected. Consumer checkpoint/peer advancement pass;120ms SQL timeout observed121.03ms. |
-| Administration | Real backup reuse, offline verification, guarded separate-target restore, SIGTERM during an observed restore node-write wait followed by identical retry, inspection, authorized GC and diagnosed missing-search-root repair.2/2 passed12.84s. |
+| Administration | Real backup reuse, offline verification, guarded separate-target restore, SIGTERM during an observed restore node-write wait followed by identical retry, inspection, authorized GC and diagnosed missing-search-root repair.2/2 passed14.84s. |
 | Crash recovery | Separate PostgreSQL immediate shutdown/WAL recovery with fsync/synchronous_commit/full_page_writes on. Current product at basis11, acknowledged12, successor13; full current/history fingerprints, retained values/log, exact retry and independent reopen agree. |
 | Old data | Preserved pre-partition/pre-fulltext binaries created actual4588/4818-byte genesis databases. Explicit schema26→29 migration and vocabulary transactions retain genesis bytes/hash, old values and retry identity. |
-| Generated lifecycle | V2 stored traces combine transactions, interrupted index publication, exact retries, peer reopen, graceful writer replacement and bounded consumer restart/acknowledgment. Saved trace replays on a fresh fixture. Controlled failure reduces9actions→3 and passes without the injected assertion. V1 action meanings remain readable. |
+| Generated lifecycle | Final24-action V2 saved trace replays after both repairs:8writes,3interrupted uploads,3writer restarts,3exact retries and4consumer resumes. A48-step durable-versus-pure comparison preserves36accepted/12rejected outcomes across restart. Controlled failure reduces9actions→3 and passes without the injected assertion. V1 action meanings remain readable. |
 
 Source details and scoped measurements are retained in
 [Goal2](../goal-2/0-plan.md), [Goal3](../goal-3/0-plan.md),
@@ -31,6 +31,25 @@ Source details and scoped measurements are retained in
 
 ## Cost evidence to interpret separately
 
+- The [independent-reader campaign](read-load.md) measures real Datalog work in
+  1/2/4processes, cold openings, concurrent scans and paced writes. At2048records
+  with a1MiBdecoded-node allowance, warm throughput was79.6k/104.5k/155.2kqueries/s
+  with0foregroundSQL. Doubling data with the same cache caused thrashing and
+  reduced it to122/237/497queries/s. Smaller-cache admission failures and all
+  foreground/background SQL, CPU, RSS and latency tails are reported. This is a
+  short shared-host sample, not cross-host linear scaling or a production ceiling.
+- Authenticated bounded subtree fetching reduced commitment encoding from1109
+  to243SQL calls for four256-operation transactions. Sequential/queued wall time
+  changed258.27→238.80ms /225.57→194.39ms while returned result-cell bytes grew
+  by44944. Smaller transactions did not consistently improve; the measured
+  ordered-transactor decision remains, with no added pipeline complexity.
+- Shared authenticated replay reduced inspection of the same8192-record,
+  nine-publication source from10.591s to6.784s. Restore SQL fell152963→39198,
+  but elapsed19.315→19.247s was essentially unchanged and returned bytes rose.
+  Single-publication target inspection also did not improve. See the
+  [maintenance measurements](operations.md#goal7-maintenance-measurement--2026-09-09) for exact fixtures, CPU/memory,
+  verification and reproduction. Large restore remains a substantial broad
+  replay/validation operation; fewer driver calls are not a speed guarantee.
 - Resident native reads avoid foreground SQL; new peers and cold misses still
   authorize, authenticate and maintain retention through PostgreSQL. A serialized
   snapshot reference is neither a credential nor a retention pin.
@@ -66,6 +85,7 @@ intentionally invoke those prebuilt files:
 cargo build --offline --bin atomic --example application_workflow
 cargo test --offline --test product_cli --test remote_transport --test remote_product --test change_consumer --test admin_cli --test postgres_runtime_roles -- --nocapture --test-threads=1
 cargo test --offline --test storage_fault_replay -- --nocapture --test-threads=1
+ATOMIC_DIFFERENTIAL_SEED=42 ATOMIC_DIFFERENTIAL_STEPS=48 cargo test --offline --test transactor_differential generated_ -- --nocapture --test-threads=1
 ```
 
 The Linux remote-product test additionally requires `unshare`, `nsenter`, `ip`,
@@ -87,3 +107,9 @@ see [transport policy](operations.md#transport-and-failure-policy), comments in
 Do not reuse the shared application server for an availability-destroying test.
 A default green test run with missing PostgreSQL/TLS/crash configuration is not
 evidence that those paths executed.
+
+The final supported binary/example build and all-target compile passed.
+The broad library run passed341tests with1ignored; PostgreSQL was deliberately
+unset there, so its early-return tests are not counted as live PostgreSQL proof.
+The configured suites above and the child plans supply that proof. Thirty focused
+maintenance tests and ten commitment tests also passed against actual PostgreSQL.

@@ -7,33 +7,19 @@ programs, and operational recovery. Retained Datomic Pro documentation governs
 semantics; recovered source is architectural evidence, not a JVM/wire target.
 Earlier goal passes remain preserved in `goal-archive/`.
 
-The G3 pass's six stages and core integrated acceptance are complete. The independent-peer
-100,000-record workload passes, including abrupt writer replacement, portable
-backup/restore, deep integrity inspection, actual PostgreSQL crash/WAL recovery,
-exact retry and full old/current/history checks through GC. Schema25 preserves
-receipt ownership while allowing obsolete publication reclamation. The final
-pending-publication inspection/restore repair passes on the original large
-failure as well as focused live PostgreSQL regressions.
+The supported product includes a local or verified-TLS remote transactor,
+separate Rust applications, immutable cached peer reads, shared speculative
+branches, exact snapshot references, persisted native query programs, safe
+transaction planning, named/implicit partitions, UUID helpers and peer-local
+fulltext. Bounded restartable transaction consumers and an administrative CLI
+cover observation, backup/restore, inspection, GC and explicit recovery.
 
-This is a measured native operating envelope, not universal production or
-Datomic-parity certification. Import measured 129.213 records/s on the documented
-local host; broad semantic restore took 56m 7.648s and deep inspection 43m 15.920s.
-See [G3 Goal 6](goal-archive/G3/goal-6/0-plan.md) and the [operator guide](docs/operations.md) for
-resource limits, retained evidence, commands and deliberate differences.
-
-The fresh [Goal 0](goal-0/0-plan.md) owns the next phase's required capabilities
-and dependency-aware implementation order. Goal1 starts with a supported local
-transactor, separate application and reusable test baseline; storage, functional
-features, distributed delivery and full administration follow. Goal1's runnable
-path, storage, functional APIs and partitions (Goals1–4) passed real PostgreSQL
-acceptance; Goal5 fulltext and Goal6 secure distributed application/operator
-delivery also pass. Goal7 integrated operating acceptance is active.
-Shared speculative indexes, exact snapshot references, expanded native query
-programs and the application's safe planning flow are implemented; functional
-integration and hint/join cost checks pass. Named/implicit partitions and UUID
-helpers are implemented. Verified-TLS submission/discovery, bounded restartable
-consumers and the operator CLI are delivered. Final integrated operating
-acceptance is not covered by the older G3 finish line.
+[Goal 0](goal-0/0-plan.md) owns the completed seven-stage acceptance, including
+final operating measurements and rebuilt integration. See
+[product acceptance](docs/acceptance.md) for verified boundaries
+and limits. Historical100,000-record G3 results remain in
+[G3 Goal 6](goal-archive/G3/goal-6/0-plan.md); they are not measurements of the
+newer implementation or a universal production/Datomic-parity certification.
 
 ## Start here
 
@@ -41,11 +27,13 @@ acceptance is not covered by the older G3 finish line.
   using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
 - [React to transactions with bounded durable consumers](docs/change-consumers.md).
 - [Back up, verify, restore, inspect and maintain databases](docs/admin.md).
+- [Interpret product acceptance and the measured operating envelope](docs/acceptance.md).
+- [Measure independent readers, cold opens and mixed analytics/write traffic](docs/read-load.md).
 - [Author persisted native query programs](docs/programs.md) with predicates,
   recursive rules, negation, historical sources and dynamic attributes.
 - [Compose native database, tuple and log queries](docs/queries.md), reuse query
   structure and configure join/resource limits.
-- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the next-phase objective and
+- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the product objective and
   required capabilities; [`0-loop.md`](goal-0/0-loop.md) guides execution and
   [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
 - [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: runnable local

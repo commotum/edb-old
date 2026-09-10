@@ -170,8 +170,9 @@ source; it never edits source facts. During repair, retained readers may cold-fa
 reopen peers after repair that changes the search root/analyzer to discard cached
 headers. Ordinary GC preserves pinned sources, retires unpinned canonical sources
 under existing policy, and reclaims orphan search blocks in bounded ledger batches.
-Excision publishes a new generation and its reconstructed search: new current and
-history views cannot return removed facts. Already-held authorized old values
+Excision publishes a new generation; search is reconstructed from that generation
+and may be unavailable until its projection is ready. New current and history
+views cannot return removed facts. Already-held authorized old values
 retain the repository's existing pre-excision access policy; excision is not a
 promise to erase bytes or memories already delivered to an application.
 

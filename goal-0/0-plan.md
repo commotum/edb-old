@@ -16,16 +16,19 @@ equivalence are not objectives.
 
 ## Current state and execution ownership
 
-**Status:** In progress. Goals1–6 are complete; Goal7 is the sole active child.
+**Status:** Complete (2026-09-09). Goals1–7 and integrated product acceptance
+are complete; no child is active. [Product acceptance](../docs/acceptance.md)
+links the executable workflows, current measurements and operating limits.
 [Goal1](../goal-1/0-plan.md) records the runnable baseline; Goal2 records storage.
 G1 (original Goals0–8), G2 (Goals9–17) and G3 (the completed native-engine pass)
 under goal-archive are historical evidence, not active instructions.
 
-The library already provides a fenced transactor, same-host submission, native
+The library provides a fenced transactor, local and verified-TLS remote submission, native
 peers, immutable values/history, pure with, query/Pull/entity navigation,
 in-memory fixtures, authenticated logs, indexing, backup/restore and GC.
-Extend those APIs rather than replacing them. Missing capabilities are assigned
-below; source observations are not fresh benchmark results.
+Those APIs were extended rather than replaced. Required capabilities and their
+completion evidence are assigned below; source observations are not fresh
+benchmark results.
 
 G3 recorded real PostgreSQL recovery/retry/GC acceptance and a 100,000-record
 import at 129.213 records/s. Restore took 3367.648s and inspection 2595.920s on
@@ -345,11 +348,22 @@ failure/retry without source edits or acceptance-harness setup.
 
 ### 7. Establish integrated operating acceptance
 
-**Status:** Active in Goal7. Expanded V2 lifecycle traces and saved replay pass,
+**Status:** Complete in Goal7 (2026-09-09). Expanded V2 lifecycle traces and saved replay pass,
 including writer replacement, exact receipts and durable consumers; controlled
 failure reduces9→3. Fresh actual old-binary genesis upgrades and separate
-PostgreSQL immediate-stop/WAL recovery passed. Commitment/maintenance performance
-repairs and independent-reader measurements remain in progress.
+PostgreSQL immediate-stop/WAL recovery passed. Authenticated bounded commitment
+fetching reduces four256-operation encodingSQL1109→243, with10/10actual PG
+regressions passing; small requests show no consistent latency gain. Shared
+authenticated inspection replay cuts the identical9-publication8192-record run
+10.591→6.784s. RestoreSQL152963→39198 does not materially improve19.3s elapsed.
+Independent1/2/4readers and mixed workloads are measured, including a sharply
+slower cache-thrashing configuration. Rebuilt local/remote/admin/consumer checks
+pass. Final24-action saved fault replay passes with exact values/receipts and
+consumer recovery;48-step durable-versus-pure comparison passes36accepted /
+12rejected cases with writer restart. Final build/all-target compile/example
+unit/formatting checks pass. The required capability set is delivered; measured
+cache residency and broad maintenance costs are operating limits, not hidden
+feature exclusions or universal production capacity claims.
 
 **Outcome:** Every required capability works together, with reproducible
 instructions and a measured, honest operating envelope.
@@ -381,13 +395,14 @@ product and integrated acceptance close Goal0.
 
 ## Continuation
 
-Active: Goal7, on 2026-09-09. Goals1–6 passed their real PostgreSQL/application,
-semantic/failure and measured-cost signals; see their evidence records. Goal2
-retains ordered transaction processing and records commitment-tree I/O for Stage7.
-Next: profile/improve commitment point-load and restore/inspection costs, measure
-multi-reader warm/cold/mixed native workloads, and extend/replay existing seeded
-lifecycle acceptance. Secure remote delivery, bounded durable consumers and
-administrative commands passed final actual acceptance. All fault targets remain
-disposable and separate from user data.
-No later stage or integrated completion is claimed. Keep this plan authoritative;
-loops/prompts are continuation guides.
+Complete2026-09-09. No unfinished stage, active child or known failing required
+acceptance check remains. Start with docs/application.md for the executable/SDK
+workflow and docs/acceptance.md for verified boundaries and repeat commands.
+Goals1–7 retain the semantic, compatibility, fault and cost evidence. If a later
+integrated check reveals a gap, reopen its owning child and reconcile this plan;
+do not invent another parent or rerun completed work without a concrete reason.
+The isolated local PostgreSQL test server remains available at
+`/tmp/atomic-product-pg.jJPI2p`(port55439), with final differential evidence in
+`atomic_goal7_final_integrated`; separate crash/TLS servers were stopped. User
+data and archived goals were not replaced. Temporary artifacts are local evidence,
+not durable backups. Keep this plan authoritative; loops/prompts guide resumption.

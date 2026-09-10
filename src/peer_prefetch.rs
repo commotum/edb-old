@@ -104,7 +104,10 @@ impl HintReadPlan {
             root_pins,
             programs: Arc::new(Mutex::new(crate::postgres::ProgramCache::default())),
             tree_cache: cache.clone(),
-            fulltext_cache: crate::fulltext_store::FulltextCache::new(cache.max_entries, cache.max_bytes),
+            fulltext_cache: crate::fulltext_store::FulltextCache::new(
+                cache.max_entries,
+                cache.max_bytes,
+            ),
             tree_node_miss: Mutex::new(None),
             // Filesystem cache operations have no interruptible deadline. Hints
             // warm only the shared bounded RAM node cache through authenticated PG.

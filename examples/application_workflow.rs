@@ -770,8 +770,14 @@ fn run() -> Result<()> {
             );
         }
         let mut bytes = Vec::new();
-        let file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
-        require(file.metadata()?.is_file(),"snapshot reference must be a regular file")?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?;
+        require(
+            file.metadata()?.is_file(),
+            "snapshot reference must be a regular file",
+        )?;
         file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
         let reference = atomic_core::SnapshotReference::decode(&bytes)?;
         require(

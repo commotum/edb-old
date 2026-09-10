@@ -165,7 +165,11 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, SemanticError> {
         1 => ProgramKind::AttributePredicate,
         2 => ProgramKind::Query,
         3 => ProgramKind::EntityPredicate,
-        4 if matches!(abi_version, DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9) => {
+        4 if matches!(
+            abi_version,
+            DUAL_PREDICATE_PROGRAM_ABI_VERSION | 6 | 7 | 8 | 9
+        ) =>
+        {
             ProgramKind::DualPredicate
         }
         tag => return Err(invalid_tag("program kind", tag)),
@@ -2224,8 +2228,14 @@ fn program_has_fulltext(instructions: &[Instruction]) -> bool {
     }
     fn clauses(input: &[crate::Clause]) -> bool {
         input.iter().any(|clause| match clause {
-            crate::Clause::Function { function: crate::Function::Fulltext, .. } => true,
-            crate::Clause::Function { function: crate::Function::Query(inner), .. } => query(inner),
+            crate::Clause::Function {
+                function: crate::Function::Fulltext,
+                ..
+            } => true,
+            crate::Clause::Function {
+                function: crate::Function::Query(inner),
+                ..
+            } => query(inner),
             crate::Clause::Not { clauses: inner, .. } => clauses(inner),
             crate::Clause::Or { branches, .. } => branches.iter().any(|branch| clauses(branch)),
             _ => false,
@@ -2233,9 +2243,14 @@ fn program_has_fulltext(instructions: &[Instruction]) -> bool {
     }
     instructions.iter().any(|instruction| match instruction {
         Instruction::Query(template) => template.native_query().is_some_and(query),
-        Instruction::If { then_branch, else_branch } => program_has_fulltext(then_branch) || program_has_fulltext(else_branch),
+        Instruction::If {
+            then_branch,
+            else_branch,
+        } => program_has_fulltext(then_branch) || program_has_fulltext(else_branch),
         Instruction::ForEach { body } => program_has_fulltext(body),
-        Instruction::PredicateDispatch { attribute, entity } => program_has_fulltext(attribute) || program_has_fulltext(entity),
+        Instruction::PredicateDispatch { attribute, entity } => {
+            program_has_fulltext(attribute) || program_has_fulltext(entity)
+        }
         _ => false,
     })
 }

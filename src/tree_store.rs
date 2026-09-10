@@ -1817,7 +1817,7 @@ impl PostgresTreeStore {
             .commit()
             .map_err(|error| postgres_error("tree/publication-commit", error))?;
 
-        crate::change_notices::publish(&self.connection,&manifest.database_id);
+        crate::change_notices::publish(&self.connection, &manifest.database_id);
 
         self.stats.manifest_writes = self.stats.manifest_writes.saturating_add(manifest_inserted);
         self.stats.root_binding_writes = self

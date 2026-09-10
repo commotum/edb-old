@@ -410,8 +410,105 @@ Excision does not erase application exports, logs, old process memory, replicas,
 PostgreSQL WAL or portable/physical backups. Apply the same retention decision
 to those separately. A pre-excision backup is recommended for operational
 recovery, but retaining it also retains the removed information; it is not an
-authorization token or a physical-erasure guarantee. Fulltext is unsupported.
+authorization token or a physical-erasure guarantee. Fulltext is rebuilt from
+the successor generation: search may be unavailable until that projection is
+ready; new current/history searches exclude excised facts,
+while already-held authorized old values retain the same pre-excision policy.
+Search copies in old values or backups are not magically erased; see the
+[fulltext ownership and recovery policy](fulltext.md).
 
 Semantic references: local Datomic backup/restore, HA and excision documentation
 under `datomic_pro_docs/08_operations/01_capacity_and_reliability/` and
 `datomic_pro_docs/09_optional/02_specialized_operations/02_excision.md`.
+
+## Goal7 maintenance measurement — 2026-09-09
+
+Deep inspection now loads shared immutable tree payloads once within its
+repeatable-read snapshot, shares validated bytes across retained publications,
+and replays the authoritative log once for their semantic comparisons. It still
+checks **every** eligible publication at its own basis, including an earlier
+forged publication followed by a valid successor, historical schema/noHistory
+changes, pending AVET work and exact transaction/state commitments. The separate
+final database/metrics recovery remains; this is not a claim that the entire
+inspection performs only one replay. Tree streaming no longer clones the entire
+growing node map for each index, and unrelated index leaves are excluded before
+decoding their datoms again.
+
+Restore reuses verified bounded node uploads for both main trees and receipt
+archives: at most 128 nodes or 8MiB per ordinary batch, with a valid oversized
+node admitted alone under the existing codec maximum. A next incoming node can
+temporarily coexist with the batch; these limits do not describe total process
+RSS. Build intents, complete root-last publication, independent semantic replay
+and exact retry authentication are unchanged. The accompanying Goal7 commitment
+prefetch also reduces point SQL calls during restore, but returns more bytes.
+
+The before/after experiment used one unchanged source and one exact portable
+backup, with separate empty destination schemas on PostgreSQL 15.11, local Unix
+socket, Threadripper 2950X/Linux. There were 8,192 append-only entities, each with
+an indexed Long key and a highly compressible 256-byte string, in 64 transactions
+of 128 entities. Including the initial schema transaction, the basis was 65:
+16,596 current and 16,596 history datoms, nine retained source publications and
+292 unique tree nodes (25,161,038 canonical bytes). The backup held 500 files /
+28,023,698 bytes. The restored target had one published tree plus eight exact
+receipt-base archives. Each measured phase used a fresh release-build process;
+PostgreSQL/OS caches were not flushed. Other project measurement/test processes
+were paused, but this is one local sample per version, not a latency guarantee.
+
+Pairs below are **before → after**. CPU is client-process user + system time;
+peak RSS is the process `VmHWM`. SQL calls are observed driver API/control calls,
+not network round trips; cell bytes exclude protocol overhead and are not total
+wire traffic.
+
+| Phase | Wall seconds | CPU seconds | SQL calls | Result-cell bytes | Peak RSS KiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Restore, including mandatory deep proof | 19.315 → 19.247 | 10.283 → 9.785 | 152,963 → 39,198 | 136,982,453 → 160,181,598 | 120,988 → 121,452 |
+| Restored target inspection, one publication | 5.849 → 6.060 | 3.608 → 3.668 | 249 → 249 | 30,177,435 → 30,177,435 | 88,728 → 94,692 |
+| Unchanged source inspection, nine publications | 10.591 → 6.784 | 9.517 → 5.269 | 901 → 657 | 92,566,951 → 58,315,003 | 114,208 → 104,700 |
+
+Repeated-publication inspection materially improved on this fixture (36% lower
+wall time and 45% lower client CPU). Restore made about 74% fewer SQL calls, but
+**did not materially improve elapsed time or peak memory**; the one-publication
+inspection also showed no improvement. The restore result includes both bounded
+uploads and commitment prefetch, not an isolated speedup attributable to either.
+These results do not remeasure or replace the historical G3 100,000-record run.
+Broad semantic reconstruction, retained closure verification and SQL work remain
+substantial; larger restore/inspection capacity must still be measured on the
+intended deployment and workload.
+
+The exact backup root was
+`802ca328037319e848bb19c6f8945ca2b0e1f11426dcd85f22c89405b62c2031`.
+Before/after native current and history fingerprints both matched
+`16596:76148a791b12e8eb75f249149df40f8e93af3e5cd41d1e483dda08a78ff957d5`,
+with unchanged source checks and zero eager compatibility materializations.
+The first run also completed initial/unchanged backup and standalone deep proof;
+the after run explicitly resumed that exact backup and still performed restore's
+mandatory proof. Thirty focused live PostgreSQL regressions passed across
+`operations_integrity`, `operations_inspection_scope`,
+`inspection_pending_publication`, `backup_restore`, `backup_semantic_integrity`,
+`backup_copy_boundary`, `restore_target_proof` and
+`restore_publication_completion`, including corruption, noHistory, interrupted
+publication, ambiguous retry, and exact earlier receipt bases.
+
+To create this bounded profiling shape, first select fresh, explicitly
+provisioned source/target catalogs and an operator-private backup directory using
+the variables above, then run the opt-in seed once:
+
+```sh
+cargo build --release --example operations_workflow
+ATOMIC_OPS_PHASE=fixture-seed ATOMIC_OPS_PROFILE_RECORDS=8192 \
+  target/release/examples/operations_workflow
+target/release/examples/operations_workflow
+```
+
+`fixture-seed` creates the named logical database and never overwrites an existing
+one; its record-count cap is a profiling guard, not a database limit. Preserve
+the source and captured backup between binary comparisons, and use a fresh empty
+destination for each new restore. A direct **read-only** source inspection can
+be measured separately by setting `ATOMIC_OPS_PHASE=deep-inspect` and pointing
+`ATOMIC_RESTORE_POSTGRES_URL` at that source for this phase only; never do that
+for restore. The ordinary driver requires separate source/target configurations.
+The frozen local executables were retained under
+`/tmp/atomic-maintenance-profile.xF5Nrb/`: `operations-before` SHA-256
+`7015e18368420f4d2087271b2d79c440400152cf6d740d11125ee8dafd78470a`,
+and `operations-after` SHA-256
+`2964e81ac22335aba3905923f16b44b4ac3c90ac7d19d042c61b30582f3d2a56`.

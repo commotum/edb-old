@@ -432,7 +432,10 @@ fn observed<T, E>(
 
 /// Owned PostgreSQL connection used internally. There is deliberately no
 /// Deref or raw-client accessor that could bypass instrumentation.
-pub(crate) fn observe_driver_call<T, E>(kind: SqlCallKind, call: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+pub(crate) fn observe_driver_call<T, E>(
+    kind: SqlCallKind,
+    call: impl FnOnce() -> Result<T, E>,
+) -> Result<T, E> {
     observed(Some(&io_context()), kind, call)
 }
 

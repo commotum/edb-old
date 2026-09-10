@@ -233,7 +233,9 @@ fn interrupt_restore_at_node_write(fixture: &Fixture, arguments: &[&str]) {
         .unwrap();
     assert!(progress.contains("PROGRESS command=restore phase=verify-stage-activate"));
     blocker.batch_execute("ROLLBACK").unwrap();
-    println!("RESTORE_INTERRUPTED observed_node_write_lock=true signal=SIGTERM retry=same-exact-selection");
+    println!(
+        "RESTORE_INTERRUPTED observed_node_write_lock=true signal=SIGTERM retry=same-exact-selection"
+    );
 }
 
 #[test]
@@ -445,10 +447,12 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
         "public",
     ]);
     assert!(success(Some(&fixture.target), &restore).contains("RESTORE_PREVIEW"));
-    assert!(PostgresStore::connect(&fixture.target)
-        .unwrap()
-        .database_status("restored")
-        .is_err());
+    assert!(
+        PostgresStore::connect(&fixture.target)
+            .unwrap()
+            .database_status("restored")
+            .is_err()
+    );
     restore.push("--apply");
     #[cfg(unix)]
     interrupt_restore_at_node_write(&fixture, &restore);
@@ -456,11 +460,13 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
         success(Some(&fixture.target), &restore).contains("RESTORED target_database=\"restored\"")
     );
     assert!(success(Some(&fixture.target), &restore).contains("basis_t=3"));
-    assert!(success(
-        Some(&fixture.target),
-        &["inspect", "--database", "restored"]
-    )
-    .contains("INSPECT healthy=true"));
+    assert!(
+        success(
+            Some(&fixture.target),
+            &["inspect", "--database", "restored"]
+        )
+        .contains("INSPECT healthy=true")
+    );
     let restored = Peer::connect(&fixture.target, "restored", 16).unwrap();
     assert_eq!(
         restored.db().values(entity, 1000).unwrap(),
@@ -471,11 +477,13 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
         3 // Original assertion, its retraction, and replacement assertion.
     );
     drop(restored);
-    assert!(success(
-        Some(&fixture.target),
-        &["fulltext-rebuild", "--database", "restored"]
-    )
-    .contains("FULLTEXT_REBUILT basis_t=3"));
+    assert!(
+        success(
+            Some(&fixture.target),
+            &["fulltext-rebuild", "--database", "restored"]
+        )
+        .contains("FULLTEXT_REBUILT basis_t=3")
+    );
     let peer = Peer::connect(&fixture.target, "restored", 16).unwrap();
     assert_eq!(
         peer.db()
