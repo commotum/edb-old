@@ -24,6 +24,7 @@ pub(super) fn execute(
         plan: Vec::new(),
         extensions: parent.extensions,
         rule_memo: BTreeMap::new(),
+        negative_memo: BTreeMap::new(),
         solving_rules: false,
         borrowed_cancel: parent.borrowed_cancel,
         max_value_bytes: parent
@@ -33,7 +34,7 @@ pub(super) fn execute(
     let result = (|| {
         dependencies::validate_negation(query, &mut child)?;
         let initial = bind_arguments(&query.inputs, args, &mut child)?;
-        let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut child)?;
+        let rows = dependencies::evaluate_complete(query, initial, &mut child)?;
         let mut budget = QueryPullBudget::new(
             Arc::clone(&parent.control.cancel),
             parent.deadline,

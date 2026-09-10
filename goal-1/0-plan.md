@@ -6,7 +6,7 @@ Complete Stage1 of `/home/jake/Developer/atomic/goal-0/0-plan.md`: repair negati
 rule evaluation (R1), disjunction readiness (R3) and anonymous identity collisions
 (R2) in the existing product, preserving valid behavior and durable retries.
 
-Status: **in progress: regression setup and shared repairs**. This is Goal0's first active
+Status: **in progress: stack-safe negative completion and combined acceptance**. This is Goal0's first active
 child. Its internal steps do not create additional goal folders. After its
 completion, return to Goal0; the other parent stages remain required.
 
@@ -86,7 +86,8 @@ safe diagnosis path; future submissions must not repeat the collision.
 - **Completion signal:** Regressions demonstrate current failures, or current-tree
   evidence explains a previously completed repair. The normal eager/exact/public
   entry points are represented; baseline valid queries/identities still pass.
-- **Status:** Not started.
+- **Status:** Complete: permanent counterexamples, baseline reproduction and actual
+  pre-repair PostgreSQL receipts captured before rebuild.
 
 ### 2. Repair query dependency semantics
 
@@ -100,7 +101,8 @@ safe diagnosis path; future submissions must not repeat the collision.
   cases pass with explicit expected results. Include negated calls to recursive
   positive rules, not just nonrecursive negative clauses. No incomplete memo escapes as an
   authoritative negative answer, and genuine binding errors remain errors.
-- **Status:** Not started.
+- **Status:** In progress: semantic regressions pass; replace nested negative
+  completion with stack-safe scheduling before final acceptance.
 
 ### 3. Repair anonymous identity without breaking durable meaning
 
@@ -114,7 +116,8 @@ safe diagnosis path; future submissions must not repeat the collision.
   commits, restart and exact retry agree with returned reports. Any required codec/
   request versioning has a pre-change fixture proving old receipt compatibility;
   no durable migration is introduced merely for convenience.
-- **Status:** Not started.
+- **Status:** Complete: eager/exact, generated/nested forms, upserts, configured
+  PostgreSQL restart/retry and real pre-repair receipt compatibility verified.
 
 ### 4. Verify the combined application behavior and hand back to Goal 0
 
@@ -132,7 +135,8 @@ safe diagnosis path; future submissions must not repeat the collision.
   regression. Record actual commands, fixture execution, compatibility decisions
   and uncertainty. Mark parent Stage1 complete and return to its first unfinished
   stage rather than ending the overall product effort here.
-- **Status:** Not started.
+- **Status:** In progress: real CLI/application/TLS checks pass; rerun relevant
+  checks after negative-completion scheduling is finalized.
 
 ## Evidence policy and continuation
 
@@ -149,8 +153,43 @@ with evidence the tests executed. Missing privileges/configuration are blockers
 to the affected completion check, not successful tests. Source changes, not this
 scaffold, must add permanent regressions.
 
-Continuation (2026-09-10): query and normalization repairs are underway from
-`c0bc499`. Establish the disposable PG fixture and preserve the old executable/
-acknowledged receipt before rebuilding; then run permanent counterexamples and
-shared/application regression checks. No step is marked complete yet. Final
-child signal remains step4, followed by returning to the parent loop.
+### Verified execution evidence (2026-09-10)
+
+- Baseline `c0bc499`; the retained old review executable still reproduces R1/R3.
+  New `query_dependency_repairs` cases pass (10); 55 nearby query checks pass,
+  with one opt-in measurement ignored. These runs did not establish PG coverage.
+- `transaction.rs` now reserves the complete expanded explicit-tempid namespace
+  before deterministic anonymous allocation. No persisted encoding, request hash,
+  public EntityRef or receipt format changed. Ordinary allocation remains stable;
+  historical collided entities are not split or reinterpreted on retry.
+- PostgreSQL 15.11 is actually running, with fsync/synchronous_commit/
+  full_page_writes on, in disposable `/tmp/atomic-repair-pg.vA037i/data`, loopback
+  port55471. Test URL: `host=127.0.0.1 port=55471 user=atomic_repair dbname=atomic_repair`;
+  `ATOMIC_POSTGRES_TRANSPORT=plaintext`. Socket tests use approved host execution.
+- `tests/identity_upgrade.rs` was compiled with rustc against the old rlib before
+  any Cargo rebuild. Seed and repaired verify both passed: direct-map and stored
+  emitter collisions still return the exact old hash/tempids/datoms/before/after/
+  history on retry; fresh request keys produce distinct entities. Baseline binary
+  `/tmp/atomic-repair-pg.vA037i/identity_upgrade_old`, original receipt
+  `old-receipts.txt`, logical DB `repair_old_receipt_c0bc499`. This ignored-by-default
+  two-build witness requires explicit seed/verify environment; a skipped ordinary
+  run is not upgrade proof. The same permanent test can repeat future upgrades.
+- `declarative_repairs_postgres` passed (15.78s): actual CLI transactor process,
+  restricted writer/peer roles, R1/R2/R3, old snapshots/history and restart/exact
+  retry. `anonymous_identity` passed all seven cases with PG configured (5.83s).
+  Local-callback primitive admission unit test passed; expansion stops at the
+  first over-budget primitive instead of retaining all callback output.
+- `product_cli` passed both tests (20.74s), including two separate application
+  processes, restricted roles and missing-publication recovery. All three
+  `remote_transport` tests passed (52.24s), including stored-query preview,
+  lost-response retry and replacement/rebinding. Log: `stage1-product.log` in the
+  fixture root. Example whole-workflow measurements are diagnostics, not scale
+  claims: initial application1665ms, twenty warmed calculations6828us and zero SQL
+  calls inside that calculation loop; total application148SQL calls.
+
+Continuation: closing review identified stack-depth risk in nested negative-rule
+completion. Goal1 remains active while replacing nested completion calls with an
+explicit task stack and rerunning query/PG regressions. Product/remote and adjacent
+transaction suites are running; their logs are under the disposable fixture root.
+Finish the child's combined signal, then return to Goal0 Stage2. No parent or child
+completion is claimed yet.

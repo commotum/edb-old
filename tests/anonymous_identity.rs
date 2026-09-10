@@ -209,13 +209,14 @@ fn nested_maps_reserve_names_before_allocating_any_parent_or_child() {
             .values(labels["parent"], CHILD)
             .unwrap()
             .into_iter()
+            .map(|value| match value {
+                Value::Ref(entity) => entity,
+                _ => panic!("expected component reference"),
+            })
             .collect::<BTreeSet<_>>(),
-        [
-            Value::Ref(labels["anonymous-child"]),
-            Value::Ref(labels["explicit-child"])
-        ]
-        .into_iter()
-        .collect()
+        [labels["anonymous-child"], labels["explicit-child"]]
+            .into_iter()
+            .collect()
     );
     if let MapValue::Many(children) = &mut parent.attributes[1].1 {
         children.reverse();

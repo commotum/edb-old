@@ -1109,8 +1109,33 @@ fn normalize_forms_against(
     validate_forms_input(forms)?;
     let mut forms = forms.to_vec();
     forms.sort_by(compare_tx_form);
+    // A local callback may return many forms (and more callbacks). Preserve
+    // incremental primitive admission while discovering that complete input.
+    // Only this finite-budget, local-callback path needs a preflight; persisted
+    // programs enforce their expansion budget before reaching this normalizer.
+    let mut admission = (max_primitive_ops != usize::MAX
+        && forms.iter().any(|form| matches!(form, TxForm::Call(_))))
+    .then(|| {
+        (
+            Normalizer {
+                db_before,
+                explicit_tempids: BTreeSet::new(),
+                next_anonymous: 0,
+                primitive_count: 0,
+                max_primitive_ops,
+            },
+            Vec::new(),
+        )
+    });
     let mut expanded = Vec::new();
-    expand_local_calls(db_before, functions, forms, 0, &mut expanded)?;
+    expand_local_calls(
+        db_before,
+        functions,
+        forms,
+        0,
+        &mut expanded,
+        &mut admission,
+    )?;
     let mut normalizer = Normalizer {
         db_before,
         explicit_tempids: explicit_tempids(&expanded),
@@ -1119,8 +1144,8 @@ fn normalize_forms_against(
         max_primitive_ops,
     };
     let mut ops = Vec::new();
-    for form in &expanded {
-        normalizer.expand_form(form, &mut ops)?;
+    for form in expanded {
+        normalizer.expand_form(&form, &mut ops)?;
     }
     Ok(ops)
 }
@@ -1137,6 +1162,7 @@ fn expand_local_calls(
     forms: Vec<TxForm>,
     depth: usize,
     output: &mut Vec<TxForm>,
+    admission: &mut Option<(Normalizer<'_>, Vec<TxOp>)>,
 ) -> Result<(), SemanticError> {
     for form in forms {
         if depth > 32 {
@@ -1156,7 +1182,14 @@ fn expand_local_calls(
                 let mut generated = functions.invoke(database, &call)?;
                 validate_forms_input(&generated)?;
                 generated.sort_by(compare_tx_form);
-                expand_local_calls(db_before, Some(functions), generated, depth + 1, output)?;
+                expand_local_calls(
+                    db_before,
+                    Some(functions),
+                    generated,
+                    depth + 1,
+                    output,
+                    admission,
+                )?;
             }
             TxForm::ProgramCall(_) => {
                 return Err(SemanticError::incorrect(
@@ -1164,7 +1197,13 @@ fn expand_local_calls(
                     "persisted database-function calls must be resolved against db-before by the transactor",
                 ));
             }
-            form => output.push(form),
+            form => {
+                if let Some((normalizer, scratch)) = admission {
+                    normalizer.expand_form(&form, scratch)?;
+                    scratch.clear();
+                }
+                output.push(form);
+            }
         }
     }
     Ok(())
@@ -1574,6 +1613,49 @@ mod tests {
 
     fn scalar(value: Value) -> MapValue {
         MapValue::Value(TxValue::Scalar(value))
+    }
+
+    #[test]
+    fn callback_discovery_preserves_cumulative_primitive_admission() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let database = Database::bootstrap().unwrap();
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let mut functions = TxFunctions::new();
+        let count = Arc::clone(&invoked);
+        functions.register("emit", move |_, _| {
+            count.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![TxForm::Op(TxOp::Add {
+                entity: EntityRef::Temp("some-entity".into()),
+                attribute: crate::DB_IDENT as u32,
+                value: Value::Keyword(Keyword::new("test", "entity")).into(),
+            })])
+        });
+        functions.register("branch", |_, _| {
+            Ok((0..100)
+                .map(|_| {
+                    TxForm::Call(TxCall {
+                        function: "emit".into(),
+                        arguments: Vec::new(),
+                    })
+                })
+                .collect())
+        });
+        let error = database
+            .normalize_forms_with_limit(
+                &[TxForm::Call(TxCall {
+                    function: "branch".into(),
+                    arguments: Vec::new(),
+                })],
+                &functions,
+                2,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "postgres/transaction-op-capacity");
+        assert_eq!(
+            invoked.load(Ordering::Relaxed),
+            3,
+            "stop at the first over-budget primitive; do not invoke the remaining 97 callbacks"
+        );
     }
 
     #[test]

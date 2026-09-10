@@ -157,9 +157,13 @@ fn old_collided_receipts_remain_exact_but_new_requests_are_repaired() {
             .unwrap();
     } else {
         assert_eq!(actual, std::fs::read_to_string(file).unwrap());
+        let run = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
         for (index, mut request) in requests.into_iter().enumerate() {
-            request.request_key = format!("fresh-after-upgrade-{index}");
-            request.tx_instant_override = Some(12 + index as i64);
+            request.request_key = format!("fresh-after-upgrade-{run}-{index}");
+            request.tx_instant_override = None;
             let report = service
                 .client()
                 .transact(request, Duration::from_secs(20))

@@ -27,6 +27,7 @@ mod prepare;
 pub use prepare::{PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats};
 #[path = "query_dependencies.rs"]
 mod dependencies;
+use dependencies::EvaluationResult;
 #[path = "query_fulltext.rs"]
 mod fulltext;
 #[path = "query_join.rs"]
@@ -998,6 +999,7 @@ struct State<'a> {
     plan: Vec<PlanStep>,
     extensions: Option<&'a QueryExtensions>,
     rule_memo: BTreeMap<RuleInvocationKey, Vec<Vec<BoundValue>>>,
+    negative_memo: BTreeMap<dependencies::NegativeInvocation, bool>,
     solving_rules: bool,
     borrowed_cancel: Option<&'a AtomicBool>,
     max_value_bytes: usize,
@@ -1091,6 +1093,7 @@ impl QueryEngine {
             plan: Vec::new(),
             extensions,
             rule_memo: BTreeMap::new(),
+            negative_memo: BTreeMap::new(),
             solving_rules: false,
             borrowed_cancel: None,
             max_value_bytes: usize::MAX,
@@ -1138,6 +1141,7 @@ impl QueryEngine {
                 plan: Vec::new(),
                 extensions: None,
                 rule_memo: BTreeMap::new(),
+                negative_memo: BTreeMap::new(),
                 solving_rules: false,
                 borrowed_cancel: budget.query_cancelled(),
                 max_value_bytes: budget.query_remaining_value_bytes(),
@@ -1197,7 +1201,7 @@ fn run_query(
     validate_consumed_sources(query, &state.sources)?;
     dependencies::validate_negation(query, state)?;
     let initial = bind_inputs(&query.inputs, inputs, state)?;
-    let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, state)?;
+    let rows = dependencies::evaluate_complete(query, initial, state)?;
     let mut pull_budget = QueryPullBudget::new(
         Arc::clone(&state.control.cancel),
         state.deadline,
@@ -1273,7 +1277,13 @@ fn validate_nested_sources(
     sources: &BTreeMap<&str, SourceRef<'_>>,
     visited: &mut BTreeSet<(String, String)>,
 ) -> Result<(), SemanticError> {
-    for clause in clauses {
+    let mut pending: Vec<_> = clauses
+        .iter()
+        .rev()
+        .map(|clause| (clause, inherited.map(str::to_owned)))
+        .collect();
+    while let Some((clause, inherited_name)) = pending.pop() {
+        let inherited = inherited_name.as_deref();
         match clause {
             Clause::Pattern(pattern) => {
                 let name = effective_source(&pattern.source, inherited);
@@ -1373,24 +1383,32 @@ fn validate_nested_sources(
                 validate_consumed_sources(query, &nested)?;
             }
             Clause::Not { clauses, .. } => {
-                validate_nested_sources(clauses, rules, inherited, sources, visited)?
+                pending.extend(
+                    clauses
+                        .iter()
+                        .rev()
+                        .map(|clause| (clause, inherited_name.clone())),
+                );
             }
             Clause::Or { branches, .. } => {
-                for branch in branches {
-                    validate_nested_sources(branch, rules, inherited, sources, visited)?;
-                }
+                pending.extend(
+                    branches
+                        .iter()
+                        .rev()
+                        .flat_map(|branch| branch.iter().rev())
+                        .map(|clause| (clause, inherited_name.clone())),
+                );
             }
             Clause::Rule { source, name, .. } => {
                 let source = effective_source(source, inherited);
                 if visited.insert((name.clone(), source.into())) {
-                    for rule in rules.iter().filter(|rule| rule.name == *name) {
-                        validate_nested_sources(
-                            &rule.clauses,
-                            rules,
-                            Some(source),
-                            sources,
-                            visited,
-                        )?;
+                    for rule in rules.iter().rev().filter(|rule| rule.name == *name) {
+                        pending.extend(
+                            rule.clauses
+                                .iter()
+                                .rev()
+                                .map(|clause| (clause, Some(source.to_owned()))),
+                        );
                     }
                 }
             }
@@ -1407,7 +1425,13 @@ fn collect_consumed_sources(
     consumed: &mut BTreeSet<String>,
     visited_rules: &mut BTreeSet<(String, String)>,
 ) {
-    for clause in clauses {
+    let mut pending: Vec<_> = clauses
+        .iter()
+        .rev()
+        .map(|clause| (clause, inherited_source.map(str::to_owned)))
+        .collect();
+    while let Some((clause, inherited_name)) = pending.pop() {
+        let inherited_source = inherited_name.as_deref();
         match clause {
             Clause::Pattern(pattern) => {
                 consumed.insert(effective_source(&pattern.source, inherited_source).to_owned());
@@ -1436,29 +1460,31 @@ fn collect_consumed_sources(
                 consumed.insert(effective_source(source, inherited_source).to_owned());
             }
             Clause::Not { clauses, .. } => {
-                collect_consumed_sources(clauses, rules, inherited_source, consumed, visited_rules)
+                pending.extend(
+                    clauses
+                        .iter()
+                        .rev()
+                        .map(|clause| (clause, inherited_name.clone())),
+                );
             }
             Clause::Or { branches, .. } => {
-                for branch in branches {
-                    collect_consumed_sources(
-                        branch,
-                        rules,
-                        inherited_source,
-                        consumed,
-                        visited_rules,
-                    );
-                }
+                pending.extend(
+                    branches
+                        .iter()
+                        .rev()
+                        .flat_map(|branch| branch.iter().rev())
+                        .map(|clause| (clause, inherited_name.clone())),
+                );
             }
             Clause::Rule { source, name, .. } => {
                 let source = effective_source(source, inherited_source).to_owned();
                 if visited_rules.insert((name.clone(), source.clone())) {
-                    for rule in rules.iter().filter(|rule| rule.name == *name) {
-                        collect_consumed_sources(
-                            &rule.clauses,
-                            rules,
-                            Some(&source),
-                            consumed,
-                            visited_rules,
+                    for rule in rules.iter().rev().filter(|rule| rule.name == *name) {
+                        pending.extend(
+                            rule.clauses
+                                .iter()
+                                .rev()
+                                .map(|clause| (clause, Some(source.clone()))),
                         );
                     }
                 }
@@ -1714,7 +1740,7 @@ fn evaluate_clauses(
     rules: &[Rule],
     inherited_source: Option<&str>,
     state: &mut State<'_>,
-) -> Result<Vec<Row>, SemanticError> {
+) -> EvaluationResult<Vec<Row>> {
     let mut remaining: Vec<_> = clauses.iter().collect();
     while !remaining.is_empty() {
         state.check(1)?;
@@ -1742,7 +1768,8 @@ fn evaluate_clauses(
             return Err(resource(
                 "query/intermediate-limit",
                 "query intermediate relation exceeded its row limit",
-            ));
+            )
+            .into());
         }
         state.stats.clauses_executed += 1;
         state.plan.push(PlanStep {
@@ -1764,9 +1791,9 @@ fn evaluate_clause(
     rules: &[Rule],
     inherited_source: Option<&str>,
     state: &mut State<'_>,
-) -> Result<(Vec<Row>, String), SemanticError> {
+) -> EvaluationResult<(Vec<Row>, String)> {
     match clause {
-        Clause::Pattern(pattern) => evaluate_pattern(pattern, rows, inherited_source, state),
+        Clause::Pattern(pattern) => Ok(evaluate_pattern(pattern, rows, inherited_source, state)?),
         Clause::Predicate {
             predicate,
             source,
@@ -1828,16 +1855,15 @@ fn evaluate_clause(
                     return Err(SemanticError::incorrect(
                         "query/insufficient-binding",
                         "not clause has unbound join variables",
-                    ));
+                    )
+                    .into());
                 }
                 let seed = if join.is_some() {
                     project_row(&row, &required)
                 } else {
                     row.clone()
                 };
-                if dependencies::evaluate_negative(clauses, seed, rules, inherited_source, state)?
-                    .is_empty()
-                {
+                if dependencies::evaluate_negative(clause, seed, inherited_source, state)? {
                     state.push_row(&mut next, row)?;
                 }
             }
@@ -1878,7 +1904,8 @@ fn evaluate_clause(
                 return Err(SemanticError::incorrect(
                     "query/rule-arity",
                     format!("rule {name} expects {arity} arguments, got {}", args.len()),
-                ));
+                )
+                .into());
             }
             let mut next = Vec::new();
             for row in rows {
@@ -1889,7 +1916,8 @@ fn evaluate_clause(
                     return Err(SemanticError::incorrect(
                         "query/insufficient-binding",
                         format!("rule {name} requires its declared input positions to be bound"),
-                    ));
+                    )
+                    .into());
                 }
                 let key = RuleInvocationKey {
                     source: source.to_owned(),
@@ -1905,7 +1933,8 @@ fn evaluate_clause(
                         return Err(fault(
                             "query/rule-relation-width",
                             "compiled rule relation has the wrong width",
-                        ));
+                        )
+                        .into());
                     }
                     let mut candidate = row.clone();
                     if args
@@ -2165,7 +2194,7 @@ fn solve_rule_invocation(
     key: RuleInvocationKey,
     rules: &[Rule],
     state: &mut State<'_>,
-) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
+) -> EvaluationResult<Vec<Vec<BoundValue>>> {
     // Recovered `eval-query` keys its input work by source and adorned
     // predicate, accumulates answers in `ans`, and the outer `qsqr` loop
     // repeats until answer cardinalities stop changing. This memo uses the
@@ -2180,7 +2209,8 @@ fn solve_rule_invocation(
                 key.name,
                 key.bindings.len()
             ),
-        ));
+        )
+        .into());
     }
     if required.iter().any(|index| key.bindings[*index].is_none()) {
         return Err(SemanticError::incorrect(
@@ -2189,7 +2219,8 @@ fn solve_rule_invocation(
                 "rule {} requires its declared input positions to be bound",
                 key.name
             ),
-        ));
+        )
+        .into());
     }
 
     ensure_rule_memo_entry(state, key.clone())?;
@@ -2199,10 +2230,10 @@ fn solve_rule_invocation(
         state.solving_rules = false;
         result?;
     }
-    rule_memo_rows(state, &key)
+    Ok(rule_memo_rows(state, &key)?)
 }
 
-fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), SemanticError> {
+fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> EvaluationResult<()> {
     loop {
         state.check(1)?;
         let before_entries = state.rule_memo.len();
@@ -2227,7 +2258,8 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> Result<(), Sema
                 return Err(resource(
                     "query/intermediate-limit",
                     "rule memo relation exceeded the intermediate row limit",
-                ));
+                )
+                .into());
             }
         }
 
@@ -2243,7 +2275,7 @@ fn evaluate_rule_key(
     key: &RuleInvocationKey,
     rules: &[Rule],
     state: &mut State<'_>,
-) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
+) -> EvaluationResult<Vec<Vec<BoundValue>>> {
     let mut produced = Vec::new();
     for rule in rules.iter().filter(|rule| rule.name == key.name) {
         let mut seed = Row::new();

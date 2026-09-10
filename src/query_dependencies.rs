@@ -4,22 +4,137 @@
 //! completion with a separate answer table before removing matching tuples.
 use super::*;
 
-pub(super) fn evaluate_negative(
-    clauses: &[Clause],
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) struct NegativeInvocation {
+    // Addresses identify clauses only during this immutable query invocation.
+    // They never escape to a prepared cache, serialized query or durable key.
+    clause: usize,
+    source: Option<String>,
     seed: Row,
-    rules: &[Rule],
-    inherited_source: Option<&str>,
+}
+
+pub(super) enum EvaluationError {
+    Semantic(SemanticError),
+    AwaitNegative(NegativeInvocation),
+}
+
+impl From<SemanticError> for EvaluationError {
+    fn from(error: SemanticError) -> Self {
+        Self::Semantic(error)
+    }
+}
+
+pub(super) type EvaluationResult<T> = Result<T, EvaluationError>;
+
+/// Drive demand for complete negative relations on an explicit stack. Each task
+/// has its own positive fixed point. Pausing it cannot publish a provisional
+/// complement: the typed suspension unwinds to this driver before set difference.
+/// Only existence is retained, keyed by lexical clause, inherited source and the
+/// exact projected input row. All tasks share the original resource accounting.
+pub(super) fn evaluate_complete(
+    query: &Query,
+    initial: Vec<Row>,
     state: &mut State<'_>,
 ) -> Result<Vec<Row>, SemanticError> {
-    // Share sources, deadline, cancellation, work and allocation accounting.
-    // Only the provisional positive answer table belongs to this subquery.
-    // Restore the outer table on errors too, without refunding attempted work.
-    let outer_memo = std::mem::take(&mut state.rule_memo);
-    let outer_solving = std::mem::replace(&mut state.solving_rules, false);
-    let result = evaluate_clauses(clauses, vec![seed], rules, inherited_source, state);
-    state.rule_memo = outer_memo;
-    state.solving_rules = outer_solving;
-    result
+    struct Task<'a> {
+        clauses: &'a [Clause],
+        initial: Vec<Row>,
+        key: Option<NegativeInvocation>,
+        memo: BTreeMap<RuleInvocationKey, Vec<Vec<BoundValue>>>,
+    }
+
+    let mut negatives = BTreeMap::new();
+    let mut pending: Vec<_> = query.clauses.iter().collect();
+    pending.extend(query.rules.iter().flat_map(|rule| &rule.clauses));
+    while let Some(clause) = pending.pop() {
+        state.check(1)?;
+        match clause {
+            Clause::Not { clauses, .. } => {
+                negatives.insert(clause as *const Clause as usize, clauses.as_slice());
+                pending.extend(clauses);
+            }
+            Clause::Or { branches, .. } => pending.extend(branches.iter().flatten()),
+            _ => {}
+        }
+    }
+    let mut tasks = vec![Task {
+        clauses: &query.clauses,
+        initial,
+        key: None,
+        memo: BTreeMap::new(),
+    }];
+    while let Some(task) = tasks.last_mut() {
+        state.check(1)?;
+        state.rule_memo = std::mem::take(&mut task.memo);
+        // A task restarts its clause sequence after a negative dependency has
+        // completed. Retained positive answers remain valid; charge every repeat
+        // and every cloned input rather than hiding the cost of this restart.
+        state.charge_value_bytes(task.initial.iter().fold(0usize, |bytes, row| {
+            row.values().fold(bytes, |bytes, value| {
+                bytes.saturating_add(join::bound_bytes(value))
+            })
+        }))?;
+        let source = task.key.as_ref().and_then(|key| key.source.as_deref());
+        let result = evaluate_clauses(
+            task.clauses,
+            task.initial.clone(),
+            &query.rules,
+            source,
+            state,
+        );
+        task.memo = std::mem::take(&mut state.rule_memo);
+        match result {
+            Ok(rows) => {
+                let completed = tasks.pop().expect("active task");
+                if let Some(key) = completed.key {
+                    state.negative_memo.insert(key, rows.is_empty());
+                } else {
+                    return Ok(rows);
+                }
+            }
+            Err(EvaluationError::Semantic(error)) => return Err(error),
+            Err(EvaluationError::AwaitNegative(key)) => {
+                let clauses = negatives.get(&key.clause).copied().ok_or_else(|| {
+                    fault(
+                        "query/negative-clause",
+                        "negative dependency is outside its query scope",
+                    )
+                })?;
+                state.charge_value_bytes(
+                    std::mem::size_of::<NegativeInvocation>()
+                        + key.source.as_ref().map_or(0, String::len),
+                )?;
+                tasks.push(Task {
+                    clauses,
+                    initial: vec![key.seed.clone()],
+                    key: Some(key),
+                    memo: BTreeMap::new(),
+                });
+            }
+        }
+    }
+    unreachable!("the root task returns its relation")
+}
+
+pub(super) fn evaluate_negative(
+    clause: &Clause,
+    seed: Row,
+    inherited_source: Option<&str>,
+    state: &mut State<'_>,
+) -> EvaluationResult<bool> {
+    state.check(1)?;
+    state.charge_value_bytes(seed.values().fold(0usize, |bytes, value| {
+        bytes.saturating_add(join::bound_bytes(value))
+    }))?;
+    let key = NegativeInvocation {
+        clause: clause as *const Clause as usize,
+        source: inherited_source.map(str::to_owned),
+        seed,
+    };
+    match state.negative_memo.get(&key) {
+        Some(empty) => Ok(*empty),
+        None => Err(EvaluationError::AwaitNegative(key)),
+    }
 }
 
 pub(super) fn ready(

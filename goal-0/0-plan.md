@@ -87,8 +87,9 @@ into ordinary repository regression tests during implementation; do not depend o
   variations; eager, exact and configured PostgreSQL/application paths agree where
   applicable; existing valid recursive/disjunctive queries remain supported.
   Persisted old requests still retry to their original receipts after restart.
-- **Status:** In progress: permanent R1/R2/R3 regressions and shared repairs;
-  establishing a disposable PostgreSQL 15.11 fixture and pre-repair receipt.
+- **Status:** In progress: R2 and real old-receipt compatibility verified;
+  R1/R3 semantic and real CLI/PG regressions pass. Closing a newly identified
+  negative-completion stack-depth risk before final Stage1 acceptance.
 
 ### 2. Make graph traversal and ownership stack-safe — Goal 2
 
@@ -213,7 +214,10 @@ decisions and any outstanding uncertainty. A scaffold, green lint count or compl
 child is not Goal0's finish line. Parent completion requires Stage7 plus reconciled
 completion signals for all earlier stages.
 
-Continuation (2026-09-10): Goal1 is active on baseline `c0bc499`. Query and identity
-repairs are underway; PostgreSQL 15.11 binaries were found in the local MATLAB
-installation. Preserve a pre-repair executable/receipt before testing changed
-normalization. No child completion or new integrated acceptance is claimed yet.
+Continuation (2026-09-10): Goal1 active, baseline `c0bc499`; details and commands in
+its plan. Real PostgreSQL15.11 fixture is `/tmp/atomic-repair-pg.vA037i/data`, port55471,
+with normal durability enabled. Pre-repair direct-map/program receipts were captured
+and matched exactly after repair; fresh requests no longer collide. Separate CLI/
+application and TLS restart/retry workflows passed. Query semantic cases pass;
+finish stack-safe negative-rule scheduling and rerun combined checks before handing
+off to Stage2. No child or parent completion is claimed yet.
