@@ -16,7 +16,7 @@ observed API gaps, not automatic commands to copy every named component.
 
 ## Current state
 
-Stages 1–4 / Goals 2–5 are verified; Stage 5 / Goal 6 is now active.
+Stages 1–5 / Goals 2–6 are verified; Stage 6 / Goal 7 is now active.
 The worktree was clean at the start of this request. No audit-stage reread,
 replacement engine, recursive hierarchy or corrective parent is required.
 Only one child is active; bounded parallel tasks within it are welcome.
@@ -120,7 +120,8 @@ fixtures, backup/recovery/COW, exact retries and application checks also pass.
 
 ### 5. Safe logical database lifecycle — Goal 6
 
-**Status:** Active; reconciling lifecycle identity, fencing and reclamation boundaries.
+**Status:** Complete; catalog, stable-identity ingress, CLI and bounded reclamation
+verified with final concurrency, genuine old-binary and application acceptance.
 **Audit ownership:** P02.
 
 **Outcome:** Users can idempotently create, list, rename, retire/delete and eventually reclaim logical databases through supported APIs and CLI.
@@ -131,7 +132,7 @@ fixtures, backup/recovery/COW, exact retries and application checks also pass.
 
 ### 6. Reliable stock services and clients — Goal 7
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Active; source-backed contract reconciled, native implementation next.
 **Audit ownership:** AO04, AO05, AO-C01, P04, AO07; AO-C03 disposition.
 
 **Outcome:** Stock executables support persistent active/standby operation, bounded automatic excision, recoverable routing, usable asynchronous clients and clear health/readiness.
@@ -242,7 +243,16 @@ Ignored callback budget failures are sticky; predicate-marker checks do not bloc
 unrelated legacy data. Goal 5 records pure regressions, measured full paths and
 cooperative callback/deployment limits.
 
-Continuation: execute Goal 6's safe logical database lifecycle. Goals 1–5 are complete;
-the parent and later stages are not. Preserve Goal 3's retained fixture identities
+Verified Goal6: mutable names over stable identities, additive catalog/CLI lifecycle,
+retirement fencing and bounded resumable terminal collection. Final29 active tests
+pass, zero skips (26 actual isolated PostgreSQL); one historical fixture generator
+is intentionally ignored. Concurrency found and repaired a publication lock-order
+deadlock;16 live commits/index convergence now pass during exclusive-page collection.
+Genuine schema33 upgrade, old receipts/programs, shared content, backups/pins and
+application handoff pass. See its plan for batch/work boundaries and measured costs.
+The accepted schema34 binary is retained for Goal7's genuine upgrade checks.
+
+Continuation: execute Goal7's reliable stock services and clients. Goals1–6 are complete;
+the parent and later stages are not. Preserve Goal3's retained fixture identities
 and compatibility evidence rather than reseeding them for later checks.
 Optional deployment/UI scope is awaiting user preference, not blocking native work.

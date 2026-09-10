@@ -14,6 +14,8 @@ const TABLE_PRIVILEGES: &[&str] = &[
 ];
 const COLUMN_PRIVILEGES: &[&str] = &["SELECT", "INSERT", "UPDATE", "REFERENCES"];
 const PEER_TABLES: &[&str] = &[
+    "atomic_database_identities",
+    "atomic_database_names",
     "atomic_change_checkpoints",
     "atomic_schema_migrations",
     "atomic_databases",

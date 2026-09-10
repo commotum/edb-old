@@ -1012,9 +1012,12 @@ fn run() -> Result<()> {
         )?;
         file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
         let reference = atomic_core::SnapshotReference::decode(&bytes)?;
+        let selected =
+            atomic_core::DatabaseCatalog::connect_configured(&config)?.resolve(&database_id)?;
         require(
-            reference.database_id() == database_id,
-            "reference route differs from selected database",
+            reference.database_id() == selected.database_id
+                && reference.key().lineage_id() == selected.lineage_id,
+            "reference identity differs from selected database",
         )?;
         let value = reference.open(&config, 128, 16 * 1024 * 1024)?;
         require(

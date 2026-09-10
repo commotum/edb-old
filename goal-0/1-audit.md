@@ -19,13 +19,14 @@ does not turn the historical audit into a test report.
 
 | Findings | Current disposition |
 | --- | --- |
+| P02 | Verified in Goal 6: idempotent catalog, identity-preserving rename, fenced retirement, bounded resumable reclamation, backup/pin protection and fresh identity on name reuse. Final29 active checks pass (26 actual isolated PostgreSQL), including concurrent writers, genuine schema33 upgrade, exact retries, historical programs and stock CLI/application; see its measured costs and retention boundaries. |
 | Q01, Q05, ST-02 | Verified in Goal 5: grouped native aggregates, seven portable data functions, versioned Rust transaction/predicate deployments, stock EDN clients and exact speculation/retries. Final configured release acceptance 36/36 including genuine old-binary upgrade, durable ABI11 invocation, backup/restore and application/restart; see its measured costs and trusted callback contract. |
 | Q02, Q04 | Verified in Goal 4: arbitrary-width relations, general typed/EDN values, pure callbacks, source-free CLI and persisted query bridge. Actual PostgreSQL/application, old ABI/receipt and reference-retention compatibility pass; see complete-path costs and explicit native semantics in its plan. |
 | Q03, P01, P03, ST-05, P06 | Verified in Goal 2 with public PostgreSQL regressions, restricted-role application/restart workflow, existing EDN/program compatibility and unchanged old receipts. See its final acceptance for commands and measured costs. |
 | ST-03, ST-01 | Verified in Goal 3: independent reserved allocation, native/retained-old million-ID histories, explicit defaults, application and old receipt/backup/upgrade compatibility. See its recorded artifact boundaries and complete-path costs. |
 | SC-01 | Verified/documented in Goal 3: recovered 1.0.7705 ordering supports the existing explicit composite-upsert hint contract; no invented constituent-only upsert. |
 | SC-02 | Verified in Goal 3: sound native NaN replacement retained, with permanent eager/native PostgreSQL regressions and documented JVM difference. |
-| Remaining IDs | Explicitly assigned to Goals 6–10 or the parent's optional/platform decision table; none silently disappears. |
+| Remaining IDs | Explicitly assigned to Goals 7–10 or the parent's optional/platform decision table; none silently disappears. |
 
 ## Where to start
 

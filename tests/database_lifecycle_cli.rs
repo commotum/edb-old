@@ -322,8 +322,12 @@ fn stock_cli_reclaims_only_the_explicit_retired_identity() {
     let preview = cli(&fixture.admin_url, &base);
     assert!(preview.contains("applied=false"));
     let mut apply = base.to_vec();
-    apply.extend(["--apply", "--batches", "200"]);
-    assert!(cli(&fixture.admin_url, &apply).contains("complete=true"));
+    // The bootstrap semantic tree alone contains hundreds of immutable
+    // nodes. This is a fixture work allowance, not the operator's default or
+    // a claim that one batch can collect an entire database.
+    apply.extend(["--apply", "--batches", "2000"]);
+    let collection = cli(&fixture.admin_url, &apply);
+    assert!(collection.contains("complete=true"), "{collection}");
     assert_eq!(catalog.resolve("temporary").unwrap(), replacement);
     assert!(cli(&fixture.admin_url, &["status", "--database", "temporary"]).contains("basis_t=0"));
     println!(
@@ -505,4 +509,84 @@ fn destructive_lifecycle_options_are_checked_before_connecting() {
     ] {
         assert!(rejected("host=invalid", &args).contains("cli/usage"));
     }
+}
+
+#[test]
+fn application_handoff_and_exact_retries_follow_identity_through_rename() {
+    let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
+        eprintln!("SKIP application lifecycle: ATOMIC_POSTGRES_URL unset");
+        return;
+    };
+    let fixture = Fixture::new(&url);
+    if let Some((writer, peer)) = &fixture.roles {
+        cli(
+            &fixture.admin_url,
+            &["migrate", "--writer-role", writer, "--peer-role", peer],
+        );
+    } else {
+        cli(&fixture.admin_url, &["migrate"]);
+    }
+    cli(&fixture.admin_url, &["create", "--database", "projects"]);
+    let entry = atomic_core::DatabaseCatalog::connect(&fixture.admin_url)
+        .unwrap()
+        .resolve("projects")
+        .unwrap();
+    let binary = std::path::Path::new(env!("CARGO_BIN_EXE_atomic"))
+        .parent()
+        .unwrap()
+        .join("examples/application_workflow");
+    assert!(
+        binary.is_file(),
+        "build --example application_workflow before this test"
+    );
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let endpoint = directory.path().join("writer.sock");
+    let reference = directory.path().join("captured.reference");
+    let mut writer = Server::start(&fixture.writer_url, "projects", &endpoint);
+    let invoke = |name: &str, read_only: bool| {
+        let mut command = Command::new(&binary);
+        configured(&mut command, &fixture.peer_url);
+        command.args(["--database", name]);
+        if read_only {
+            command.arg("--reference-in").arg(&reference);
+        } else {
+            command.arg("--endpoint").arg(&endpoint);
+            if !reference.exists() {
+                command.arg("--reference-out").arg(&reference);
+            }
+        }
+        command.output().unwrap()
+    };
+    let started = Instant::now();
+    let initial = success(invoke("projects", false));
+    assert!(initial.contains("APPLICATION_OK"));
+    cli(
+        &fixture.admin_url,
+        &[
+            "rename",
+            "--database",
+            "projects",
+            "--new-name",
+            "planning",
+            "--lineage",
+            &entry.lineage_id,
+            "--apply",
+        ],
+    );
+    let retry = success(invoke("planning", false));
+    assert!(retry.contains("seed_replayed=true update_replayed=true"));
+    assert!(retry.contains("COMPUTATION_OK"));
+    assert!(success(invoke("planning", true)).contains("REFERENCE_OK basis_t=2"));
+    cli(&fixture.admin_url, &["create", "--database", "projects"]);
+    let wrong = invoke("projects", true);
+    assert!(
+        !wrong.status.success(),
+        "old reference was routed to a reused name"
+    );
+    writer.stop();
+    println!(
+        "APPLICATION_LIFECYCLE_OK renamed=true exact_retry=true reference=true old_name_reuse_rejected=true complete_ms={}",
+        started.elapsed().as_millis()
+    );
 }

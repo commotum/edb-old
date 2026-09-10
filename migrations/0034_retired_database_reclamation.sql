@@ -4,6 +4,8 @@ ALTER TABLE atomic_database_identities ADD COLUMN reclaimed_at TIMESTAMPTZ;
 CREATE TABLE atomic_database_reclamation_progress (
     database_id TEXT PRIMARY KEY REFERENCES atomic_database_identities(database_id),
     phase INTEGER NOT NULL DEFAULT 0 CHECK(phase>=0),
+    -- Array-position phases are versioned storage, not freely reorderable code.
+    format_version INTEGER NOT NULL DEFAULT 1 CHECK(format_version=1),
     active_backend INTEGER,
     active_xid BIGINT,
     started_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
@@ -53,6 +55,21 @@ DO $$ DECLARE proc REGPROCEDURE; definition TEXT; BEGIN
         definition:=pg_get_functiondef(proc);
         definition:=regexp_replace(definition, 'BEGIN',
             E'BEGIN\n    IF TG_OP = ''DELETE'' AND atomic_database_reclamation_authorized() THEN RETURN OLD; END IF;');
+        EXECUTE definition;
+        EXECUTE format('ALTER FUNCTION %s SET search_path TO %I,pg_catalog,pg_temp',proc,current_schema());
+    END LOOP;
+END $$;
+
+-- Terminal work already owns a complete page frontier. Suppress duplicate
+-- enqueue side effects (including source-wide abandoned-build discovery) only
+-- in that transaction; ordinary shared-page GC retains its original protocol.
+DO $$ DECLARE proc REGPROCEDURE; definition TEXT; BEGIN
+    FOREACH proc IN ARRAY ARRAY['atomic_mark_fulltext_garbage()'::regprocedure,
+        'atomic_track_fulltext_page_reference()'::regprocedure,
+        'atomic_retire_fulltext_build()'::regprocedure] LOOP
+        definition:=pg_get_functiondef(proc);
+        definition:=regexp_replace(definition,'BEGIN',
+            E'BEGIN\n    IF TG_OP = ''DELETE'' AND atomic_database_reclamation_authorized() THEN RETURN NULL; END IF;');
         EXECUTE definition;
         EXECUTE format('ALTER FUNCTION %s SET search_path TO %I,pg_catalog,pg_temp',proc,current_schema());
     END LOOP;
@@ -113,7 +130,10 @@ BEGIN
     SELECT pg_get_userbyid(relowner) INTO owner FROM pg_class WHERE oid='atomic_databases'::regclass;
     IF current_user<>owner THEN RAISE EXCEPTION 'Atomic terminal collection requires catalog ownership' USING ERRCODE='42501'; END IF;
     IF age_millis IS NULL OR age_millis<0 THEN RAISE EXCEPTION 'Atomic retirement age must be nonnegative' USING ERRCODE='22023'; END IF;
-    SELECT * INTO identity FROM atomic_database_identities WHERE database_id=target FOR UPDATE;
+    -- Publication locks head then identity. Try-only acquisition preserves
+    -- that order and never waits holding the reverse side of an in-flight write.
+    PERFORM 1 FROM atomic_heads WHERE database_id=target FOR UPDATE NOWAIT;
+    SELECT * INTO identity FROM atomic_database_identities WHERE database_id=target FOR UPDATE NOWAIT;
     IF NOT FOUND OR identity.lineage_id<>lineage THEN
         RAISE EXCEPTION 'Atomic retired database identity does not match target' USING ERRCODE='22023';
     END IF;
@@ -122,6 +142,9 @@ BEGIN
         RAISE EXCEPTION 'Atomic database has not reached retirement age' USING ERRCODE='55P03';
     END IF;
     IF identity.reclaimed_at IS NOT NULL THEN RETURN QUERY SELECT 2147483647,TRUE; RETURN; END IF;
+    IF EXISTS(SELECT 1 FROM atomic_database_reclamation_progress WHERE database_id=target AND format_version<>1) THEN
+        RAISE EXCEPTION 'Atomic terminal collection progress version is unsupported' USING ERRCODE='55000';
+    END IF;
     IF apply THEN
         INSERT INTO atomic_database_reclamation_progress(database_id,active_backend,active_xid)
         VALUES(target,pg_backend_pid(),txid_current()) ON CONFLICT(database_id)

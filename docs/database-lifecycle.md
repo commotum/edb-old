@@ -34,6 +34,10 @@ to open `customers` fails until that name is deliberately created again.
 Listings are keyset-paginated: `--after` is exclusive, default limit 1000, maximum
 4096. A full page does not prove another page exists; continue from its last name.
 For `--retired`, the cursor is the last storage ID, since there is no active name.
+An unfinished restore reserves a visible name even before its first readable
+database value exists. Listing is not a readiness check. Create returns `EXISTS`
+for that reservation; operators can retire it, and a late restore publication
+must then fail instead of reviving it.
 
 Rust applications use `DatabaseCatalog::{connect_configured,create_if_absent,
 resolve,list,rename_checked,retire_checked}`. `CreateDatabaseResult` distinguishes
@@ -41,6 +45,9 @@ creation from an existing entry without recovering all data. Existing strict
 `PostgresStore::create_database` remains available; its return type is unchanged.
 User-facing `Connection`/`Peer` and service startup names resolve once. Low-level
 storage IDs and exact snapshot-reference routes are not public-name aliases.
+Do not feed `connection.identity().database_id()` back into a named connect after
+rename. Keep the connection, use the current public name, or reopen an exact
+snapshot reference while the identity is active.
 
 ## Retire, then reclaim
 
@@ -70,17 +77,32 @@ atomic gc-deleted --storage-id ID --lineage UUID --postgres-database atomic \
   --catalog-schema public --older-than-seconds 2592000 --apply --batches 10
 ```
 
-Preview does not delete. Apply makes bounded, resumable progress and reports its
-phase, selected/removed rows, pin checks and completion. A batch bounds victims,
-not all examined metadata or wall-clock time. Live reader/backup/build pins can
+Preview changes no database rows. Apply makes bounded, resumable progress and
+reports its phase, selected/removed/inserted/updated rows, immutable objects read,
+pin checks and completion. Each batch touches at most 512 data/frontier rows,
+plus fixed progress bookkeeping. This is not a bound on all examined metadata,
+SQL execution time or process memory. Discovery reads one immutable object at a
+time; legacy segment sharing may require checking all remaining legacy manifests.
+Live reader/backup/build pins can
 prevent progress; that is protection, not a successful reclamation. Retry the same
 identity after releasing them. Shared immutable content still referenced by another
 database is retained. Issued-identity tombstones prevent historical route reuse.
 
+Completion means the retired database's attributable metadata and exclusive
+reachable objects have been collected. It does not certify erasure of every
+historical physical byte: obsolete objects already detached from their owner by
+earlier maintenance remain the responsibility of ordinary catalog-wide `gc`.
+Neither command erases external backups, PostgreSQL backups/WAL or replicas.
+Incomplete shared-tree reachability evidence causes a reported failure to progress,
+not speculative deletion; repair or finish the corresponding maintenance first.
+
 This is not excision of selected facts and not `DROP SCHEMA`. Ordinary `gc` collects
 obsolete structures in a catalog; `gc-deleted` dismantles one retired database.
 Completed backups remain independently verifiable. Restore retains canonical
-lineage; see the restore instructions and checks in [admin.md](admin.md).
+lineage. Restoring a retired lineage into the same catalog requires finishing its
+reclamation first, or choosing another catalog. After reclamation, restore allocates
+a fresh storage route while retaining the backup's lineage; old exact-reference
+routes remain retired. See the restore checks in [admin.md](admin.md).
 
 ## Upgrade boundary
 

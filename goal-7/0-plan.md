@@ -5,7 +5,8 @@
 Stock executables support persistent active/standby operation, bounded automatic excision, recoverable routing, usable asynchronous clients and clear health/readiness.
 
 This is Stage 6 of [Goal 0](../goal-0/0-plan.md), owning AO04, AO05, AO-C01, P04, AO07; AO-C03 disposition.
-Status: scaffolded; not active. Preserve completed EDN and all other child work.
+Status: active (2026-09-10); internal Stage1 reconciled, implementation next.
+Goal6 final acceptance passed; preserve completed EDN and all prior child work.
 The historical audit is [goal-0/1-audit.md](../goal-0/1-audit.md).
 
 ## Constraints
@@ -51,4 +52,45 @@ old durable meaning/retries. Reopen implementation for integration gaps.
 This child finishes only when all three outcomes and its parent-stage signal hold.
 Record commands/results, material design decisions, remaining gaps and a concise
 next action here, then return to Goal 0. A scaffold or pure helper is not completion.
-Current next action: wait for prior required stages; reconcile source before activation.
+Current next action: implement the source-backed service/client contract below,
+then exercise the complete separate-process and asynchronous application workflows.
+
+## Reconciled native contract
+
+The HA/deployment docs require persistent contenders, takeover and independent
+peer reads; recovered lifecycle code serves only after acquiring authority.
+Preserve resolve-once storage identity, configured indexing, native deployments,
+partition defaults and verified transport settings across takeover. Add nonblocking
+standby status/try-active and interruptible polling without rewriting service queues.
+Stock automatic-election mode may be additive to existing fail-fast startup.
+Health means the process/supervisor is functioning; readiness additionally needs
+active writer authority and its configured listener. No credentials or subject data
+belong in probes. Foreground supervisor identity and one database per process are
+native deployment defaults; assess documented composition instead of copying PID files.
+
+Automatic excision belongs to indexing and processes committed requests, including
+restart recovery, with one resumable job and bounded admission/steps. The excision
+doc explicitly permits whole-database work and reduced write availability: do not
+invent constant-cost requirements. Reuse existing authenticated generation rewrite,
+pins/checkpoints/root-last completion; account admitted eager phases honestly and
+check cooperative cancellation. Narrow lease/epoch-checked runtime authority to
+committed-request jobs, never broad restore/GC/activation grants. A concrete source
+gap exists in writer tree adoption after generation replacement; repair it while
+preserving receipt-first assessment and intentional predates-excision tombstones.
+
+An additive bounded Rust Future/Stream facade performs blocking driver/evaluator
+work off executor threads and owns cleanup of abandoned jobs/results. Capture read
+bases at admission, include queue time in deadlines, demand-drive stream chunks,
+fuse terminal errors and distinguish dropped waiters from transaction cancellation.
+Native values retain their existing synchronous method/last-drop contract unless
+explicitly wrapped; do not silently claim otherwise. Completion callbacks are
+once-only native closures, not ported Java Executor machinery.
+
+Connection-bound remote routing captures stable identity and verified TLS policy,
+refreshes stale endpoints, and preserves known commit versus report-open failure.
+Route recovery is not permission to replay arbitrary transactions or regenerate
+request keys. Ambiguous outcomes must remain explicit and exact-retry safe.
+
+Accepted pre-stage schema34 binary: /tmp/atomic-pre-services.vJBL8z/atomic,
+SHA256 ac98c9c660dbdcb4b6b1d1226735e6e4b98053aba0ff5cf137b1a8867091a7d3.
+Use it for genuine compatibility checks before any new migration is considered done.

@@ -437,7 +437,12 @@ impl PortableBackup {
         F: FnOnce(),
     {
         let identity = crate::database_catalog::resolve_name_in(&mut self.client, database_id)?;
-        self.backup_database_once_with_pin_probe(&identity.database_id, directory, BackupFault::None, probe)
+        self.backup_database_once_with_pin_probe(
+            &identity.database_id,
+            directory,
+            BackupFault::None,
+            probe,
+        )
     }
 
     fn backup_database_once_with_pin_probe<F>(
@@ -1641,9 +1646,8 @@ fn ensure_restore_target(
             },
         ));
     }
-    let storage_id = crate::database_catalog::allocate_storage_id_in(
-        &mut transaction, target_database_id,
-    )?;
+    let storage_id =
+        crate::database_catalog::allocate_storage_id_in(&mut transaction, target_database_id)?;
 
     transaction
         .execute(

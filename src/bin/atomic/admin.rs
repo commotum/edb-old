@@ -475,12 +475,15 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                     operator.preview_retired_database_reclamation(storage_id, lineage, age)?
                 };
                 println!(
-                    "RECLAMATION storage_id={:?} lineage={} batch={batch} phase={} rows_selected={} rows_removed={} pins_checked={} complete={} applied={}",
+                    "RECLAMATION storage_id={:?} lineage={} batch={batch} phase={} rows_selected={} rows_removed={} rows_inserted={} rows_updated={} objects_read={} pins_checked={} complete={} applied={}",
                     report.storage_id,
                     report.lineage_id,
                     report.phase,
                     report.rows_selected,
                     report.rows_removed,
+                    report.rows_inserted,
+                    report.rows_updated,
+                    report.objects_read,
                     report.pins_checked,
                     report.complete,
                     report.applied

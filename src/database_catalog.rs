@@ -47,12 +47,13 @@ pub(crate) fn resolve_name_opt_in<C: GenericClient>(
     client: &mut C,
     name: &str,
 ) -> Result<Option<DatabaseCatalogEntry>, SemanticError> {
-    // Migration retains historical names even if they exceed new-create limits.
+    // A durable restore reservation owns its name before it publishes a head.
+    // Catalog existence must not be confused with readiness to open a value.
     client
         .query_opt(
             "SELECT n.name,i.database_id,i.lineage_id,i.retired_at IS NOT NULL \
         FROM atomic_database_names n JOIN atomic_database_identities i USING(database_id) \
-        JOIN atomic_databases d USING(database_id) JOIN atomic_heads h USING(database_id) \
+        JOIN atomic_databases d USING(database_id) \
         WHERE n.name=$1 AND i.retired_at IS NULL AND i.lineage_id=d.lineage_id",
             &[&name],
         )
@@ -196,6 +197,8 @@ impl DatabaseCatalog {
             store: PostgresStore::connect_configured(connection)?,
         })
     }
+    /// Resolve an issued active name, including an unfinished restore target.
+    /// Opening a database value independently requires a published head.
     pub fn resolve(&mut self, name: &str) -> Result<DatabaseCatalogEntry, SemanticError> {
         resolve_name_in(self.store.catalog_client(), name)
     }
@@ -216,7 +219,8 @@ impl DatabaseCatalog {
             .query(
                 "SELECT n.name,i.database_id,i.lineage_id,false \
             FROM atomic_database_names n JOIN atomic_database_identities i USING(database_id) \
-            JOIN atomic_heads h USING(database_id) WHERE i.retired_at IS NULL \
+            JOIN atomic_databases d USING(database_id) \
+            WHERE i.retired_at IS NULL AND i.lineage_id=d.lineage_id \
             AND ($1::text IS NULL OR n.name>$1) ORDER BY n.name LIMIT $2",
                 &[&after_name, &limit],
             )
@@ -338,7 +342,7 @@ impl DatabaseCatalog {
             )
             .map_err(|error| postgres_error("catalog/retire-lease", error))?;
         transaction
-            .query_one(
+            .query_opt(
                 "SELECT basis_t FROM atomic_heads WHERE database_id=$1 FOR UPDATE",
                 &[&entry.database_id],
             )

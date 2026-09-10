@@ -429,6 +429,14 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                         .as_ref()
                         .is_some_and(|server| !server.is_available())
                 {
+                    // Keep the safe diagnostic code before shutdown consumes
+                    // the service. Messages/details can contain user data.
+                    if let Some(failure) = service.background_indexing_stats().last_failure {
+                        eprintln!(
+                            "TRANSACTOR_INDEX_FAILURE category={:?} code={}",
+                            failure.category, failure.code
+                        );
+                    }
                     lost_authority = true;
                     break;
                 }

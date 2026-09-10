@@ -3,7 +3,7 @@
 
 use postgres::{GenericClient, Transaction};
 
-const GUARDS: [(&str, &str); 10] = [
+const REPLACED_FUNCTIONS: [(&str, &str); 13] = [
     (
         "atomic_reject_database_mutation",
         include_str!("../../migrations/0014_log_generations.sql"),
@@ -43,6 +43,18 @@ const GUARDS: [(&str, &str); 10] = [
     (
         "atomic_reject_tree_node_block_mutation",
         include_str!("../../migrations/0026_optional_compressed_nodes.sql"),
+    ),
+    (
+        "atomic_mark_fulltext_garbage",
+        include_str!("../../migrations/0027_fulltext_sidecars.sql"),
+    ),
+    (
+        "atomic_track_fulltext_page_reference",
+        include_str!("../../migrations/0030_shared_fulltext_pages.sql"),
+    ),
+    (
+        "atomic_retire_fulltext_build",
+        include_str!("../../migrations/0030_shared_fulltext_pages.sql"),
     ),
 ];
 
@@ -101,9 +113,10 @@ pub fn remove_migration_34(transaction: &mut Transaction<'_>) {
     );
     assert_legacy_names(transaction);
 
-    // Restore the ten exact old immutable guards before dropping the helper
-    // they currently invoke. No trigger disabling or permissive replacement.
-    for (name, sql) in GUARDS {
+    // Restore the ten immutable guards and three fulltext side-effect bodies
+    // before dropping the helper they currently invoke. No trigger disabling
+    // or permissive replacement. Request-base release is unchanged by SQL34.
+    for (name, sql) in REPLACED_FUNCTIONS {
         transaction
             .batch_execute(&historical_guard(sql, name))
             .unwrap();
@@ -161,7 +174,7 @@ pub fn assert_restored(client: &mut impl GenericClient) {
             .get::<_, i64>(0),
         34
     );
-    for (name, _) in GUARDS {
+    for (name, _) in REPLACED_FUNCTIONS {
         let body: String = client
             .query_one(
                 "SELECT prosrc FROM pg_proc WHERE oid=$1::text::regprocedure",

@@ -17,10 +17,13 @@ INSERT INTO atomic_database_identities(database_id,lineage_id,created_at)
 INSERT INTO atomic_database_names(name,database_id)
     SELECT database_id,database_id FROM atomic_databases;
 
--- Serialize publication with retirement at the already existing head lock.
--- Retirement takes lease then head; no code here locks in the reverse order.
+-- Serialize publication with retirement through the issued identity. A head
+-- UPDATE already owns its head row; independent index publication must NOT
+-- acquire it, because its canonical-database lock would invert the writer's
+-- head-before-content-FK order. The identity lock also covers headless restore
+-- and rejects an old REPEATABLE READ snapshot after retirement.
 CREATE FUNCTION atomic_require_active_publication()
-RETURNS trigger LANGUAGE plpgsql SET search_path FROM CURRENT AS $$
+RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path FROM CURRENT AS $$
 DECLARE published_database TEXT;
 BEGIN
     IF TG_TABLE_NAME='atomic_fulltext_projections' THEN
@@ -28,11 +31,9 @@ BEGIN
     ELSE
         published_database:=NEW.database_id;
     END IF;
-    IF TG_TABLE_NAME <> 'atomic_heads' THEN
-        PERFORM 1 FROM atomic_heads WHERE database_id=published_database FOR UPDATE;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM atomic_database_identities
-                    WHERE database_id=published_database AND retired_at IS NULL) THEN
+    PERFORM 1 FROM atomic_database_identities
+        WHERE database_id=published_database AND retired_at IS NULL FOR SHARE;
+    IF NOT FOUND THEN
         RAISE EXCEPTION 'Atomic database identity is retired or unregistered' USING ERRCODE='55000';
     END IF;
     RETURN NEW;
