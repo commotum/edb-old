@@ -284,6 +284,28 @@ struct LogChunk {
     total_len: u64,
 }
 
+impl Drop for LogChunk {
+    fn drop(&mut self) {
+        let mut previous = self.previous.take();
+        while let Some(chunk) = previous {
+            // Consume our ownership atomically. If another snapshot owns this
+            // predecessor, it is responsible for its eventual release. Unlike
+            // try_unwrap(...).ok(), racing last owners cannot both fail and then
+            // recursively drop the chain through an unclaimed Err(Arc).
+            let Some(mut chunk) = Arc::into_inner(chunk) else {
+                break;
+            };
+            previous = chunk.previous.take();
+            // Dropping this detached chunk releases its entries, but its own
+            // Drop sees no predecessor. Native stack depth is therefore fixed.
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "recent_log_drop_tests.rs"]
+mod log_drop_tests;
+
 /// Reverse-linked immutable chunks make successor extension bounded while
 /// retaining chronological replay. A partial tail copies at most 31 entry
 /// records; all older chunks and all transaction payloads remain shared.

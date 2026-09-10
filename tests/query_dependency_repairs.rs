@@ -195,6 +195,53 @@ fn negation_waits_for_recursive_positive_closure_and_keeps_local_variables_priva
 }
 
 #[test]
+fn a_positive_recursive_stratum_can_filter_against_a_completed_lower_rule() {
+    let sources = vec![source(
+        "$",
+        &[
+            (1, "edge", Value::Long(2)),
+            (2, "edge", Value::Long(3)),
+            (2, "edge", Value::Long(4)),
+            (4, "edge", Value::Long(2)),
+            (3, "blocked", Value::Bool(true)),
+        ],
+    )];
+    let rules = vec![
+        rule("blocked", &["to"], &[0], vec![marked("to", "blocked")]),
+        rule(
+            "allowed",
+            &["from", "to"],
+            &[0],
+            vec![
+                pattern(v("from"), "edge", v("to")),
+                not(&["to"], vec![call("blocked", vec![v("to")])]),
+            ],
+        ),
+        rule(
+            "allowed",
+            &["from", "to"],
+            &[0],
+            vec![
+                call("allowed", vec![v("from"), v("middle")]),
+                pattern(v("middle"), "edge", v("to")),
+                not(&["to"], vec![call("blocked", vec![v("to")])]),
+            ],
+        ),
+    ];
+    for reverse in [false, true] {
+        let mut rules = rules.clone();
+        if reverse {
+            rules.reverse();
+        }
+        let query = query(
+            vec![call("allowed", vec![c(Value::Long(1)), v("e")])],
+            rules,
+        );
+        assert_entities(execute(&query, &sources).unwrap(), &[2, 4]);
+    }
+}
+
+#[test]
 fn nested_negation_uses_completed_strata_and_preserves_source_scoping() {
     let sources = vec![
         source(
@@ -295,17 +342,317 @@ fn choice() -> Clause {
 #[test]
 fn predicate_only_or_waits_for_inputs_in_every_outer_clause_order() {
     for reverse in [false, true] {
-        let mut clauses = vec![pattern(v("e"), "person", v("value")), choice()];
-        if reverse {
-            clauses.reverse();
+        for reverse_branches in [false, true] {
+            let mut choice = choice();
+            if reverse_branches && let Clause::Or { branches, .. } = &mut choice {
+                branches.reverse();
+            }
+            let mut clauses = vec![pattern(v("e"), "person", v("value")), choice];
+            if reverse {
+                clauses.reverse();
+            }
+            assert_entities(
+                execute(&query(clauses, vec![]), &fixture()).unwrap(),
+                &[1, 2],
+            );
         }
-        assert_entities(
-            execute(&query(clauses, vec![]), &fixture()).unwrap(),
-            &[1, 2],
-        );
     }
     let error = execute(&query(vec![choice()], vec![]), &fixture()).unwrap_err();
     assert_eq!(error.code, "query/insufficient-binding");
+}
+
+#[test]
+fn acyclic_negative_strata_use_a_constant_native_stack_and_charge_their_work() {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(|| {
+            for depth in [16usize, 64, 256, 512, 513] {
+                let mut rules = Vec::new();
+                for index in 0..depth {
+                    rules.push(rule(
+                        &format!("r{index}"),
+                        &["e"],
+                        &[0],
+                        vec![not(
+                            &["e"],
+                            vec![call(&format!("r{}", index + 1), vec![v("e")])],
+                        )],
+                    ));
+                }
+                rules.push(rule(
+                    &format!("r{depth}"),
+                    &["e"],
+                    &[0],
+                    vec![Clause::Predicate {
+                        predicate: Predicate::Eq,
+                        source: "$".into(),
+                        args: vec![v("e"), c(Value::Long(1))],
+                    }],
+                ));
+                let mut query = query(vec![call("r0", vec![v("e")])], rules);
+                query.inputs.push(InputSpec::Scalar("e".into()));
+                let outcome = QueryEngine::execute_sources(
+                    &query,
+                    &[],
+                    &[QueryInput::Scalar(Value::Long(1))],
+                    &QueryControl::default(),
+                )
+                .unwrap();
+                eprintln!(
+                    "negative_strata depth={depth} work={} iterations={} allocated_bytes={}",
+                    outcome.stats.work,
+                    outcome.stats.rule_iterations,
+                    outcome.stats.allocated_value_bytes
+                );
+                assert!(outcome.stats.work >= depth as u64);
+                assert_entities(outcome, if depth % 2 == 0 { &[1] } else { &[] });
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn at_source(mut clause: Clause, name: &str) -> Clause {
+    match &mut clause {
+        Clause::Pattern(pattern) => pattern.source = name.into(),
+        Clause::Rule { source, .. } => *source = name.into(),
+        _ => panic!("source-bearing clause expected"),
+    }
+    clause
+}
+
+#[test]
+fn negative_seed_batches_do_not_rescan_the_outer_relation_once_per_entity() {
+    // Separate raw sources make the denied side empty and every indexed probe's
+    // analogue O(1); doubling the outer relation should double evaluator work,
+    // not quadruple it through task/row restarts. This is not a throughput claim.
+    for form in ["direct", "unbound-rule", "required-rule", "or"] {
+        let mut previous = None;
+        for count in [32i64, 64, 128] {
+            let rows: Vec<_> = (1..=count)
+                .map(|e| (e, "person", Value::Bool(true)))
+                .collect();
+            let sources = vec![source("$people", &rows), source("$blocked", &[])];
+            let people = at_source(marked("e", "person"), "$people");
+            let blocked = at_source(marked("e", "blocked"), "$blocked");
+            let blocked_rule = rule("blocked", &["e"], &[0], vec![blocked.clone()]);
+            let negative = not(&["e"], vec![call("blocked", vec![v("e")])]);
+            let query = match form {
+                "direct" => query(vec![people, not(&["e"], vec![blocked])], vec![]),
+                "unbound-rule" => query(
+                    vec![call("eligible", vec![v("e")])],
+                    vec![
+                        blocked_rule,
+                        rule("eligible", &["e"], &[], vec![people, negative]),
+                    ],
+                ),
+                "required-rule" => query(
+                    vec![people, call("eligible", vec![v("e")])],
+                    vec![blocked_rule, rule("eligible", &["e"], &[0], vec![negative])],
+                ),
+                "or" => query(
+                    vec![
+                        people,
+                        Clause::Or {
+                            join: Some(vec!["e".into()]),
+                            branches: vec![
+                                vec![negative],
+                                vec![Clause::Predicate {
+                                    predicate: Predicate::Eq,
+                                    source: "$".into(),
+                                    args: vec![v("e"), c(Value::Long(-1))],
+                                }],
+                            ],
+                        },
+                    ],
+                    vec![blocked_rule],
+                ),
+                _ => unreachable!(),
+            };
+            let outcome = execute(&query, &sources).unwrap();
+            let work = outcome.stats.work;
+            eprintln!(
+                "negative_width form={form} count={count} work={work} candidates={}",
+                outcome.stats.join_candidates
+            );
+            if let Some(previous) = previous {
+                assert!(work <= previous * 2 + 128, "{form}: {previous} -> {work}");
+            }
+            previous = Some(work);
+            assert_entities(outcome, &(1..=count).collect::<Vec<_>>());
+        }
+    }
+}
+
+#[test]
+fn completed_negative_cache_is_local_to_clause_source_seed_and_execution() {
+    let sources = vec![
+        source("$left", &[(1, "blocked", Value::Bool(true))]),
+        source("$right", &[(2, "blocked", Value::Bool(true))]),
+    ];
+    let eligible = rule(
+        "eligible",
+        &["e"],
+        &[0],
+        vec![not(&["e"], vec![marked("e", "blocked")])],
+    );
+    let mut query = query(
+        vec![Clause::Or {
+            join: Some(vec!["e".into()]),
+            branches: vec![
+                vec![at_source(call("eligible", vec![v("e")]), "$left")],
+                vec![at_source(call("eligible", vec![v("e")]), "$right")],
+            ],
+        }],
+        vec![eligible],
+    );
+    query.inputs.push(InputSpec::Collection("e".into()));
+    let prepared = PreparedQuery::new(&query).unwrap();
+    let inputs = [QueryInput::Collection(vec![Value::Long(1), Value::Long(2)])];
+    assert_entities(
+        prepared
+            .execute(&sources, &inputs, &QueryControl::default())
+            .unwrap(),
+        &[1, 2],
+    );
+    let replaced = vec![
+        source(
+            "$left",
+            &[
+                (1, "blocked", Value::Bool(true)),
+                (2, "blocked", Value::Bool(true)),
+            ],
+        ),
+        source(
+            "$right",
+            &[
+                (1, "blocked", Value::Bool(true)),
+                (2, "blocked", Value::Bool(true)),
+            ],
+        ),
+    ];
+    assert_entities(
+        prepared
+            .execute(&replaced, &inputs, &QueryControl::default())
+            .unwrap(),
+        &[],
+    );
+
+    let mut different_clauses = self::query(
+        vec![Clause::Or {
+            join: Some(vec!["e".into()]),
+            branches: vec![
+                vec![not(
+                    &["e"],
+                    vec![at_source(marked("e", "blocked"), "$left")],
+                )],
+                vec![not(
+                    &["e"],
+                    vec![at_source(marked("e", "blocked"), "$right")],
+                )],
+            ],
+        }],
+        vec![],
+    );
+    different_clauses
+        .inputs
+        .push(InputSpec::Collection("e".into()));
+    assert_entities(
+        QueryEngine::execute_sources(
+            &different_clauses,
+            &sources,
+            &inputs,
+            &QueryControl::default(),
+        )
+        .unwrap(),
+        &[1, 2],
+    );
+}
+
+#[test]
+fn negative_task_errors_do_not_publish_answers_or_poison_prepared_reuse() {
+    let mut query = query(
+        vec![call("eligible", vec![v("e"), v("denominator")])],
+        vec![
+            rule(
+                "eligible",
+                &["e", "denominator"],
+                &[0, 1],
+                vec![not(
+                    &["e", "denominator"],
+                    vec![call("arithmetic", vec![v("e"), v("denominator")])],
+                )],
+            ),
+            rule(
+                "arithmetic",
+                &["e", "denominator"],
+                &[0, 1],
+                vec![
+                    // This lower task completes before arithmetic fails, so
+                    // error reuse must also discard already-cached negatives.
+                    not(
+                        &["e"],
+                        vec![Clause::Predicate {
+                            predicate: Predicate::Eq,
+                            source: "$".into(),
+                            args: vec![v("e"), c(Value::Long(-1))],
+                        }],
+                    ),
+                    Clause::Function {
+                        function: Function::Divide,
+                        source: "$".into(),
+                        args: vec![v("e"), v("denominator")],
+                        binding: Binding::Scalar("result".into()),
+                    },
+                ],
+            ),
+        ],
+    );
+    query.inputs = vec![
+        InputSpec::Scalar("e".into()),
+        InputSpec::Scalar("denominator".into()),
+    ];
+    let prepared = PreparedQuery::new(&query).unwrap();
+    let inputs = |denominator| {
+        [
+            QueryInput::Scalar(Value::Long(1)),
+            QueryInput::Scalar(Value::Long(denominator)),
+        ]
+    };
+    assert_eq!(
+        prepared
+            .execute(&[], &inputs(0), &QueryControl::default())
+            .unwrap_err()
+            .code,
+        "query/arithmetic"
+    );
+    assert_entities(
+        prepared
+            .execute(&[], &inputs(1), &QueryControl::default())
+            .unwrap(),
+        &[],
+    );
+    let outcome = prepared
+        .execute(&[], &inputs(1), &QueryControl::default())
+        .unwrap();
+    let limited = QueryControl {
+        max_work: usize::try_from(outcome.stats.work - 1).unwrap(),
+        ..QueryControl::default()
+    };
+    assert_eq!(
+        prepared
+            .execute(&[], &inputs(1), &limited)
+            .unwrap_err()
+            .code,
+        "query/work-limit"
+    );
+    assert_entities(
+        prepared
+            .execute(&[], &inputs(1), &QueryControl::default())
+            .unwrap(),
+        &[],
+    );
 }
 
 #[test]

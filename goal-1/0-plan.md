@@ -6,9 +6,9 @@ Complete Stage1 of `/home/jake/Developer/atomic/goal-0/0-plan.md`: repair negati
 rule evaluation (R1), disjunction readiness (R3) and anonymous identity collisions
 (R2) in the existing product, preserving valid behavior and durable retries.
 
-Status: **in progress: stack-safe negative completion and combined acceptance**. This is Goal0's first active
-child. Its internal steps do not create additional goal folders. After its
-completion, return to Goal0; the other parent stages remain required.
+Status: **complete (2026-09-10)**. Goal0 now owns continuation at Goal2. This
+child's internal steps do not create additional goal folders; the other parent
+stages remain required.
 
 Use the Datomic docs and recovered 1.0.7705 source named in the parent. Code pointers
 below are starting points, not prescribed patch boundaries. Reconcile current
@@ -101,8 +101,8 @@ safe diagnosis path; future submissions must not repeat the collision.
   cases pass with explicit expected results. Include negated calls to recursive
   positive rules, not just nonrecursive negative clauses. No incomplete memo escapes as an
   authoritative negative answer, and genuine binding errors remain errors.
-- **Status:** In progress: semantic regressions pass; replace nested negative
-  completion with stack-safe scheduling before final acceptance.
+- **Status:** Complete: typed negative-completion task stack, batched demands,
+  tracked memo completeness and binding-aware Or pass semantic/resource regressions.
 
 ### 3. Repair anonymous identity without breaking durable meaning
 
@@ -135,8 +135,8 @@ safe diagnosis path; future submissions must not repeat the collision.
   regression. Record actual commands, fixture execution, compatibility decisions
   and uncertainty. Mark parent Stage1 complete and return to its first unfinished
   stage rather than ending the overall product effort here.
-- **Status:** In progress: real CLI/application/TLS checks pass; rerun relevant
-  checks after negative-completion scheduling is finalized.
+- **Status:** Complete: final CLI/PG regression, nearby query/transaction suites,
+  upgrade receipt verification, formatting and all-target Clippy checked.
 
 ## Evidence policy and continuation
 
@@ -186,10 +186,30 @@ scaffold, must add permanent regressions.
   fixture root. Example whole-workflow measurements are diagnostics, not scale
   claims: initial application1665ms, twenty warmed calculations6828us and zero SQL
   calls inside that calculation loop; total application148SQL calls.
+- Configured adjacent batch passed26/26 with `--include-ignored`: transaction_phases,
+  partitions, partition_authoring, program_transactions, program_tuple_input,
+  program_postgres and ref_unique_identity. Sixteen enter PG; the phase test ran
+  all six size/queue cases. Four-request wall diagnostics for1/64/256data ops were
+  138.6/492.1/2062.6ms unqueued and125.9/585.7/2132.4ms queued; SQLcalls145/184/355.
+  These unoptimized concurrent-run samples are not throughput guarantees.
+- All-target Clippy completed without errors (existing warnings remain for Stage7).
+  Stack-safe negative tasks passed15 focused semantic/resource tests and55 nearby
+  query checks. A separate indexed scaling regression then caught repeated memo
+  solving in `Or -> required rule -> Not`: work3978/52624/800170 for32/128/512entities,
+  despite linear datom reads. This is a repair regression, not an accepted limit.
 
-Continuation: closing review identified stack-depth risk in nested negative-rule
-completion. Goal1 remains active while replacing nested completion calls with an
-explicit task stack and rerunning query/PG regressions. Product/remote and adjacent
-transaction suites are running; their logs are under the disposable fixture root.
-Finish the child's combined signal, then return to Goal0 Stage2. No parent or child
-completion is claimed yet.
+Final verification: the composed-query regression is repaired by batched demand,
+deferred solving and retained positive-memo completeness. At32/128/512entities,
+work is1211/4641/18363, datoms105/419/1673 and accounted bytes130701/523003/2094541;
+fixed-point iterations remain2. Accounted bytes are not RSS. All15 dependency and
+3 independently authored indexed scaling tests pass; final55 nearby query tests
+pass (one existing opt-in benchmark ignored). Strata16/64/256/512/513 pass on256KiB
+stack without a new depth cap; this is stack-safety proof, not linearCPU in rule
+definition count. Final CLI/PG combined check passes8.04s; old-receipt verify
+passes0.59s. Latest identity/remote batch passed7+3tests with PG configured.
+`cargo fmt --all -- --check`, `git diff --check`, and low-debug/nonincremental
+`cargo clippy --offline --all-targets` pass (existing warnings retained for Stage7).
+
+Continuation: return to Goal0; Goal2 is active. Preserve these regressions and
+the unchanged durable codecs. Reopen Goal1 if integrated checks reveal a query/
+identity regression. The parent product repair is not complete.

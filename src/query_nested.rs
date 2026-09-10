@@ -26,6 +26,8 @@ pub(super) fn execute(
         rule_memo: BTreeMap::new(),
         negative_memo: BTreeMap::new(),
         solving_rules: false,
+        rule_memo_complete: false,
+        defer_rules: false,
         borrowed_cancel: parent.borrowed_cancel,
         max_value_bytes: parent
             .max_value_bytes

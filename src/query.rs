@@ -1001,6 +1001,8 @@ struct State<'a> {
     rule_memo: BTreeMap<RuleInvocationKey, Vec<Vec<BoundValue>>>,
     negative_memo: BTreeMap<dependencies::NegativeInvocation, bool>,
     solving_rules: bool,
+    rule_memo_complete: bool,
+    defer_rules: bool,
     borrowed_cancel: Option<&'a AtomicBool>,
     max_value_bytes: usize,
 }
@@ -1095,6 +1097,8 @@ impl QueryEngine {
             rule_memo: BTreeMap::new(),
             negative_memo: BTreeMap::new(),
             solving_rules: false,
+            rule_memo_complete: false,
+            defer_rules: false,
             borrowed_cancel: None,
             max_value_bytes: usize::MAX,
         };
@@ -1143,6 +1147,8 @@ impl QueryEngine {
                 rule_memo: BTreeMap::new(),
                 negative_memo: BTreeMap::new(),
                 solving_rules: false,
+                rule_memo_complete: false,
+                defer_rules: false,
                 borrowed_cancel: budget.query_cancelled(),
                 max_value_bytes: budget.query_remaining_value_bytes(),
             };
@@ -1850,6 +1856,7 @@ fn evaluate_clause(
                 .clone()
                 .unwrap_or_else(|| variables_in_clauses(clauses));
             let mut next = Vec::new();
+            let mut pending = BTreeSet::new();
             for row in rows {
                 if required.iter().any(|variable| !row.contains_key(variable)) {
                     return Err(SemanticError::incorrect(
@@ -1863,23 +1870,52 @@ fn evaluate_clause(
                 } else {
                     row.clone()
                 };
-                if dependencies::evaluate_negative(clause, seed, inherited_source, state)? {
-                    state.push_row(&mut next, row)?;
+                match dependencies::evaluate_negative(clause, seed, inherited_source, state)? {
+                    dependencies::NegativeStatus::Complete(true) => {
+                        state.push_row(&mut next, row)?
+                    }
+                    dependencies::NegativeStatus::Complete(false) => {}
+                    dependencies::NegativeStatus::Pending(key) => {
+                        pending.insert(key);
+                    }
                 }
+            }
+            if !pending.is_empty() {
+                return Err(dependencies::EvaluationError::AwaitNegative(
+                    pending.into_iter().collect(),
+                ));
             }
             Ok((next, "set-difference".into()))
         }
         Clause::Or { join, branches } => {
             validate_or(branches, join.as_deref())?;
             let mut next = Vec::new();
+            let mut pending = BTreeSet::new();
+            let mut deferred = false;
             for row in rows {
                 for branch in branches {
                     let seed = join
                         .as_ref()
                         .map_or_else(|| row.clone(), |variables| project_row(&row, variables));
-                    for produced in
-                        evaluate_clauses(branch, vec![seed], rules, inherited_source, state)?
-                    {
+                    let produced = match evaluate_clauses(
+                        branch,
+                        vec![seed],
+                        rules,
+                        inherited_source,
+                        state,
+                    ) {
+                        Ok(rows) => rows,
+                        Err(dependencies::EvaluationError::AwaitNegative(requests)) => {
+                            pending.extend(requests);
+                            continue;
+                        }
+                        Err(dependencies::EvaluationError::AwaitRules) => {
+                            deferred = true;
+                            continue;
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    for produced in produced {
                         if let Some(join) = join {
                             let mut merged = row.clone();
                             if join.iter().all(|variable| {
@@ -1895,6 +1931,14 @@ fn evaluate_clause(
                     }
                 }
             }
+            if !pending.is_empty() {
+                return Err(dependencies::EvaluationError::AwaitNegative(
+                    pending.into_iter().collect(),
+                ));
+            }
+            if deferred {
+                return Err(dependencies::EvaluationError::AwaitRules);
+            }
             Ok((next, "set-union".into()))
         }
         Clause::Rule { source, name, args } => {
@@ -1907,8 +1951,9 @@ fn evaluate_clause(
                 )
                 .into());
             }
-            let mut next = Vec::new();
+            let mut invocations = Vec::new();
             for row in rows {
+                state.check(1)?;
                 if required
                     .iter()
                     .any(|index| !term_is_bound(&args[*index], &row))
@@ -1927,7 +1972,15 @@ fn evaluate_clause(
                         .map(|term| term_bound_value(term, &row))
                         .collect(),
                 };
-                let relation = solve_rule_invocation(key, rules, state)?;
+                ensure_rule_memo_entry(state, key.clone())?;
+                invocations.push((row, key));
+            }
+            // Demand is a relation, not one invocation at a time. In particular
+            // collect every row's negative dependencies before restarting a scan.
+            solve_rule_invocations(rules, state)?;
+            let mut next = Vec::new();
+            for (row, key) in invocations {
+                let relation = rule_memo_rows(state, &key)?;
                 for tuple in &relation {
                     if tuple.len() != args.len() {
                         return Err(fault(
@@ -2190,47 +2243,31 @@ fn rule_signature<'a>(
         })
 }
 
-fn solve_rule_invocation(
-    key: RuleInvocationKey,
-    rules: &[Rule],
-    state: &mut State<'_>,
-) -> EvaluationResult<Vec<Vec<BoundValue>>> {
+fn solve_rule_invocations(rules: &[Rule], state: &mut State<'_>) -> EvaluationResult<()> {
     // Recovered `eval-query` keys its input work by source and adorned
     // predicate, accumulates answers in `ans`, and the outer `qsqr` loop
     // repeats until answer cardinalities stop changing. This memo uses the
     // concrete bound values as well as the adornment: it is more selective,
     // while retaining the same monotone fixed-point boundary.
-    let (arity, required) = rule_signature(rules, &key.name)?;
-    if key.bindings.len() != arity {
-        return Err(SemanticError::incorrect(
-            "query/rule-arity",
-            format!(
-                "rule {} expects {arity} arguments, got {}",
-                key.name,
-                key.bindings.len()
-            ),
-        )
-        .into());
-    }
-    if required.iter().any(|index| key.bindings[*index].is_none()) {
-        return Err(SemanticError::incorrect(
-            "query/insufficient-binding",
-            format!(
-                "rule {} requires its declared input positions to be bound",
-                key.name
-            ),
-        )
-        .into());
-    }
-
-    ensure_rule_memo_entry(state, key.clone())?;
-    if !state.solving_rules {
+    if !state.solving_rules && !state.rule_memo_complete {
+        if state.defer_rules {
+            // A sibling already requested negative work during this pass.
+            // Register the new keys but let the driver solve them as one batch.
+            return Err(dependencies::EvaluationError::AwaitRules);
+        }
         state.solving_rules = true;
         let result = stabilize_rule_memo(rules, state);
         state.solving_rules = false;
+        if matches!(
+            &result,
+            Err(dependencies::EvaluationError::AwaitNegative(_))
+        ) {
+            state.defer_rules = true;
+        }
         result?;
+        state.rule_memo_complete = true;
     }
-    Ok(rule_memo_rows(state, &key)?)
+    Ok(())
 }
 
 fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> EvaluationResult<()> {
@@ -2239,9 +2276,17 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> EvaluationResul
         let before_entries = state.rule_memo.len();
         let before_rows = state.rule_memo.values().map(Vec::len).sum::<usize>();
         let keys = state.rule_memo.keys().cloned().collect::<Vec<_>>();
+        let mut pending = BTreeSet::new();
 
         for key in keys {
-            let produced = evaluate_rule_key(&key, rules, state)?;
+            let produced = match evaluate_rule_key(&key, rules, state) {
+                Ok(rows) => rows,
+                Err(dependencies::EvaluationError::AwaitNegative(requests)) => {
+                    pending.extend(requests);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             ensure_rule_memo_entry(state, key.clone())?;
             let (length, added) = {
                 let rows = state
@@ -2263,6 +2308,12 @@ fn stabilize_rule_memo(rules: &[Rule], state: &mut State<'_>) -> EvaluationResul
             }
         }
 
+        if !pending.is_empty() {
+            return Err(dependencies::EvaluationError::AwaitNegative(
+                pending.into_iter().collect(),
+            ));
+        }
+
         state.stats.rule_iterations += 1;
         let after_rows = state.rule_memo.values().map(Vec::len).sum::<usize>();
         if state.rule_memo.len() == before_entries && after_rows == before_rows {
@@ -2277,6 +2328,7 @@ fn evaluate_rule_key(
     state: &mut State<'_>,
 ) -> EvaluationResult<Vec<Vec<BoundValue>>> {
     let mut produced = Vec::new();
+    let mut pending = BTreeSet::new();
     for rule in rules.iter().filter(|rule| rule.name == key.name) {
         let mut seed = Row::new();
         let mut compatible = true;
@@ -2291,7 +2343,15 @@ fn evaluate_rule_key(
         if !compatible {
             continue;
         }
-        let rows = evaluate_clauses(&rule.clauses, vec![seed], rules, Some(&key.source), state)?;
+        let rows =
+            match evaluate_clauses(&rule.clauses, vec![seed], rules, Some(&key.source), state) {
+                Ok(rows) => rows,
+                Err(dependencies::EvaluationError::AwaitNegative(requests)) => {
+                    pending.extend(requests);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         for row in rows {
             let tuple = rule
                 .head
@@ -2311,6 +2371,11 @@ fn evaluate_rule_key(
             produced.push(tuple);
         }
     }
+    if !pending.is_empty() {
+        return Err(dependencies::EvaluationError::AwaitNegative(
+            pending.into_iter().collect(),
+        ));
+    }
     stable_dedupe_by(&mut produced, Ord::cmp);
     Ok(produced)
 }
@@ -2320,6 +2385,7 @@ fn ensure_rule_memo_entry(
     key: RuleInvocationKey,
 ) -> Result<(), SemanticError> {
     if !state.rule_memo.contains_key(&key) {
+        state.rule_memo_complete = false;
         state.charge_value_bytes(key.bindings.iter().flatten().fold(
             std::mem::size_of::<RuleInvocationKey>() + key.name.len() + key.source.len(),
             |bytes, value| bytes.saturating_add(join::bound_bytes(value)),

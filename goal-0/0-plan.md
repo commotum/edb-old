@@ -9,8 +9,8 @@ correct, ownership stack-safe, and routine work proportional to the information
 actually consumed or changed. Finish with integrated application and PostgreSQL
 evidence, not merely a collection of completed child goals.
 
-Status: **executing Stage 1**. Active child: **Goal 1**.
-Stages 1–7 map directly to `goal-1` through `goal-7`; only Goal 1 is scaffolded now.
+Status: **executing Stage 2**. Active child: **Goal 2**.
+Stages 1–7 map directly to `goal-1` through `goal-7`; Goals1–2 are scaffolded.
 
 ## Authority and constraints
 
@@ -87,9 +87,11 @@ into ordinary repository regression tests during implementation; do not depend o
   variations; eager, exact and configured PostgreSQL/application paths agree where
   applicable; existing valid recursive/disjunctive queries remain supported.
   Persisted old requests still retry to their original receipts after restart.
-- **Status:** In progress: R2 and real old-receipt compatibility verified;
-  R1/R3 semantic and real CLI/PG regressions pass. Closing a newly identified
-  negative-completion stack-depth risk before final Stage1 acceptance.
+- **Status:** Complete (2026-09-10). R1/R2/R3, old-engine receipt compatibility,
+  real CLI/application/TLS restart/retry and adjacent suites pass. Stack-safe batched
+  negative completion passed513strata on256KiB stack; indexed Or/rule/Not work at
+  32/128/512entities is1211/4641/18363 with two fixed-point iterations per size.
+  This is accounted work, not a CPU-throughput claim. Details in Goal1.
 
 ### 2. Make graph traversal and ownership stack-safe — Goal 2
 
@@ -102,7 +104,8 @@ into ordinary repository regression tests during implementation; do not depend o
   retained values, shared predecessors and bounded failure paths remain correct;
   real PG retraction/restart works. No arbitrary graph-depth cap substitutes for
   stack-safe traversal. Reproduction need not crash the main test runner.
-- **Status:** Not started.
+- **Status:** In progress: Goal2 active; permanent small-stack traversal/release
+  regressions, shared repairs and real PostgreSQL retraction/restart.
 
 ### 3. Complete and bound numeric behavior — Goal 3
 
@@ -214,10 +217,9 @@ decisions and any outstanding uncertainty. A scaffold, green lint count or compl
 child is not Goal0's finish line. Parent completion requires Stage7 plus reconciled
 completion signals for all earlier stages.
 
-Continuation (2026-09-10): Goal1 active, baseline `c0bc499`; details and commands in
-its plan. Real PostgreSQL15.11 fixture is `/tmp/atomic-repair-pg.vA037i/data`, port55471,
-with normal durability enabled. Pre-repair direct-map/program receipts were captured
-and matched exactly after repair; fresh requests no longer collide. Separate CLI/
-application and TLS restart/retry workflows passed. Query semantic cases pass;
-finish stack-safe negative-rule scheduling and rerun combined checks before handing
-off to Stage2. No child or parent completion is claimed yet.
+Continuation (2026-09-10): Goal1 complete, Goal2 active. Real PostgreSQL15.11 fixture
+is `/tmp/atomic-repair-pg.vA037i/data`, port55471, with normal durability enabled;
+connection/upgrade witness details are in Goal1. Next: stack-safe component closure
+in both assessors and ownership-aware recent-log release, then verify/reconcile
+Stage2 and continue to Stage3. Parent completion still requires all remaining repairs
+and Stage7 integrated acceptance.

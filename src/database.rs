@@ -2820,52 +2820,68 @@ impl Database {
         touched: &mut BTreeSet<(u64, u32)>,
         visited: &mut BTreeSet<u64>,
     ) -> Result<(), SemanticError> {
-        if !visited.insert(entity) {
-            return Ok(());
+        // Like recovered builtins/component-es-set, graph depth belongs in a
+        // worklist, not the call stack. Continuations preserve the previous
+        // depth-first EAVT/child/VAET order without limiting stored graph depth.
+        enum Work {
+            Visit(u64),
+            Fact(Datom),
+            Retract(Datom),
+            Incoming(u64),
         }
-        let facts: Vec<_> = self
-            .current_indexes
-            .matching(&IndexPrefix::Eavt {
-                entity,
-                attribute: None,
-                value: None,
-            })?
-            .to_vec();
-        for fact in facts {
-            let attribute = self.schema.attribute(fact.attribute)?;
-            if attribute.component
-                && let Value::Ref(child) = fact.value
-            {
-                self.expand_retract_entity(child, logical, touched, visited)?;
+        let mut pending = vec![Work::Visit(entity)];
+        while let Some(work) = pending.pop() {
+            match work {
+                Work::Visit(entity) => {
+                    if !visited.insert(entity) {
+                        continue;
+                    }
+                    let facts = self.current_indexes.matching(&IndexPrefix::Eavt {
+                        entity,
+                        attribute: None,
+                        value: None,
+                    })?;
+                    pending.push(Work::Incoming(entity));
+                    pending.extend(facts.iter().rev().cloned().map(Work::Fact));
+                }
+                Work::Fact(fact) => {
+                    let component = self.schema.attribute(fact.attribute)?.component;
+                    let child = match &fact.value {
+                        Value::Ref(child) if component => Some(*child),
+                        _ => None,
+                    };
+                    pending.push(Work::Retract(fact));
+                    if let Some(child) = child {
+                        pending.push(Work::Visit(child));
+                    }
+                }
+                Work::Retract(fact) => {
+                    touched.insert((fact.entity, fact.attribute));
+                    logical.push(LogicalDatom {
+                        entity: fact.entity,
+                        attribute: fact.attribute,
+                        value: fact.value,
+                        added: false,
+                    });
+                }
+                Work::Incoming(entity) => {
+                    // Retract E or V facts, including noncomponent incoming
+                    // refs. VAET avoids scanning unrelated current data.
+                    for fact in self.current_indexes.matching(&IndexPrefix::Vaet {
+                        value: Value::Ref(entity),
+                        attribute: None,
+                        entity: None,
+                    })? {
+                        touched.insert((fact.entity, fact.attribute));
+                        logical.push(LogicalDatom {
+                            entity: fact.entity,
+                            attribute: fact.attribute,
+                            value: fact.value.clone(),
+                            added: false,
+                        });
+                    }
+                }
             }
-            touched.insert((entity, fact.attribute));
-            logical.push(LogicalDatom {
-                entity,
-                attribute: fact.attribute,
-                value: fact.value,
-                added: false,
-            });
-        }
-
-        // The documented built-in retracts facts where the target is either E
-        // or V. VAET makes this proportional to incoming references rather
-        // than a scan of all current facts.
-        let incoming: Vec<_> = self
-            .current_indexes
-            .matching(&IndexPrefix::Vaet {
-                value: Value::Ref(entity),
-                attribute: None,
-                entity: None,
-            })?
-            .to_vec();
-        for fact in incoming {
-            touched.insert((fact.entity, fact.attribute));
-            logical.push(LogicalDatom {
-                entity: fact.entity,
-                attribute: fact.attribute,
-                value: fact.value,
-                added: false,
-            });
         }
         Ok(())
     }

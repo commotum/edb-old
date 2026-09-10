@@ -1822,40 +1822,66 @@ fn expand_retract_entity(
     touched: &mut BTreeSet<(u64, u32)>,
     visited: &mut BTreeSet<u64>,
 ) -> Result<(), SemanticError> {
-    if !visited.insert(entity) {
-        return Ok(());
+    // Explicit continuations keep the eager oracle's depth-first read order,
+    // including ordinary Reader read/byte admission checks at every prefix.
+    // A visited set alone stops cycles but cannot make deep paths stack-safe.
+    enum Work {
+        Visit(u64),
+        Fact(Datom),
+        Retract(Datom),
+        Incoming(u64),
     }
-    for fact in reader.prefix(&IndexPrefix::Eavt {
-        entity,
-        attribute: None,
-        value: None,
-    })? {
-        let attribute = reader.base.schema().attribute(fact.attribute)?;
-        if attribute.component
-            && let Value::Ref(child) = fact.value
-        {
-            expand_retract_entity(reader, child, logical, touched, visited)?;
+    let mut pending = vec![Work::Visit(entity)];
+    while let Some(work) = pending.pop() {
+        match work {
+            Work::Visit(entity) => {
+                if !visited.insert(entity) {
+                    continue;
+                }
+                let facts = reader.prefix(&IndexPrefix::Eavt {
+                    entity,
+                    attribute: None,
+                    value: None,
+                })?;
+                pending.push(Work::Incoming(entity));
+                pending.extend(facts.into_iter().rev().map(Work::Fact));
+            }
+            Work::Fact(fact) => {
+                let component = reader.base.schema().attribute(fact.attribute)?.component;
+                let child = match &fact.value {
+                    Value::Ref(child) if component => Some(*child),
+                    _ => None,
+                };
+                pending.push(Work::Retract(fact));
+                if let Some(child) = child {
+                    pending.push(Work::Visit(child));
+                }
+            }
+            Work::Retract(fact) => {
+                touched.insert((fact.entity, fact.attribute));
+                logical.push(LogicalDatom {
+                    entity: fact.entity,
+                    attribute: fact.attribute,
+                    value: fact.value,
+                    added: false,
+                });
+            }
+            Work::Incoming(entity) => {
+                for fact in reader.prefix(&IndexPrefix::Vaet {
+                    value: Value::Ref(entity),
+                    attribute: None,
+                    entity: None,
+                })? {
+                    touched.insert((fact.entity, fact.attribute));
+                    logical.push(LogicalDatom {
+                        entity: fact.entity,
+                        attribute: fact.attribute,
+                        value: fact.value,
+                        added: false,
+                    });
+                }
+            }
         }
-        touched.insert((entity, fact.attribute));
-        logical.push(LogicalDatom {
-            entity,
-            attribute: fact.attribute,
-            value: fact.value,
-            added: false,
-        });
-    }
-    for fact in reader.prefix(&IndexPrefix::Vaet {
-        value: Value::Ref(entity),
-        attribute: None,
-        entity: None,
-    })? {
-        touched.insert((fact.entity, fact.attribute));
-        logical.push(LogicalDatom {
-            entity: fact.entity,
-            attribute: fact.attribute,
-            value: fact.value,
-            added: false,
-        });
     }
     Ok(())
 }
@@ -3050,6 +3076,81 @@ mod tests {
         let value = DatabaseValue::eager(Arc::new(seeded));
         let assessed = assess_tiered(&value, &ops, 11).unwrap();
         assert_eq!(assessed.tx_data, expected.tx_data);
+    }
+
+    #[test]
+    fn component_worklist_visits_each_entity_once_and_charges_every_prefix() {
+        const DEPTH: usize = 257;
+        let node = |index| make_eid(USER_PARTITION, 10_000 + index as u64).unwrap();
+        let mut operations = Vec::new();
+        for index in 0..DEPTH {
+            operations.push(TxOp::Add {
+                entity: EntityRef::Id(node(index)),
+                attribute: NAME,
+                value: Value::String(format!("node-{index}")).into(),
+            });
+            if index + 1 < DEPTH {
+                operations.push(TxOp::Add {
+                    entity: EntityRef::Id(node(index)),
+                    attribute: PARENT,
+                    value: Value::Ref(node(index + 1)).into(),
+                });
+            }
+        }
+        let before = Database::new(schema())
+            .unwrap()
+            .with(&operations, 10)
+            .unwrap()
+            .db_after
+            .database_value();
+        let original = before.datoms(IndexOrder::Eavt).unwrap();
+        let mut reader = Reader::new(&before, AssessmentLimits::unbounded());
+        let mut logical = Vec::new();
+        let mut touched = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let started = std::time::Instant::now();
+        expand_retract_entity(
+            &mut reader,
+            node(0),
+            &mut logical,
+            &mut touched,
+            &mut visited,
+        )
+        .unwrap();
+        assert_eq!(visited.len(), DEPTH);
+        assert_eq!(reader.work.prefixes, 2 * DEPTH as u64);
+        assert_eq!(reader.work.datoms, (3 * DEPTH - 2) as u64);
+        assert_eq!(logical.len(), 3 * DEPTH - 2);
+        assert_eq!(touched.len(), 2 * DEPTH - 1);
+        let work = reader.work;
+        drop((reader, logical, touched, visited));
+        eprintln!(
+            "COMPONENT_WORKLIST depth={DEPTH} prefixes={} datoms={} traversal_and_worklist_drop_us={}",
+            work.prefixes,
+            work.datoms,
+            started.elapsed().as_micros()
+        );
+
+        let mut reader = Reader::new(
+            &before,
+            AssessmentLimits {
+                max_read_datoms: 32,
+                max_read_bytes: u64::MAX,
+            },
+        );
+        let mut visited = BTreeSet::new();
+        let error = expand_retract_entity(
+            &mut reader,
+            node(0),
+            &mut Vec::new(),
+            &mut BTreeSet::new(),
+            &mut visited,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "transaction/read-capacity");
+        assert_eq!(reader.work.datoms, 32);
+        assert!(visited.len() < DEPTH);
+        assert_eq!(before.datoms(IndexOrder::Eavt).unwrap(), original);
     }
 
     #[test]
