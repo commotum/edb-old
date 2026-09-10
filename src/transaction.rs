@@ -59,6 +59,8 @@ pub enum TxForm {
     /// A process-local Rust callback used by speculative `with_forms` calls.
     /// This is deliberately distinct from a temporal database function.
     Call(TxCall),
+    /// Schema-independent EDN data, lowered only against authoritative db-before.
+    Edn(crate::edn_transaction::EdnTransactionForm),
 }
 
 /// Total structural order for primitive transaction forms.
@@ -189,6 +191,9 @@ fn compare_tx_form(left: &TxForm, right: &TxForm) -> Ordering {
                     compare_slice_by(&left.arguments, &right.arguments, compare_tx_value)
                 })
             }
+            (TxForm::Edn(left), TxForm::Edn(right)) => {
+                left.canonical_edn().cmp(right.canonical_edn())
+            }
             _ => Ordering::Equal,
         })
 }
@@ -199,6 +204,7 @@ fn tx_form_rank(form: &TxForm) -> u8 {
         TxForm::EntityMap(_) => 1,
         TxForm::ProgramCall(_) => 2,
         TxForm::Call(_) => 3,
+        TxForm::Edn(_) => 4,
     }
 }
 
@@ -437,6 +443,10 @@ pub(crate) fn forms_have_partition_directives(forms: &[TxForm]) -> bool {
             TxForm::Op(TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. })
         )
     })
+}
+
+pub(crate) fn forms_have_edn(forms: &[TxForm]) -> bool {
+    forms.iter().any(|form| matches!(form, TxForm::Edn(_)))
 }
 
 pub(crate) fn runtime_has_extended_inputs(input: &RuntimeValue) -> bool {
@@ -1106,6 +1116,20 @@ fn normalize_forms_against(
     functions: Option<&TxFunctions>,
     max_primitive_ops: usize,
 ) -> Result<Vec<TxOp>, SemanticError> {
+    let lowered;
+    let forms = if forms_have_edn(forms) {
+        lowered = match db_before {
+            NormalizerRead::Eager(database) => {
+                crate::edn_transaction::lower_forms(&database.database_value(), forms)?
+            }
+            NormalizerRead::Exact(database) => {
+                crate::edn_transaction::lower_forms(database, forms)?
+            }
+        };
+        lowered.as_slice()
+    } else {
+        forms
+    };
     validate_forms_input(forms)?;
     let mut forms = forms.to_vec();
     forms.sort_by(compare_tx_form);
@@ -1191,7 +1215,7 @@ fn expand_local_calls(
                     admission,
                 )?;
             }
-            TxForm::ProgramCall(_) => {
+            TxForm::ProgramCall(_) | TxForm::Edn(_) => {
                 return Err(SemanticError::incorrect(
                     "transaction/unresolved-database-function",
                     "persisted database-function calls must be resolved against db-before by the transactor",
@@ -1299,7 +1323,7 @@ fn explicit_tempids(forms: &[TxForm]) -> BTreeSet<String> {
                 }
                 TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
             },
-            TxForm::Call(_) | TxForm::ProgramCall(_) => {
+            TxForm::Call(_) | TxForm::ProgramCall(_) | TxForm::Edn(_) => {
                 unreachable!("all calls were expanded before anonymous allocation")
             }
         }
@@ -1323,7 +1347,7 @@ impl Normalizer<'_> {
                 self.expand_map(map, None, 0, output)?;
                 Ok(())
             }
-            TxForm::Call(_) | TxForm::ProgramCall(_) => {
+            TxForm::Call(_) | TxForm::ProgramCall(_) | TxForm::Edn(_) => {
                 unreachable!("all calls were expanded before anonymous allocation")
             }
         }

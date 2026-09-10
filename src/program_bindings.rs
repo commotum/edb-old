@@ -169,6 +169,15 @@ pub(crate) fn expand_submission_forms(
     budget: &mut ProgramBudget<'_>,
 ) -> Result<Vec<TxForm>, SemanticError> {
     crate::transaction::validate_forms_input(submitted)?;
+    // This runs inside the receipt-miss branch against the locked db-before.
+    // Neither schema resolution nor program rebinding can change old retries.
+    let lowered;
+    let submitted = if crate::transaction::forms_have_edn(submitted) {
+        lowered = crate::edn_transaction::lower_forms(db_before, submitted)?;
+        lowered.as_slice()
+    } else {
+        submitted
+    };
     let mut forms = Vec::with_capacity(submitted.len());
     let mut calls = Vec::new();
     for form in submitted {
@@ -181,6 +190,7 @@ pub(crate) fn expand_submission_forms(
                     "process-local Rust transaction callbacks cannot cross the authoritative service boundary",
                 ));
             }
+            TxForm::Edn(_) => unreachable!("EDN forms were lowered against db-before"),
         }
     }
     forms.extend(execute_program_calls(resolve, db_before, &calls, budget)?);

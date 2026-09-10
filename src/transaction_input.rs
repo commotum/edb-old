@@ -171,6 +171,7 @@ pub(crate) fn validate_forms_input(forms: &[TxForm]) -> Result<(), SemanticError
     }
     for form in forms {
         match form {
+            TxForm::Edn(_) => {} // Private construction validates EDN shape/depth/bytes.
             TxForm::Op(op) => validate_ops_input(std::slice::from_ref(op))?,
             TxForm::EntityMap(value) => map(value, 0)?,
             TxForm::Call(call) => {

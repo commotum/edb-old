@@ -46,7 +46,9 @@ pub(crate) fn encode_submission(
         put_framed_bytes(&mut body, &bytes)?;
     }
     // Form encoding has already enforced shape/depth limits before this walk.
-    if forms_have_fulltext_attributes(&request.forms) {
+    if crate::transaction::forms_have_edn(&request.forms) {
+        body[0] = 5;
+    } else if forms_have_fulltext_attributes(&request.forms) {
         body[0] = 4;
     } else if crate::transaction::forms_have_partition_directives(&request.forms) {
         body[0] = 3;
@@ -61,7 +63,7 @@ pub(crate) fn decode_submission(
 ) -> Result<(DatabaseIdentity, TransactionRequest), SemanticError> {
     let mut cursor = Cursor::new(decode_blob(bytes, REQUEST)?);
     let version = cursor.u8()?;
-    if ![1, 2, 3, 4].contains(&version) {
+    if ![1, 2, 3, 4, 5].contains(&version) {
         return Err(fault(
             "transport/version",
             "unsupported native submission version",
@@ -87,6 +89,12 @@ pub(crate) fn decode_submission(
         form.finish()?;
     }
     cursor.finish()?;
+    if version < 5 && crate::transaction::forms_have_edn(&forms) {
+        return Err(fault(
+            "transport/version",
+            "EDN forms require native submission version 5",
+        ));
+    }
     if version < 4 && forms_have_fulltext_attributes(&forms) {
         return Err(fault(
             "transport/version",
@@ -134,6 +142,9 @@ fn framed<'a>(cursor: &mut Cursor<'a>) -> Result<&'a [u8], SemanticError> {
 
 fn decode_form(cursor: &mut Cursor<'_>) -> Result<TxForm, SemanticError> {
     Ok(match cursor.u8()? {
+        3 => TxForm::Edn(crate::edn_transaction::EdnTransactionForm::decode(
+            &cursor.string()?,
+        )?),
         0 => TxForm::Op(decode_op(cursor)?),
         1 => TxForm::EntityMap(decode_map(cursor, 0)?),
         2 => {
@@ -523,6 +534,53 @@ pub(crate) fn decode_submission_outcome(bytes: &[u8]) -> Result<WireOutcome, Sem
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edn_forms_have_additive_transport_and_keep_unresolved_request_identity() {
+        let identity = DatabaseIdentity::new("catalog", "lineage");
+        let request =
+            TransactionRequest::from_edn("edn", "[{:unknown/a 1 :unknown/b #{3 2}}]").unwrap();
+        let bytes = encode_submission(&identity, &request).unwrap();
+        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], 5);
+        let (_, decoded) = decode_submission(&bytes).unwrap();
+        assert_eq!(encode_submission(&identity, &decoded).unwrap(), bytes);
+        assert_eq!(
+            submission_request_digest(&request.forms, None, None).unwrap(),
+            submission_request_digest(&decoded.forms, None, None).unwrap()
+        );
+        for old_version in 1..5 {
+            let mut body = decode_blob(&bytes, REQUEST).unwrap().to_vec();
+            body[0] = old_version;
+            assert_eq!(
+                decode_submission(&encode_blob(REQUEST, &body).unwrap())
+                    .err()
+                    .unwrap()
+                    .code,
+                "transport/version"
+            );
+        }
+        for length in 0..bytes.len() {
+            assert!(decode_submission(&bytes[..length]).is_err());
+        }
+        assert_eq!(
+            crate::edn_transaction::EdnTransactionForm::decode("{:unknown/b 2 :unknown/a 1}")
+                .unwrap_err()
+                .code,
+            "transport/noncanonical-edn"
+        );
+        let typed = TransactionRequest::new(
+            "typed",
+            vec![TxOp::Add {
+                entity: EntityRef::Temp("x".into()),
+                attribute: 1_000,
+                value: Value::Long(1).into(),
+            }],
+        );
+        assert_eq!(
+            decode_blob(&encode_submission(&identity, &typed).unwrap(), REQUEST).unwrap()[0],
+            1
+        );
+    }
 
     #[test]
     fn partition_directives_use_new_wire_grammar_and_preserve_request_identity() {

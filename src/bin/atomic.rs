@@ -1,6 +1,8 @@
 //! Supported local runtime and explicit administrative entry points.
 #[path = "atomic/admin.rs"]
 mod admin;
+#[path = "atomic/data.rs"]
+mod data;
 use atomic_core::{
     BackgroundIndexingConfig, CapacityLimits, ErrorCategory, LocalTransactionEndpoint,
     LocalTransportConfig, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, SemanticError,
@@ -209,7 +211,7 @@ fn io_error() -> SemanticError {
 fn run(args: Arguments) -> Result<(), SemanticError> {
     match args.command.as_str() {
         "--help" | "help" => {
-            print!("{HELP}{}", admin::HELP);
+            print!("{HELP}{}{}", admin::HELP, data::HELP);
             return Ok(());
         }
         "--version" => {
@@ -435,13 +437,23 @@ fn install_signals() -> Result<(), SemanticError> {
 
 fn main() -> ExitCode {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    let result = admin::dispatch(&raw).unwrap_or_else(|| Arguments::parse(raw).and_then(run));
+    let result = data::dispatch(&raw)
+        .or_else(|| admin::dispatch(&raw))
+        .unwrap_or_else(|| Arguments::parse(raw).and_then(run));
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             // Never print arbitrary server errors, anomalies, transaction data,
             // connection strings or paths originating in failed input.
             eprintln!("ERROR category={:?} code={}", error.category, error.code);
+            for field in ["line", "column", "offset"] {
+                if let Some(value) = error.details.get(field)
+                    && !value.is_empty()
+                    && value.bytes().all(|byte| byte.is_ascii_digit())
+                {
+                    eprintln!("{field}={value}");
+                }
+            }
             if error.code.starts_with("cli/") || error.code.starts_with("config/") {
                 eprintln!("{}", error.message);
             }

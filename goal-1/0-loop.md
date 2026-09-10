@@ -30,4 +30,6 @@
    criteria hold. Hand verified results and honest remaining uncertainties back
    to Goal 0; this child's completion is not the parent's finish line.
 
-Current state: scaffold only; waiting for the user's execution/parent handoff.
+Current state: execution authorized; Stage 1 active. Goal 0 now owns a concurrent
+documentation audit and explicitly delegates EDN to this independent workstream.
+Read its handoff, but preserve the other session's audit files and stage status.

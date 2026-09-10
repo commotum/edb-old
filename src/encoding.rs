@@ -795,15 +795,15 @@ pub(crate) fn canonical_submission_request(
     let mut body = Vec::new();
     // Submission identity has its own grammar version because these bytes are
     // hashed for idempotency but are not durable database values.
-    body.push(
-        if crate::transaction::forms_have_partition_directives(forms) {
-            4
-        } else if crate::transaction::forms_have_extended_inputs(forms) {
-            3
-        } else {
-            2
-        },
-    );
+    body.push(if crate::transaction::forms_have_edn(forms) {
+        5
+    } else if crate::transaction::forms_have_partition_directives(forms) {
+        4
+    } else if crate::transaction::forms_have_extended_inputs(forms) {
+        3
+    } else {
+        2
+    });
     match compare_basis_t {
         Some(basis) => {
             body.push(1);
@@ -1824,6 +1824,10 @@ fn encode_tx_op(output: &mut Vec<u8>, op: &TxOp) -> Result<(), SemanticError> {
 /// persistent/request representation.
 fn encode_persistent_tx_form(output: &mut Vec<u8>, form: &TxForm) -> Result<(), SemanticError> {
     match form {
+        TxForm::Edn(form) => {
+            output.push(3);
+            put_string(output, form.canonical_edn())?;
+        }
         TxForm::Op(op) => {
             output.push(0);
             encode_tx_op(output, op)?;

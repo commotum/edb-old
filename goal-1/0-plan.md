@@ -17,14 +17,18 @@ through the same transaction, query, pull and durability machinery.
 
 ## Status and integration
 
-Scaffold created 2026-09-10. Implementation has not started; no runtime tests were
-run for this scaffold. All four internal stages below are unfinished.
+Implementation started 2026-09-10. The scaffold and actual source were reconciled.
+Stage 1 is active; transaction and query adapters are being developed against its
+shared value contract. The first stored/result conversion regressions passed
+(3 tests, unoptimized); no complete stage is claimed yet.
 
-This goal will own the first stage of the user's forthcoming Goal 0. No new
-parent is created here. These internal stages do not create additional goal
-folders. Archived G1–G5 are evidence, not active instructions. When the parent
-arrives, reconcile its handoff without replacing this work or declaring the
-parent complete merely because EDN is complete.
+The concurrently created Goal 0 is a documentation capability audit, not an
+implementation parent loop. Its plan explicitly identifies Goal 1 as the
+independent EDN owner and forbids duplicating this work. Both plans were read;
+continue EDN implementation here, leaving the other session's audit files intact.
+Do not mark its stages complete or expand this implementation into its audit.
+These internal stages create no additional goal folders. Archived G1–G5 are
+evidence, not active instructions. EDN completion does not imply audit completion.
 
 ## Verified starting point
 
@@ -95,7 +99,7 @@ parent complete merely because EDN is complete.
 
 ## Ordered stages
 
-### 1. Shared EDN reader and writer — not started
+### 1. Shared EDN reader and writer — in progress
 
 **Outcome:** A public, reusable Rust EDN value model and reader/writer with a
 tested format contract independent of any database connection.
@@ -188,8 +192,9 @@ Goal 1 finishes only when all four outcomes and the end-to-end scenario are
 established. A parser, a successful Alice insert, or a scaffold alone is not
 feature completion. Do not weaken required coverage to obtain a green status.
 
-Next action when execution is requested: reconcile the forthcoming parent and
-current code, then implement Stage 1 while preparing the transaction identity and
-schema-resolution boundary for Stage 2. Fold material decisions, verified results,
-remaining gaps and a concise next action into this plan; update the parent when
-available. Until then, this scaffold is ready but not executing.
+Current implementation boundary: a shared EDN value/reader/writer remains
+independent of stored `Value`. Transaction EDN will retain a schema-independent
+request representation until authoritative receipt-first processing; existing
+typed encodings remain unchanged. Query and pull adapters reuse native engines.
+Next: finish format/value conversion regressions, integrate the adapters, then
+exercise executable and PostgreSQL acceptance. No runtime result is claimed yet.
