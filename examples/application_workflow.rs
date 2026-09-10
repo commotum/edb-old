@@ -4,11 +4,11 @@ use atomic_core::{
     DatabaseValue, Entity, EntityMap, EntityRef, EntityValue, FindElement, FindSpec,
     FulltextOptions, FulltextReport, Function, IndexPrefix, InputSpec, Instruction, Keyword,
     MapValue, OperationContext, OperationKind, Program, ProgramControl, ProgramKind, ProgramOutput,
-    ProgramRuntime, Query, QueryControl, QueryInput, QueryResult, QueryTemplate,
-    QueryTemplateSource, QueryValue, Schema, SemanticError, Term, TransactionRequest, TxForm, TxOp,
-    TxValue, Unique, Value, ValueType, Variable, decode_program, encode_program, partition_eid,
-    postgres_config_from_env, process_sql_stats, squuid, squuid_time_millis, uuid_v7,
-    uuid_v7_time_millis,
+    ProgramRuntime, Query, QueryControl, QueryDataSource, QueryEngine, QueryInput, QueryResult,
+    QueryTemplate, QueryTemplateSource, QueryValue, Schema, SemanticError, Term,
+    TransactionRequest, TxForm, TxOp, TxValue, Unique, Value, ValueType, Variable, decode_program,
+    encode_program, partition_eid, postgres_config_from_env, process_sql_stats, squuid,
+    squuid_time_millis, uuid_v7, uuid_v7_time_millis,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -192,6 +192,70 @@ fn require(condition: bool, message: &'static str) -> Result<()> {
     } else {
         Err(message.into())
     }
+}
+
+/// Join immutable database facts to application-owned planning data. Neither
+/// lazy projection nor entity comparison needs a fresh connection value.
+fn read_values_workflow(before: &DatabaseValue, after: &DatabaseValue) -> Result<()> {
+    let measured = OperationContext::new(OperationKind::Application);
+    let _scope = measured.enter();
+    let started = Instant::now();
+    let indexed = before.has_avet(&atomic_core::AttributeName::Id(PROJECT))?;
+    let mut target = DataPattern::new(Term::var("key"), Term::var("target"), Term::Blank);
+    target.source = "$targets".into();
+    let query = Query::new(
+        FindSpec::Relation(vec![
+            FindElement::Variable("key".into()),
+            FindElement::Variable("target".into()),
+        ]),
+        vec![
+            Clause::Pattern(Box::new(DataPattern::new(
+                Term::var("project"),
+                Term::Constant(Value::Ref(PROJECT.into())),
+                Term::var("key"),
+            ))),
+            Clause::Pattern(Box::new(target)),
+        ],
+    );
+    {
+        let sources = [
+            QueryDataSource::database("$", before.clone()),
+            QueryDataSource::tuples(
+                "$targets",
+                vec![
+                    vec![Value::String("alpha".into()), Value::Long(10)],
+                    vec![Value::String("beta".into()), Value::Long(20)],
+                ],
+            ),
+        ];
+        let control = QueryControl {
+            timeout: Some(WAIT),
+            max_work: 10_000,
+            ..Default::default()
+        };
+        let sequence = QueryEngine::sequence_sources(&query, &sources, &[], &control)?;
+        require(
+            sequence.remaining_rows() == 2,
+            "mixed-source query lost a project",
+        )?;
+        let rows = sequence.collect::<std::result::Result<Vec<_>, _>>()?;
+        require(rows.len() == 2, "mixed-source sequence did not finish")?;
+    }
+    let eid = before
+        .lookup(PROJECT, &Value::String("alpha".into()))?
+        .ok_or("alpha missing")?;
+    let old = before.entity(eid)?.ok_or("old alpha missing")?;
+    let new = after.entity(eid)?.ok_or("new alpha missing")?;
+    require(
+        old == new && old.identity() == new.identity(),
+        "entity identity changed across time",
+    )?;
+    println!(
+        "READ_VALUES_OK mixed_sources=true entity_identity=true avet_ready={indexed} elapsed_ms={} sql_calls={}",
+        started.elapsed().as_millis(),
+        measured.snapshot().sql_calls
+    );
+    Ok(())
 }
 
 /// Plans retain replayable intent and a protected basis, not speculative IDs
@@ -880,6 +944,7 @@ fn run() -> Result<()> {
     // Later runs may already include the planning workflow's later commits.
     // Use the exact receipt value, never substitute a newer connection capture.
     let current = updated.db_after;
+    read_values_workflow(&captured, &current)?;
     let expected = fixture.with(&update(), 2_000)?.db_after.database_value();
     require(
         calculation(&current)? == calculation(&expected)?,

@@ -21,6 +21,7 @@ EDN data commands (file path '-' reads stdin; results are EDN on stdout):
   atomic transact --database ID --file PATH --request-key KEY
     (--endpoint PATH | --remote) [--basis N] [--tx-instant MILLIS] [--timeout-ms N]
   atomic with --database ID --file PATH [--tx-instant MILLIS]
+    [--default-partition KEYWORD]
   atomic query --database ID --file PATH [--inputs PATH] [--sources PATH]
     [--as-of N] [--since N] [--history] [--timeout-ms N] [--max-work N]
     [--max-results N] [--max-join-bytes N]
@@ -30,6 +31,8 @@ EDN data commands (file path '-' reads stdin; results are EDN on stdout):
 transact requires a stable caller-supplied request key; reuse it AND the original
 intent/options after an unknown outcome. --basis is an optional optimistic guard.
 with is a local preview and never commits. Its temporary IDs are not reserved.
+Use the same --default-partition as the transactor to preview default placement.
+Explicit partition hints override the default; existing entities never move.
 query --inputs is a vector of non-source :in arguments (including rules/patterns).
 --sources is a map from source symbols to tuple rows or descriptors such as
 {$past {:database \"customers\" :as-of 42} $log {:database \"customers\" :log true}}.
@@ -69,7 +72,15 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
             ],
             &["--remote"],
         ),
-        "with" => (&["--database", "--file", "--tx-instant"], &[]),
+        "with" => (
+            &[
+                "--database",
+                "--file",
+                "--tx-instant",
+                "--default-partition",
+            ],
+            &[],
+        ),
         "query" => (
             &[
                 "--database",
@@ -124,6 +135,7 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
     }
     args.required("--database")?;
     args.required("--file")?;
+    super::transaction_defaults(args.values.get("--default-partition").map(String::as_str))?;
     if command == "transact" {
         args.required("--request-key")?;
         if args.values.contains_key("--endpoint") == args.switches.contains("--remote") {
@@ -309,7 +321,10 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         }
         "with" => {
             let db = connection.db();
-            let report = db.with_edn(&text, args.preview_instant()?)?;
+            let defaults = super::transaction_defaults(
+                args.values.get("--default-partition").map(String::as_str),
+            )?;
+            let report = db.with_edn_with_defaults(&text, args.preview_instant()?, &defaults)?;
             let mut fields = report_fields(
                 report.db_before.basis_t(),
                 report.db_after.basis_t(),

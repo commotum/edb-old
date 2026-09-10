@@ -137,6 +137,15 @@ impl TransactionRequest {
 }
 
 impl DatabaseValue {
+    pub fn with_edn_with_defaults(
+        &self,
+        text: &str,
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        self.with_forms_with_defaults(&read_edn_transaction(text)?, tx_instant, defaults)
+    }
+
     pub fn with_edn(
         &self,
         text: &str,
@@ -159,6 +168,20 @@ impl DatabaseValue {
 }
 
 impl Database {
+    pub fn with_edn_with_defaults(
+        &self,
+        text: &str,
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<crate::TxReport, SemanticError> {
+        self.with_forms_with_defaults(
+            &read_edn_transaction(text)?,
+            &TxFunctions::new(),
+            tx_instant,
+            defaults,
+        )
+    }
+
     pub fn with_edn(&self, text: &str, tx_instant: i64) -> Result<crate::TxReport, SemanticError> {
         self.with_forms(
             &read_edn_transaction(text)?,

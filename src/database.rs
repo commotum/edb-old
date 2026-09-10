@@ -1,6 +1,9 @@
+#[cfg(test)]
+use crate::USER_PARTITION;
 use crate::identity::{validate_frontier, validate_supported_eid};
 use crate::idents::IdentIndex;
 use crate::index::IndexRoots;
+use crate::reserved_allocation::ReservedAllocation;
 use crate::state_commitment::{CommitmentWork, SemanticStateCommitment};
 use crate::vocabulary::{
     DB_EXCISE, DB_EXCISE_ATTRS, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_IDENT, DB_TX_INSTANT,
@@ -11,8 +14,8 @@ use crate::vocabulary::{
 };
 use crate::{
     Cardinality, Datom, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, IndexPrefix, Schema,
-    SemanticError, TX_PARTITION, TupleSpec, USER_PARTITION, Unique, Value, ValueType, eid_to_eidx,
-    eid_to_part, make_eid, t_to_tx, tx_to_t,
+    SemanticError, TX_PARTITION, TupleSpec, Unique, Value, ValueType, eid_to_eidx, eid_to_part,
+    make_eid, t_to_tx, tx_to_t,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -206,6 +209,94 @@ pub enum TxOp {
     AlterAttribute(crate::Attribute),
 }
 
+/// Reserve all explicit partition-zero operands before allocating any tempid.
+/// A no-op retraction or a reference-only argument still acknowledges an ID;
+/// it need not survive as material transaction data. This is input-sized work,
+/// independent of the database's accumulated schema or ordinary allocation.
+pub(crate) fn observe_reserved_transaction_inputs(
+    reserved: &mut ReservedAllocation,
+    ops: &[TxOp],
+) -> Result<(), SemanticError> {
+    enum Input<'a> {
+        Entity(&'a EntityRef),
+        Value(&'a TxValue),
+    }
+    let mut pending = Vec::new();
+    for op in ops {
+        match op {
+            TxOp::Add {
+                entity,
+                attribute,
+                value,
+            } => {
+                reserved.observe_attribute(*attribute)?;
+                pending.push(Input::Entity(entity));
+                pending.push(Input::Value(value));
+            }
+            TxOp::Retract {
+                entity,
+                attribute,
+                value,
+            } => {
+                reserved.observe_attribute(*attribute)?;
+                pending.push(Input::Entity(entity));
+                if let Some(value) = value {
+                    pending.push(Input::Value(value));
+                }
+            }
+            TxOp::Cas {
+                entity,
+                attribute,
+                old,
+                new,
+            } => {
+                reserved.observe_attribute(*attribute)?;
+                pending.push(Input::Entity(entity));
+                pending.push(Input::Value(new));
+                if let Some(value) = old {
+                    pending.push(Input::Value(value));
+                }
+            }
+            TxOp::RetractEntity(entity) | TxOp::MatchPartition { entity, .. } => {
+                pending.push(Input::Entity(entity))
+            }
+            TxOp::ForcePartition { partition, .. } => pending.push(Input::Entity(partition)),
+            TxOp::Ensure { entity, spec } => {
+                pending.push(Input::Entity(entity));
+                pending.push(Input::Entity(spec));
+            }
+            TxOp::InstallAttribute(attribute) | TxOp::AlterAttribute(attribute) => {
+                reserved.observe_attribute(attribute.id)?;
+                if let Some(TupleSpec::Composite(attributes)) = &attribute.tuple {
+                    for attribute in attributes {
+                        reserved.observe_attribute(*attribute)?;
+                    }
+                }
+            }
+        }
+        while let Some(input) = pending.pop() {
+            match input {
+                Input::Entity(EntityRef::Id(entity)) => reserved.observe_entity(*entity)?,
+                Input::Entity(EntityRef::Lookup { attribute, value }) => {
+                    reserved.observe_attribute(*attribute)?;
+                    reserved.observe_value(value)?;
+                }
+                Input::Entity(EntityRef::LookupInput { attribute, value }) => {
+                    reserved.observe_attribute(*attribute)?;
+                    pending.push(Input::Value(value));
+                }
+                Input::Entity(EntityRef::Ident(_) | EntityRef::Temp(_) | EntityRef::Tx) => {}
+                Input::Value(TxValue::Scalar(value)) => reserved.observe_value(value)?,
+                Input::Value(TxValue::Entity(entity)) => pending.push(Input::Entity(entity)),
+                Input::Value(TxValue::Tuple(slots)) => {
+                    pending.extend(slots.iter().flatten().map(Input::Value))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SchemaChange {
     Install(crate::Attribute),
@@ -330,6 +421,8 @@ impl AssessedTransaction {
 /// values structurally share all prior chunks.
 #[derive(Clone, Debug)]
 pub struct Database {
+    // Reference identity is deliberately outside durable semantic commitments.
+    pub(crate) entity_origin: crate::entity_identity::DatabaseOrigin,
     schema: Arc<Schema>,
     idents: Arc<IdentIndex>,
     basis_t: u64,
@@ -337,6 +430,7 @@ pub struct Database {
     /// retain their partition bits; this field deliberately stores only the
     /// recovered low 42-bit `eidx` boundary.
     eidx_frontier: u64,
+    reserved_allocation: Option<ReservedAllocation>,
     last_tx_instant: Option<i64>,
     tx_instant_attribute: Option<u32>,
     current: Arc<[CurrentFact]>,
@@ -367,7 +461,11 @@ impl Database {
     /// installed by ordinary positive transactions, never appended to
     /// genesis.
     pub fn bootstrap() -> Result<Self, SemanticError> {
-        Self::from_genesis(canonical_genesis_datoms())
+        let mut database = Self::from_genesis(canonical_genesis_datoms())?;
+        let mut reserved = ReservedAllocation::initial();
+        reserved.observe_datoms(database.genesis.iter())?;
+        database.reserved_allocation = Some(reserved);
+        Ok(database)
     }
 
     /// Convenience constructor that bootstraps the database and installs the
@@ -435,10 +533,12 @@ impl Database {
         let current_indexes = IndexRoots::build(&derived_schema, current_datoms);
         let history_indexes = IndexRoots::build(&derived_schema, genesis.iter().cloned());
         let mut database = Self {
+            entity_origin: crate::entity_identity::DatabaseOrigin::memory(),
             schema: Arc::new(derived_schema),
             idents: Arc::new(idents),
             basis_t: 0,
             eidx_frontier,
+            reserved_allocation: None,
             last_tx_instant: None,
             tx_instant_attribute: Some(tx_instant_attribute),
             current: current.into(),
@@ -526,6 +626,21 @@ impl Database {
     /// Exclusive non-negative entity-index issuance frontier.
     pub fn eidx_frontier(&self) -> u64 {
         self.eidx_frontier
+    }
+
+    pub(crate) fn reserved_allocation(&self) -> Option<ReservedAllocation> {
+        self.reserved_allocation
+    }
+
+    /// Attach only an independently authenticated checkpoint or complete
+    /// legacy allocation-history proof. Current facts alone are insufficient.
+    pub(crate) fn with_reserved_allocation(
+        mut self,
+        reserved: ReservedAllocation,
+    ) -> Result<Self, SemanticError> {
+        ReservedAllocation::from_frontier(reserved.frontier(), self.eidx_frontier)?;
+        self.reserved_allocation = Some(reserved);
+        Ok(self)
     }
 
     pub(crate) fn semantic_state_commitment(&self) -> &SemanticStateCommitment {
@@ -656,10 +771,12 @@ impl Database {
             })?;
         let current_datoms = facts_as_datoms(&current);
         let mut database = Self {
+            entity_origin: crate::entity_identity::DatabaseOrigin::memory(),
             schema: Arc::new(derived_schema),
             idents: Arc::new(idents),
             basis_t,
             eidx_frontier,
+            reserved_allocation: None,
             last_tx_instant: Some(last_tx_instant),
             tx_instant_attribute: Some(tx_instant_attribute),
             current: current.into(),
@@ -1013,6 +1130,18 @@ impl Database {
     /// retained straightforward fact representation.
     pub fn validate_invariants(&self) -> Result<(), SemanticError> {
         validate_frontier(self.eidx_frontier)?;
+        if let Some(reserved) = self.reserved_allocation {
+            ReservedAllocation::from_frontier(reserved.frontier(), self.eidx_frontier)?;
+            let mut observed = ReservedAllocation::initial();
+            observed.observe_datoms(self.history_datoms())?;
+            if observed.frontier() > reserved.frontier() {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "kernel/reserved-frontier-mismatch",
+                    "reserved checkpoint does not cover retained partition-zero information",
+                ));
+            }
+        }
         validate_genesis_information(&self.genesis)?;
         self.schema.validate_tuple_definitions()?;
         t_to_tx(self.basis_t).map_err(|error| {
@@ -1426,6 +1555,18 @@ impl Database {
         self.assess_context(ops, tx_instant)?.validate(None)
     }
 
+    /// Pure application with explicit allocation defaults. Neither this value
+    /// nor ambient process configuration is changed.
+    pub fn with_defaults(
+        &self,
+        ops: &[TxOp],
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<TxReport, SemanticError> {
+        self.assess_context_with_defaults(ops, tx_instant, defaults)?
+            .validate(None)
+    }
+
     /// Rebuild one already-assessed committed successor from its material
     /// transaction record. Persistence uses this path during recovery; it
     /// deliberately does not rerun transaction functions, tempid resolution,
@@ -1437,7 +1578,7 @@ impl Database {
         &self,
         transaction: &crate::DurableTransaction,
     ) -> Result<Self, SemanticError> {
-        self.apply_committed_with_excision(transaction, false)
+        self.apply_committed_with_excision(transaction, false, None)
     }
 
     /// Replay a transaction from a generation whose history was filtered by
@@ -1450,13 +1591,44 @@ impl Database {
         &self,
         transaction: &crate::DurableTransaction,
     ) -> Result<Self, SemanticError> {
-        self.apply_committed_with_excision(transaction, true)
+        self.apply_committed_with_excision(transaction, true, None)
+    }
+
+    pub(crate) fn apply_committed_with_reserved_allocation(
+        &self,
+        transaction: &crate::DurableTransaction,
+        prior: ReservedAllocation,
+        after: ReservedAllocation,
+        allow_excision: bool,
+    ) -> Result<Self, SemanticError> {
+        ReservedAllocation::from_frontier(prior.frontier(), self.eidx_frontier)?;
+        ReservedAllocation::from_frontier(after.frontier(), transaction.eidx_frontier)?;
+        if self.reserved_allocation.is_some_and(|state| state != prior)
+            || after.frontier() < prior.frontier()
+        {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/reserved-frontier-mismatch",
+                "reserved allocation checkpoint does not extend its authenticated predecessor",
+            ));
+        }
+        let mut observed = prior;
+        observed.observe_transaction(transaction)?;
+        if observed.frontier() > after.frontier() {
+            return Err(SemanticError::new(
+                ErrorCategory::Fault,
+                "recovery/unwitnessed-reserved-allocation",
+                "reserved checkpoint does not cover committed identities and references",
+            ));
+        }
+        self.apply_committed_with_excision(transaction, allow_excision, Some(after))
     }
 
     fn apply_committed_with_excision(
         &self,
         transaction: &crate::DurableTransaction,
         allow_dangling_retractions: bool,
+        reserved_after: Option<ReservedAllocation>,
     ) -> Result<Self, SemanticError> {
         let t = self.basis_t.checked_add(1).ok_or_else(|| {
             SemanticError::new(
@@ -1629,6 +1801,7 @@ impl Database {
             &transaction.tempids,
             &recovered_changes,
             &derived_schema,
+            reserved_after,
         )?;
         if transaction.eidx_frontier != expected_frontier {
             return Err(SemanticError::new(
@@ -1659,8 +1832,18 @@ impl Database {
         for datom in &transaction.tx_data {
             validate_stored_entity(datom.entity, transaction.eidx_frontier, t, &derived_schema)?;
             validate_stored_value(&datom.value, transaction.eidx_frontier, t, &derived_schema)?;
-            validate_new_entity_allocation(datom.entity, self.eidx_frontier, &allocations)?;
-            validate_new_value_allocations(&datom.value, self.eidx_frontier, &allocations)?;
+            validate_new_entity_allocation(
+                datom.entity,
+                self.eidx_frontier,
+                &allocations,
+                reserved_after,
+            )?;
+            validate_new_value_allocations(
+                &datom.value,
+                self.eidx_frontier,
+                &allocations,
+                reserved_after,
+            )?;
         }
         final_current.sort_by(compare_current);
 
@@ -1669,6 +1852,10 @@ impl Database {
         db_after.idents = Arc::new(successor_idents);
         db_after.basis_t = t;
         db_after.eidx_frontier = transaction.eidx_frontier;
+        // A v1 record has no reserved checkpoint. Its old issuance validator
+        // stays strict; a caller upgrading a legacy prefix supplies a complete
+        // authenticated proof explicitly to the versioned entry point.
+        db_after.reserved_allocation = reserved_after;
         db_after.last_tx_instant = Some(tx_instant);
         let current_datoms = facts_as_datoms(&final_current);
         db_after.current = final_current.into();
@@ -1703,12 +1890,33 @@ impl Database {
             .validate(Some(functions))
     }
 
+    pub(crate) fn with_function_context_and_defaults(
+        &self,
+        ops: &[TxOp],
+        functions: &crate::TxFunctions,
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<TxReport, SemanticError> {
+        self.assess_context_with_defaults(ops, tx_instant, defaults)?
+            .validate(Some(functions))
+    }
+
     fn assess_context(
         &self,
         ops: &[TxOp],
         tx_instant: i64,
     ) -> Result<AssessedTransaction, SemanticError> {
+        self.assess_context_with_defaults(ops, tx_instant, &crate::TransactionDefaults::default())
+    }
+
+    fn assess_context_with_defaults(
+        &self,
+        ops: &[TxOp],
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<AssessedTransaction, SemanticError> {
         crate::transaction::validate_ops_input(ops)?;
+        let default_partition = defaults.resolve(&self.schema, |name| self.entid(name))?;
         if let Some(previous) = self.last_tx_instant
             && tx_instant < previous
         {
@@ -1743,7 +1951,17 @@ impl Database {
         let (schema_logical, _schema_changes, allocation_start) =
             self.prepare_schema_information(&ordered_ops, tx, allocation_start)?;
 
-        let (tempids, eidx_frontier) = self.resolve_tempids(&ordered_ops, tx, allocation_start)?;
+        let mut reserved_allocation = self.reserved_allocation;
+        if let Some(reserved) = &mut reserved_allocation {
+            observe_reserved_transaction_inputs(reserved, &ordered_ops)?;
+        }
+        let (tempids, eidx_frontier) = self.resolve_tempids(
+            &ordered_ops,
+            tx,
+            allocation_start,
+            default_partition,
+            &mut reserved_allocation,
+        )?;
         let mut logical = schema_logical;
         let mut ensures = Vec::new();
         let mut touched_constituents = BTreeSet::new();
@@ -1848,6 +2066,7 @@ impl Database {
         db_after.schema = successor_schema;
         db_after.idents = Arc::new(successor_idents);
         db_after.eidx_frontier = eidx_frontier;
+        db_after.reserved_allocation = reserved_allocation;
         let current_datoms = facts_as_datoms(&final_current);
         db_after.current = final_current.into();
         let mut history_chunks: Vec<_> = self.history.iter().cloned().collect();
@@ -2367,12 +2586,17 @@ impl Database {
         ops: &[TxOp],
         tx: u64,
         allocation_start: u64,
+        default_partition: u32,
+        reserved: &mut Option<ReservedAllocation>,
     ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
         let names = validated_entity_tempids(ops)?;
-        let policy =
-            crate::partitions::PartitionPolicy::new(ops, &names, &self.schema, |entity| {
-                self.resolve_entity(entity, tx, &BTreeMap::new())
-            })?;
+        let policy = crate::partitions::PartitionPolicy::with_default(
+            ops,
+            &names,
+            &self.schema,
+            default_partition,
+            |entity| self.resolve_entity(entity, tx, &BTreeMap::new()),
+        )?;
         let names: Vec<_> = names.into_iter().collect();
         let positions: BTreeMap<_, _> = names
             .iter()
@@ -2471,24 +2695,31 @@ impl Database {
             } else if let Some(allocated) = allocated_by_root.get(&root) {
                 *allocated
             } else {
-                let partition = partitions.get(&root).copied().unwrap_or(USER_PARTITION);
+                let partition = partitions.get(&root).copied().unwrap_or(default_partition);
                 let allocated = if partition == TX_PARTITION {
                     tx
+                } else if partition == crate::DB_PARTITION && reserved.is_some() {
+                    reserved
+                        .as_mut()
+                        .expect("reserved mode checked")
+                        .allocate()?
                 } else {
-                    make_eid(partition, next)?
-                };
-                if partition != TX_PARTITION {
+                    let allocated = make_eid(partition, next)?;
                     next = next.checked_add(1).ok_or_else(|| {
                         SemanticError::incorrect(
                             "transaction/entity-id-overflow",
                             "tempid allocation exhausted the entity-index space",
                         )
                     })?;
-                }
+                    allocated
+                };
                 allocated_by_root.insert(root, allocated);
                 allocated
             };
             result.insert(name.clone(), id);
+        }
+        if let Some(reserved) = reserved {
+            next = next.max(reserved.frontier());
         }
         validate_frontier(next)?;
         Ok((result, next))
@@ -3913,6 +4144,7 @@ fn expected_frontier_after_commit(
     tempids: &BTreeMap<String, u64>,
     schema_changes: &[SchemaChange],
     schema: &Schema,
+    reserved_after: Option<ReservedAllocation>,
 ) -> Result<(u64, BTreeMap<u64, u64>), SemanticError> {
     validate_frontier(current_frontier)?;
     let start = current_frontier.max(t.checked_add(1).ok_or_else(|| {
@@ -3925,12 +4157,21 @@ fn expected_frontier_after_commit(
     validate_frontier(start)?;
 
     let mut allocated = BTreeMap::new();
+    let reserved_tempids: BTreeSet<_> = if reserved_after.is_some() {
+        tempids
+            .values()
+            .copied()
+            .filter(|entity| eid_to_part(*entity) == Ok(crate::DB_PARTITION))
+            .collect()
+    } else {
+        BTreeSet::new()
+    };
     for change in schema_changes {
         let SchemaChange::Install(attribute) = change else {
             continue;
         };
         let eidx = u64::from(attribute.id);
-        if eidx >= current_frontier {
+        if eidx >= current_frontier && !reserved_tempids.contains(&eidx) {
             allocated.insert(eidx, eidx);
         }
     }
@@ -3959,6 +4200,9 @@ fn expected_frontier_after_commit(
                     "transaction tempid is outside the committed basis",
                 ));
             }
+            continue;
+        }
+        if partition == crate::DB_PARTITION && reserved_after.is_some() {
             continue;
         }
         if eidx >= current_frontier {
@@ -4004,6 +4248,7 @@ fn expected_frontier_after_commit(
             "committed tempid allocation overflows the entity-index space",
         )
     })?;
+    let frontier = reserved_after.map_or(frontier, |reserved| frontier.max(reserved.frontier()));
     validate_frontier(frontier)?;
     Ok((frontier, allocated))
 }
@@ -4012,8 +4257,21 @@ fn validate_new_entity_allocation(
     entity: u64,
     prior_frontier: u64,
     allocations: &BTreeMap<u64, u64>,
+    reserved_after: Option<ReservedAllocation>,
 ) -> Result<(), SemanticError> {
     let index = eid_to_eidx(entity)?;
+    if eid_to_part(entity)? == crate::DB_PARTITION
+        && let Some(reserved) = reserved_after
+    {
+        if index < reserved.frontier() {
+            return Ok(());
+        }
+        return Err(SemanticError::new(
+            ErrorCategory::Fault,
+            "recovery/unwitnessed-reserved-allocation",
+            "reserved identity exceeds its authenticated checkpoint",
+        ));
+    }
     if eid_to_part(entity)? != TX_PARTITION
         && index >= prior_frontier
         && allocations.get(&index) != Some(&entity)
@@ -4031,12 +4289,15 @@ fn validate_new_value_allocations(
     value: &Value,
     prior_frontier: u64,
     allocations: &BTreeMap<u64, u64>,
+    reserved_after: Option<ReservedAllocation>,
 ) -> Result<(), SemanticError> {
     match value {
-        Value::Ref(entity) => validate_new_entity_allocation(*entity, prior_frontier, allocations),
+        Value::Ref(entity) => {
+            validate_new_entity_allocation(*entity, prior_frontier, allocations, reserved_after)
+        }
         Value::Tuple(slots) => {
             for value in slots.iter().flatten() {
-                validate_new_value_allocations(value, prior_frontier, allocations)?;
+                validate_new_value_allocations(value, prior_frontier, allocations, reserved_after)?;
             }
             Ok(())
         }
@@ -4074,6 +4335,195 @@ impl UnionFind {
             };
             self.parent[high] = low;
         }
+    }
+}
+
+#[cfg(test)]
+mod reserved_replay_tests {
+    use super::*;
+
+    fn envelope(report: &TxReport) -> crate::DurableTransaction {
+        crate::DurableTransaction {
+            database_id: "reserved-replay".into(),
+            basis_t: report.db_after.basis_t(),
+            previous_hash: [0; 32],
+            eidx_frontier: report.db_after.eidx_frontier(),
+            tempids: report.tempids.clone(),
+            tx_data: report.tx_data.clone(),
+        }
+    }
+
+    #[test]
+    fn versioned_replay_accepts_independent_domains_but_legacy_stays_strict() {
+        let before = Database::bootstrap().unwrap();
+        let report = before.with_edn(r#"[
+            {:db/id "schema" :db/ident :replay/value :db/valueType :db.type/long :db/cardinality :db.cardinality/one}
+            {:db/id "ordinary" :db/doc "ordinary"}]"#, 1).unwrap();
+        assert_eq!(report.tempids["schema"], 1_000);
+        assert_eq!(eid_to_eidx(report.tempids["ordinary"]).unwrap(), 1_000);
+        let tx = envelope(&report);
+        assert_eq!(
+            before.apply_committed(&tx).unwrap_err().code,
+            "recovery/duplicate-tempid-index"
+        );
+        let replayed = before
+            .apply_committed_with_reserved_allocation(
+                &tx,
+                before.reserved_allocation().unwrap(),
+                report.db_after.reserved_allocation().unwrap(),
+                false,
+            )
+            .unwrap();
+        replayed.validate_invariants().unwrap();
+        assert_eq!(
+            replayed.reserved_allocation(),
+            report.db_after.reserved_allocation()
+        );
+        assert!(same_stored_datoms(
+            &replayed.datoms(View::History, IndexOrder::Eavt),
+            &report.db_after.datoms(View::History, IndexOrder::Eavt)
+        ));
+
+        let mut malformed = tx.clone();
+        let prior_id = malformed.tempids["ordinary"];
+        malformed.tempids.insert("ordinary".into(), prior_id + 1);
+        for datom in &mut malformed.tx_data {
+            if datom.entity == prior_id {
+                datom.entity += 1;
+            }
+        }
+        malformed.eidx_frontier += 1;
+        assert_eq!(
+            before
+                .apply_committed_with_reserved_allocation(
+                    &malformed,
+                    before.reserved_allocation().unwrap(),
+                    report.db_after.reserved_allocation().unwrap(),
+                    false,
+                )
+                .unwrap_err()
+                .code,
+            "recovery/noncontiguous-tempid-allocation"
+        );
+    }
+
+    #[test]
+    fn reserved_receipt_only_issuance_and_no_op_claims_survive_versioned_replay() {
+        let before = Database::bootstrap()
+            .unwrap()
+            .with(
+                &(0..32)
+                    .map(|n| TxOp::RetractEntity(EntityRef::Temp(format!("user-{n}"))))
+                    .collect::<Vec<_>>(),
+                1,
+            )
+            .unwrap()
+            .db_after;
+        let report = before
+            .with(
+                &[
+                    TxOp::RetractEntity(EntityRef::Id(1_020)),
+                    TxOp::RetractEntity(EntityRef::Temp("reserved".into())),
+                    TxOp::ForcePartition {
+                        tempid: "reserved".into(),
+                        partition: EntityRef::Id(crate::DB_PART_DB),
+                    },
+                ],
+                2,
+            )
+            .unwrap();
+        assert_eq!(report.tempids["reserved"], 1_021);
+        assert!(
+            report
+                .tx_data
+                .iter()
+                .all(|d| d.attribute == DB_TX_INSTANT as u32)
+        );
+        let prior = before.reserved_allocation().unwrap();
+        let after = report.db_after.reserved_allocation().unwrap();
+        let tx = envelope(&report);
+        let replayed = before
+            .apply_committed_with_reserved_allocation(&tx, prior, after, false)
+            .unwrap();
+        assert_eq!(replayed.reserved_allocation().unwrap().frontier(), 1_022);
+        assert_eq!(replayed.eidx_frontier(), 1_032);
+        let uncovered = ReservedAllocation::from_frontier(1_021, 1_032).unwrap();
+        assert_eq!(
+            before
+                .apply_committed_with_reserved_allocation(&tx, prior, uncovered, false)
+                .unwrap_err()
+                .code,
+            "recovery/unwitnessed-reserved-allocation"
+        );
+        let changed_prior = ReservedAllocation::from_frontier(1_001, 1_032).unwrap();
+        assert_eq!(
+            before
+                .apply_committed_with_reserved_allocation(&tx, changed_prior, after, false)
+                .unwrap_err()
+                .code,
+            "recovery/reserved-frontier-mismatch"
+        );
+    }
+
+    #[test]
+    fn explicit_legacy_mode_preserves_issuance_before_authenticated_upgrade() {
+        let legacy = Database::from_genesis(canonical_genesis_datoms()).unwrap();
+        assert!(legacy.reserved_allocation().is_none());
+        let grown = legacy
+            .with(&[TxOp::RetractEntity(EntityRef::Temp("old".into()))], 1)
+            .unwrap();
+        let original = envelope(&grown);
+        let replayed = legacy.apply_committed(&original).unwrap();
+        assert!(replayed.reserved_allocation().is_none());
+        assert_eq!(replayed.eidx_frontier(), 1_001);
+        let text = r#"[{:db/id "schema" :db/ident :replay/after :db/valueType :db.type/long :db/cardinality :db.cardinality/one}]"#;
+        assert_eq!(replayed.with_edn(text, 2).unwrap().tempids["schema"], 1_001);
+        let mut proof = ReservedAllocation::initial();
+        proof.observe_datoms(legacy.genesis_datoms()).unwrap();
+        proof.observe_transaction(&original).unwrap();
+        let upgraded = replayed.with_reserved_allocation(proof).unwrap();
+        assert_eq!(upgraded.with_edn(text, 2).unwrap().tempids["schema"], 1_000);
+        assert_eq!(original, envelope(&grown));
+    }
+
+    #[test]
+    fn typed_install_prefix_and_reserved_tempid_coexist_with_ordinary_replay() {
+        let before = Database::bootstrap().unwrap();
+        let report = before
+            .with(
+                &[
+                    TxOp::InstallAttribute(crate::Attribute::new(
+                        1_000,
+                        crate::Keyword::new("replay", "typed"),
+                        ValueType::Long,
+                        Cardinality::One,
+                    )),
+                    TxOp::RetractEntity(EntityRef::Temp("ordinary".into())),
+                    TxOp::RetractEntity(EntityRef::Temp("reserved".into())),
+                    TxOp::ForcePartition {
+                        tempid: "reserved".into(),
+                        partition: EntityRef::Id(crate::DB_PART_DB),
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+        assert_eq!(report.tempids["reserved"], 1_001);
+        assert_eq!(eid_to_eidx(report.tempids["ordinary"]).unwrap(), 1_001);
+        assert_eq!(report.db_after.eidx_frontier(), 1_002);
+        let replayed = before
+            .apply_committed_with_reserved_allocation(
+                &envelope(&report),
+                before.reserved_allocation().unwrap(),
+                report.db_after.reserved_allocation().unwrap(),
+                false,
+            )
+            .unwrap();
+        replayed.validate_invariants().unwrap();
+        assert_eq!(
+            replayed.reserved_allocation(),
+            report.db_after.reserved_allocation()
+        );
     }
 }
 

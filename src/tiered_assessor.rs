@@ -5,6 +5,8 @@
 //! ranges from the db-before value and keeps the proposed successor as a small
 //! logical delta.  It deliberately contains no `materialize` fallback.
 
+#[cfg(test)]
+use crate::USER_PARTITION;
 use crate::database::{UpsertIdentityValue, normalize_excision_before_t, validated_entity_tempids};
 use crate::database_value::TransactionReadContext;
 use crate::identity::{validate_frontier, validate_supported_eid};
@@ -16,8 +18,8 @@ use crate::{
     DB_INSTALL_ATTRIBUTE, DB_IS_COMPONENT, DB_NO_HISTORY, DB_PART_DB, DB_TUPLE_ATTRS,
     DB_TUPLE_DISCONTINUED, DB_TUPLE_TYPE, DB_TUPLE_TYPES, DB_TX_INSTANT, DB_UNIQUE, DB_VALUE_TYPE,
     DatabaseValue, Datom, EntityRef, ErrorCategory, IndexOrder, IndexPrefix, Schema, SemanticError,
-    TX_PARTITION, TupleSpec, TxFunctions, TxOp, TxValue, USER_PARTITION, Unique, Value, ValueType,
-    eid_to_eidx, eid_to_part, make_eid, t_to_tx,
+    TX_PARTITION, TupleSpec, TxFunctions, TxOp, TxValue, Unique, Value, ValueType, eid_to_eidx,
+    eid_to_part, make_eid, t_to_tx,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -422,17 +424,35 @@ pub(crate) fn assess_tiered_with_limits(
 /// budget. Unlike the standalone bounded entry point, zero is meaningful
 /// here: an assessment that yields no logical datoms may proceed, while the
 /// first datom read is rejected by [`Reader::charge`].
+#[cfg(test)]
 pub(crate) fn assess_tiered_with_remaining_limits(
     base: &DatabaseValue,
     ops: &[TxOp],
     tx_instant: i64,
     limits: AssessmentLimits,
 ) -> Result<TieredAssessment, SemanticError> {
+    assess_tiered_with_remaining_limits_and_defaults(
+        base,
+        ops,
+        tx_instant,
+        limits,
+        &crate::TransactionDefaults::default(),
+    )
+}
+
+pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
+    base: &DatabaseValue,
+    ops: &[TxOp],
+    tx_instant: i64,
+    limits: AssessmentLimits,
+    defaults: &crate::TransactionDefaults,
+) -> Result<TieredAssessment, SemanticError> {
     // PostgreSQL supplies one context before persisted generation begins. The
     // standalone semantic-oracle entry still needs the same cross-phase
     // behavior, so give it a private unbounded observer while Reader enforces
     // the caller's explicit assessment allowance.
     crate::transaction::validate_ops_input(ops)?;
+    let default_partition = defaults.resolve(base.schema(), |name| base.entid(name))?;
     let base = if base.transaction_read_context().is_some() {
         base.clone()
     } else {
@@ -477,7 +497,18 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     let mut reader = Reader::new(base, limits);
     let (mut logical, allocation_start) =
         prepare_schema_information(&mut reader, &ordered, tx, initial_allocation_start)?;
-    let (tempids, eidx_frontier) = resolve_tempids(&mut reader, &ordered, tx, allocation_start)?;
+    let mut reserved_allocation = base.reserved_allocation()?;
+    if let Some(reserved) = &mut reserved_allocation {
+        crate::database::observe_reserved_transaction_inputs(reserved, &ordered)?;
+    }
+    let (tempids, eidx_frontier) = resolve_tempids(
+        &mut reader,
+        &ordered,
+        tx,
+        allocation_start,
+        default_partition,
+        &mut reserved_allocation,
+    )?;
     let mut ensures = Vec::new();
     let mut touched = BTreeSet::new();
     for op in &ordered {
@@ -538,13 +569,14 @@ pub(crate) fn assess_tiered_with_remaining_limits(
     let mut tx_data = material_changes(&mut reader, &logical, tx)?;
     tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
 
-    let db_after = DatabaseValue::transaction_overlay(
+    let db_after = DatabaseValue::transaction_overlay_with_allocation(
         base.clone(),
         Arc::from(tx_data.clone()),
         Arc::clone(&successor_schema),
         basis_t,
         eidx_frontier,
         tx_instant,
+        reserved_allocation,
     )?;
 
     Ok(TieredAssessment {
@@ -1461,12 +1493,18 @@ fn resolve_tempids(
     ops: &[TxOp],
     tx: u64,
     allocation_start: u64,
+    default_partition: u32,
+    reserved: &mut Option<crate::reserved_allocation::ReservedAllocation>,
 ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
     let names = validated_entity_tempids(ops)?;
     let base = reader.base;
-    let policy = crate::partitions::PartitionPolicy::new(ops, &names, base.schema(), |entity| {
-        resolve_entity(reader, entity, tx, &BTreeMap::new())
-    })?;
+    let policy = crate::partitions::PartitionPolicy::with_default(
+        ops,
+        &names,
+        base.schema(),
+        default_partition,
+        |entity| resolve_entity(reader, entity, tx, &BTreeMap::new()),
+    )?;
     let names = names.into_iter().collect::<Vec<_>>();
     let positions = names
         .iter()
@@ -1551,24 +1589,31 @@ fn resolve_tempids(
         } else if let Some(allocated) = allocated_by_root.get(&root) {
             *allocated
         } else {
-            let partition = partitions.get(&root).copied().unwrap_or(USER_PARTITION);
+            let partition = partitions.get(&root).copied().unwrap_or(default_partition);
             let allocated = if partition == TX_PARTITION {
                 tx
+            } else if partition == crate::DB_PARTITION && reserved.is_some() {
+                reserved
+                    .as_mut()
+                    .expect("reserved mode checked")
+                    .allocate()?
             } else {
-                make_eid(partition, next)?
-            };
-            if partition != TX_PARTITION {
+                let allocated = make_eid(partition, next)?;
                 next = next.checked_add(1).ok_or_else(|| {
                     SemanticError::incorrect(
                         "transaction/entity-id-overflow",
                         "tempid allocation exhausted the entity-index space",
                     )
                 })?;
-            }
+                allocated
+            };
             allocated_by_root.insert(root, allocated);
             allocated
         };
         result.insert(name.clone(), entity);
+    }
+    if let Some(reserved) = reserved {
+        next = next.max(reserved.frontier());
     }
     validate_frontier(next)?;
     Ok((result, next))

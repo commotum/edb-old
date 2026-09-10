@@ -8,7 +8,24 @@ execution report or a claim that all Datomic behavior is now covered by Atomic.
 EDN reader/writer and transaction/query/Pull frontends are owned by
 [Goal1](../goal-1/0-plan.md), actively changing during this audit. Existing typed
 entity-map transactions are present. No product source, test, data or Goal1 files
-were changed by this audit. Implementation is outside Goal0's scope.
+were changed by this initial audit. Its scope was read-only; the later user request
+authorized the implementation coordinator in [0-plan.md](0-plan.md).
+
+## Implementation reconciliation — 2026-09-10
+
+The catalog below preserves the initial static findings. Current ownership and
+verified progress belong to the parent and child plans; this dated reconciliation
+does not turn the historical audit into a test report.
+
+| Findings | Current disposition |
+| --- | --- |
+| Q02 | Goal 1 already repaired one-/two-column EDN/raw patterns. Six-plus columns remain in Goal 4. |
+| Q04 | EDN nil input adaptation exists; general typed/query-only values remain in Goal 4. |
+| Q03, P01, P03, ST-05, P06 | Verified in Goal 2 with public PostgreSQL regressions, restricted-role application/restart workflow, existing EDN/program compatibility and unchanged old receipts. See its final acceptance for commands and measured costs. |
+| ST-03, ST-01 | Goal 3 owns reserved allocation/frontier reproduction and default placement. |
+| SC-01 | Recovered 1.0.7705 ordering supports the existing explicit composite-upsert hint contract; Goal 3 will verify/document, not invent constituent-only upsert. |
+| SC-02 | Preserve sound native NaN replacement; Goal 3 owns focused regression and disposition. |
+| Remaining IDs | Explicitly assigned to Goals 4–10 or the parent's optional/platform decision table; none silently disappears. |
 
 ## Where to start
 

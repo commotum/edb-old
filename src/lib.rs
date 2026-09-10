@@ -5,6 +5,7 @@
 //! independent peers provide local queries, pull, temporal views, and native
 //! immutable snapshots. The pure kernel remains available as an explicit oracle.
 
+mod allocation_storage;
 mod backup;
 mod block_codec;
 mod change_consumer;
@@ -13,6 +14,7 @@ pub(crate) mod compressed_nodes;
 mod connection;
 mod cow_generation;
 mod database;
+pub mod database_invoke;
 mod database_stats;
 mod database_value;
 mod datom;
@@ -22,6 +24,7 @@ pub mod edn_query;
 pub mod edn_transaction;
 pub mod edn_value;
 mod encoding;
+mod entity_identity;
 mod error;
 mod excision;
 mod fulltext;
@@ -37,6 +40,8 @@ mod log_generation;
 mod operations;
 mod overlay_index;
 mod partitions;
+mod reserved_allocation;
+pub use partitions::TransactionDefaults;
 mod peer;
 mod persistent_commitment;
 pub mod persistent_tree;
@@ -85,6 +90,7 @@ pub use change_notices::{
 pub use compressed_nodes::{NodeBlockReadStats, NodeBlockWriteStats};
 pub use connection::{Connection, ConnectionTransactionTicket, DatabaseIdentity};
 pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
+pub use database_invoke::{InvokeControl, InvokeRole};
 pub use database_stats::{AttributeStats, DatabaseStats};
 pub use database_value::{
     DatabaseValue, DatabaseValuePrefixCursor, DatabaseValueScanCursor, RawIndexValue,
@@ -98,6 +104,7 @@ pub use encoding::{
     encode_program_output, encode_transaction, program_hash, program_request_digest,
     request_digest, sha256, submission_request_digest, transaction_hash,
 };
+pub use entity_identity::EntityIdentity;
 pub use error::{ErrorCategory, SemanticError};
 pub use fulltext::{FulltextHit, FulltextOptions, FulltextReport, FulltextStats};
 pub use fulltext_store::{

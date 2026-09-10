@@ -1602,6 +1602,19 @@ impl TransactionService {
         Self::start_configured(config, connection)
     }
 
+    pub fn start_with_defaults(
+        config: TransactionServiceConfig,
+        defaults: crate::TransactionDefaults,
+    ) -> Result<Self, SemanticError> {
+        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
+        Self::start_configured_with_indexing_and_defaults(
+            config,
+            connection,
+            BackgroundIndexingConfig::default(),
+            defaults,
+        )
+    }
+
     /// Start every writer, lease, and background-index connection under one
     /// explicit PostgreSQL transport policy. `config.connection` remains for
     /// source compatibility with the original constructor; this argument is
@@ -1630,6 +1643,22 @@ impl TransactionService {
         connection: PostgresConnectionConfig,
         indexing_config: BackgroundIndexingConfig,
     ) -> Result<Self, SemanticError> {
+        Self::start_configured_with_indexing_and_defaults(
+            config,
+            connection,
+            indexing_config,
+            crate::TransactionDefaults::default(),
+        )
+    }
+
+    /// Start a writer with explicit fresh-transaction allocation policy. The
+    /// policy is not transaction data and never changes a stored retry result.
+    pub fn start_configured_with_indexing_and_defaults(
+        config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        indexing_config: BackgroundIndexingConfig,
+        defaults: crate::TransactionDefaults,
+    ) -> Result<Self, SemanticError> {
         if config.database_id.is_empty()
             || config.queue_capacity == 0
             || config.lease_duration.is_zero()
@@ -1644,6 +1673,7 @@ impl TransactionService {
         let indexing_config = indexing_config.validate()?;
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
+        store.set_transaction_defaults(defaults);
         store.set_capacity_limits(config.capacity_limits)?;
         let writer_recent_limits = crate::recent::RecentLimits {
             soft_datoms: u64::MAX,

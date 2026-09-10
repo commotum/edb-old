@@ -29,6 +29,9 @@ use crate::{
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
 #[cfg(test)]
+#[path = "peer_allocation_tests.rs"]
+mod allocation_state_tests;
+#[cfg(test)]
 #[path = "peer_boundary_bias_tests.rs"]
 mod boundary_bias_tests;
 #[cfg(test)]
@@ -4270,6 +4273,11 @@ struct TieredState {
     /// durable base. Their pre-base values cannot appear until a covering
     /// indexing publication backfills them.
     avet_unready: Arc<BTreeSet<u32>>,
+    // Allocation history belongs to the exact logical endpoint, not its tree
+    // publication. Lazy loading avoids a legacy log walk during ordinary reads.
+    reserved_allocation: Arc<
+        OnceLock<Result<Option<crate::reserved_allocation::ReservedAllocation>, SemanticError>>,
+    >,
     generation: u64,
 }
 
@@ -5012,6 +5020,7 @@ impl Peer {
                 eidx_frontier,
                 range_reads: _,
                 state_hashes: _,
+                allocation_replay: _,
             } = tail;
             let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &database_id,
@@ -5086,6 +5095,10 @@ impl Peer {
                 recent_limits,
             )?);
             let cell = OnceLock::new();
+            // A legacy segmented base reconstructs an eager value with a
+            // fresh local origin. Public compatibility values must retain the
+            // same authenticated lineage as this peer's native read handle.
+            database.entity_origin = crate::entity_identity::DatabaseOrigin::durable(&lineage_id);
             let database = Arc::new(database);
             let _ = cell.set(Arc::clone(&database));
             (
@@ -5155,6 +5168,7 @@ impl Peer {
                         recent,
                         metadata,
                         avet_unready,
+                        reserved_allocation: Arc::new(OnceLock::new()),
                         generation: 0,
                     }),
                     compatibility,
@@ -5979,6 +5993,7 @@ impl Peer {
         let mut successor = (*state.tiered).clone();
         successor.basis_t = target;
         successor.eidx_frontier = tail.eidx_frontier;
+        successor.reserved_allocation = Arc::new(OnceLock::new());
         successor.current_hash = tail.end_hash;
         successor.current_state_hash = tail.end_state_hash;
         successor.recent = Arc::new(recent);
@@ -5992,11 +6007,45 @@ impl Peer {
         if let Some(cached) = state.compatibility.value.get() {
             let cached = Arc::clone(cached);
             let mut database = (*cached).clone();
-            for transaction in &tail.transactions {
-                database = database.apply_committed(transaction)?;
+            let mut endpoint = ExactEndpoint {
+                generation: state.excision_generation,
+                basis_t: state.basis_t,
+                tx_hash: state.current_hash,
+                state_hash: state.current_state_hash,
+                eidx_frontier: state.eidx_frontier,
+            };
+            for (((transaction, (reserved, excision)), tx_hash), state_hash) in tail
+                .transactions
+                .iter()
+                .zip(&tail.allocation_replay)
+                .zip(&tail.transaction_hashes)
+                .zip(&tail.state_hashes)
+            {
+                database = apply_compatibility_transaction(
+                    &mut io.client,
+                    &self.core.read.database_id,
+                    &database,
+                    endpoint,
+                    transaction,
+                    *reserved,
+                    *excision,
+                )?;
+                endpoint.basis_t = transaction.basis_t;
+                endpoint.eidx_frontier = transaction.eidx_frontier;
+                endpoint.tx_hash = *tx_hash;
+                endpoint.state_hash = *state_hash;
             }
+            complete_compatibility_allocation(
+                &mut io.client,
+                &self.core.read.database_id,
+                &mut database,
+                endpoint,
+            )?;
             database.validate_invariants()?;
             verify_materialized_endpoint(&database, &successor)?;
+            let _ = successor
+                .reserved_allocation
+                .set(Ok(database.reserved_allocation()));
             let _ = compatibility.value.set(Arc::new(database));
         } else if require_compatibility {
             let mut segments = lock(&state.compatibility.segments);
@@ -6095,6 +6144,7 @@ impl Peer {
         let mut successor = (*state.tiered).clone();
         successor.basis_t = target;
         successor.eidx_frontier = tail.eidx_frontier;
+        successor.reserved_allocation = Arc::new(OnceLock::new());
         successor.current_hash = tail.end_hash;
         successor.current_state_hash = tail.end_state_hash;
         successor.durable_base_t = base.manifest.basis_t;
@@ -6149,6 +6199,7 @@ impl Peer {
             let mut after = (*before.tiered).clone();
             after.basis_t = transaction.basis_t;
             after.eidx_frontier = transaction.eidx_frontier;
+            after.reserved_allocation = Arc::new(OnceLock::new());
             after.current_hash = *tx_hash;
             after.current_state_hash = *state_hash;
             after.recent = Arc::new(recent);
@@ -6417,6 +6468,7 @@ impl Peer {
                     recent,
                     metadata,
                     avet_unready,
+                    reserved_allocation: Arc::new(OnceLock::new()),
                     generation: state.generation.saturating_add(1),
                 }),
                 compatibility: Arc::new(PeerCompatibility {
@@ -6471,6 +6523,7 @@ impl Peer {
                     recent,
                     metadata,
                     avet_unready: Arc::new(BTreeSet::new()),
+                    reserved_allocation: Arc::new(OnceLock::new()),
                     generation: state.generation.saturating_add(1),
                 }),
                 compatibility: Arc::new(PeerCompatibility {
@@ -7328,6 +7381,56 @@ impl Drop for PeerIndexCursor {
 }
 
 impl TieredSnapshot {
+    pub(crate) fn reserved_allocation(
+        &self,
+    ) -> Result<Option<crate::reserved_allocation::ReservedAllocation>, SemanticError> {
+        if let Some(cached) = self.state.reserved_allocation.get() {
+            return cached.clone();
+        }
+        self.core.root_pins.ensure()?;
+        let mut io = lock(&self.core.io);
+        // The I/O lane also serializes the first proof walk among clones. Do
+        // not permanently poison an immutable value after a transient read
+        // failure; only an authenticated successful result is memoized.
+        if let Some(cached) = self.state.reserved_allocation.get() {
+            return cached.clone();
+        }
+        if io.client.is_closed() {
+            reconnect_peer_io(&self.core, &mut io)?;
+        }
+        let allocation = crate::allocation_storage::load_reserved_allocation(
+            &mut io.client,
+            &self.core.database_id,
+            self.endpoint(),
+        )?;
+        let _ = self.state.reserved_allocation.set(Ok(allocation));
+        Ok(allocation)
+    }
+
+    /// Seed the exact successor while its allocation proof is already owned by
+    /// assessment. This carries no new publication or durable-format authority.
+    pub(crate) fn with_reserved_allocation(
+        self,
+        allocation: Option<crate::reserved_allocation::ReservedAllocation>,
+    ) -> Result<Self, SemanticError> {
+        if let Some(allocation) = allocation {
+            crate::reserved_allocation::ReservedAllocation::from_frontier(
+                allocation.frontier(),
+                self.eidx_frontier(),
+            )?;
+        }
+        let mut state = (*self.state).clone();
+        state.reserved_allocation = Arc::new(OnceLock::from(Ok(allocation)));
+        Ok(Self {
+            core: self.core,
+            state: Arc::new(state),
+        })
+    }
+
+    pub(crate) fn lineage_id(&self) -> &str {
+        &self.core.lineage_id
+    }
+
     pub(crate) fn read_handle(&self) -> TieredReadHandle {
         TieredReadHandle {
             core: Arc::clone(&self.core),
@@ -7547,14 +7650,20 @@ impl TieredSnapshot {
         required_manifest: Option<Digest>,
         purpose: ExactOpenPurpose,
     ) -> Result<(Self, ExactOpenStats), SemanticError> {
-        Self::open_exact_on_core(
+        let (mut opened, stats) = Self::open_exact_on_core(
             &self.core,
             database_id,
             endpoint,
             required_manifest,
             purpose,
             self.state.generation.saturating_add(1),
-        )
+        )?;
+        if endpoint == self.endpoint() {
+            // Physical rebasing cannot change authenticated issuance history.
+            Arc::make_mut(&mut opened.state).reserved_allocation =
+                Arc::clone(&self.state.reserved_allocation);
+        }
+        Ok((opened, stats))
     }
 
     fn open_exact_on_core(
@@ -7873,6 +7982,7 @@ impl TieredSnapshot {
         let mut state = (*self.state).clone();
         state.basis_t = basis_t;
         state.eidx_frontier = eidx_frontier;
+        state.reserved_allocation = Arc::new(OnceLock::new());
         state.current_hash = tx_hash;
         state.current_state_hash = state_hash;
         state.recent = Arc::new(recent);
@@ -8767,6 +8877,10 @@ fn materialize_compatibility_with_io(
         ));
     }
     verify_materialized_endpoint(&database, state)?;
+    let _ = state
+        .reserved_allocation
+        .set(Ok(database.reserved_allocation()));
+    database.entity_origin = crate::entity_identity::DatabaseOrigin::durable(&core.lineage_id);
     Ok(Arc::new(database))
 }
 
@@ -9995,6 +10109,7 @@ fn build_exact_tiered_state<C: GenericClient>(
             recent,
             metadata,
             avet_unready,
+            reserved_allocation: Arc::new(OnceLock::new()),
             generation: local_generation,
         },
         tail_transactions,
@@ -10028,6 +10143,7 @@ struct AuthenticatedTail {
     transactions: Vec<DurableTransaction>,
     transaction_hashes: Vec<Digest>,
     state_hashes: Vec<Digest>,
+    allocation_replay: Vec<(Option<crate::reserved_allocation::ReservedAllocation>, bool)>,
     end_hash: Digest,
     end_state_hash: Digest,
     eidx_frontier: u64,
@@ -10068,6 +10184,7 @@ fn read_authenticated_tail<C: GenericClient>(
             transactions: Vec::new(),
             transaction_hashes: Vec::new(),
             state_hashes: Vec::new(),
+            allocation_replay: Vec::new(),
             end_hash: base.tx_hash,
             end_state_hash: base.state_hash,
             eidx_frontier: base.eidx_frontier,
@@ -10081,6 +10198,7 @@ fn read_authenticated_tail<C: GenericClient>(
     let mut transactions = Vec::new();
     let mut transaction_hashes = Vec::new();
     let mut state_hashes = Vec::new();
+    let mut allocation_replay = Vec::new();
     let mut scanned_transactions = 0_u64;
     let mut datoms = 0_u64;
     let mut accounted_bytes = 0_u64;
@@ -10150,6 +10268,7 @@ fn read_authenticated_tail<C: GenericClient>(
             end_state_hash = state_hash;
             transaction_hashes.push(row.tx_hash);
             state_hashes.push(state_hash);
+            allocation_replay.push((row.reserved_allocation, row.excision_replay));
             transactions.push(transaction);
             Ok(())
         },
@@ -10158,6 +10277,7 @@ fn read_authenticated_tail<C: GenericClient>(
         transactions,
         transaction_hashes,
         state_hashes,
+        allocation_replay,
         end_hash,
         end_state_hash,
         eidx_frontier,
@@ -10467,16 +10587,32 @@ fn apply_tail<C: GenericClient>(
     )?;
     let mut reports = Vec::with_capacity(rows.len());
     let mut target_state = None;
+    let mut endpoint = ExactEndpoint {
+        generation: log_generation,
+        basis_t: database.basis_t(),
+        tx_hash: *previous_hash,
+        state_hash: read_state_hash(client, database_id, log_generation, database.basis_t())?,
+        eidx_frontier: database.eidx_frontier(),
+    };
     for row in rows {
-        *database = if row.excision_replay {
-            database.apply_excised_committed(&row.transaction)?
-        } else {
-            database.apply_committed(&row.transaction)?
-        };
+        *database = apply_compatibility_transaction(
+            client,
+            database_id,
+            database,
+            endpoint,
+            &row.transaction,
+            row.reserved_allocation,
+            row.excision_replay,
+        )?;
+        endpoint.basis_t = row.transaction.basis_t;
+        endpoint.eidx_frontier = row.transaction.eidx_frontier;
+        endpoint.tx_hash = row.tx_hash;
+        endpoint.state_hash = row.state_hash;
         target_state = Some(row.state_hash);
         *previous_hash = row.tx_hash;
         reports.push(row.transaction);
     }
+    complete_compatibility_allocation(client, database_id, database, endpoint)?;
     // Independently audit the completed eager replay once, not every prefix.
     database.validate_invariants()?;
     // The canonical transaction hash chain authenticates every intermediate
@@ -10493,6 +10629,62 @@ fn apply_tail<C: GenericClient>(
         ));
     }
     Ok(reports)
+}
+
+fn apply_compatibility_transaction<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    database: &Database,
+    before: ExactEndpoint,
+    transaction: &DurableTransaction,
+    after: Option<crate::reserved_allocation::ReservedAllocation>,
+    allow_excision: bool,
+) -> Result<Database, SemanticError> {
+    if let Some(after) = after {
+        let prior = match database.reserved_allocation() {
+            Some(prior) => prior,
+            None => {
+                crate::allocation_storage::load_reserved_allocation(client, database_id, before)?
+                    .ok_or_else(|| {
+                        fault(
+                            "allocation/missing-predecessor",
+                            "versioned allocation replay has no authenticated predecessor",
+                        )
+                    })?
+            }
+        };
+        database.apply_committed_with_reserved_allocation(transaction, prior, after, allow_excision)
+    } else {
+        // A retained native v1 value can carry an upgrade proof without its
+        // historical content having used v2. Apply old entries with the strict
+        // old frontier checks. The completed legacy endpoint is then proved
+        // once below; that proof rejects any actual v2 -> v1 regression.
+        if allow_excision {
+            database.apply_excised_committed(transaction)
+        } else {
+            database.apply_committed(transaction)
+        }
+    }
+}
+
+fn complete_compatibility_allocation<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    database: &mut Database,
+    endpoint: ExactEndpoint,
+) -> Result<(), SemanticError> {
+    if endpoint.generation > 0 && database.reserved_allocation().is_none() {
+        let allocation =
+            crate::allocation_storage::load_reserved_allocation(client, database_id, endpoint)?
+                .ok_or_else(|| {
+                    fault(
+                        "allocation/missing-native-proof",
+                        "native compatibility replay requires allocation proof",
+                    )
+                })?;
+        *database = database.clone().with_reserved_allocation(allocation)?;
+    }
+    Ok(())
 }
 
 fn index_member(database: &Database, datom: &Datom, order: IndexOrder) -> bool {

@@ -6,7 +6,7 @@ mod data;
 use atomic_core::{
     BackgroundIndexingConfig, CapacityLimits, ErrorCategory, LocalTransactionEndpoint,
     LocalTransportConfig, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, SemanticError,
-    TransactionService, TransactionServiceConfig, postgres_config_from_env,
+    TransactionDefaults, TransactionService, TransactionServiceConfig, postgres_config_from_env,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -46,8 +46,10 @@ Remote TLS: ATOMIC_REMOTE_TLS_CERT (PEM chain), ATOMIC_REMOTE_TLS_KEY (private
 Clients use the same token file and optional ATOMIC_REMOTE_TLS_ROOT PEM trust
   anchor; certificate/name verification is mandatory. No plaintext TCP mode.
 
-Transactor options (positive integers):
+Transactor options (numeric limits are positive integers):
   --holder ID                  lease holder label (default: process-specific)
+  --default-partition KEYWORD   default placement for new ordinary entities
+                               (default: :db.part/user; install named partitions first)
   --lease-ms N                 default 5000
   --renew-ms N                 default 1000; must be less than lease
   --queue-capacity N           default 64
@@ -88,6 +90,7 @@ impl Arguments {
                 "--advertise",
                 "--tls-server-name",
                 "--holder",
+                "--default-partition",
                 "--lease-ms",
                 "--renew-ms",
                 "--queue-capacity",
@@ -136,6 +139,12 @@ impl Arguments {
             _ => {}
         }
         if parsed.command == "transactor" {
+            transaction_defaults(
+                parsed
+                    .options
+                    .get("--default-partition")
+                    .map(String::as_str),
+            )?;
             let local = parsed.options.contains_key("--endpoint");
             let remote = parsed.options.contains_key("--listen");
             if local == remote {
@@ -163,6 +172,7 @@ impl Arguments {
                     "--database"
                         | "--endpoint"
                         | "--holder"
+                        | "--default-partition"
                         | "--listen"
                         | "--advertise"
                         | "--tls-server-name"
@@ -202,6 +212,18 @@ impl Arguments {
 
 fn usage(message: impl Into<String>) -> SemanticError {
     SemanticError::incorrect("cli/usage", message)
+}
+
+fn transaction_defaults(partition: Option<&str>) -> Result<TransactionDefaults, SemanticError> {
+    let Some(text) = partition else {
+        return Ok(TransactionDefaults::default());
+    };
+    let atomic_core::edn::EdnValue::Keyword(name) = atomic_core::edn::read_edn(text)
+        .map_err(|_| usage("--default-partition requires one EDN keyword"))?
+    else {
+        return Err(usage("--default-partition requires one EDN keyword"));
+    };
+    Ok(TransactionDefaults::default().with_default_partition(name))
 }
 
 fn io_error() -> SemanticError {
@@ -340,10 +362,13 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                 None
             };
             install_signals()?;
-            let service = TransactionService::start_configured_with_indexing(
+            let defaults =
+                transaction_defaults(args.options.get("--default-partition").map(String::as_str))?;
+            let service = TransactionService::start_configured_with_indexing_and_defaults(
                 config,
                 connection.clone(),
                 index,
+                defaults,
             )?;
             let started = (|| -> Result<_, SemanticError> {
                 let local = local_endpoint
@@ -511,5 +536,33 @@ mod tests {
         }
         assert_eq!(parse(&[]).unwrap().command, "--help");
         assert!(parse(&["create", "--database", "d"]).is_ok());
+    }
+
+    #[test]
+    fn default_partition_is_data_not_a_numeric_limit_or_clojure_expression() {
+        let args = [
+            "transactor",
+            "--database",
+            "d",
+            "--endpoint",
+            "/private",
+            "--default-partition",
+        ];
+        let mut valid = args.to_vec();
+        valid.push(":app/people");
+        assert!(parse(&valid).is_ok());
+        for invalid in [
+            "42",
+            "app/people",
+            "::app",
+            "(run private-marker)",
+            ":app/p :other/p",
+        ] {
+            let mut input = args.to_vec();
+            input.push(invalid);
+            let error = parse(&input).err().expect("non-keyword default accepted");
+            assert_eq!(error.code, "cli/usage");
+            assert!(!format!("{error:?}").contains("private-marker"));
+        }
     }
 }

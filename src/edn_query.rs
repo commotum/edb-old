@@ -189,6 +189,23 @@ impl BoundEdnQuery {
         }
     }
 
+    /// Prepare the same bound query as a fallible sequence of result tuples.
+    /// Relational work is eager; Pull and its registered transforms are lazy.
+    /// Return-map keys remain available on this binding for per-row rendering.
+    pub fn sequence(
+        &self,
+        control: &QueryControl,
+        extensions: Option<&QueryExtensions>,
+    ) -> Result<crate::QuerySequence, SemanticError> {
+        crate::QueryEngine::sequence_sources_with_extensions(
+            self.query(),
+            &self.sources,
+            &self.inputs,
+            control,
+            extensions,
+        )
+    }
+
     pub fn result_to_edn(&self, result: &QueryResult) -> Result<EdnValue, SemanticError> {
         match &self.return_keys {
             Some(keys) => {

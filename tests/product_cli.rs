@@ -94,6 +94,7 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
                 .unwrap(),
         );
         assert!(output.contains("APPLICATION_OK"));
+        assert!(output.contains("READ_VALUES_OK mixed_sources=true entity_identity=true"));
         assert!(output.contains("PLANNING_OK discarded=true stale_rejected=true logical_ids_remapped=true exact_report=true exact_reference=true"));
         assert!(output.contains("PARTITIONS_OK named=true component_affinity=true uuid_roundtrip=true retry_exact=true reference_exact=true"));
         assert!(output.contains(

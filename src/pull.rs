@@ -532,6 +532,23 @@ pub struct Entity {
     cache: Option<Arc<Mutex<EntityCache>>>,
 }
 
+// Reference identity deliberately excludes the lazy cache and database basis.
+// Attribute comparisons belong to Pull/query results, not entity handles.
+impl PartialEq for Entity {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.database.entity_origin == other.database.entity_origin
+    }
+}
+
+impl Eq for Entity {}
+
+impl std::hash::Hash for Entity {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.database.entity_origin, state);
+        std::hash::Hash::hash(&self.id, state);
+    }
+}
+
 type EntityCache = BTreeMap<PullDirection, Option<EntityValue>>;
 
 // A touched entity owns a potentially deep tree of cached component entities.
@@ -593,6 +610,15 @@ impl Entity {
 
     pub fn id(&self) -> u64 {
         self.id
+    }
+
+    /// A cheap identity token suitable for map/set keys. No attributes are read.
+    /// Use a snapshot key as well when the key must distinguish time views.
+    pub fn identity(&self) -> crate::EntityIdentity {
+        crate::EntityIdentity {
+            origin: self.database.entity_origin.clone(),
+            entity: self.id,
+        }
     }
 
     pub fn database(&self) -> DatabaseValue {

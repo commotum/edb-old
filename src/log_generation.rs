@@ -11,6 +11,7 @@
 use crate::encoding::{
     canonical_datom_bytes, decode_canonical_datoms, validate_transaction_content,
 };
+use crate::reserved_allocation::ReservedAllocation;
 use crate::{
     Datom, Digest, DurableTransaction, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, MAX_EIDX,
     SemanticError, eid_to_eidx, eid_to_part, sha256,
@@ -18,7 +19,8 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 
 const MAGIC: &[u8; 4] = b"ATLC";
-const VERSION: u16 = 1;
+const LEGACY_VERSION: u16 = 1;
+const RESERVED_ALLOCATION_VERSION: u16 = 2;
 const KIND_TRANSACTION_CONTENT: u8 = 1;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
@@ -36,6 +38,10 @@ pub(crate) struct LineageTransactionContent {
     pub(crate) lineage_id: String,
     pub(crate) basis_t: u64,
     pub(crate) eidx_frontier: u64,
+    /// Explicit format selection: None preserves ATLC v1 exactly. ATLC v2
+    /// authenticates retained reserved issuance even when physical excision
+    /// removes every datum that originally witnessed a reference-only ID.
+    pub(crate) reserved_frontier: Option<u64>,
     /// Distinct newly issued non-transaction entity ids. Names are absent.
     pub(crate) allocations: Vec<u64>,
     pub(crate) tx_data: Vec<Datom>,
@@ -65,11 +71,93 @@ impl LineageTransactionContent {
             lineage_id: lineage_id.to_owned(),
             basis_t: transaction.basis_t,
             eidx_frontier: transaction.eidx_frontier,
+            reserved_frontier: None,
             allocations: allocations.into_iter().collect(),
             tx_data: transaction.tx_data.clone(),
         };
         content.validate()?;
         Ok(content)
+    }
+
+    /// New-format conversion is deliberately separate from the legacy
+    /// constructor. Merely upgrading the binary must never change a v1
+    /// payload's identity while copying or verifying older durable content.
+    pub(crate) fn from_transaction_v2(
+        lineage_id: &str,
+        prior_eidx_frontier: u64,
+        prior_reserved: ReservedAllocation,
+        after_reserved: ReservedAllocation,
+        transaction: &DurableTransaction,
+    ) -> Result<Self, SemanticError> {
+        ReservedAllocation::from_frontier(prior_reserved.frontier(), prior_eidx_frontier)?;
+        let mut allocations = BTreeSet::new();
+        for entity in transaction.tempids.values().copied() {
+            let partition = eid_to_part(entity)?;
+            let index = eid_to_eidx(entity)?;
+            let fresh = if partition == crate::DB_PARTITION {
+                index >= prior_reserved.frontier()
+            } else {
+                partition != crate::TX_PARTITION && index >= prior_eidx_frontier
+            };
+            if fresh {
+                allocations.insert(entity);
+            }
+        }
+        let content = Self {
+            lineage_id: lineage_id.to_owned(),
+            basis_t: transaction.basis_t,
+            eidx_frontier: transaction.eidx_frontier,
+            reserved_frontier: Some(after_reserved.frontier()),
+            allocations: allocations.into_iter().collect(),
+            tx_data: transaction.tx_data.clone(),
+        };
+        content.validate_reserved_transition(prior_reserved)?;
+        Ok(content)
+    }
+
+    pub(crate) fn version(&self) -> u16 {
+        if self.reserved_frontier.is_some() {
+            RESERVED_ALLOCATION_VERSION
+        } else {
+            LEGACY_VERSION
+        }
+    }
+
+    /// Check the reserved side of a v2 transition against its authenticated
+    /// predecessor. Ordinary contiguous issuance remains the replay caller's
+    /// responsibility and must exclude partition-zero witnesses in v2.
+    ///
+    /// The checkpoint may be higher than the surviving witnesses: input-only
+    /// explicit references and physical excision legitimately retain such a
+    /// high-water mark. It may never regress or omit a visible claim.
+    pub(crate) fn validate_reserved_transition(
+        &self,
+        prior: ReservedAllocation,
+    ) -> Result<ReservedAllocation, SemanticError> {
+        self.validate()?;
+        let frontier = self.reserved_frontier.ok_or_else(|| {
+            incorrect(
+                "generation/reserved-allocation-version",
+                "ATLC v1 has no authenticated reserved allocation checkpoint",
+            )
+        })?;
+        let after = ReservedAllocation::from_frontier(frontier, self.eidx_frontier)?;
+        if frontier < prior.frontier() {
+            return Err(incorrect(
+                "generation/reserved-frontier-regression",
+                "reserved allocation checkpoint regresses from its predecessor",
+            ));
+        }
+        if self.allocations.iter().any(|entity| {
+            eid_to_part(*entity).ok() == Some(crate::DB_PARTITION)
+                && eid_to_eidx(*entity).is_ok_and(|index| index < prior.frontier())
+        }) {
+            return Err(incorrect(
+                "generation/reserved-allocation-not-fresh",
+                "reserved allocation witness was already below the predecessor frontier",
+            ));
+        }
+        Ok(after)
     }
 
     /// Reconstruct the kernel recovery record. Synthetic names exist only to
@@ -143,6 +231,13 @@ impl LineageTransactionContent {
         let body_len = 2_usize
             .checked_add(lineage.len())
             .and_then(|length| length.checked_add(8 + 8 + 4))
+            .and_then(|length| {
+                length.checked_add(if self.reserved_frontier.is_some() {
+                    8
+                } else {
+                    0
+                })
+            })
             .and_then(|length| length.checked_add(allocation_bytes))
             .and_then(|length| length.checked_add(4))
             .and_then(|length| length.checked_add(datom_bytes))
@@ -161,7 +256,7 @@ impl LineageTransactionContent {
 
         let mut bytes = Vec::with_capacity(HEADER_LEN + body_len + CHECKSUM_LEN);
         bytes.extend_from_slice(MAGIC);
-        bytes.extend_from_slice(&VERSION.to_be_bytes());
+        bytes.extend_from_slice(&self.version().to_be_bytes());
         bytes.push(KIND_TRANSACTION_CONTENT);
         bytes.push(0);
         bytes.extend_from_slice(&(body_len as u64).to_be_bytes());
@@ -169,6 +264,9 @@ impl LineageTransactionContent {
         bytes.extend_from_slice(lineage);
         bytes.extend_from_slice(&self.basis_t.to_be_bytes());
         bytes.extend_from_slice(&self.eidx_frontier.to_be_bytes());
+        if let Some(frontier) = self.reserved_frontier {
+            bytes.extend_from_slice(&frontier.to_be_bytes());
+        }
         bytes.extend_from_slice(&allocation_count.to_be_bytes());
         for entity in &self.allocations {
             bytes.extend_from_slice(&entity.to_be_bytes());
@@ -198,7 +296,7 @@ impl LineageTransactionContent {
             ));
         }
         let version = u16::from_be_bytes(bytes[4..6].try_into().expect("checked header"));
-        if version != VERSION {
+        if !matches!(version, LEGACY_VERSION | RESERVED_ALLOCATION_VERSION) {
             return Err(SemanticError::new(
                 ErrorCategory::Unsupported,
                 "generation/content-version",
@@ -246,6 +344,11 @@ impl LineageTransactionContent {
         let lineage_id = read_string(body, &mut cursor, lineage_len)?;
         let basis_t = read_u64(body, &mut cursor)?;
         let eidx_frontier = read_u64(body, &mut cursor)?;
+        let reserved_frontier = if version == RESERVED_ALLOCATION_VERSION {
+            Some(read_u64(body, &mut cursor)?)
+        } else {
+            None
+        };
         let allocation_count = read_u32(body, &mut cursor)? as usize;
         let remaining = body.len().checked_sub(cursor).ok_or_else(|| {
             fault(
@@ -269,6 +372,7 @@ impl LineageTransactionContent {
             lineage_id,
             basis_t,
             eidx_frontier,
+            reserved_frontier,
             allocations,
             tx_data,
         };
@@ -331,6 +435,20 @@ impl LineageTransactionContent {
         // and frontier-local invariants without allocating a synthetic map.
         // Exact frontier advancement is checked against db-before on replay.
         validate_transaction_content(self.basis_t, self.eidx_frontier, &self.tx_data)?;
+        if let Some(frontier) = self.reserved_frontier {
+            ReservedAllocation::from_frontier(frontier, self.eidx_frontier)?;
+            let mut observed = ReservedAllocation::initial();
+            observed.observe_datoms(&self.tx_data)?;
+            for entity in &self.allocations {
+                observed.observe_entity(*entity)?;
+            }
+            if observed.frontier() > frontier {
+                return Err(incorrect(
+                    "generation/reserved-frontier-missing-claim",
+                    "reserved allocation checkpoint omits a datom or allocation witness",
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -602,6 +720,7 @@ mod tests {
             lineage_id: LINEAGE.to_owned(),
             basis_t: 1,
             eidx_frontier: INITIAL_EIDX_FRONTIER + 1,
+            reserved_frontier: None,
             allocations: vec![make_eid(USER_PARTITION, INITIAL_EIDX_FRONTIER).unwrap()],
             tx_data: vec![Datom {
                 entity: make_eid(USER_PARTITION, INITIAL_EIDX_FRONTIER).unwrap(),
@@ -611,6 +730,252 @@ mod tests {
                 added: true,
             }],
         }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn v1_bytes_and_hash_are_frozen_when_v2_is_available() {
+        // Independent literal from the pre-v2 layout: body length 100, one
+        // allocation and one canonical Instant datom, plus SHA-256 checksum.
+        let expected = concat!(
+            "41544c430001010000000000000000640024",
+            "30313233343536372d383961622d346465662d383132332d343536373839616263646566",
+            "000000000000000100000000000003e90000000100001000000003e8",
+            "0000000100001000000003e8000000320600000000000003e8",
+            "00000c000000000101",
+            "1a0cab8ccacddededb6315866a35eee9686c109addf9cee2ddf20887f241923a"
+        );
+        let legacy = content();
+        let bytes = legacy.encode().unwrap();
+        assert_eq!(legacy.version(), 1);
+        assert_eq!(hex(&bytes), expected);
+        assert_eq!(
+            hex(&sha256(&bytes)),
+            "9f13fd86e2eac6c33c686b39db8d15be3901bbaded243c3638c058451fe20d98"
+        );
+        let recovered = LineageTransactionContent::decode(&bytes).unwrap();
+        assert_eq!(recovered.reserved_frontier, None);
+        assert_eq!(recovered.encode().unwrap(), bytes);
+        // Selecting v2 is explicit, including when its frontier is initial.
+        let mut modern = legacy;
+        modern.reserved_frontier = Some(INITIAL_EIDX_FRONTIER);
+        assert_eq!(modern.version(), 2);
+        assert_ne!(modern.encode().unwrap(), bytes);
+        assert_ne!(modern.hash().unwrap(), recovered.hash().unwrap());
+    }
+
+    fn receipt_only_transaction() -> DurableTransaction {
+        let tx = t_to_tx(1).unwrap();
+        DurableTransaction {
+            database_id: "caller-alias".into(),
+            basis_t: 1,
+            previous_hash: [5; 32],
+            eidx_frontier: 2_000_001,
+            tempids: [
+                ("old-system".into(), 42),
+                ("new-system-a".into(), 1_000),
+                ("new-system-b".into(), 1_001),
+                (
+                    "ordinary".into(),
+                    make_eid(USER_PARTITION, 2_000_000).unwrap(),
+                ),
+                ("transaction".into(), tx),
+            ]
+            .into_iter()
+            .collect(),
+            tx_data: vec![Datom {
+                entity: tx,
+                attribute: crate::DB_TX_INSTANT as u32,
+                value: Value::Instant(1_000),
+                tx,
+                added: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn v2_preserves_low_receipt_only_ids_without_changing_v1_selection() {
+        let transaction = receipt_only_transaction();
+        let prior = ReservedAllocation::initial();
+        let after = ReservedAllocation::from_frontier(1_002, transaction.eidx_frontier).unwrap();
+        let legacy =
+            LineageTransactionContent::from_transaction(LINEAGE, 2_000_000, &transaction).unwrap();
+        assert_eq!(legacy.version(), 1);
+        assert_eq!(
+            legacy.allocations,
+            vec![make_eid(USER_PARTITION, 2_000_000).unwrap()]
+        );
+        let modern = LineageTransactionContent::from_transaction_v2(
+            LINEAGE,
+            2_000_000,
+            prior,
+            after,
+            &transaction,
+        )
+        .unwrap();
+        assert_eq!(
+            modern.allocations,
+            vec![1_000, 1_001, make_eid(USER_PARTITION, 2_000_000).unwrap()]
+        );
+        assert_eq!(modern.validate_reserved_transition(prior).unwrap(), after);
+        let encoded = modern.encode().unwrap();
+        let decoded = LineageTransactionContent::decode(&encoded).unwrap();
+        assert_eq!(decoded, modern);
+        assert_eq!(decoded.encode().unwrap(), encoded);
+        let replay = decoded.to_transaction([9; 32]);
+        assert_eq!(replay.previous_hash, [9; 32]);
+        assert_eq!(
+            replay.tempids.values().copied().collect::<Vec<_>>(),
+            modern.allocations
+        );
+        assert_eq!(transaction.tempids["new-system-a"], 1_000);
+        assert!(
+            !encoded
+                .windows("new-system-a".len())
+                .any(|bytes| bytes == b"new-system-a")
+        );
+    }
+
+    #[test]
+    fn v2_reserved_and_ordinary_witnesses_can_share_an_index() {
+        let mut transaction = receipt_only_transaction();
+        transaction.eidx_frontier = 1_002;
+        transaction
+            .tempids
+            .insert("ordinary".into(), make_eid(USER_PARTITION, 1_000).unwrap());
+        let prior = ReservedAllocation::initial();
+        let after = ReservedAllocation::from_frontier(1_002, 1_002).unwrap();
+        let content = LineageTransactionContent::from_transaction_v2(
+            LINEAGE,
+            1_000,
+            prior,
+            after,
+            &transaction,
+        )
+        .unwrap();
+        assert_eq!(
+            content.allocations,
+            vec![1_000, 1_001, make_eid(USER_PARTITION, 1_000).unwrap()]
+        );
+        assert_eq!(
+            LineageTransactionContent::decode(&content.encode().unwrap()).unwrap(),
+            content
+        );
+    }
+
+    #[test]
+    fn v2_retains_a_source_frontier_after_reference_only_facts_are_removed() {
+        let mut transaction = receipt_only_transaction();
+        transaction.tempids.clear();
+        let prior = ReservedAllocation::initial();
+        let after = ReservedAllocation::from_frontier(500_001, transaction.eidx_frontier).unwrap();
+        let content = LineageTransactionContent::from_transaction_v2(
+            LINEAGE,
+            2_000_000,
+            prior,
+            after,
+            &transaction,
+        )
+        .unwrap();
+        assert!(content.allocations.is_empty());
+        let decoded = LineageTransactionContent::decode(&content.encode().unwrap()).unwrap();
+        let mut state = decoded.validate_reserved_transition(prior).unwrap();
+        assert_eq!(state.allocate().unwrap(), 500_001);
+    }
+
+    #[test]
+    fn v2_rejects_regression_missing_claim_and_stale_witness() {
+        let transaction = receipt_only_transaction();
+        let prior = ReservedAllocation::initial();
+        let after = ReservedAllocation::from_frontier(1_002, transaction.eidx_frontier).unwrap();
+        let valid = LineageTransactionContent::from_transaction_v2(
+            LINEAGE,
+            2_000_000,
+            prior,
+            after,
+            &transaction,
+        )
+        .unwrap();
+        let mut invalid = valid.clone();
+        invalid.reserved_frontier = Some(1_001);
+        assert_eq!(
+            invalid.encode().unwrap_err().code,
+            "generation/reserved-frontier-missing-claim"
+        );
+        invalid = valid.clone();
+        invalid.reserved_frontier = Some(transaction.eidx_frontier + 1);
+        assert_eq!(
+            invalid.encode().unwrap_err().code,
+            "allocation/reserved-frontier-out-of-range"
+        );
+        let later_prior =
+            ReservedAllocation::from_frontier(1_003, transaction.eidx_frontier).unwrap();
+        assert_eq!(
+            valid
+                .validate_reserved_transition(later_prior)
+                .unwrap_err()
+                .code,
+            "generation/reserved-frontier-regression"
+        );
+        let stale_prior =
+            ReservedAllocation::from_frontier(1_001, transaction.eidx_frontier).unwrap();
+        assert_eq!(
+            valid
+                .validate_reserved_transition(stale_prior)
+                .unwrap_err()
+                .code,
+            "generation/reserved-allocation-not-fresh"
+        );
+        let mut omitted_ref = valid;
+        omitted_ref.tx_data.push(Datom {
+            entity: make_eid(USER_PARTITION, 1_000).unwrap(),
+            attribute: 100,
+            value: Value::Tuple(vec![None, Some(Value::Ref(1_002))]),
+            tx: t_to_tx(1).unwrap(),
+            added: true,
+        });
+        assert_eq!(
+            omitted_ref.encode().unwrap_err().code,
+            "generation/reserved-frontier-missing-claim"
+        );
+    }
+
+    #[test]
+    fn v2_version_and_checkpoint_are_authenticated_and_malformed_input_is_rejected() {
+        let mut value = content();
+        value.reserved_frontier = Some(INITIAL_EIDX_FRONTIER);
+        let encoded = value.encode().unwrap();
+        let frontier_at = HEADER_LEN + 2 + LINEAGE.len() + 8 + 8;
+        let mut tampered = encoded.clone();
+        tampered[frontier_at + 7] ^= 1;
+        assert_eq!(
+            LineageTransactionContent::decode(&tampered)
+                .unwrap_err()
+                .code,
+            "generation/content-checksum"
+        );
+        for offset in 0..encoded.len() {
+            assert!(LineageTransactionContent::decode(&encoded[..offset]).is_err());
+        }
+        for version in [0_u16, 3, u16::MAX] {
+            let mut unsupported = encoded.clone();
+            unsupported[4..6].copy_from_slice(&version.to_be_bytes());
+            assert_eq!(
+                LineageTransactionContent::decode(&unsupported)
+                    .unwrap_err()
+                    .code,
+                "generation/content-version"
+            );
+        }
+        let mut mislabeled = encoded;
+        mislabeled[4..6].copy_from_slice(&LEGACY_VERSION.to_be_bytes());
+        let checksum_at = mislabeled.len() - CHECKSUM_LEN;
+        let checksum = sha256(&mislabeled[..checksum_at]);
+        mislabeled[checksum_at..].copy_from_slice(&checksum);
+        assert!(LineageTransactionContent::decode(&mislabeled).is_err());
     }
 
     #[test]

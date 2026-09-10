@@ -889,9 +889,35 @@ impl Database {
         let ops = self.normalize_forms(forms, functions)?;
         self.with_function_context(&ops, functions, tx_instant)
     }
+
+    pub fn with_forms_with_defaults(
+        &self,
+        forms: &[TxForm],
+        functions: &TxFunctions,
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<TxReport, SemanticError> {
+        let ops = self.normalize_forms(forms, functions)?;
+        self.with_function_context_and_defaults(&ops, functions, tx_instant, defaults)
+    }
 }
 
 impl DatabaseValue {
+    /// Speculate using explicit allocation defaults, never environment state.
+    pub fn with_defaults(
+        &self,
+        ops: &[TxOp],
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        validate_ops_input(ops)?;
+        self.with_forms_with_defaults(
+            &ops.iter().cloned().map(TxForm::Op).collect::<Vec<_>>(),
+            tx_instant,
+            defaults,
+        )
+    }
+
     /// Apply primitive transaction information without persisting it. The
     /// caller supplies time, as for the eager `Database::with` oracle.
     pub fn with(
@@ -924,6 +950,36 @@ impl DatabaseValue {
         forms: &[TxForm],
         tx_instant: i64,
         limits: SpeculationLimits,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        self.with_forms_with_limits_and_defaults(
+            forms,
+            tx_instant,
+            limits,
+            &crate::TransactionDefaults::default(),
+        )
+    }
+
+    pub fn with_forms_with_defaults(
+        &self,
+        forms: &[TxForm],
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        self.with_forms_with_limits_and_defaults(
+            forms,
+            tx_instant,
+            SpeculationLimits::default(),
+            defaults,
+        )
+    }
+
+    /// Allocation policy and capacity remain independently configurable.
+    pub fn with_forms_with_limits_and_defaults(
+        &self,
+        forms: &[TxForm],
+        tx_instant: i64,
+        limits: SpeculationLimits,
+        defaults: &crate::TransactionDefaults,
     ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
         use crate::database_value::TransactionReadContext;
         use crate::postgres::program_bindings::{
@@ -999,7 +1055,7 @@ impl DatabaseValue {
         };
         let ops = before.normalize_persisted_forms_with_limit(&expanded, limits.max_operations)?;
         let remaining = context.remaining()?;
-        let assessed = crate::tiered_assessor::assess_tiered_with_remaining_limits(
+        let assessed = crate::tiered_assessor::assess_tiered_with_remaining_limits_and_defaults(
             &before,
             &ops,
             tx_instant,
@@ -1007,6 +1063,7 @@ impl DatabaseValue {
                 max_read_datoms: remaining.datoms,
                 max_read_bytes: remaining.retained_bytes,
             },
+            defaults,
         )?;
         validate_successor_program_bindings(
             &mut resolve,

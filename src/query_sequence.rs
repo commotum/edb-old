@@ -8,7 +8,7 @@ use super::*;
 pub struct QuerySequence {
     rows: std::vec::IntoIter<Vec<QueryValue>>,
     elements: Vec<FindElement>,
-    sources: Vec<QuerySource>,
+    sources: Vec<QueryDataSource>,
     budget: QueryPullBudget<'static>,
     stats: QueryStats,
     plan: Vec<PlanStep>,
@@ -63,18 +63,21 @@ impl Iterator for QuerySequence {
                             "pull expression variable must bind an entity id",
                         )
                     })?;
-                    let database = &self
+                    let source = self
                         .sources
                         .iter()
                         .find(|candidate| candidate.name == *source)
-                        .expect("original source validation precedes preparation")
-                        .database;
+                        .expect("original source validation precedes preparation");
+                    let QuerySourceValue::Database(database) = &source.value else {
+                        unreachable!("original Pull source validation precedes preparation")
+                    };
                     *value = database.pull_for_query(pattern, entity, &mut self.budget)?;
                 }
             }
             Ok(row)
         })();
         self.stats.work = self.budget.work() as u64;
+        self.stats.allocated_value_bytes = self.budget.value_bytes();
         if result.is_ok() {
             self.stats.rows_produced += 1;
         } else {
@@ -107,12 +110,48 @@ impl QueryEngine {
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
     ) -> Result<QuerySequence, SemanticError> {
+        let sources: Vec<_> = sources
+            .iter()
+            .map(|source| QueryDataSource::database(&source.name, source.database.clone()))
+            .collect();
+        Self::sequence_sources_with_extensions(query, &sources, inputs, control, extensions)
+    }
+
+    /// Evaluate the relation using the same immutable database, raw-tuple and
+    /// log sources as eager queries, then project Pull lazily per consumed row.
+    pub fn sequence_sources(
+        query: &Query,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        control: &QueryControl,
+    ) -> Result<QuerySequence, SemanticError> {
+        Self::sequence_sources_with_extensions(query, sources, inputs, control, None)
+    }
+
+    /// Callbacks in relational clauses run during preparation; Pull callbacks
+    /// run only during iteration. Both phases share the original time/work
+    /// allowance. No live connection or mutable source is retained.
+    pub fn sequence_sources_with_extensions(
+        query: &Query,
+        sources: &[QueryDataSource],
+        inputs: &[QueryInput],
+        control: &QueryControl,
+        extensions: Option<&QueryExtensions>,
+    ) -> Result<QuerySequence, SemanticError> {
         let started = Instant::now();
         validate_query(query, inputs.len())?;
-        let source_map = sources
-            .iter()
-            .map(|source| (source.name.as_str(), SourceRef::Database(&source.database)))
-            .collect();
+        let mut source_map = BTreeMap::new();
+        for source in sources {
+            if source_map
+                .insert(source.name.as_str(), source.borrowed())
+                .is_some()
+            {
+                return Err(SemanticError::incorrect(
+                    "query/duplicate-source",
+                    format!("source {} is supplied more than once", source.name),
+                ));
+            }
+        }
         validate_consumed_sources(query, &source_map)?;
         let mut prepared = query.clone();
         let elements = find_elements(&query.find).to_vec();
@@ -133,7 +172,7 @@ impl QueryEngine {
         let mut preparation_control = control.clone();
         preparation_control.timeout =
             deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
-        let mut outcome = Self::execute_with_extensions(
+        let mut outcome = Self::execute_sources_with_extensions(
             &prepared,
             sources,
             inputs,
@@ -153,7 +192,8 @@ impl QueryEngine {
             deadline,
             control.max_work,
             usize::try_from(outcome.stats.work).unwrap_or(usize::MAX),
-        );
+        )
+        .with_value_budget(outcome.stats.allocated_value_bytes, usize::MAX);
         budget.check(0)?;
         outcome.stats.rows_produced = 0;
         Ok(QuerySequence {

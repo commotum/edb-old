@@ -22,17 +22,15 @@ transaction; `implicit_part_id(partition)` decodes it. Numbers are in
 partitions occupy installed codes in the lower half.
 
 The existing 42-bit entity-index field and its sign-bit restriction remain
-unchanged. Allocation uses one global issuance frontier, not a counter per
-partition. Explicit IDs still need a valid partition and an issued entity index;
-constructing an integer with `make_eid` does not reserve or issue it. The default
-is `:db.part/user`. Schema/partition installation has system affinity to
-`:db.part/db`; transaction time uses `:db.part/tx`.
-The Datomic transactor's default-partition configuration property is not mapped
-to a native runtime setting; use explicit force/match policy for custom defaults.
-Because named partition IDs themselves must fit the lower half of the partition
-field, allocate named partition entities before the global frontier reaches
-524,288. Already installed named partitions continue to allocate entities after
-that point; implicit partitions do not require installation.
+unchanged. Explicit IDs still need a valid partition and an issued entity index;
+constructing an integer with `make_eid` does not reserve or issue it. The ordinary
+default is `:db.part/user`, with an explicit execution-default option described
+below. Schema/partition installation has system affinity to `:db.part/db`;
+transaction time uses `:db.part/tx`. Native reserved-allocation checkpoints
+separate new schema/named-partition placement from growth of ordinary entities;
+they do not provide a separate counter for every application partition.
+Named partition entities must still fit the lower half of the partition field,
+and implicit partitions do not require installation.
 
 Install a named partition as ordinary data, then use it in a later transaction
 (policy resolves against db-before):
@@ -113,6 +111,94 @@ name partitions. These instructions obey the shared fuel, emitted-form and byte
 budgets. Only programs containing them select ABI 8; existing ABI 4–7 content
 retains its old encoding. Explicit directive forms select native submission wire
 version 3 and request-identity grammar 4; old forms keep their prior bytes.
+
+## Default placement for new entities
+
+Partitions group entity IDs for locality; they are not databases, access controls
+or transaction boundaries. Existing APIs continue placing ordinary fresh entities
+in `:db.part/user` unless transaction data supplies a stronger directive.
+
+Configure a different default explicitly:
+
+```rust
+let defaults = TransactionDefaults::default()
+    .with_default_partition(Keyword::new("part", "orders"));
+let preview = database.with_edn_with_defaults(text, instant, &defaults)?;
+let writer = TransactionService::start_with_defaults(config, defaults)?;
+```
+
+`Database` and `DatabaseValue` both provide `with_defaults`,
+`with_forms_with_defaults`, and `with_edn_with_defaults`. The eager forms method
+also accepts its existing `TxFunctions` argument. Native speculation additionally
+provides `with_forms_with_limits_and_defaults` to configure allocation and resource
+limits independently. The complete service constructor is
+`start_configured_with_indexing_and_defaults(config, connection, indexing, defaults)`;
+the connection keeps its explicit PostgreSQL/TLS policy.
+
+The stock CLI accepts `--default-partition :part/orders` on `atomic transactor`
+and local `atomic with`. A committing client uses the writer's policy; defaults
+are not a per-request override or part of the durable request encoding.
+
+With the usual explicit PostgreSQL environment configured, start the writer and
+preview the same EDN intent in another terminal:
+
+```sh
+atomic transactor --database orders --endpoint /tmp/atomic-orders.sock \
+  --default-partition :part/orders
+atomic with --database orders --file order.edn \
+  --default-partition :part/orders
+```
+
+### Install the partition before fresh use
+
+Using the ordinary default, install a named partition:
+
+```clojure
+[{:db/ident :part/orders :db.install/_partition :db.part/db}]
+```
+
+Then select its keyword as the execution default. A configured name is resolved
+from the exact transaction's resident db-before metadata, not from a global
+environment variable. Missing names fail with
+`transaction/default-partition-not-found`; nonpartition names and reserved
+`:db.part/db` / `:db.part/tx` defaults fail with
+`transaction/invalid-default-partition`. There is no silent user-partition fallback
+for an invalid explicit configuration.
+
+Resolution happens for fresh transactions, not writer startup or replay. A writer
+can therefore return saved receipts even if its default was changed to a missing
+name or the old partition alias was repurposed to a nonpartition. A rename alone
+retains the old name as an alias, so that name remains usable. Install the intended
+name before sending fresh work; startup alone does not validate that it exists.
+After a bad default is selected, restart
+with a valid default to create or repair the intended named partition.
+
+### Allocation precedence and retry behavior
+
+- Existing identities/upserts keep their entity IDs and partitions.
+- Schema entities retain automatic system placement; transaction entities remain
+  in the transaction partition.
+- Explicit force directives override affinity; match directives select their
+  target partition. A match to a reserved system/transaction target falls back to
+  the configured application default.
+- Only otherwise unassigned fresh domain entities use the default, including
+  anonymous maps, nested component maps and generated transaction data.
+
+The fallback is not implemented as a force directive for every tempid. If an
+unforced tempid unifies with an explicitly forced tempid through a unique identity,
+the explicit placement wins without an artificial policy conflict.
+
+Changing defaults affects only future fresh allocations. Stored retry receipts
+are checked before default resolution, and retain their original IDs, datoms,
+hashes and before/after values. Recovery replays committed datoms; it does not
+reevaluate current defaults. Speculation must receive the same defaults as the
+writer to predict that writer's placement, and never reserves IDs.
+
+These native options implement the useful locality semantics of the
+[Datomic partitions reference](../datomic_pro_docs/04_transactions/07_partitions.md)
+without reading a transactor property from inside the pure Rust kernel. Executable
+precedence, anonymous/nested, PostgreSQL and restart/retry examples are in
+[default_partition.rs](../tests/default_partition.rs).
 
 ## UUID helpers
 

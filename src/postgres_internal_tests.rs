@@ -524,7 +524,7 @@ fn transaction_read_work_includes_predicate_and_commitment_reads() {
     );
 }
 
-fn create_isolated_schema(connection: &str, prefix: &str) -> String {
+pub(crate) fn create_isolated_schema(connection: &str, prefix: &str) -> String {
     let schema = unique(prefix);
     let mut client = Client::connect(connection, NoTls).unwrap();
     client
@@ -533,7 +533,7 @@ fn create_isolated_schema(connection: &str, prefix: &str) -> String {
     schema
 }
 
-fn client_in_schema(connection: &str, schema: &str) -> Client {
+pub(crate) fn client_in_schema(connection: &str, schema: &str) -> Client {
     let mut client = Client::connect(connection, NoTls).unwrap();
     client
         .batch_execute(&format!("SET search_path TO \"{schema}\""))
@@ -541,14 +541,14 @@ fn client_in_schema(connection: &str, schema: &str) -> Client {
     client
 }
 
-fn drop_isolated_schema(connection: &str, schema: &str) {
+pub(crate) fn drop_isolated_schema(connection: &str, schema: &str) {
     let mut client = Client::connect(connection, NoTls).unwrap();
     client
         .batch_execute(&format!("DROP SCHEMA \"{schema}\" CASCADE"))
         .unwrap();
 }
 
-fn install_migration_prefix(client: &mut Client, through: i64) {
+pub(crate) fn install_migration_prefix(client: &mut Client, through: i64) {
     for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= through) {
         client.batch_execute(sql).unwrap();
         let checksum = crate::sha256(sql.as_bytes());
@@ -565,7 +565,7 @@ fn install_migration_prefix(client: &mut Client, through: i64) {
 /// the v9-v11 catalog. Upgrade fixtures must write that historical shape
 /// directly; routing them through the current store would test v14 creation
 /// SQL against columns and generation tables that intentionally do not exist.
-fn provision_legacy_generation_zero_database(
+pub(crate) fn provision_legacy_generation_zero_database(
     client: &mut Client,
     database_id: &str,
     schema: Schema,
@@ -970,6 +970,166 @@ fn populated_v11_to_v12_preserves_authoritative_bytes_and_exact_state() {
     assert_database_eq(&store.recover(database_id).unwrap(), &before);
     drop(store);
     drop_isolated_schema(&connection, &isolated);
+}
+
+#[test]
+fn legacy_segmented_compatibility_values_retain_authenticated_entity_identity() {
+    let Some(connection) = connection() else {
+        eprintln!("legacy identity witness requires ATOMIC_POSTGRES_URL");
+        return;
+    };
+    let isolated = create_isolated_schema(&connection, "legacy_entity_identity");
+    struct Cleanup<'a> {
+        connection: &'a str,
+        schema: &'a str,
+    }
+    impl Drop for Cleanup<'_> {
+        fn drop(&mut self) {
+            drop_isolated_schema(self.connection, self.schema);
+        }
+    }
+    let _cleanup = Cleanup {
+        connection: &connection,
+        schema: &isolated,
+    };
+    let database_id = "legacy-identity";
+    let mut client = client_in_schema(&connection, &isolated);
+    install_migration_prefix(&mut client, 11);
+    let database = provision_legacy_generation_zero_database(&mut client, database_id, schema());
+    let head: Vec<u8> = client
+        .query_one(
+            "SELECT tx_hash FROM atomic_heads WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap()
+        .get(0);
+    let tx_hash: crate::Digest = head.try_into().unwrap();
+    // Publish the actual legacy segmented representation. Current indexers
+    // produce native trees, which would never exercise this open-time path.
+    let mut segments = Vec::new();
+    for history in [false, true] {
+        for order in [
+            IndexOrder::Eavt,
+            IndexOrder::Aevt,
+            IndexOrder::Avet,
+            IndexOrder::Vaet,
+        ] {
+            let datoms = database.datoms(
+                if history {
+                    View::History
+                } else {
+                    View::Current
+                },
+                order,
+            );
+            if datoms.is_empty() {
+                continue;
+            }
+            let count = u32::try_from(datoms.len()).unwrap();
+            let payload = crate::encode_index_segment(&crate::IndexSegment {
+                order,
+                history,
+                datoms,
+            })
+            .unwrap();
+            let hash = sha256(&payload);
+            client.execute(
+                "INSERT INTO atomic_index_segments (segment_hash, payload) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                &[&&hash[..], &payload],
+            ).unwrap();
+            segments.push(crate::SegmentRef {
+                order,
+                history,
+                ordinal: 0,
+                hash,
+                count,
+            });
+        }
+    }
+    let manifest = crate::IndexManifest {
+        database_id: database_id.into(),
+        basis_t: database.basis_t(),
+        tx_hash,
+        eidx_frontier: database.eidx_frontier(),
+        segments,
+    };
+    let payload = crate::encode_index_manifest(&manifest).unwrap();
+    let manifest_hash = sha256(&payload);
+    let basis = i64::try_from(database.basis_t()).unwrap();
+    client.execute(
+        "INSERT INTO atomic_index_manifests (database_id, basis_t, tx_hash, manifest_hash, payload) VALUES ($1, $2, $3, $4, $5)",
+        &[&database_id, &basis, &&tx_hash[..], &&manifest_hash[..], &payload],
+    ).unwrap();
+    client.execute(
+        "INSERT INTO atomic_index_publications (database_id, basis_t, tx_hash, manifest_hash) VALUES ($1, $2, $3, $4)",
+        &[&database_id, &basis, &&tx_hash[..], &&manifest_hash[..]],
+    ).unwrap();
+    let authoritative_before = authoritative_rows(&mut client, database_id);
+    let mut migrator = crate::PostgresMigrator::from_client(client);
+    migrator.migrate().unwrap();
+    drop(migrator);
+
+    let scoped = if connection.starts_with("postgres://") || connection.starts_with("postgresql://")
+    {
+        format!(
+            "{connection}{}options=-csearch_path%3D{isolated}%2Cpg_catalog",
+            if connection.contains('?') { "&" } else { "?" }
+        )
+    } else {
+        format!("{connection} options='-csearch_path={isolated},pg_catalog'")
+    };
+    let mut store = PostgresStore::connect(&scoped).unwrap();
+    let recovered = store.recover(database_id).unwrap();
+    let peer = crate::Peer::connect_compatibility(&scoped, database_id, 16).unwrap();
+    let second = crate::Peer::connect_compatibility(&scoped, database_id, 16).unwrap();
+    assert_eq!(
+        peer.durable_base_t(),
+        database.basis_t(),
+        "fixture must use its segmented base, not log-only recovery"
+    );
+    assert_eq!(peer.load_stats().compatibility_materializations, 1);
+    let entity = u64::from(ITEM_NAME);
+    let eager = peer
+        .db_compatibility()
+        .database_value()
+        .entity(entity)
+        .unwrap()
+        .unwrap();
+    let native = peer.database_value().entity(entity).unwrap().unwrap();
+    let another = second
+        .db_compatibility()
+        .database_value()
+        .entity(entity)
+        .unwrap()
+        .unwrap();
+    let recovered = recovered.database_value().entity(entity).unwrap().unwrap();
+    assert!(native.identity().lineage_id().is_some());
+    assert_eq!(eager.identity(), native.identity());
+    assert_eq!(eager.identity(), another.identity());
+    assert_eq!(eager.identity(), recovered.identity());
+    let mut client = client_in_schema(&connection, &isolated);
+    assert_eq!(
+        authoritative_rows(&mut client, database_id),
+        authoritative_before
+    );
+    assert_eq!(
+        client
+            .query_one(
+                "SELECT payload FROM atomic_index_manifests WHERE manifest_hash = $1",
+                &[&&manifest_hash[..]]
+            )
+            .unwrap()
+            .get::<_, Vec<u8>>(0),
+        payload
+    );
+    drop(eager);
+    drop(native);
+    drop(another);
+    drop(recovered);
+    drop(peer);
+    drop(second);
+    drop(store);
+    drop(client);
 }
 
 #[test]

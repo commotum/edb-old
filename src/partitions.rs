@@ -1,6 +1,65 @@
 //! Shared transaction-local partition policy. No entity IDs are allocated here.
-use crate::{EntityRef, Schema, SemanticError, TxOp, TxValue, eid_to_eidx, eid_to_part};
+use crate::{EntityRef, Keyword, Schema, SemanticError, TxOp, TxValue, eid_to_eidx, eid_to_part};
 use std::collections::{BTreeMap, BTreeSet};
+
+/// Explicit execution defaults, separate from transaction data and resource
+/// limits. Existing APIs use the user partition. This policy affects only new
+/// domain entities without a stronger placement directive or existing identity.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct TransactionDefaults {
+    default_partition: Option<Keyword>,
+}
+
+impl TransactionDefaults {
+    pub fn with_default_partition(mut self, partition: Keyword) -> Self {
+        self.default_partition = Some(partition);
+        self
+    }
+
+    pub fn default_partition(&self) -> Option<&Keyword> {
+        self.default_partition.as_ref()
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        schema: &Schema,
+        resolve: impl FnOnce(&Keyword) -> Option<u64>,
+    ) -> Result<u32, SemanticError> {
+        let Some(name) = &self.default_partition else {
+            return Ok(crate::USER_PARTITION);
+        };
+        let entity = resolve(name).ok_or_else(|| {
+            SemanticError::incorrect(
+                "transaction/default-partition-not-found",
+                format!(
+                    "configured default partition {} is not installed",
+                    name.qualified_name()
+                ),
+            )
+        })?;
+        let bits = partition_bits(entity)
+            .and_then(|bits| {
+                schema.validate_partition_bits(bits)?;
+                Ok(bits)
+            })
+            .map_err(|_| {
+                SemanticError::incorrect(
+                    "transaction/invalid-default-partition",
+                    format!(
+                        "configured default {} is not a partition",
+                        name.qualified_name()
+                    ),
+                )
+            })?;
+        if bits < crate::USER_PARTITION {
+            return Err(SemanticError::incorrect(
+                "transaction/invalid-default-partition",
+                "the default for application entities cannot be a reserved system or transaction partition",
+            ));
+        }
+        Ok(bits)
+    }
+}
 
 enum Affinity {
     Temp(String),
@@ -12,13 +71,25 @@ pub(crate) struct PartitionPolicy {
     affinity: BTreeMap<String, Affinity>,
     system: BTreeSet<String>,
     resolved: BTreeMap<String, u32>,
+    default_partition: u32,
 }
 
 impl PartitionPolicy {
+    #[cfg(test)]
     pub(crate) fn new(
         ops: &[TxOp],
         names: &BTreeSet<String>,
         schema: &Schema,
+        resolve: impl FnMut(&EntityRef) -> Result<u64, SemanticError>,
+    ) -> Result<Self, SemanticError> {
+        Self::with_default(ops, names, schema, crate::USER_PARTITION, resolve)
+    }
+
+    pub(crate) fn with_default(
+        ops: &[TxOp],
+        names: &BTreeSet<String>,
+        schema: &Schema,
+        default_partition: u32,
         mut resolve: impl FnMut(&EntityRef) -> Result<u64, SemanticError>,
     ) -> Result<Self, SemanticError> {
         let mut result = Self {
@@ -26,6 +97,7 @@ impl PartitionPolicy {
             affinity: BTreeMap::new(),
             system: BTreeSet::new(),
             resolved: BTreeMap::new(),
+            default_partition,
         };
         for op in ops {
             match op {
@@ -154,7 +226,7 @@ impl PartitionPolicy {
                 }
                 // Recovered matching excludes reserved system/tx targets.
                 Some(Affinity::Bits(bits)) if *bits >= crate::USER_PARTITION => break *bits,
-                _ => break crate::USER_PARTITION,
+                _ => break self.default_partition,
             }
         };
         for name in path {

@@ -10,6 +10,7 @@ use crate::log_generation::{
     LineageTransactionContent, generation_transaction_hash, request_key_hash,
     tombstone_request_digest,
 };
+use crate::reserved_allocation::ReservedAllocation;
 use crate::state_commitment::checkpoint_state_hash;
 use crate::{
     Database, Digest, DurableTransaction, ErrorCategory, SemanticError, decode_transaction, sha256,
@@ -87,6 +88,12 @@ pub(crate) struct GenerationRewriter {
     previous_hash: Digest,
     source_previous_hash: Digest,
     removed_datoms: u64,
+    source_reserved: ReservedAllocation,
+    output_reserved: ReservedAllocation,
+    source_v2: bool,
+    output_v2: bool,
+    legacy_excision_floor: ReservedAllocation,
+    legacy_excision_before_t: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -103,8 +110,25 @@ impl GenerationRewriter {
         source_database: &Database,
         completed_requests: &BTreeSet<(u64, u64)>,
     ) -> Result<Self, SemanticError> {
-        let pending = source_database
-            .pending_excision_requests_after(0)?
+        let requests = source_database.pending_excision_requests_after(0)?;
+        let completed = requests
+            .iter()
+            .filter(|request| {
+                completed_requests.contains(&(request.request_t, request.request_entity))
+            })
+            .collect::<Vec<_>>();
+        if completed.len() != completed_requests.len() {
+            return Err(fault(
+                "excision/source-completion-proof",
+                "completed excision lacks its protected request facts",
+            ));
+        }
+        let legacy_excision_before_t = completed
+            .iter()
+            .map(|request| source_database.excision_before_t(request))
+            .max()
+            .unwrap_or(0);
+        let pending = requests
             .into_iter()
             .filter(|request| {
                 !completed_requests.contains(&(request.request_t, request.request_entity))
@@ -118,6 +142,8 @@ impl GenerationRewriter {
                 "database has no pending transactional excision requests",
             ));
         }
+        let mut reserved = ReservedAllocation::initial();
+        reserved.observe_datoms(source_database.genesis_datoms())?;
         Ok(Self {
             lineage_id: lineage_id.to_owned(),
             generation,
@@ -127,6 +153,12 @@ impl GenerationRewriter {
             previous_hash: genesis_hash,
             source_previous_hash: genesis_hash,
             removed_datoms: 0,
+            source_reserved: reserved,
+            output_reserved: reserved,
+            source_v2: false,
+            output_v2: false,
+            legacy_excision_floor: ReservedAllocation::initial(),
+            legacy_excision_before_t,
         })
     }
 
@@ -149,6 +181,7 @@ impl GenerationRewriter {
                 "source transaction rows are not a canonical contiguous prefix",
             ));
         }
+        let mut source_checkpoint = None;
         let authenticated_transaction = match &source.encoding {
             SourceLogEncoding::Legacy(payload) => {
                 if sha256(payload) != source.tx_hash {
@@ -186,6 +219,15 @@ impl GenerationRewriter {
                         "lineage source membership commitment is invalid",
                     ));
                 }
+                if content.reserved_frontier.is_some() {
+                    source_checkpoint =
+                        Some(content.validate_reserved_transition(self.source_reserved)?);
+                } else if self.source_v2 {
+                    return Err(fault(
+                        "excision/source-allocation-version",
+                        "source allocation format regresses from ATLC v2 to v1",
+                    ));
+                }
                 let mut transaction = content.to_transaction(source.transaction.previous_hash);
                 transaction.database_id = source.transaction.database_id.clone();
                 transaction
@@ -196,6 +238,22 @@ impl GenerationRewriter {
                 "excision/source-payload",
                 "source payload does not canonically encode the supplied transaction",
             ));
+        }
+        let mut source_reserved = self.source_reserved;
+        if let Some(checkpoint) = source_checkpoint {
+            source_reserved = checkpoint;
+            self.source_v2 = true;
+            // A first authenticated modern checkpoint supersedes the legacy
+            // uncertainty bound. Already emitted v2 state still cannot regress.
+            self.legacy_excision_floor = ReservedAllocation::initial();
+        } else {
+            source_reserved.observe_transaction(&source.transaction)?;
+            if basis_t < self.legacy_excision_before_t {
+                // Resolve the exact frozen cutoff from the complete source.
+                // Preserve the uncertain prefix, not later ordinary growth.
+                self.legacy_excision_floor
+                    .reserve_legacy_excision_floor(source.transaction.eidx_frontier)?;
+            }
         }
         let before = source.transaction.tx_data.len();
         let mut filtered = self.plan.filter_transaction(&source.transaction);
@@ -209,15 +267,51 @@ impl GenerationRewriter {
         // Excluding generation and predecessor is what lets unaffected
         // immutable content survive a COW rewrite by identity.
         let current_frontier = self.database.eidx_frontier();
-        let content = LineageTransactionContent::from_transaction(
-            &self.lineage_id,
-            current_frontier,
-            &filtered,
-        )?;
+        let prior_reserved = self.output_reserved;
+        let mut surviving_reserved = prior_reserved;
+        surviving_reserved.observe_transaction(&filtered)?;
+        let output_v2 = self.output_v2
+            || source_checkpoint.is_some()
+            || source_reserved.frontier() > surviving_reserved.frontier();
+        let after_reserved = if output_v2 {
+            ReservedAllocation::from_frontier(
+                prior_reserved
+                    .frontier()
+                    .max(source_reserved.frontier())
+                    .max(self.legacy_excision_floor.frontier()),
+                filtered.eidx_frontier,
+            )?
+        } else {
+            surviving_reserved
+        };
+        let content = if output_v2 {
+            LineageTransactionContent::from_transaction_v2(
+                &self.lineage_id,
+                current_frontier,
+                prior_reserved,
+                after_reserved,
+                &filtered,
+            )?
+        } else {
+            LineageTransactionContent::from_transaction(
+                &self.lineage_id,
+                current_frontier,
+                &filtered,
+            )?
+        };
         let payload = content.encode()?;
         let content_hash = sha256(&payload);
         filtered = content.to_transaction(self.previous_hash);
-        self.database = self.database.apply_excised_committed(&filtered)?;
+        self.database = if output_v2 {
+            self.database.apply_committed_with_reserved_allocation(
+                &filtered,
+                prior_reserved,
+                after_reserved,
+                true,
+            )?
+        } else {
+            self.database.apply_excised_committed(&filtered)?
+        };
         let state_hash = checkpoint_state_hash(&self.database)?;
         let tx_hash = generation_transaction_hash(
             &self.lineage_id,
@@ -247,6 +341,9 @@ impl GenerationRewriter {
         };
         self.previous_hash = tx_hash;
         self.source_previous_hash = source.tx_hash;
+        self.source_reserved = source_reserved;
+        self.output_reserved = after_reserved;
+        self.output_v2 = output_v2;
         Ok(row)
     }
 
@@ -524,6 +621,115 @@ mod tests {
             rewrite_excision_generation(LINEAGE, 8, genesis_hash, &source, &rows, &completed)
                 .unwrap_err();
         assert_eq!(error.code, "excision/no-pending-requests");
+    }
+
+    #[test]
+    fn legacy_reference_only_claim_survives_cow_and_starts_monotone_v2_content() {
+        // A genuine old allocator issues ordinary receipt-only IDs past a
+        // low DB-partition target that has never been an entity or a tempid.
+        let modern_bootstrap = Database::bootstrap().unwrap();
+        let bootstrap = Database::from_genesis(modern_bootstrap.genesis_datoms().to_vec()).unwrap();
+        let genesis_hash = sha256(&encode_genesis(bootstrap.genesis_datoms()).unwrap());
+        let installed = bootstrap
+            .with(
+                &[TxOp::InstallAttribute(Attribute::new(
+                    SECRET,
+                    Keyword::new("claim", "ref"),
+                    ValueType::Ref,
+                    Cardinality::One,
+                ))],
+                100,
+            )
+            .unwrap();
+        let first = source_row(&installed, genesis_hash, "schema");
+        let receipt_only = installed
+            .db_after
+            .with(
+                &(0..800)
+                    .map(|index| TxOp::RetractEntity(EntityRef::Temp(format!("issued-{index}"))))
+                    .collect::<Vec<_>>(),
+                200,
+            )
+            .unwrap();
+        let second = source_row(&receipt_only, first.tx_hash, "receipts");
+        let reference = receipt_only
+            .db_after
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("owner".into()),
+                    attribute: SECRET,
+                    value: TxValue::Entity(EntityRef::Id(1_750)),
+                }],
+                300,
+            )
+            .unwrap();
+        let owner = reference.tempids["owner"];
+        let third = source_row(&reference, second.tx_hash, "reference");
+        let requested = reference
+            .db_after
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("request".into()),
+                    attribute: DB_EXCISE as u32,
+                    value: TxValue::Entity(EntityRef::Id(owner)),
+                }],
+                400,
+            )
+            .unwrap();
+        let fourth = source_row(&requested, third.tx_hash, "excise");
+        let rows = vec![first, second, third, fourth];
+        let rewritten = rewrite_excision_generation(
+            LINEAGE,
+            7,
+            genesis_hash,
+            &requested.db_after,
+            &rows,
+            &BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(rewritten.removed_datoms, 1);
+        assert!(rewritten.database.values(owner, SECRET).is_empty());
+        let contents = rewritten
+            .rows
+            .iter()
+            .map(|row| LineageTransactionContent::decode(&row.payload).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contents
+                .iter()
+                .map(LineageTransactionContent::version)
+                .collect::<Vec<_>>(),
+            vec![1, 1, 2, 2]
+        );
+        assert_eq!(contents[2].reserved_frontier, Some(1_751));
+        assert_eq!(contents[3].reserved_frontier, Some(1_751));
+        assert!(
+            !contents[2]
+                .tx_data
+                .iter()
+                .any(|datom| datom.value == Value::Ref(1_750))
+        );
+        // Restart solely from published content; no original values or source
+        // generation are available to rescue the reference-only claim.
+        let mut restarted = Database::from_genesis(bootstrap.genesis_datoms().to_vec()).unwrap();
+        let mut reserved = ReservedAllocation::initial();
+        reserved.observe_datoms(bootstrap.genesis_datoms()).unwrap();
+        for (row, content) in rewritten.rows.iter().zip(&contents) {
+            let transaction = content.to_transaction(row.previous_hash);
+            if content.reserved_frontier.is_some() {
+                let after = content.validate_reserved_transition(reserved).unwrap();
+                restarted = restarted
+                    .apply_committed_with_reserved_allocation(&transaction, reserved, after, true)
+                    .unwrap();
+                reserved = after;
+            } else {
+                restarted = restarted.apply_excised_committed(&transaction).unwrap();
+                reserved.observe_transaction(&transaction).unwrap();
+            }
+        }
+        assert_eq!(restarted.reserved_allocation().unwrap().frontier(), 1_751);
+        assert_eq!(reserved.allocate().unwrap(), 1_751);
+        assert!(restarted.same_information_as(&rewritten.database));
     }
 
     #[test]

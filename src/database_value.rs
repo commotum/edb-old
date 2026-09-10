@@ -25,7 +25,9 @@ type ReadFilter = dyn Fn(&DatabaseValue, &Datom) -> bool + Send + Sync;
 /// ident or lookup-ref resolution against this exact immutable database
 /// value. `Tuple` permits that same distinction recursively in ref-typed
 /// tuple slots; `None` slots remain tuple nils. Read boundaries deliberately
-/// have no tempid form.
+/// have no tempid form. Tuple boundaries may contain a leading subset of the
+/// schema's slots, including an empty subset. They are virtual positions, not
+/// stored assertions: a shorter tuple sorts before its longer extensions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RawIndexValue {
     Stored(Value),
@@ -480,6 +482,7 @@ impl LastTxInstantMemo {
 #[derive(Clone)]
 pub struct DatabaseValue {
     basis: ReadBasis,
+    pub(crate) entity_origin: crate::entity_identity::DatabaseOrigin,
     read_identity: Arc<ReadValueIdentity>,
     last_tx_instant_memo: Arc<LastTxInstantMemo>,
     as_of_t: Option<u64>,
@@ -516,6 +519,7 @@ struct TransactionOverlay {
     basis_t: u64,
     eidx_frontier: u64,
     last_tx_instant: i64,
+    reserved_allocation: Option<crate::reserved_allocation::ReservedAllocation>,
 }
 
 /// The result of a pure transaction. These values never advance a connection
@@ -1388,6 +1392,7 @@ impl DatabaseValue {
     pub fn eager(database: Arc<Database>) -> Self {
         let last_tx_instant_memo = Arc::new(LastTxInstantMemo::seeded(database.last_tx_instant()));
         Self {
+            entity_origin: database.entity_origin.clone(),
             basis: ReadBasis::Eager(database),
             read_identity: Arc::new(ReadValueIdentity),
             last_tx_instant_memo,
@@ -1407,6 +1412,7 @@ impl DatabaseValue {
 
     pub(crate) fn tiered(snapshot: TieredSnapshot) -> Self {
         Self {
+            entity_origin: crate::entity_identity::DatabaseOrigin::durable(snapshot.lineage_id()),
             basis: ReadBasis::Native(snapshot),
             read_identity: Arc::new(ReadValueIdentity),
             last_tx_instant_memo: Arc::new(LastTxInstantMemo::empty()),
@@ -1490,13 +1496,40 @@ impl DatabaseValue {
     /// Build an exact db-after for assessment or pure speculation. Chained
     /// values share one committed base and retain only speculative information.
     /// A committed successor still must install an authenticated tiered value.
+    #[cfg(test)]
     pub(crate) fn transaction_overlay(
+        base: DatabaseValue,
+        tx_data: Arc<[Datom]>,
+        schema: Arc<Schema>,
+        basis_t: u64,
+        eidx_frontier: u64,
+        last_tx_instant: i64,
+    ) -> Result<Self, SemanticError> {
+        let mut allocation = base.reserved_allocation()?;
+        if let Some(allocation) = &mut allocation {
+            allocation.observe_datoms(tx_data.iter())?;
+        }
+        Self::transaction_overlay_with_allocation(
+            base,
+            tx_data,
+            schema,
+            basis_t,
+            eidx_frontier,
+            last_tx_instant,
+            allocation,
+        )
+    }
+
+    /// Assessment supplies its final retained cursor, including allocated
+    /// tempids which left no datoms. It cannot be derived from schema alone.
+    pub(crate) fn transaction_overlay_with_allocation(
         mut base: DatabaseValue,
         tx_data: Arc<[Datom]>,
         schema: Arc<Schema>,
         basis_t: u64,
         eidx_frontier: u64,
         last_tx_instant: i64,
+        reserved_allocation: Option<crate::reserved_allocation::ReservedAllocation>,
     ) -> Result<Self, SemanticError> {
         if !base.direct_current() {
             return Err(SemanticError::incorrect(
@@ -1518,6 +1551,12 @@ impl DatabaseValue {
             ));
         }
         validate_frontier(eidx_frontier)?;
+        if let Some(allocation) = reserved_allocation {
+            crate::reserved_allocation::ReservedAllocation::from_frontier(
+                allocation.frontier(),
+                eidx_frontier,
+            )?;
+        }
         if eidx_frontier < base.eidx_frontier() {
             return Err(SemanticError::incorrect(
                 "database/overlay-frontier-regression",
@@ -1610,6 +1649,7 @@ impl DatabaseValue {
         base.read_observer = None;
         base.read_context = None;
         Ok(Self {
+            entity_origin: base.entity_origin.clone(),
             basis: ReadBasis::TransactionOverlay(Arc::new(TransactionOverlay {
                 base,
                 indexes,
@@ -1618,6 +1658,7 @@ impl DatabaseValue {
                 basis_t,
                 eidx_frontier,
                 last_tx_instant,
+                reserved_allocation,
             })),
             read_identity: Arc::new(ReadValueIdentity),
             last_tx_instant_memo: Arc::new(LastTxInstantMemo::seeded(Some(last_tx_instant))),
@@ -1700,6 +1741,16 @@ impl DatabaseValue {
             ReadBasis::Eager(database) => database.eidx_frontier(),
             ReadBasis::Native(snapshot) => snapshot.eidx_frontier(),
             ReadBasis::TransactionOverlay(overlay) => overlay.eidx_frontier,
+        }
+    }
+
+    pub(crate) fn reserved_allocation(
+        &self,
+    ) -> Result<Option<crate::reserved_allocation::ReservedAllocation>, SemanticError> {
+        match &self.basis {
+            ReadBasis::Eager(database) => Ok(database.reserved_allocation()),
+            ReadBasis::Native(snapshot) => snapshot.reserved_allocation(),
+            ReadBasis::TransactionOverlay(overlay) => Ok(overlay.reserved_allocation),
         }
     }
 
@@ -2394,6 +2445,18 @@ impl DatabaseValue {
         self.memoized_prefix_cursor(true, prefix)
     }
 
+    /// Whether an attribute's AVET projection is usable at this exact database
+    /// value. This differs from the attribute's configured `indexed`/`unique`
+    /// schema flags while native background backfill is pending.
+    ///
+    /// Known attributes without AVET return `false`; unknown attribute ids or
+    /// idents return `database/unknown-attribute`. This does not wait for an
+    /// index build or refresh this immutable value. Temporal/filter views
+    /// retain their captured basis's schema and physical readiness.
+    pub fn has_avet(&self, attribute: &AttributeName) -> Result<bool, SemanticError> {
+        Ok(self.physical_avet_ready(self.resolve_attribute(attribute)?))
+    }
+
     /// Whether the physical AVET projection for one logically indexed
     /// attribute is complete at this immutable basis. Logical schema alone is
     /// insufficient while a background backfill is pending.
@@ -2442,7 +2505,7 @@ impl DatabaseValue {
         self.lookup_with_control(attribute, value, &mut |_| Ok(true))
     }
 
-    fn lookup_with_control(
+    pub(crate) fn lookup_with_control(
         &self,
         attribute: u32,
         value: &Value,
@@ -2680,7 +2743,7 @@ impl DatabaseValue {
         value: RawIndexValue,
     ) -> Result<Value, SemanticError> {
         let schema = self.schema().attribute(attribute)?;
-        let value = match (schema.value_type, value) {
+        let mut value = match (schema.value_type, value) {
             (ValueType::Ref, RawIndexValue::Entity(identifier)) => {
                 Value::Ref(self.require_index_entity(&identifier)?)
             }
@@ -2705,7 +2768,33 @@ impl DatabaseValue {
                 ));
             }
         };
+        // A virtual tuple start is allowed to omit trailing slots, unlike an
+        // assertion. Pad only for the existing schema validator, so all slot
+        // types, scalar limits and reference checks remain unchanged. At most
+        // eight slots are admitted and no supplied payload is cloned. Remove
+        // the padding before comparison: [x] must sort before [x, nil].
+        let prefix_length =
+            if let (ValueType::Tuple, Value::Tuple(slots)) = (schema.value_type, &mut value) {
+                let length = slots.len();
+                let stored_length = match schema.tuple.as_ref() {
+                    Some(TupleSpec::Homogeneous(_)) if length <= 8 => length.max(2),
+                    Some(TupleSpec::Heterogeneous(types)) if length <= types.len() => types.len(),
+                    Some(TupleSpec::Composite(attributes)) if length <= attributes.len() => {
+                        attributes.len()
+                    }
+                    // Leave invalid oversized values untouched: the ordinary
+                    // validator supplies its established arity error below.
+                    _ => length,
+                };
+                slots.resize_with(stored_length, || None);
+                Some(length)
+            } else {
+                None
+            };
         self.schema().validate_value(schema, &value)?;
+        if let (Some(length), Value::Tuple(slots)) = (prefix_length, &mut value) {
+            slots.truncate(length);
+        }
         Ok(value)
     }
 
@@ -2715,7 +2804,7 @@ impl DatabaseValue {
         slots: Vec<Option<RawIndexValue>>,
     ) -> Result<Value, SemanticError> {
         let value_types = match attribute.tuple.as_ref() {
-            Some(TupleSpec::Homogeneous(value_type)) => vec![*value_type; slots.len()],
+            Some(TupleSpec::Homogeneous(value_type)) => vec![*value_type; 8],
             Some(TupleSpec::Heterogeneous(value_types)) => value_types.clone(),
             Some(TupleSpec::Composite(attributes)) => attributes
                 .iter()
@@ -2728,12 +2817,10 @@ impl DatabaseValue {
                 ));
             }
         };
-        if !matches!(attribute.tuple, Some(TupleSpec::Homogeneous(_)))
-            && value_types.len() != slots.len()
-        {
+        if slots.len() > value_types.len() {
             return Err(SemanticError::incorrect(
                 "transaction/invalid-tuple-length",
-                format!("tuple requires {} slots", value_types.len()),
+                format!("tuple boundary accepts at most {} slots", value_types.len()),
             ));
         }
         let normalized = value_types
@@ -4898,6 +4985,8 @@ mod tests {
                     AttributeName::Id(BOUNDARY_HETEROGENEOUS),
                     RawIndexValue::Tuple(vec![
                         Some(RawIndexValue::Entity(EntityIdentifier::Id(alice))),
+                        None,
+                        None,
                         None,
                     ]),
                 ))

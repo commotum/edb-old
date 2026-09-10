@@ -88,6 +88,159 @@ fn malformed_edn_is_rejected_before_database_access_without_echoing_values() {
 }
 
 #[test]
+fn configured_partition_cli_preview_commit_and_changed_default_exact_retry() {
+    let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
+        eprintln!("SKIPPED default partition CLI: ATOMIC_POSTGRES_URL unset");
+        return;
+    };
+    let started = Instant::now();
+    let fixture = Fixture::new(&connection);
+    if let Some((writer, peer)) = &fixture.roles {
+        cli(
+            &fixture.admin_url,
+            &["migrate", "--writer-role", writer, "--peer-role", peer],
+        );
+    } else {
+        cli(&fixture.admin_url, &["migrate"]);
+    }
+    cli(&fixture.admin_url, &["create", "--database", "edn"]);
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let endpoint = directory.path().join("transactor.sock");
+    let mut server = Server::start(&fixture.writer_url, "edn", &endpoint);
+    transact(
+        &fixture.peer_url,
+        &endpoint,
+        "schema",
+        include_str!("../examples/edn/schema.edn"),
+    );
+    transact(
+        &fixture.peer_url,
+        &endpoint,
+        "partition",
+        r#"[{:db/ident :app.part/people :db.install/_partition :db.part/db}]"#,
+    );
+    let named = data(
+        &fixture.peer_url,
+        &["query", "--database", "edn", "--file", "-"],
+        "[:find ?e :where [?e :db/ident :app.part/people]]",
+    );
+    let EdnValue::Set(rows) = read_edn(&named).unwrap() else {
+        panic!("relation")
+    };
+    let EdnValue::Vector(row) = &rows[0] else {
+        panic!("row")
+    };
+    let atomic_core::Value::Ref(partition) = atomic_core::edn_value::edn_to_value(&row[0]).unwrap()
+    else {
+        panic!("partition id")
+    };
+    server.stop();
+    let mut command = atomic();
+    configured(&mut command, &fixture.writer_url);
+    command
+        .args([
+            "transactor",
+            "--database",
+            "edn",
+            "--default-partition",
+            ":app.part/people",
+            "--endpoint",
+        ])
+        .arg(&endpoint);
+    let mut server = Server::spawn(command);
+    let intent = r#"[{:db/id "default" :person/name "Configured" :person/email "configured@example.com"}
+        {:db/id "forced" :person/name "Forced"}
+        {:db/force-partition {"forced" :db.part/user}}]"#;
+    let preview = data(
+        &fixture.peer_url,
+        &[
+            "with",
+            "--database",
+            "edn",
+            "--file",
+            "-",
+            "--default-partition",
+            ":app.part/people",
+        ],
+        intent,
+    );
+    assert_eq!(field(&preview, "committed"), EdnValue::Bool(false));
+    let committed = transact(&fixture.peer_url, &endpoint, "placed", intent);
+    let check_placement = |report: &str| {
+        let EdnValue::Map(ids) = field(report, "tempids") else {
+            panic!("tempids")
+        };
+        for (key, bits) in [
+            ("default", partition as u32),
+            ("forced", atomic_core::USER_PARTITION),
+        ] {
+            let (_, EdnValue::Long(id)) = ids
+                .iter()
+                .find(|(k, _)| *k == EdnValue::String(key.into()))
+                .unwrap()
+            else {
+                panic!("id")
+            };
+            assert_eq!(atomic_core::eid_to_part(*id as u64).unwrap(), bits);
+        }
+    };
+    check_placement(&preview);
+    check_placement(&committed);
+    server.stop();
+    // Even an unresolved new default cannot obstruct the original saved receipt.
+    let mut command = atomic();
+    configured(&mut command, &fixture.writer_url);
+    command
+        .args([
+            "transactor",
+            "--database",
+            "edn",
+            "--default-partition",
+            ":missing/partition",
+            "--endpoint",
+        ])
+        .arg(&endpoint);
+    let mut server = Server::spawn(command);
+    let replay = transact(&fixture.peer_url, &endpoint, "placed", intent);
+    assert_eq!(field(&replay, "replayed"), EdnValue::Bool(true));
+    for name in [
+        "basis-t",
+        "tx-hash",
+        "tempids",
+        "tx-data",
+        "db-before-t",
+        "db-after-t",
+    ] {
+        assert_eq!(field(&committed, name), field(&replay, name), "{name}");
+    }
+    server.stop();
+    // Default placement is writer configuration, never a caller override on transact.
+    let mut command = atomic();
+    command.env_remove("ATOMIC_POSTGRES_URL").args([
+        "transact",
+        "--database",
+        "edn",
+        "--file",
+        "-",
+        "--endpoint",
+        "/none",
+        "--request-key",
+        "none",
+        "--default-partition",
+        ":app.part/people",
+    ]);
+    let rejected = command.output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("cli/edn-usage"));
+    println!(
+        "DEFAULT_PARTITION_CLI_OK preview=true commit=true explicit_override=true changed_config_exact_retry=true restricted_roles={} complete_elapsed_us={}",
+        fixture.roles.is_some(),
+        started.elapsed().as_micros()
+    );
+}
+
+#[test]
 fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
     let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIPPED actual EDN CLI: ATOMIC_POSTGRES_URL unset");

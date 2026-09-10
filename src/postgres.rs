@@ -15,9 +15,7 @@ use crate::recent::RecentLimits;
 use crate::sql_io::{GenericClient, SqlClient as Client};
 use crate::state_commitment::CommitmentWork;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
-use crate::tiered_assessor::{
-    AssessmentLimits, AssessmentReadWork, assess_tiered_with_remaining_limits,
-};
+use crate::tiered_assessor::{AssessmentLimits, AssessmentReadWork};
 use crate::{
     Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, OperationContext,
     OperationKind, PostgresConnectionConfig, Program, ProgramBudget, ProgramHash, ProgramKind,
@@ -271,12 +269,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         30,
         include_str!("../migrations/0030_shared_fulltext_pages.sql"),
     ),
+    (
+        31,
+        include_str!("../migrations/0031_reserved_allocation.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 30;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 31;
 
 /// Version of the authenticated fixed-dependency walker whose result GC may
 /// trust. Any future traversal change that adds roots must bump this version
@@ -1019,7 +1021,7 @@ fn retained_generation_program_roots<C: GenericClient>(
             if row.get::<_, Option<String>>(7).as_deref() != Some(lineage.as_str())
                 || row.get::<_, Option<i64>>(8) != Some(sql_basis(basis)?)
                 || row.get::<_, Option<i64>>(9) != Some(sql_basis(frontier)?)
-                || row.get::<_, Option<i16>>(10) != Some(1)
+                || row.get::<_, Option<i16>>(10) != Some(content.version() as i16)
                 || content.lineage_id != lineage
                 || content.basis_t != basis
                 || content.eidx_frontier != frontier
@@ -2295,6 +2297,7 @@ pub struct PostgresStore {
     receipt_read_cores: BTreeMap<String, WeakTieredReadHandle>,
     program_cache: SharedProgramCache,
     capacity_limits: CapacityLimits,
+    transaction_defaults: crate::TransactionDefaults,
     writer_recent_limits: RecentLimits,
 }
 
@@ -2327,6 +2330,7 @@ impl PostgresStore {
             receipt_read_cores: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
+            transaction_defaults: crate::TransactionDefaults::default(),
             writer_recent_limits: RecentLimits::default(),
         }
     }
@@ -2343,8 +2347,13 @@ impl PostgresStore {
             receipt_read_cores: BTreeMap::new(),
             program_cache: Arc::new(Mutex::new(ProgramCache::default())),
             capacity_limits: CapacityLimits::default(),
+            transaction_defaults: crate::TransactionDefaults::default(),
             writer_recent_limits: RecentLimits::default(),
         }
+    }
+
+    pub(crate) fn set_transaction_defaults(&mut self, defaults: crate::TransactionDefaults) {
+        self.transaction_defaults = defaults;
     }
 
     pub(crate) fn set_capacity_limits(
@@ -2875,7 +2884,7 @@ impl PostgresStore {
             .cloned()
             .map(TxOp::InstallAttribute)
             .collect();
-        let database = Database::new(schema)?;
+        let mut database = Database::new(schema)?;
         let bootstrap = Database::bootstrap()?;
         let encoded = encode_genesis(bootstrap.genesis_datoms())?;
         let genesis_hash = sha256(&encoded);
@@ -2970,9 +2979,15 @@ impl PostgresStore {
             )
             .map_err(|error| postgres_error("postgres/create-generation-completion", error))?;
         if let Some((envelope, request_hash, state_hash)) = &initial_envelope {
-            let content = LineageTransactionContent::from_transaction(
+            let content = LineageTransactionContent::from_transaction_v2(
                 &lineage_id,
                 bootstrap.eidx_frontier(),
+                bootstrap
+                    .reserved_allocation()
+                    .expect("new bootstrap allocation"),
+                database
+                    .reserved_allocation()
+                    .expect("new database allocation"),
                 envelope,
             )?;
             let payload = content.encode()?;
@@ -3071,6 +3086,7 @@ impl PostgresStore {
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/create-commit", error))?;
+        database.entity_origin = crate::entity_identity::DatabaseOrigin::durable(&lineage_id);
         Ok(database)
     }
 
@@ -3722,15 +3738,20 @@ impl PostgresStore {
             ));
         }
         let remaining = read_context.remaining()?;
-        let mut assessed = assess_tiered_with_remaining_limits(
-            &observed_db_before,
-            &ops,
-            tx_instant,
-            AssessmentLimits {
-                max_read_datoms: remaining.datoms,
-                max_read_bytes: remaining.retained_bytes,
-            },
-        )?;
+        // Configuration affects fresh allocation only. The receipt-first path
+        // above has already returned any previous outcome without resolving a
+        // possibly changed or removed default-partition name.
+        let mut assessed =
+            crate::tiered_assessor::assess_tiered_with_remaining_limits_and_defaults(
+                &observed_db_before,
+                &ops,
+                tx_instant,
+                AssessmentLimits {
+                    max_read_datoms: remaining.datoms,
+                    max_read_bytes: remaining.retained_bytes,
+                },
+                &self.transaction_defaults,
+            )?;
         assessed.db_before = assessed
             .db_before
             .with_transaction_read_context(Arc::clone(&read_context));
@@ -3781,9 +3802,21 @@ impl PostgresStore {
             let tx_hash = transaction_hash(&payload);
             (payload, None, tx_hash)
         } else {
-            let content = LineageTransactionContent::from_transaction(
+            let content = LineageTransactionContent::from_transaction_v2(
                 &lineage_id,
                 db_before.eidx_frontier(),
+                db_before.reserved_allocation()?.ok_or_else(|| {
+                    fault(
+                        "allocation/missing-native-before",
+                        "native allocation requires authenticated prior state",
+                    )
+                })?,
+                assessed.db_after.reserved_allocation()?.ok_or_else(|| {
+                    fault(
+                        "allocation/missing-native-after",
+                        "native allocation requires assessed successor state",
+                    )
+                })?,
                 &envelope,
             )?;
             let payload = content.encode()?;
@@ -3807,13 +3840,15 @@ impl PostgresStore {
             ));
         }
         let next_basis = sql_basis(envelope.basis_t)?;
-        let successor = db_before_snapshot.authenticated_successor(
-            tx_hash,
-            state_hash,
-            envelope.clone(),
-            &assessed.successor_schema,
-            read_context.as_ref(),
-        )?;
+        let successor = db_before_snapshot
+            .authenticated_successor(
+                tx_hash,
+                state_hash,
+                envelope.clone(),
+                &assessed.successor_schema,
+                read_context.as_ref(),
+            )?
+            .with_reserved_allocation(assessed.db_after.reserved_allocation()?)?;
         if successor.endpoint()
             != (ExactEndpoint {
                 generation: log_generation,
@@ -3901,7 +3936,8 @@ impl PostgresStore {
             if stored.get::<_, String>(0) != lineage_id
                 || stored.get::<_, i64>(1) != next_basis
                 || pg_basis(stored.get(2), "stored content frontier")? != envelope.eidx_frontier
-                || stored.get::<_, i16>(3) != 1
+                || stored.get::<_, i16>(3)
+                    != LineageTransactionContent::decode(&payload)?.version() as i16
                 || stored.get::<_, Vec<u8>>(4) != payload
             {
                 return Err(fault(
@@ -4104,6 +4140,7 @@ pub(crate) struct Recovered {
 #[derive(Clone, Debug)]
 pub(crate) struct AuthenticatedLogTransaction {
     pub(crate) transaction: DurableTransaction,
+    pub(crate) reserved_allocation: Option<crate::reserved_allocation::ReservedAllocation>,
     pub(crate) tx_hash: Digest,
     pub(crate) state_hash: Digest,
     pub(crate) payload: Vec<u8>,
@@ -4249,6 +4286,7 @@ where
         } else {
             Some(digest(row.get(5), "transaction content hash")?)
         };
+        let mut reserved_allocation = None;
         let transaction = if generation == 0 {
             if transaction_hash(&payload) != tx_hash {
                 return Err(fault(
@@ -4303,6 +4341,14 @@ where
                     "lineage transaction membership commitment is invalid",
                 ));
             }
+            reserved_allocation = content
+                .reserved_frontier
+                .map(|reserved| {
+                    crate::reserved_allocation::ReservedAllocation::from_frontier(
+                        reserved, frontier,
+                    )
+                })
+                .transpose()?;
             let mut transaction = content.to_transaction(stored_previous);
             // ATLC commits the stable lineage, not a mutable catalog alias.
             // Consumers authenticate that lineage above, then project the
@@ -4330,6 +4376,7 @@ where
         }
         visit(AuthenticatedLogTransaction {
             transaction,
+            reserved_allocation,
             tx_hash,
             state_hash,
             payload,
@@ -4427,6 +4474,7 @@ pub(crate) fn recover_generation_to_with_visitor<C: GenericClient>(
         ));
     }
     let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
+    database.entity_origin = crate::entity_identity::DatabaseOrigin::durable(&lineage_id);
     let target_basis_sql = sql_basis(target_basis)?;
     let generation_sql = sql_basis(generation)?;
     let rows = if generation == 0 {
@@ -4472,6 +4520,8 @@ pub(crate) fn recover_generation_to_with_visitor<C: GenericClient>(
 
     let mut previous_hash = genesis_hash;
     let mut target_state_hash = [0; 32];
+    let mut reserved = crate::reserved_allocation::ReservedAllocation::initial();
+    reserved.observe_datoms(&database.datoms(crate::View::History, crate::IndexOrder::Eavt))?;
     visit(&database, genesis_hash, None)?;
     for (offset, row) in rows.into_iter().enumerate() {
         let expected_basis = offset as u64 + 1;
@@ -4492,6 +4542,7 @@ pub(crate) fn recover_generation_to_with_visitor<C: GenericClient>(
                 format!("transaction {basis} does not link to its predecessor"),
             ));
         }
+        let mut after_reserved = None;
         let envelope = if generation == 0 {
             if transaction_hash(&payload) != stored_hash {
                 return Err(fault(
@@ -4546,12 +4597,38 @@ pub(crate) fn recover_generation_to_with_visitor<C: GenericClient>(
                     format!("transaction {basis} membership commitment is invalid"),
                 ));
             }
+            if content.reserved_frontier.is_some() {
+                after_reserved = Some(content.validate_reserved_transition(reserved)?);
+            }
             content.to_transaction(previous_hash)
         };
         let request_kind: i16 = row.get(8);
-        database = if generation == 0 || matches!(request_kind, 1 | 2) {
+        if !matches!(request_kind, 0..=2) || (generation == 0 && request_kind != 1) {
+            return Err(fault(
+                "recovery/request-kind",
+                "transaction has an invalid request kind",
+            ));
+        }
+        if after_reserved.is_none() && database.reserved_allocation().is_some() {
+            return Err(fault(
+                "allocation/version-regression",
+                "legacy content follows versioned reserved allocation",
+            ));
+        }
+        database = if let Some(after) = after_reserved {
+            let next = database.apply_committed_with_reserved_allocation(
+                &envelope,
+                reserved,
+                after,
+                request_kind == 0,
+            )?;
+            reserved = after;
+            next
+        } else if generation == 0 || matches!(request_kind, 1 | 2) {
+            reserved.observe_transaction(&envelope)?;
             database.apply_committed(&envelope)?
         } else if request_kind == 0 {
+            reserved.observe_transaction(&envelope)?;
             database.apply_excised_committed(&envelope)?
         } else {
             return Err(fault(
@@ -4583,6 +4660,26 @@ pub(crate) fn recover_generation_to_with_visitor<C: GenericClient>(
                 "transaction {target_basis} state commitment does not match its database value"
             ),
         ));
+    }
+    if generation > 0 && database.reserved_allocation().is_none() {
+        let allocation = crate::allocation_storage::load_reserved_allocation(
+            client,
+            database_id,
+            ExactEndpoint {
+                generation,
+                basis_t: target_basis,
+                tx_hash: target_hash,
+                state_hash: target_state_hash,
+                eidx_frontier: database.eidx_frontier(),
+            },
+        )?
+        .ok_or_else(|| {
+            fault(
+                "allocation/missing-native-proof",
+                "native recovery requires allocation proof",
+            )
+        })?;
+        database = database.with_reserved_allocation(allocation)?;
     }
     Ok(Recovered {
         database,

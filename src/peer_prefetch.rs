@@ -92,6 +92,7 @@ impl HintReadPlan {
             recent: self.recent,
             metadata: self.metadata,
             avet_unready: self.avet_unready,
+            reserved_allocation: Arc::new(OnceLock::new()),
             generation: self.generation,
         };
         let cache = self.tree_cache;

@@ -119,17 +119,7 @@ fn callable_hash(
     match callable {
         CallableRef::Database(reference) => {
             let entity = database_callable_entity(database, reference)?;
-            match database.values(entity, crate::DB_FN as u32)?.as_slice() {
-                [Value::Function(hash)] => Ok(*hash),
-                [] => Err(SemanticError::incorrect(
-                    "program/not-a-database-function",
-                    format!("entity {entity} has no :db/fn value"),
-                )),
-                _ => Err(fault(
-                    "program/invalid-function-binding",
-                    format!("entity {entity} has a malformed :db/fn value"),
-                )),
-            }
+            database_program_hash_with_control(database, entity, &mut |_| Ok(true))
         }
         CallableRef::ExactHash(hash) => Ok(*hash),
         CallableRef::Local(symbol) => Err(SemanticError::new(
@@ -139,6 +129,36 @@ fn callable_hash(
                 "no process-local function registry contains {}",
                 symbol.qualified_name()
             ),
+        )),
+    }
+}
+
+/// Shared temporal binding lookup for transaction expansion and direct reads.
+/// Probe at most two visible values: a function binding is cardinality one.
+/// The controlled cursor also admits raw candidates hidden by a view filter.
+pub(crate) fn database_program_hash_with_control(
+    database: &DatabaseValue,
+    entity: u64,
+    control: &mut dyn FnMut(Option<&crate::Datom>) -> Result<bool, SemanticError>,
+) -> Result<ProgramHash, SemanticError> {
+    let mut values = database.prefix_cursor(&crate::IndexPrefix::Eavt {
+        entity,
+        attribute: Some(crate::DB_FN as u32),
+        value: None,
+    })?;
+    let Some(first) = values.next_with_control(control).transpose()? else {
+        return Err(SemanticError::incorrect(
+            "program/not-a-database-function",
+            format!("entity {entity} has no :db/fn value"),
+        ));
+    };
+    match first.value {
+        Value::Function(hash) if values.next_with_control(control).transpose()?.is_none() => {
+            Ok(hash)
+        }
+        _ => Err(fault(
+            "program/invalid-function-binding",
+            format!("entity {entity} has a malformed :db/fn value"),
         )),
     }
 }

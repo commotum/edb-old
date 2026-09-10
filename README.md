@@ -33,6 +33,8 @@ newer implementation or a universal production/Datomic-parity certification.
   recursive rules, negation, historical sources and dynamic attributes.
 - [Compose native database, tuple and log queries](docs/queries.md), reuse query
   structure and configure join/resource limits.
+- [Configure entity placement and partition hints](docs/partitions.md), and
+  [understand composite identity and native NaN behavior](docs/schema-identity.md).
 - [The operational guide](docs/operations.md) describes provisioning,
   I/O policy, backup/restore, GC and excision.
 - [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
@@ -162,6 +164,10 @@ heap traversal instead of depending on Rust call-stack depth.
 
 `QueryEngine::sequence` / `DatabaseValue::query_sequence` prepare joins and
 aggregates eagerly, then defer Pull and transforms until each row is consumed.
+`QueryEngine::sequence_sources` also accepts mixed database, tuple and log sources;
+bound EDN queries expose the same sequence path. See [composing immutable reads](docs/read-values.md)
+for entity identity comparison, physical AVET readiness, partial tuple seeks and
+read-only invocation of stored native functions.
 `remaining_rows()` counts prepared tuples without running those projections;
 a later error terminates the iterator. Distinct entity bindings remain distinct
 even when their projected maps compare equal. `PullAttribute::transform` accepts

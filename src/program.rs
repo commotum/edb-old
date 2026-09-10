@@ -945,7 +945,37 @@ enum ProgramRead<'a> {
     Exact(&'a DatabaseValue),
 }
 
-type ProgramPrefixCursor<'a> = Box<dyn Iterator<Item = Result<crate::Datom, SemanticError>> + 'a>;
+enum ProgramPrefixCursor<'a> {
+    Eager(std::iter::Cloned<std::slice::Iter<'a, crate::Datom>>),
+    Exact(Box<crate::DatabaseValuePrefixCursor<'a>>),
+}
+
+impl ProgramPrefixCursor<'_> {
+    /// Keep the exact cursor's raw-candidate and hidden merge-loop polls.
+    /// Erasing it to Iterator would make a rejecting filter postpone fuel
+    /// admission and cancellation until the next visible row (or exhaustion).
+    fn next_with_budget(
+        &mut self,
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<Option<crate::Datom>, SemanticError> {
+        let mut poll = |_: Option<&crate::Datom>| {
+            budget.check_cancel()?;
+            budget.charge(1)?;
+            Ok(true)
+        };
+        match self {
+            Self::Eager(cursor) => {
+                poll(None)?;
+                let datom = cursor.next();
+                if let Some(datom) = &datom {
+                    poll(Some(datom))?;
+                }
+                Ok(datom)
+            }
+            Self::Exact(cursor) => cursor.next_with_control(&mut poll).transpose(),
+        }
+    }
+}
 
 impl<'a> ProgramRead<'a> {
     fn schema(self) -> &'a crate::Schema {
@@ -979,25 +1009,47 @@ impl<'a> ProgramRead<'a> {
         }
     }
 
-    fn lookup(self, attribute: u32, value: &Value) -> Result<Option<u64>, SemanticError> {
+    fn lookup(
+        self,
+        attribute: u32,
+        value: &Value,
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<Option<u64>, SemanticError> {
+        budget.check_cancel()?;
+        budget.charge(1)?;
         match self {
             Self::AttributePredicate => {
                 unreachable!("validated attribute predicate attempted a database read")
             }
             Self::Eager(database) => database.lookup(attribute, value),
-            Self::Exact(database) => database.lookup(attribute, value),
+            Self::Exact(database) => database.lookup_with_control(attribute, value, &mut |_| {
+                budget.check_cancel()?;
+                budget.charge(1)?;
+                Ok(true)
+            }),
         }
     }
 
-    fn lookup_input(self, attribute: u32, value: &TxValue) -> Result<Option<u64>, SemanticError> {
+    fn lookup_input(
+        self,
+        attribute: u32,
+        value: &TxValue,
+        budget: &mut ProgramBudget<'_>,
+    ) -> Result<Option<u64>, SemanticError> {
         match self {
             Self::AttributePredicate => {
                 unreachable!("validated attribute predicate attempted a database read")
             }
-            Self::Eager(database) => database
-                .database_value()
-                .resolve_lookup_input(attribute, value),
-            Self::Exact(database) => database.resolve_lookup_input(attribute, value),
+            Self::Eager(database) => database.database_value().resolve_lookup_input_with(
+                attribute,
+                value,
+                &mut |attribute, value| self.lookup(attribute, value, budget),
+            ),
+            Self::Exact(database) => {
+                database.resolve_lookup_input_with(attribute, value, &mut |attribute, value| {
+                    self.lookup(attribute, value, budget)
+                })
+            }
         }
     }
 
@@ -1006,10 +1058,12 @@ impl<'a> ProgramRead<'a> {
             Self::AttributePredicate => {
                 unreachable!("validated attribute predicate attempted a database read")
             }
-            Self::Eager(database) => Ok(Box::new(
-                database.datoms_with_prefix(prefix)?.iter().cloned().map(Ok),
+            Self::Eager(database) => Ok(ProgramPrefixCursor::Eager(
+                database.datoms_with_prefix(prefix)?.iter().cloned(),
             )),
-            Self::Exact(database) => Ok(Box::new(database.query_prefix_cursor(prefix)?)),
+            Self::Exact(database) => Ok(ProgramPrefixCursor::Exact(Box::new(
+                database.query_prefix_cursor(prefix)?,
+            ))),
         }
     }
 }
@@ -1845,19 +1899,19 @@ impl Evaluation<'_, '_, '_, '_> {
                     }
                 }
                 Instruction::LoadOne(attribute) => {
-                    let entity = database_entity_id(self.database, pop(stack)?)?;
+                    let entity = database_entity_id(self.database, pop(stack)?, self.budget)?;
                     let mut datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
                         entity,
                         attribute: Some(*attribute),
                         value: None,
                     })?;
-                    let first = datoms.next().transpose()?;
+                    let first = datoms.next_with_budget(self.budget)?;
                     if first.is_some() {
                         self.budget.charge(1)?;
                     }
                     match first {
                         Some(datom) => {
-                            if datoms.next().transpose()?.is_some() {
+                            if datoms.next_with_budget(self.budget)?.is_some() {
                                 self.budget.charge(1)?;
                                 return Err(incorrect(
                                     "program/not-cardinality-one",
@@ -1875,15 +1929,14 @@ impl Evaluation<'_, '_, '_, '_> {
                     }
                 }
                 Instruction::LoadMany(attribute) => {
-                    let entity = database_entity_id(self.database, pop(stack)?)?;
-                    let datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
+                    let entity = database_entity_id(self.database, pop(stack)?, self.budget)?;
+                    let mut datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
                         entity,
                         attribute: Some(*attribute),
                         value: None,
                     })?;
                     let mut values = Vec::new();
-                    for datom in datoms {
-                        let datom = datom?;
+                    while let Some(datom) = datoms.next_with_budget(self.budget)? {
                         self.budget.charge(1)?;
                         if values.len() >= self.budget.max_collection_items {
                             return Err(busy(
@@ -1896,13 +1949,13 @@ impl Evaluation<'_, '_, '_, '_> {
                     self.push(stack, RuntimeValue::Vector(values))?;
                 }
                 Instruction::Exists(attribute) => {
-                    let entity = database_entity_id(self.database, pop(stack)?)?;
+                    let entity = database_entity_id(self.database, pop(stack)?, self.budget)?;
                     let mut datoms = self.database.prefix_cursor(&IndexPrefix::Eavt {
                         entity,
                         attribute: Some(*attribute),
                         value: None,
                     })?;
-                    let exists = datoms.next().transpose()?.is_some();
+                    let exists = datoms.next_with_budget(self.budget)?.is_some();
                     if exists {
                         self.budget.charge(1)?;
                     }
@@ -2475,6 +2528,7 @@ fn runtime_detail_text(value: &RuntimeValue) -> String {
 fn database_entity_id(
     database: ProgramRead<'_>,
     value: RuntimeValue,
+    budget: &mut ProgramBudget<'_>,
 ) -> Result<u64, SemanticError> {
     match entity_ref(value)? {
         EntityRef::Id(entity) => Ok(entity),
@@ -2485,21 +2539,21 @@ fn database_entity_id(
             )
         }),
         EntityRef::Lookup { attribute, value } => {
-            database.lookup(attribute, &value)?.ok_or_else(|| {
+            database.lookup(attribute, &value, budget)?.ok_or_else(|| {
                 incorrect(
                     "program/entity-not-found",
                     "database lookup reference did not resolve",
                 )
             })
         }
-        EntityRef::LookupInput { attribute, value } => {
-            database.lookup_input(attribute, &value)?.ok_or_else(|| {
+        EntityRef::LookupInput { attribute, value } => database
+            .lookup_input(attribute, &value, budget)?
+            .ok_or_else(|| {
                 incorrect(
                     "program/entity-not-found",
                     "database lookup reference did not resolve",
                 )
-            })
-        }
+            }),
         EntityRef::Temp(_) | EntityRef::Tx => Err(incorrect(
             "program/unresolved-entity-read",
             "transaction-local entity references cannot be read from db-before",
@@ -2586,20 +2640,22 @@ fn execute_query_template(
         let mut next = Vec::new();
         for binding in &bindings {
             budget.check_cancel()?;
-            let entity = resolve_query_entity(database, &pattern.entity, binding, arguments)?;
+            let entity =
+                resolve_query_entity(database, &pattern.entity, binding, arguments, budget)?;
             let value = resolve_query_value(
                 database,
                 pattern.attribute,
                 &pattern.value,
                 binding,
                 arguments,
+                budget,
             )?;
             database.schema().attribute(pattern.attribute)?;
 
             // Every binding-driven index access is charged, including an
             // access which subsequently finds no datoms.
             budget.charge(1)?;
-            let datoms = if let Some(entity) = entity {
+            let mut datoms = if let Some(entity) = entity {
                 database.prefix_cursor(&IndexPrefix::Eavt {
                     entity,
                     attribute: Some(pattern.attribute),
@@ -2619,8 +2675,7 @@ fn execute_query_template(
                 })?
             };
 
-            for datom in datoms {
-                let datom = datom?;
+            while let Some(datom) = datoms.next_with_budget(budget)? {
                 budget.check_cancel()?;
                 // One unit for examining the datom plus its actual value
                 // width. This charges rejected candidates as real work while
@@ -2635,6 +2690,7 @@ fn execute_query_template(
                     &mut candidate,
                     arguments,
                     datom.entity,
+                    budget,
                 )? && unify_query_value(
                     database,
                     pattern.attribute,
@@ -2642,6 +2698,7 @@ fn execute_query_template(
                     &mut candidate,
                     arguments,
                     &datom.value,
+                    budget,
                 )? {
                     charge_query_binding(budget, &candidate)?;
                     if next.len() >= budget.max_collection_items {
@@ -2744,8 +2801,9 @@ fn resolve_query_entity(
     term: &QueryTerm,
     binding: &QueryBinding,
     arguments: &[RuntimeValue],
+    budget: &mut ProgramBudget<'_>,
 ) -> Result<Option<u64>, SemanticError> {
-    query_term_value(database, term, binding, arguments)?
+    query_term_value(database, term, binding, arguments, budget)?
         .map(|value| query_entity_id(database, &value))
         .transpose()
 }
@@ -2781,8 +2839,9 @@ fn resolve_query_value(
     term: &QueryTerm,
     binding: &QueryBinding,
     arguments: &[RuntimeValue],
+    budget: &mut ProgramBudget<'_>,
 ) -> Result<Option<Value>, SemanticError> {
-    query_term_value(database, term, binding, arguments)?
+    query_term_value(database, term, binding, arguments, budget)?
         .map(|value| resolve_query_attribute_value(database, attribute, value))
         .transpose()
 }
@@ -2817,6 +2876,7 @@ fn query_term_value(
     term: &QueryTerm,
     binding: &QueryBinding,
     arguments: &[RuntimeValue],
+    budget: &mut ProgramBudget<'_>,
 ) -> Result<Option<Value>, SemanticError> {
     match term {
         QueryTerm::Variable(variable) => Ok(binding[usize::from(*variable)].clone()),
@@ -2828,6 +2888,7 @@ fn query_term_value(
                 RuntimeValue::Entity(entity) => Value::Ref(database_entity_id(
                     database,
                     RuntimeValue::Entity(entity.clone()),
+                    budget,
                 )?),
                 RuntimeValue::Null | RuntimeValue::Vector(_) | RuntimeValue::Map(_) => {
                     return Err(incorrect(
@@ -2846,6 +2907,7 @@ fn unify_query_entity(
     binding: &mut QueryBinding,
     arguments: &[RuntimeValue],
     entity: u64,
+    budget: &mut ProgramBudget<'_>,
 ) -> Result<bool, SemanticError> {
     if let QueryTerm::Variable(variable) = term {
         let slot = &mut binding[usize::from(*variable)];
@@ -2855,7 +2917,7 @@ fn unify_query_entity(
         *slot = Some(Value::Ref(entity));
         return Ok(true);
     }
-    Ok(resolve_query_entity(database, term, binding, arguments)? == Some(entity))
+    Ok(resolve_query_entity(database, term, binding, arguments, budget)? == Some(entity))
 }
 
 fn unify_query_value(
@@ -2865,6 +2927,7 @@ fn unify_query_value(
     binding: &mut QueryBinding,
     arguments: &[RuntimeValue],
     value: &Value,
+    budget: &mut ProgramBudget<'_>,
 ) -> Result<bool, SemanticError> {
     if let QueryTerm::Variable(variable) = term {
         let slot = &mut binding[usize::from(*variable)];
@@ -2876,7 +2939,10 @@ fn unify_query_value(
         *slot = Some(value.clone());
         return Ok(true);
     }
-    Ok(resolve_query_value(database, attribute, term, binding, arguments)?.as_ref() == Some(value))
+    Ok(
+        resolve_query_value(database, attribute, term, binding, arguments, budget)?.as_ref()
+            == Some(value),
+    )
 }
 
 fn charge_query_binding(
