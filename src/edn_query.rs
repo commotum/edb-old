@@ -1,15 +1,16 @@
 //! EDN query templates compile to the existing native query engine.
 use crate::edn::{EdnValue, read_edn};
 use crate::edn_pull::{
-    EdnAdapterLimits, EdnPullTransforms, admit, admit_many, form_error,
+    EdnAdapterLimits, EdnPullTransforms, admission_size, admit, form_error,
     pull_pattern_from_edn_with_limits, sequential, symbol_name,
 };
 use crate::edn_value::{edn_to_value, query_result_to_edn, return_maps_to_edn};
 use crate::{
     Aggregate, Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, Keyword,
-    Predicate, Query, QueryControl, QueryDataSource, QueryEngine, QueryExtensions, QueryInput,
+    Predicate, PreparedQuery, Query, QueryControl, QueryDataSource, QueryExtensions, QueryInput,
     QueryOutcome, QueryResult, QuerySourceValue, Rule, SemanticError, Term, Value, Variable,
 };
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -37,7 +38,7 @@ pub struct EdnQuery {
 
 #[derive(Clone, Debug)]
 pub struct BoundEdnQuery {
-    pub query: Query,
+    prepared: PreparedQuery,
     pub sources: Vec<QueryDataSource>,
     pub inputs: Vec<QueryInput>,
     pub return_keys: Option<Vec<Value>>,
@@ -76,7 +77,7 @@ impl EdnQuery {
         transforms: &EdnPullTransforms,
         limits: &EdnAdapterLimits,
     ) -> Result<BoundEdnQuery, SemanticError> {
-        admit_many(
+        let (input_nodes, input_bytes) = admission_size(
             std::iter::once(&self.template).chain(arguments.iter().filter_map(|argument| {
                 match argument {
                     EdnQueryArgument::Data(value) => Some(value),
@@ -100,9 +101,6 @@ impl EdnQuery {
         let mut rules = None;
         for (index, (spec, argument)) in self.inputs.iter().zip(arguments).enumerate() {
             let path = format!("query/:in/{index}");
-            if let EdnQueryArgument::Data(value) = argument {
-                admit(value, limits)?;
-            }
             match (spec, argument) {
                 (EdnQueryInput::Source(name), EdnQueryArgument::Source(value)) => {
                     sources.push(QueryDataSource {
@@ -148,15 +146,21 @@ impl EdnQuery {
             }
         }
         let mut compiler = Compiler::new(transforms, limits, &self.template, arguments);
+        compiler.remaining.set(EdnAdapterLimits {
+            max_nodes: limits.max_nodes - input_nodes,
+            max_bytes: limits.max_bytes - input_bytes,
+            ..*limits
+        });
         let (mut query, return_keys) =
             compiler.query(&self.template, &patterns, rules, &BTreeMap::new())?;
         query.inputs = native_specs;
         grounded_inputs.append(&mut query.clauses);
         query.clauses = grounded_inputs;
         // Preparation and execution remain the existing native mechanisms.
-        crate::PreparedQuery::new(&query)?;
+        let prepared = PreparedQuery::new(&query)?;
+        sources.append(&mut compiler.synthetic_sources);
         Ok(BoundEdnQuery {
-            query,
+            prepared,
             sources,
             inputs,
             return_keys,
@@ -165,24 +169,30 @@ impl EdnQuery {
 }
 
 impl BoundEdnQuery {
+    pub fn query(&self) -> &Query {
+        self.prepared.query()
+    }
+
     pub fn execute(
         &self,
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
     ) -> Result<QueryOutcome, SemanticError> {
-        QueryEngine::execute_sources_with_extensions(
-            &self.query,
-            &self.sources,
-            &self.inputs,
-            control,
-            extensions,
-        )
+        match extensions {
+            Some(extensions) => self.prepared.execute_with_extensions(
+                &self.sources,
+                &self.inputs,
+                control,
+                extensions,
+            ),
+            None => self.prepared.execute(&self.sources, &self.inputs, control),
+        }
     }
 
     pub fn result_to_edn(&self, result: &QueryResult) -> Result<EdnValue, SemanticError> {
         match &self.return_keys {
             Some(keys) => {
-                let arity = match &self.query.find {
+                let arity = match &self.query().find {
                     FindSpec::Relation(v) | FindSpec::Tuple(v) => v.len(),
                     _ => {
                         return Err(form_error(
@@ -477,6 +487,10 @@ struct Compiler<'a> {
     limits: &'a EdnAdapterLimits,
     used_variables: BTreeSet<String>,
     fresh: usize,
+    synthetic_sources: Vec<QueryDataSource>,
+    remaining: Cell<EdnAdapterLimits>,
+    rule_names: BTreeSet<String>,
+    rule_data: Option<Arc<EdnValue>>,
 }
 
 impl<'a> Compiler<'a> {
@@ -518,6 +532,10 @@ impl<'a> Compiler<'a> {
             limits,
             used_variables,
             fresh: 0,
+            synthetic_sources: Vec::new(),
+            remaining: Cell::new(*limits),
+            rule_names: BTreeSet::new(),
+            rule_data: None,
         }
     }
 
@@ -531,6 +549,17 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    fn admit_expansion(&self, value: &EdnValue) -> Result<(), SemanticError> {
+        let remaining = self.remaining.get();
+        let (nodes, bytes) = admission_size(std::iter::once(value), &remaining)?;
+        self.remaining.set(EdnAdapterLimits {
+            max_nodes: remaining.max_nodes - nodes,
+            max_bytes: remaining.max_bytes - bytes,
+            ..remaining
+        });
+        Ok(())
+    }
+
     fn query(
         &mut self,
         value: &EdnValue,
@@ -539,50 +568,77 @@ impl<'a> Compiler<'a> {
         source_names: &BTreeMap<String, String>,
     ) -> Result<(Query, Option<Vec<Value>>), SemanticError> {
         let sections = sections(value)?;
-        let mut query = Query::new(
-            self.find(sections["find"], patterns, source_names)?,
-            Vec::new(),
-        );
-        query.with = sections
-            .get("with")
-            .copied()
-            .unwrap_or_default()
+        // `%` is a lexical input, not an expression to evaluate. Keep a scoped,
+        // bounded copy so nested static q can forward the same rules argument.
+        if let Some(value) = rule_input {
+            self.admit_expansion(value)?;
+        }
+        let previous_data =
+            std::mem::replace(&mut self.rule_data, rule_input.map(|v| Arc::new(v.clone())));
+        let rule_definitions = rule_input
+            .and_then(sequential)
+            .or_else(|| sections.get("rules").copied())
+            .unwrap_or_default();
+        let names = rule_definitions
             .iter()
-            .map(variable)
-            .collect::<Result<_, _>>()?;
-        query.inputs = input_specs(&sections)?
-            .into_iter()
-            .filter_map(|spec| {
-                if let EdnQueryInput::Binding(spec) = spec {
-                    Some(spec)
-                } else {
-                    None
-                }
+            .filter_map(|definition| {
+                sequential(definition)
+                    .and_then(|d| d.first())
+                    .and_then(sequential)
+                    .and_then(|h| h.first())
+                    .and_then(symbol_name)
             })
             .collect();
-        query.clauses = self.clauses(
-            sections.get("where").copied().unwrap_or_default(),
-            "$",
-            patterns,
-            source_names,
-        )?;
-        if let Some(rules) = rule_input {
-            query.rules = self.rules(rules, patterns, source_names)?;
-        }
-        if let Some(rules) = sections.get("rules") {
-            // Native map/list query extension: static rule definitions can also
-            // be carried in :rules instead of supplied through %.
-            if rule_input.is_some() {
-                return Err(form_error(
-                    "edn/query-rules",
-                    "supply rules via :rules or %, not both",
-                    "query/:rules",
-                ));
+        let previous_names = std::mem::replace(&mut self.rule_names, names);
+        let result = (|| {
+            let mut query = Query::new(
+                self.find(sections["find"], patterns, source_names)?,
+                Vec::new(),
+            );
+            query.with = sections
+                .get("with")
+                .copied()
+                .unwrap_or_default()
+                .iter()
+                .map(variable)
+                .collect::<Result<_, _>>()?;
+            query.inputs = input_specs(&sections)?
+                .into_iter()
+                .filter_map(|spec| {
+                    if let EdnQueryInput::Binding(spec) = spec {
+                        Some(spec)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            query.clauses = self.clauses(
+                sections.get("where").copied().unwrap_or_default(),
+                "$",
+                patterns,
+                source_names,
+            )?;
+            if let Some(rules) = rule_input {
+                query.rules = self.rules(rules, patterns, source_names)?;
             }
-            query.rules = self.rules_slice(rules, patterns, source_names)?;
-        }
-        let return_keys = self.return_keys(&sections, &query.find)?;
-        Ok((query, return_keys))
+            if let Some(rules) = sections.get("rules") {
+                // Native map/list query extension: static rule definitions can also
+                // be carried in :rules instead of supplied through %.
+                if rule_input.is_some() {
+                    return Err(form_error(
+                        "edn/query-rules",
+                        "supply rules via :rules or %, not both",
+                        "query/:rules",
+                    ));
+                }
+                query.rules = self.rules_slice(rules, patterns, source_names)?;
+            }
+            let return_keys = self.return_keys(&sections, &query.find)?;
+            Ok((query, return_keys))
+        })();
+        self.rule_names = previous_names;
+        self.rule_data = previous_data;
+        result
     }
 
     fn find(
@@ -599,9 +655,14 @@ impl<'a> Compiler<'a> {
             ));
         }
         if let [value] = values
-            && let EdnValue::Vector(tuple) = value
+            && let Some(tuple) = sequential(value)
+            && (matches!(value, EdnValue::Vector(_))
+                || tuple.first().is_some_and(|first| {
+                    sequential(first).is_some()
+                        || symbol_name(first).is_some_and(|v| v.starts_with('?'))
+                }))
         {
-            if let [value, marker] = tuple.as_slice()
+            if let [value, marker] = tuple
                 && symbol_name(marker).as_deref() == Some("...")
             {
                 return Ok(FindSpec::Collection(
@@ -673,6 +734,16 @@ impl<'a> Compiler<'a> {
             } else {
                 pattern
             };
+            let decoded;
+            let pattern = if let EdnValue::String(text) = pattern {
+                decoded = read_edn(text)?;
+                &decoded
+            } else {
+                pattern
+            };
+            // Pattern parameters can be referenced many times; charge every
+            // compiled copy before cloning it, not merely the input once.
+            self.admit_expansion(pattern)?;
             return Ok(FindElement::Pull {
                 source,
                 variable: variable(entity)?,
@@ -847,7 +918,9 @@ impl<'a> Compiler<'a> {
                     }]);
                 }
                 "and" => return self.clauses(rest, &source, patterns, sources),
-                name if plain(name) && matches!(value, EdnValue::List(_)) => {
+                name if plain(name)
+                    && (matches!(value, EdnValue::List(_)) || self.rule_names.contains(name)) =>
+                {
                     return Ok(vec![Clause::Rule {
                         source,
                         name: name.into(),
@@ -900,7 +973,7 @@ impl<'a> Compiler<'a> {
                 "query/:where",
             )
         })?;
-        let (source, args) = source_prefix(args, inherited, sources);
+        let (mut source, args) = source_prefix(args, inherited, sources);
         if tail.is_empty()
             && let Some(predicate) = predicate(&name)
         {
@@ -918,7 +991,9 @@ impl<'a> Compiler<'a> {
             ));
         }
         let (function, args) = if matches!(name.as_str(), "q" | "datomic.api/q") {
-            self.subquery(args, patterns, sources)?
+            let (function, args, nested_source) = self.subquery(args, patterns, sources)?;
+            source = nested_source;
+            (function, args)
         } else {
             (
                 function(&name),
@@ -964,7 +1039,7 @@ impl<'a> Compiler<'a> {
         args: &[EdnValue],
         outer_patterns: &BTreeMap<String, &EdnValue>,
         outer_sources: &BTreeMap<String, String>,
-    ) -> Result<(Function, Vec<Term>), SemanticError> {
+    ) -> Result<(Function, Vec<Term>, String), SemanticError> {
         let Some((template, args)) = args.split_first() else {
             return Err(form_error(
                 "edn/query-subquery",
@@ -984,7 +1059,9 @@ impl<'a> Compiler<'a> {
         let mut source_names = outer_sources.clone();
         let mut patterns = outer_patterns.clone();
         let mut rules = None;
+        let enclosing_rules = self.rule_data.clone();
         let mut values = Vec::new();
+        let mut invocation_source = None;
         for (spec, value) in specs.iter().zip(args) {
             match spec {
                 EdnQueryInput::Source(name) => {
@@ -997,14 +1074,28 @@ impl<'a> Compiler<'a> {
                                 "query/:where/q",
                             )
                         })?;
-                    source_names.insert(
-                        name.clone(),
-                        outer_sources.get(&supplied).cloned().unwrap_or(supplied),
-                    );
+                    let supplied = outer_sources.get(&supplied).cloned().unwrap_or(supplied);
+                    invocation_source.get_or_insert_with(|| supplied.clone());
+                    source_names.insert(name.clone(), supplied);
                 }
                 EdnQueryInput::Binding(_) => values.push(term(value)?),
-                EdnQueryInput::Rules => rules = Some(value),
+                EdnQueryInput::Rules => {
+                    rules = Some(if symbol_name(value).as_deref() == Some("%") {
+                        enclosing_rules.as_deref().ok_or_else(|| {
+                            form_error(
+                                "edn/query-subquery-rules",
+                                "nested % requires an enclosing rules input",
+                                "query/:where/q",
+                            )
+                        })?
+                    } else {
+                        value
+                    });
+                }
                 EdnQueryInput::Pattern(name) => {
+                    let value = symbol_name(value)
+                        .and_then(|name| outer_patterns.get(&name).copied())
+                        .unwrap_or(value);
                     patterns.insert(name.clone(), value);
                 }
             }
@@ -1017,7 +1108,27 @@ impl<'a> Compiler<'a> {
                 "query/:where/q",
             ));
         }
-        Ok((Function::Query(Box::new(query)), values))
+        // Native nested queries install a default source even for source-free
+        // computations. Supply an explicit empty relation, never a connection
+        // or an unrelated ambient database. Names cannot collide with EDN.
+        let source = invocation_source.unwrap_or_else(|| {
+            if let Some(source) = self.synthetic_sources.first() {
+                return source.name.clone();
+            }
+            let name = loop {
+                let name = format!("$__atomic_edn_empty_{}", self.fresh);
+                self.fresh += 1;
+                if self.used_variables.insert(name.clone()) {
+                    break name;
+                }
+            };
+            self.synthetic_sources.push(QueryDataSource {
+                name: name.clone(),
+                value: QuerySourceValue::Tuples(Arc::new(Vec::new())),
+            });
+            name
+        });
+        Ok((Function::Query(Box::new(query)), values, source))
     }
 
     fn rules(

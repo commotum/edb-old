@@ -21,6 +21,8 @@ newer implementation or a universal production/Datomic-parity certification.
 
 ## Start here
 
+- [Submit EDN transactions, queries and pull patterns](docs/edn.md), using native
+  Rust data adapters or the file/stdin CLI.
 - [Run the supported local or remote transactor and separate application](docs/application.md)
   using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
 - [React to transactions with bounded durable consumers](docs/change-consumers.md).

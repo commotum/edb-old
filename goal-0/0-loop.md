@@ -2,9 +2,10 @@
 
 1. Read `0-plan.md` and reconcile the checklist in `1-audit.md` with current docs,
    source and Goal1's externally owned EDN work. Preserve other sessions' changes.
-2. Select the first unfinished folder or its unresolved review entry. Read its
-   document and relevant API/implementation paths, rather than searching only
-   for matching names. Use disjoint parallel reviews where useful.
+2. Select the first unfinished folder, or an unresolved catalog candidate if all
+   folders are reviewed. Reopen completed entries only for changed or conflicting
+   evidence. Read the document and relevant implementation, rather than searching
+   only for matching names. Use disjoint parallel reviews where useful.
 3. Identify user-visible requirements and map them to actual behavior. Inspect
    relevant tests and supported examples to challenge suspected gaps.
 4. Record precise evidence and disposition. Confirm important negative claims

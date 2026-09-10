@@ -135,10 +135,7 @@ fn schema_maps_use_the_existing_system_allocator_and_db_before_rules() {
     assert!(
         empty
             .with_edn(
-                &format!(
-                    "{}",
-                    text.trim_end_matches(']').to_owned() + " {:person/name \"too-early\"}]"
-                ),
+                &(text.trim_end_matches(']').to_owned() + " {:person/name \"too-early\"}]"),
                 10
             )
             .is_err()
@@ -237,7 +234,7 @@ fn nested_reverse_and_anonymous_identities_share_the_typed_normalizer() {
         &before,
         r#"[
       {:db/id "__map/00000000000000000000" :person/name "explicit"}
-      {:person/name "anonymous"}
+      {:db/id nil :person/name "anonymous"}
       {:db/id "parent" :person/name "Parent" :person/children [{:person/name "Child"}]}
       {:db/id "friend" :person/email "friend@example.com" :person/name "Friend"}
       {:person/name "Owner" :person/friend "friend"}
@@ -328,6 +325,32 @@ fn schema_disambiguates_tuples_lookups_and_many_reference_collections() {
         vec![&Value::String("Tuple owner".into())]
     );
     assert_eq!(updated.db_after.values(b, FRIEND), vec![&Value::Ref(a)]);
+    let many_lookup = checked_preview(
+        &created.db_after,
+        r#"[{:db/id "other" :person/children [[:person/email "a@example.com"] [:person/email "b@example.com"]]}]"#,
+        20,
+    );
+    assert_eq!(
+        many_lookup
+            .db_after
+            .values(many_lookup.tempids["other"], CHILD),
+        vec![&Value::Ref(a), &Value::Ref(b)]
+    );
+    assert!(
+        created
+            .db_after
+            .with_edn(
+                r#"[{:person/children [:person/email "a@example.com"]}]"#,
+                20
+            )
+            .is_err()
+    );
+    assert!(
+        created
+            .db_after
+            .with_edn(r#"[{:person/name ["not a scalar"]}]"#, 20)
+            .is_err()
+    );
 }
 
 #[test]
@@ -337,6 +360,7 @@ fn builtins_entity_forms_and_transaction_metadata_use_existing_semantics() {
         &before,
         r#"[
       {:db/id "p" :db/ident :person/alice :person/name "Alice" :person/tags ("a" "b")}
+      {:db/ident :person/required :db.entity/attrs [:person/name]}
       [ :db/add "datomic.tx" :person/name "import run"]]"#,
         10,
     );
@@ -345,7 +369,8 @@ fn builtins_entity_forms_and_transaction_metadata_use_existing_semantics() {
         &added.db_after,
         &format!(
             r#"[[:db/cas :person/alice :person/count nil 1]
-                     [:db/retract {alice} :person/tags "a"]]"#
+                     [:db/retract {alice} :person/tags "a"]
+                     [:db/ensure :person/alice :person/required]]"#
         ),
         20,
     );
@@ -598,6 +623,13 @@ fn postgres_socket_schema_maps_and_receipt_replay_precede_ident_resolution() {
     let replay = replay.report.unwrap();
     assert_eq!(replay.tx_data, receipt.tx_data);
     assert_eq!(replay.tempids, receipt.tempids);
+    let reevaluated =
+        TransactionRequest::from_edn("new-after-repurpose", r#"[{:person/name "Alice"}]"#).unwrap();
+    assert!(
+        peer.transact_socket(server.endpoint(), reevaluated, timeout)
+            .is_err(),
+        "a new request must resolve the repurposed keyword against authoritative db-before"
+    );
     let changed = TransactionRequest::from_edn(
         "alice",
         r#"[{:db/id "alice" :person/name "Bob" :person/email "alice@example.com"}]"#,

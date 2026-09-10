@@ -17,10 +17,12 @@ through the same transaction, query, pull and durability machinery.
 
 ## Status and integration
 
-Implementation started 2026-09-10. The scaffold and actual source were reconciled.
-Stage 1 is active; transaction and query adapters are being developed against its
-shared value contract. The first stored/result conversion regressions passed
-(3 tests, unoptimized); no complete stage is claimed yet.
+Implemented and accepted 2026-09-10. All four stages are complete: reader/writer,
+adapters, public APIs, executable workflow and documentation. The integrated
+two-column raw-relation failure was repaired in its owning native query path;
+the original failing CLI fixture now passes, with hash/scan regressions. Final
+optimized EDN and typed application checks used actual PostgreSQL. This is EDN
+frontend acceptance, not a claim that every Datomic capability is implemented.
 
 The concurrently created Goal 0 is a documentation capability audit, not an
 implementation parent loop. Its plan explicitly identifies Goal 1 as the
@@ -99,7 +101,7 @@ evidence, not active instructions. EDN completion does not imply audit completio
 
 ## Ordered stages
 
-### 1. Shared EDN reader and writer — in progress
+### 1. Shared EDN reader and writer — complete
 
 **Outcome:** A public, reusable Rust EDN value model and reader/writer with a
 tested format contract independent of any database connection.
@@ -118,7 +120,7 @@ including non-string keys, collection/numeric equality, escapes, tags, discarded
 forms, malformed/truncated input and resource boundaries. Precision is retained;
 no evaluation or database access occurs. Record format extensions separately.
 
-### 2. EDN transactions through the existing engine — not started
+### 2. EDN transactions through the existing engine — complete
 
 **Outcome:** Applications submit EDN maps or primitive forms and preview them
 locally, with the same semantics as typed transactions and safe durable retries.
@@ -141,7 +143,7 @@ program rebinding returns the original receipt; changed input under the same
 request key is rejected according to the defined identity contract. Existing
 typed request hashes and old receipt behavior remain valid.
 
-### 3. EDN queries, pull and result data — not started
+### 3. EDN queries, pull and result data — complete
 
 **Outcome:** The same frontend exposes the existing peer-local query/navigation
 capabilities without requiring users to construct native ASTs manually.
@@ -162,7 +164,7 @@ query/pull capabilities do not silently disappear at the EDN interface. Valid ED
 outside an adapter's semantic domain produces a specific conversion error; any
 uncovered documented capability is recorded as a gap, not renamed "complete."
 
-### 4. Usable application path and integrated acceptance — not started
+### 4. Usable application path and integrated acceptance — complete
 
 **Outcome:** EDN is a documented, exercised product capability, not an isolated
 parser or an example that bypasses the normal transactor.
@@ -192,9 +194,124 @@ Goal 1 finishes only when all four outcomes and the end-to-end scenario are
 established. A parser, a successful Alice insert, or a scaffold alone is not
 feature completion. Do not weaken required coverage to obtain a green status.
 
-Current implementation boundary: a shared EDN value/reader/writer remains
-independent of stored `Value`. Transaction EDN will retain a schema-independent
-request representation until authoritative receipt-first processing; existing
-typed encodings remain unchanged. Query and pull adapters reuse native engines.
-Next: finish format/value conversion regressions, integrate the adapters, then
-exercise executable and PostgreSQL acceptance. No runtime result is claimed yet.
+Implemented boundaries and decisions:
+
+- `edn` owns the full data syntax and bounded reader/writer. `edn_value` explicitly
+  converts narrower native domains and prints exact native tags. `edn_transaction`
+  retains unresolved EDN intent; `edn_query`/`edn_pull` reuse prepared native engines.
+- EDN-only submission grammar/envelope 5 and form tag 3 are additive. Typed hashes
+  and durable datoms are unchanged. Whitespace/comments, map/set order and outer
+  transaction order do not change EDN intent; ordered values and numeric
+  representations remain significant. Receipt lookup precedes schema/ident/program
+  resolution, including after restart/rebinding.
+- No duplicate schema installer or allocator was added. Existing automatic schema
+  partitioning and map expansion are reused. Lists/vectors expand for many-valued
+  map attributes; many-reference lookup refs require an outer collection. Omitted
+  attributes and nil/omitted IDs retain documented meanings.
+- `atomic transact/with/query/pull` use ordinary peer/writer boundaries, explicit
+  credentials and file/stdin input. Output failure never means rollback. Confirmed
+  receipts survive full-report formatting/admission failure.
+- Final review repaired cumulative report conversion admission, borrowed-coefficient
+  admission before decimal cloning, Float nonzero underflow rejection and quadratic
+  named-source lookup. Permanent regressions passed. Limits account bytes/work,
+  not measured process RSS.
+- Existing typed-domain gaps remain explicit: arbitrary map/character scalar query
+  inputs, runtime-variable nested query templates and nested return-map materialization
+  are not supplied by the underlying query engine. Native source patterns expose
+  at most five columns; raw tuple scalar values retain the stored-value domain.
+  These boundaries produce explicit adapter errors, not evaluation or coercion.
+  No JVM evaluation was added.
+- The integrated raw-relation repair retains only meaningful pattern columns when
+  calculating required row width, preserving original column ordinals. Implicit
+  and explicit trailing blanks are equivalent, and missing requested columns do
+  not match. Public ASTs, codecs, query budgets and numeric hashing are unchanged.
+  Authority: query reference Data Patterns/Implicit Blanks; recovered `datalog.clj`
+  `extrel-coll` and projection behavior. No replacement query engine was introduced.
+
+Verified intermediate evidence (not the final acceptance snapshot): format13/13
+optimized; transactions9/9 with two actual PostgreSQL cases; query/pull13/13 with
+actual PostgreSQL fulltext/log; 32 adjacent typed transaction/schema/identity/program
+tests; eight submission-codec fixtures. The genuine pre-repair receipt verification
+passed1/1 in17.32s, SHA256 unchanged:
+`e625cb49f32df376c9cf1e5135582347ad502de21dd7ff713f52f210dd123c32`.
+The earlier complete EDN executable workflow passed2/2 with restricted runtime roles
+and actual PostgreSQL. The expanded optimized workflow then failed at its new
+two-column named raw-source join; this remains an acceptance failure until repaired
+and rerun. A manual `transaction_phases` benchmark was not run or counted.
+
+## Final acceptance evidence
+
+Disposable PostgreSQL connection used for final configured checks:
+`host=/tmp/atomic-repair-pg.vA037i port=55471 user=atomic_repair dbname=edn_acceptance_20260910`.
+The existing server was not restarted or reconfigured; `fsync=on` and
+`synchronous_commit=on` were verified. Catalog/role fixtures isolate application
+tests; executable witnesses confirmed restricted writer/peer roles. No existing
+user databases or canonical data were replaced.
+
+Commands below ran with `CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_INCREMENTAL=0` and
+the above `ATOMIC_POSTGRES_URL` for PostgreSQL targets:
+
+```sh
+cargo test --offline --release -j4 --test edn_format --test edn_values --test edn_transactions --test edn_query_pull --test edn_cli --bin atomic -- --nocapture
+cargo test --offline --release -j4 --lib edn_value::tests -- --nocapture
+cargo test --offline --release -j4 --lib submission_codec::tests -- --nocapture
+cargo build --offline --release -j4 --example application_workflow --bin atomic
+cargo test --offline --release -j4 --test product_cli --test query_composition --test query_runtime_sources --test query_semantics --test query_primitives --test query_rules --test query_nested_shapes --test query_dependency_repairs --test query_exact_sources -- --nocapture
+```
+
+- EDN acceptance: **45 passed**, no failed/ignored/skipped cases. Breakdown:
+  format13 (0.03s), stored/results4, transactions9 (1.83s), query/pull15 (1.20s),
+  executable2 (4.05s), binary2. Includes actual fulltext/log sources, schema/ident
+  changes, native program rebinding, malformed input before database access,
+  file/stdin, example fixtures, multiple historical/raw sources and rules/return maps.
+- New conversion admission regressions: **3 passed**. Submission codec/old typed
+  encoding fixtures: **8 passed**, optimized (0.12s).
+- Existing typed query/product group: **63 passed**; one opt-in measurement ignored
+  and not counted. PostgreSQL cases executed. Separate application/writer restart,
+  restricted-role rejection, exact planning/partition/fulltext receipts and explicit
+  recovery all passed. Product target2/2 (4.43s), composition5, dependencies15,
+  exact sources5, nested shapes8, primitives5, rules4, runtime sources10, semantics9.
+- Earlier adjacent transaction checks: **32 passed**, PostgreSQL enabled, under
+  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0` with
+  `cargo test --offline -j4 --test anonymous_identity --test program_transactions
+  --test ref_unique_identity --test schema_information_repair --test tuple_input
+  -- --nocapture --test-threads=2`. Counts7/6/2/8/9. The separately selected
+  `transaction_phases` manual benchmark was ignored, not passed.
+- Genuine pre-repair receipt: **1 passed**, not reseeded. The command used the same
+  server but physical `dbname=atomic_repair`, logical
+  `ATOMIC_IDENTITY_UPGRADE_DATABASE=repair_old_receipt_c0bc499`,
+  `ATOMIC_IDENTITY_UPGRADE_MODE=verify`, and
+  `ATOMIC_IDENTITY_UPGRADE_RECEIPT=/tmp/atomic-repair-pg.vA037i/old-receipts.txt`:
+  `cargo test --offline -j4 --test identity_upgrade -- --ignored --exact
+  old_collided_receipts_remain_exact_but_new_requests_are_repaired --nocapture`.
+  Passed in17.32s; SHA256 above unchanged before/after.
+- Final `cargo fmt --all -- --check` and `git diff --check` passed.
+  `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+  cargo clippy --offline -j4 --all-targets` completed successfully (18.28s).
+  Its 24 distinct pre-existing warnings remain; no new EDN warnings were reported.
+
+The expanded CLI failure is retained as development evidence above, not an
+unresolved failure: final configured optimized acceptance passed the unchanged
+two-column comparison. This is a focused regression set, not a claim that every
+repository test, remote deployment/fault matrix or manual benchmark ran anew.
+
+## Measured costs and handoff
+
+See [the EDN guide](../docs/edn.md#observed-costs) for the complete recorded table,
+environment, reproducible example files and semantic/format boundaries. Increasing
+32/128/512-entity submissions (2,062/8,614/35,110 input bytes) took
+106.658/141.440/333.391ms end-to-end through separate CLI processes and the ordinary
+writer. Corresponding complete query calls took31.004/44.161/57.434ms for
+34/162/674 cumulative rows; single-entity pulls took43.675/42.884/47.636ms.
+Parser and request-preparation costs were measured separately. Large exact decimal
+coefficients/scales preserve representation and compact output; work follows
+actual input/coefficient sizes, not virtual decimal scale. Samples are not
+statistical throughput claims or measured EDN process RSS.
+
+Continuation: no unfinished EDN stage or known acceptance failure remains. Preserve
+this implementation and tests; reopen the owning internal stage if subsequent
+integration finds a regression. Goal 0's independently edited documentation audit
+and its remaining capability findings are not modified or declared solved by this
+child. Its next consumer should use this evidence to reconcile EDN-owned findings,
+while retaining the explicitly recorded native query-domain gaps. No recursive
+goal hierarchy, new parent, JVM runtime or alternative store was created.

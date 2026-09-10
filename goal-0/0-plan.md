@@ -10,12 +10,14 @@ gaps; it does not implement them or create implementation goals automatically.
 
 ## Status and ownership
 
-Started 2026-09-10. Audit in progress. Ten documentation stages follow the ten
-major folders; final synthesis reconciles their findings. The per-file checklist
-and findings are in [1-audit.md](1-audit.md); this plan owns scope and stage status.
-Initial corpus: 90 Markdown documents plus supporting illustrations and the CSV
-manifest. Source has concurrent uncommitted EDN work, so each finding describes
-inspected evidence rather than claiming a frozen or newly tested build.
+Started and initial static pass completed 2026-09-10. All ten documentation
+folders and final synthesis are reviewed: 90/90 Markdown documents, 28 supporting
+illustrations and the CSV manifest are accounted for. The per-file checklist and
+41 deduplicated findings/differences are in [1-audit.md](1-audit.md); this plan owns
+scope and stage status. Findings distinguish gaps, partial support, scope choices
+and unresolved candidates. No tests were executed or product source changed.
+Source has concurrent EDN work, so each finding describes inspected evidence
+rather than claiming a frozen build or complete Datomic conformance.
 
 [Goal1](../goal-1/0-plan.md) owns EDN reading/writing and transaction/query/pull
 frontends in another session. Link EDN requirements to that owner; do not edit its
@@ -60,7 +62,7 @@ explicitly unresolved candidates; it must not call them confirmed absence.
 
 ### 1. Orientation — `00_start_here`
 
-**Status:** Active (7 documents).
+**Status:** Reviewed — initial static pass complete (7 documents).
 
 **Outcome:** Account for promised product, installation, language and release capabilities.
 
@@ -71,7 +73,7 @@ notes and vendor packaging; assess applicability rather than port every old fix.
 
 ### 2. Tutorial workflows — `01_tutorials`
 
-**Status:** Pending (8 documents).
+**Status:** Reviewed — initial static pass complete (8 documents).
 
 **Outcome:** Map each introductory end-to-end workflow to Atomic APIs or tools.
 
@@ -82,7 +84,7 @@ including usability gaps and EDN-owned input paths.
 
 ### 3. Core data model — `02_core_concepts`
 
-**Status:** Pending (6 documents).
+**Status:** Reviewed — initial static pass complete (6 documents).
 
 **Outcome:** Resolve gaps in database values, entities, filters and programming with data.
 
@@ -92,7 +94,7 @@ including usability gaps and EDN-owned input paths.
 
 ### 4. Schema and identity — `03_schema`
 
-**Status:** Pending (4 documents).
+**Status:** Reviewed — initial static pass complete (4 documents).
 
 **Outcome:** Compare schema, evolution, modeling and identity with the documented contract.
 
@@ -103,7 +105,7 @@ behind otherwise present typed APIs.
 
 ### 5. Transactions — `04_transactions`
 
-**Status:** Pending (9 documents).
+**Status:** Reviewed — initial static pass complete (9 documents).
 
 **Outcome:** Account for every documented transaction and synchronization capability.
 
@@ -114,7 +116,7 @@ native equivalents from unsupported behavior.
 
 ### 6. Queries and pull — `05_query_and_pull`
 
-**Status:** Pending (4 documents).
+**Status:** Reviewed — initial static pass complete (4 documents).
 
 **Outcome:** Map query and pull grammar and behavior to actual native capabilities.
 
@@ -125,7 +127,7 @@ evaluation semantics; EDN syntax stays with Goal1.
 
 ### 7. Indexes — `06_indexes`
 
-**Status:** Pending (6 documents).
+**Status:** Reviewed — initial static pass complete (6 documents).
 
 **Outcome:** Resolve differences in raw index access and index lifecycle.
 
@@ -135,7 +137,7 @@ evaluation semantics; EDN syntax stays with Goal1.
 
 ### 8. Peer API and diagnostics — `07_peer_api`
 
-**Status:** Pending (18 documents).
+**Status:** Reviewed — initial static pass complete (18 documents).
 
 **Outcome:** Account for the portable capability behind documented Clojure and Java APIs.
 
@@ -146,7 +148,7 @@ futures, logs, errors and statistics.
 
 ### 9. Operations — `08_operations`
 
-**Status:** Pending (10 documents).
+**Status:** Reviewed — initial static pass complete (10 documents).
 
 **Outcome:** Identify missing deployment, reliability and observability capabilities.
 
@@ -157,7 +159,7 @@ caches, logging and tuning; assess Rust/PostgreSQL equivalents.
 
 ### 10. Optional capabilities — `09_optional`
 
-**Status:** Pending (18 documents).
+**Status:** Reviewed — initial static pass complete (18 documents).
 
 **Outcome:** Account explicitly for optional clients, deployment, maintenance and tooling.
 
@@ -168,7 +170,7 @@ from platform choices and proprietary services.
 
 ### 11. Reconcile the remaining gaps
 
-**Status:** Pending.
+**Status:** Complete for initial static identification; validation candidates remain explicit.
 
 **Outcome:** A coherent catalog of the remaining functionality, with no duplicate
 EDN work, unsupported absence claims or silently omitted documentation areas.
@@ -185,9 +187,14 @@ this goal's completion.
 
 ## Continuation
 
-Start with the first unfinished folder, consulting the per-file checklist. Bounded
-parallel reviews of disjoint folders are useful; integrate actual evidence before
-marking a stage reviewed. Next: finish orientation/tutorial/core review, merge
-schema/transaction/index, query/API and operations/optional reviews, then validate
-the strongest candidates and reconcile the catalog. Do not stop after creating
-this scaffold: gap identification was requested in the same task.
+The requested scaffold and initial corpus-wide identification are complete. Do
+not restart completed folder reviews. If continuing the audit, refresh affected
+source evidence after Goal1 changes and select an unresolved catalog entry.
+
+The highest-priority validation candidate is [ST-03](1-audit.md#st-03): reproduce
+automatic schema/partition allocation near its documented ID boundaries, checking
+the explicit-low-ID workaround and target-version semantics. [SC-01](1-audit.md#sc-01)
+and [SC-02](1-audit.md#sc-02) need semantic/version clarification. The catalog's
+"Where to start" section identifies the most concrete query and operational gaps.
+Keep identification separate from implementation; product fixes need their own
+subsequent scope. Record newly resolved evidence without claiming unrun tests.

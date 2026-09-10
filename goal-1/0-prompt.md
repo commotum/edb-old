@@ -1,5 +1,10 @@
 # Goal 1 continuation prompt
 
+Status: EDN implementation accepted 2026-09-10. Read the plan's evidence/handoff
+first; reopen only for a concrete regression or newly authorized requirement.
+The independently owned Goal 0 is a documentation audit, not an implementation
+loop to start automatically from this prompt.
+
 ```text
 Implement Atomic's native EDN data frontend using
 /home/jake/Developer/atomic/goal-1/0-plan.md and

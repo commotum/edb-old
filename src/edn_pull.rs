@@ -380,6 +380,13 @@ pub(crate) fn admit_many<'a>(
     values: impl Iterator<Item = &'a EdnValue>,
     limits: &EdnAdapterLimits,
 ) -> Result<(), SemanticError> {
+    admission_size(values, limits).map(|_| ())
+}
+
+pub(crate) fn admission_size<'a>(
+    values: impl Iterator<Item = &'a EdnValue>,
+    limits: &EdnAdapterLimits,
+) -> Result<(usize, usize), SemanticError> {
     let mut nodes = 0usize;
     let mut bytes = 0usize;
     for value in values {
@@ -416,7 +423,7 @@ pub(crate) fn admit_many<'a>(
                 return Err(SemanticError::new(
                     ErrorCategory::Busy,
                     "edn/adapter-limit",
-                    "EDN semantic conversion exceeds its depth or node admission limit",
+                    "EDN semantic conversion exceeds its depth, node or byte admission limit",
                 ));
             }
             let children = match value {
@@ -452,5 +459,5 @@ pub(crate) fn admit_many<'a>(
             }
         }
     }
-    Ok(())
+    Ok((nodes, bytes))
 }

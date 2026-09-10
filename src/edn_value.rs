@@ -6,8 +6,10 @@
 
 use crate::edn::EdnValue;
 use crate::{
-    Keyword, QueryResult, QueryValue, ReturnMapShape, ReturnMaps, SemanticError, Symbol, Value,
+    Datom, Keyword, QueryResult, QueryValue, ReturnMapShape, ReturnMaps, SemanticError, Symbol,
+    Value,
 };
+use std::collections::BTreeMap;
 
 const MAX_DEPTH: usize = 64;
 const MAX_NODES: usize = 1_000_000;
@@ -74,7 +76,7 @@ fn from_edn(value: &EdnValue, budget: &mut Budget, depth: usize) -> Result<Value
             Value::BigInt(v.clone())
         }
         EdnValue::BigDec(v) => {
-            budget.bytes(v.digits() as usize)?;
+            budget.bytes(v.as_bigint_and_scale().0.bits().div_ceil(8) as usize)?;
             Value::BigDec(v.clone())
         }
         EdnValue::String(v) => {
@@ -162,11 +164,15 @@ fn from_edn(value: &EdnValue, budget: &mut Budget, depth: usize) -> Result<Value
                     )
                 }
                 (Some("atomic"), "float") => {
-                    let v = match payload.as_ref() {
-                        EdnValue::String(v) => v
-                            .parse::<f32>()
-                            .map_err(|_| invalid("invalid #atomic/float value"))?,
-                        EdnValue::Double(v) => *v as f32,
+                    let (v, nonzero) = match payload.as_ref() {
+                        EdnValue::String(v) => (
+                            v.parse::<f32>()
+                                .map_err(|_| invalid("invalid #atomic/float value"))?,
+                            v.split(['e', 'E']).next().is_some_and(|mantissa| {
+                                mantissa.bytes().any(|b| matches!(b, b'1'..=b'9'))
+                            }),
+                        ),
+                        EdnValue::Double(v) => (*v as f32, *v != 0.0),
                         _ => {
                             return Err(invalid(
                                 "#atomic/float requires a floating-point literal or string",
@@ -175,6 +181,9 @@ fn from_edn(value: &EdnValue, budget: &mut Budget, depth: usize) -> Result<Value
                     };
                     if !v.is_finite() {
                         return Err(invalid("nonfinite float requires #atomic/float-bits"));
+                    }
+                    if v == 0.0 && nonzero {
+                        return Err(invalid("nonzero #atomic/float underflows the stored range"));
                     }
                     Value::Float(v)
                 }
@@ -215,6 +224,70 @@ fn from_edn(value: &EdnValue, budget: &mut Budget, depth: usize) -> Result<Value
 pub fn value_to_edn(value: &Value) -> Result<EdnValue, SemanticError> {
     to_edn(value, &mut Budget::new(), 0)
 }
+
+/// Encode transaction report data with one cumulative conversion budget for
+/// all datoms, containers and temporary IDs. This describes a report, not its
+/// commit status: callers must retain confirmed receipt metadata independently
+/// if the full report exceeds admission or cannot be observed.
+pub fn transaction_report_to_edn(
+    before: u64,
+    after: u64,
+    datoms: &[Datom],
+    tempids: &BTreeMap<String, u64>,
+) -> Result<EdnValue, SemanticError> {
+    report_to_edn(before, after, datoms, tempids, &mut Budget::new())
+}
+
+fn report_to_edn(
+    before: u64,
+    after: u64,
+    datoms: &[Datom],
+    tempids: &BTreeMap<String, u64>,
+    budget: &mut Budget,
+) -> Result<EdnValue, SemanticError> {
+    if datoms.len().saturating_add(tempids.len()) > 100_000 {
+        return Err(limit());
+    }
+    let integer = |value: u64| {
+        i64::try_from(value)
+            .map(EdnValue::Long)
+            .unwrap_or_else(|_| EdnValue::BigInt(value.into()))
+    };
+    // Root, four key/value pairs and the short, fixed metadata payloads.
+    for _ in 0..9 {
+        budget.node(0)?;
+    }
+    budget.bytes(128)?;
+    let mut data = Vec::new();
+    for datom in datoms {
+        // Row container and four scalar fields; value conversion shares budget.
+        for _ in 0..5 {
+            budget.node(2)?;
+        }
+        let value = to_edn(&datom.value, budget, 3)?;
+        data.push(EdnValue::Vector(vec![
+            integer(datom.entity),
+            integer(u64::from(datom.attribute)),
+            value,
+            integer(datom.tx),
+            EdnValue::Bool(datom.added),
+        ]));
+    }
+    let mut ids = Vec::new();
+    for (id, entity) in tempids {
+        budget.node(2)?;
+        budget.node(2)?;
+        budget.bytes(id.len())?;
+        ids.push((EdnValue::String(id.clone()), integer(*entity)));
+    }
+    Ok(EdnValue::Map(vec![
+        (edn_keyword("atomic", "db-before-t"), integer(before)),
+        (edn_keyword("atomic", "db-after-t"), integer(after)),
+        (edn_keyword("atomic", "tx-data"), EdnValue::Vector(data)),
+        (edn_keyword("atomic", "tempids"), EdnValue::Map(ids)),
+    ]))
+}
+
 fn to_edn(value: &Value, budget: &mut Budget, depth: usize) -> Result<EdnValue, SemanticError> {
     budget.node(depth)?;
     Ok(match value {
@@ -225,7 +298,7 @@ fn to_edn(value: &Value, budget: &mut Budget, depth: usize) -> Result<EdnValue, 
             EdnValue::BigInt(v.clone())
         }
         Value::BigDec(v) => {
-            budget.bytes(v.digits() as usize)?;
+            budget.bytes(v.as_bigint_and_scale().0.bits().div_ceil(8) as usize)?;
             EdnValue::BigDec(v.clone())
         }
         Value::Double(v) if v.is_finite() => EdnValue::Double(*v),
@@ -485,4 +558,73 @@ fn decode_hex(text: &str) -> Result<Vec<u8>, SemanticError> {
 /// Convenience constructor for metadata/result maps used by text applications.
 pub fn edn_keyword(namespace: &str, name: &str) -> EdnValue {
     EdnValue::Keyword(Keyword::new(namespace, name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn budget(bytes: usize) -> Budget {
+        Budget {
+            nodes: MAX_NODES,
+            bytes,
+        }
+    }
+
+    #[test]
+    fn report_conversion_shares_payload_and_tempid_admission() {
+        let datom = Datom {
+            entity: 1000,
+            attribute: 1000,
+            value: Value::String("x".repeat(512)),
+            tx: 1000,
+            added: true,
+        };
+        let ids = BTreeMap::new();
+        report_to_edn(0, 1, std::slice::from_ref(&datom), &ids, &mut budget(2048)).unwrap();
+        assert_eq!(
+            report_to_edn(0, 1, &[datom.clone(), datom], &ids, &mut budget(2048))
+                .unwrap_err()
+                .code,
+            "edn/conversion-limit"
+        );
+        let ids = BTreeMap::from([("x".repeat(1024), 1000), ("y".repeat(1024), 1001)]);
+        assert_eq!(
+            report_to_edn(0, 1, &[], &ids, &mut budget(2048))
+                .unwrap_err()
+                .code,
+            "edn/conversion-limit"
+        );
+    }
+
+    #[test]
+    fn exact_coefficients_are_admitted_by_borrowed_size_before_cloning() {
+        let value = bigdecimal::BigDecimal::new(num_bigint::BigInt::from(1) << 4096, i64::MAX);
+        let edn = EdnValue::BigDec(value.clone());
+        let native = Value::BigDec(value);
+        assert_eq!(
+            from_edn(&edn, &mut budget(256), 0).unwrap_err().code,
+            "edn/conversion-limit"
+        );
+        assert_eq!(
+            to_edn(&native, &mut budget(256), 0).unwrap_err().code,
+            "edn/conversion-limit"
+        );
+        from_edn(&edn, &mut budget(1024), 0).unwrap();
+        to_edn(&native, &mut budget(1024), 0).unwrap();
+    }
+
+    #[test]
+    fn explicit_float_conversion_rejects_underflow_but_preserves_signed_zero() {
+        for text in [r#"#atomic/float "1e-999""#, "#atomic/float 1e-100"] {
+            assert!(edn_to_value(&crate::edn::read_edn(text).unwrap()).is_err());
+        }
+        for text in [r#"#atomic/float "-0.000e99""#, "#atomic/float -0.0"] {
+            let Value::Float(value) = edn_to_value(&crate::edn::read_edn(text).unwrap()).unwrap()
+            else {
+                panic!("Float lost")
+            };
+            assert_eq!(value.to_bits(), (-0.0f32).to_bits());
+        }
+    }
 }

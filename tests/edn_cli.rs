@@ -107,10 +107,7 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let endpoint = directory.path().join("transactor.sock");
     let mut server = Server::start(&fixture.writer_url, "edn", &endpoint);
-    let schema = r#"[{:db/ident :person/name :db/valueType :db.type/string :db/cardinality :db.cardinality/one}
-      {:db/ident :person/email :db/valueType :db.type/string :db/cardinality :db.cardinality/one :db/unique :db.unique/identity}
-      {:db/ident :person/aliases :db/valueType :db.type/string :db/cardinality :db.cardinality/many}
-      {:db/ident :person/friends :db/valueType :db.type/ref :db/cardinality :db.cardinality/many} ]"#;
+    let schema = include_str!("../examples/edn/schema.edn");
     assert_eq!(
         field(
             &transact(&fixture.peer_url, &endpoint, "schema", schema),
@@ -118,18 +115,17 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         ),
         EdnValue::Bool(true)
     );
-    let alice = r#"[{:person/name "Alice" :person/email "alice@example.com" :person/aliases ["Al" "A"]
-      :person/friends [{:person/name "Bob" :person/email "bob@example.com"}]}]"#;
+    let alice = include_str!("../examples/edn/people.edn");
     let first = transact(&fixture.peer_url, &endpoint, "alice", alice);
     assert_eq!(field(&first, "replayed"), EdnValue::Bool(false));
-    let query = "[:find ?e ?name :where [?e :person/name ?name]]";
+    let query = include_str!("../examples/edn/names-query.edn");
     let result = data(
         &fixture.peer_url,
         &["query", "--database", "edn", "--file", "-"],
         query,
     );
     assert!(result.contains("Alice") && result.contains("Bob"));
-    let pull = "[:person/name :person/aliases {:person/friends [:person/name]}]";
+    let pull = include_str!("../examples/edn/person-pull.edn");
     let pulled = data(
         &fixture.peer_url,
         &[
@@ -201,6 +197,51 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         "[:find ?e :in $ ?name :where [?e :person/name ?name]]",
     );
     assert!(matches!(read_edn(&filtered).unwrap(), EdnValue::Set(rows) if rows.len() == 1));
+    // Multiple immutable bases and raw rows can be authored in a sources file.
+    let EdnValue::Long(first_t) = field(&first, "basis-t") else {
+        panic!("fixture basis must fit a Long")
+    };
+    let mut sources_file = tempfile::NamedTempFile::new().unwrap();
+    write!(sources_file, "{{$then {{:database \"edn\" :as-of {first_t}}} $now {{:database \"edn\"}} $extra [[\"alice@example.com\" \"external\"]]}}").unwrap();
+    let compared = data(
+        &fixture.peer_url,
+        &[
+            "query",
+            "--database",
+            "edn",
+            "--file",
+            "-",
+            "--sources",
+            sources_file.path().to_str().unwrap(),
+        ],
+        "[:find ?before ?after ?extra :in $then $now $extra :where [$then ?e :person/name ?before] [$now ?e :person/name ?after] [$now ?e :person/email ?email] [$extra ?email ?extra]]",
+    );
+    assert_eq!(
+        read_edn(&compared).unwrap(),
+        read_edn(r#"#{["Alice" "Alicia" "external"]}"#).unwrap()
+    );
+    let mut rules_file = tempfile::NamedTempFile::new().unwrap();
+    rules_file
+        .write_all(b"[[[(named ?e ?name) [?e :person/name ?name]]]]")
+        .unwrap();
+    let return_maps = data(
+        &fixture.peer_url,
+        &[
+            "query",
+            "--database",
+            "edn",
+            "--file",
+            "-",
+            "--inputs",
+            rules_file.path().to_str().unwrap(),
+        ],
+        "[:find ?name :keys name :in $ % :where (named ?e ?name)]",
+    );
+    assert!(
+        return_maps.contains(":name")
+            && return_maps.contains("Alicia")
+            && return_maps.contains("Bob")
+    );
     server.stop();
     // A peer query is independent of writer availability.
     assert!(
@@ -233,7 +274,7 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         .contains("Alicia")
     );
     println!(
-        "EDN_APPLICATION_OK schema=true maps=true nested=true lookup=true omitted_preserved=true preview_isolated=true history=true independent_reads=true restart_exact_retry=true restricted_roles={}",
+        "EDN_APPLICATION_OK schema=true maps=true nested=true lookup=true omitted_preserved=true preview_isolated=true history=true multiple_sources=true rules=true return_maps=true independent_reads=true restart_exact_retry=true restricted_roles={}",
         fixture.roles.is_some()
     );
 
@@ -245,6 +286,10 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         let start = Instant::now();
         let printed = atomic_core::edn::write_edn(&parsed).unwrap();
         let print_us = start.elapsed().as_micros();
+        let start = Instant::now();
+        let prepared = atomic_core::TransactionRequest::from_edn("cost-only", &text).unwrap();
+        let prepare_us = start.elapsed().as_micros();
+        drop(prepared);
         let start = Instant::now();
         let committed = transact(
             &fixture.peer_url,
@@ -281,7 +326,7 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
             panic!("relation shape lost")
         };
         println!(
-            "EDN_COST entities={count} input_bytes={} formatted_bytes={} parse_us={parse_us} print_us={print_us} complete_transact_process_us={commit_us} complete_query_process_us={query_us} complete_pull_process_us={pull_us} query_rows={} query_result_bytes={} pull_result_bytes={}",
+            "EDN_COST entities={count} input_bytes={} formatted_bytes={} parse_us={parse_us} print_us={print_us} parse_and_canonical_request_us={prepare_us} complete_transact_process_us={commit_us} complete_query_process_us={query_us} complete_pull_process_us={pull_us} query_rows={} query_result_bytes={} pull_result_bytes={}",
             text.len(),
             printed.len(),
             rows.len(),

@@ -1,12 +1,14 @@
 //! Text data commands use the ordinary peer and fenced transactor interfaces.
 use atomic_core::edn::{EdnValue, read_edn, write_edn};
-use atomic_core::edn_pull::parse_pull_edn;
+use atomic_core::edn_pull::{entity_identifier_from_edn, parse_pull_edn};
 use atomic_core::edn_query::{EdnQueryArgument, EdnQueryInput, parse_query_edn};
-use atomic_core::edn_value::{edn_keyword, edn_to_value, query_value_to_edn, value_to_edn};
+use atomic_core::edn_value::{
+    edn_keyword, edn_to_value, query_value_to_edn, transaction_report_to_edn,
+};
 use atomic_core::{
-    AttributeName, Connection, DatabaseValue, Datom, EntityIdentifier, ErrorCategory,
-    PostgresConnectionConfig, PullControl, QueryControl, QuerySourceValue, SemanticError,
-    TransactionRequest, Value, postgres_config_from_env, remote_client_config_from_env,
+    Connection, DatabaseValue, Datom, ErrorCategory, PostgresConnectionConfig, PullControl,
+    QueryControl, QuerySourceValue, SemanticError, TransactionRequest, postgres_config_from_env,
+    remote_client_config_from_env,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Read, Write};
@@ -295,6 +297,12 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                     (key("committed"), EdnValue::Bool(true)),
                     (key("basis-t"), integer(commit.basis_t)),
                     (key("replayed"), EdnValue::Bool(commit.replayed)),
+                    (
+                        key("tx-hash"),
+                        EdnValue::String(
+                            commit.tx_hash.iter().map(|b| format!("{b:02x}")).collect(),
+                        ),
+                    ),
                     (key("report-error"), EdnValue::String(error.code.into())),
                 ]))?;
             }
@@ -336,15 +344,13 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
             let EdnValue::Map(source_values) = &sources else {
                 return Err(usage("--sources must contain a map"));
             };
+            let source_values = source_descriptors(source_values)?;
             let mut supplied = BTreeSet::new();
             let mut arguments = Vec::new();
             for input in &query.inputs {
                 match input {
                     EdnQueryInput::Source(name) => {
-                        let descriptor = source_values
-                            .iter()
-                            .find(|(key, _)| source_name(key).as_deref() == Some(name));
-                        let source = if let Some((_, descriptor)) = descriptor {
+                        let source = if let Some(descriptor) = source_values.get(name) {
                             supplied.insert(name.clone());
                             source_value(descriptor, &config, &connection)?
                         } else if name == "$" {
@@ -381,7 +387,7 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         }
         "pull" => {
             let pattern = parse_pull_edn(&text)?;
-            let identifier = entity_identifier(&read_edn(args.required("--entity")?)?)?;
+            let identifier = entity_identifier_from_edn(&read_edn(args.required("--entity")?)?)?;
             let db = view(connection.db(), &args)?;
             let control = PullControl {
                 max_depth: args.size("--max-depth", usize::MAX)?,
@@ -410,37 +416,10 @@ fn report_fields(
     datoms: &[Datom],
     tempids: &BTreeMap<String, u64>,
 ) -> Result<Vec<(EdnValue, EdnValue)>, SemanticError> {
-    // Bound containers before cloning/encoding their contents; the value writer
-    // subsequently enforces total output bytes and nested values.
-    if datoms.len().saturating_add(tempids.len()) > 100_000 {
-        return Err(usage("transaction report exceeds text output item limit"));
-    }
-    let data = datoms
-        .iter()
-        .map(|d| {
-            Ok(EdnValue::Vector(vec![
-                integer(d.entity),
-                integer(u64::from(d.attribute)),
-                value_to_edn(&d.value)?,
-                integer(d.tx),
-                EdnValue::Bool(d.added),
-            ]))
-        })
-        .collect::<Result<_, SemanticError>>()?;
-    Ok(vec![
-        (key("db-before-t"), integer(before)),
-        (key("db-after-t"), integer(after)),
-        (key("tx-data"), EdnValue::Vector(data)),
-        (
-            key("tempids"),
-            EdnValue::Map(
-                tempids
-                    .iter()
-                    .map(|(k, v)| (EdnValue::String(k.clone()), integer(*v)))
-                    .collect(),
-            ),
-        ),
-    ])
+    let EdnValue::Map(fields) = transaction_report_to_edn(before, after, datoms, tempids)? else {
+        unreachable!("report encoder produces a map")
+    };
+    Ok(fields)
 }
 fn view(mut db: DatabaseValue, args: &Arguments) -> Result<DatabaseValue, SemanticError> {
     if args.values.contains_key("--as-of") {
@@ -454,36 +433,26 @@ fn view(mut db: DatabaseValue, args: &Arguments) -> Result<DatabaseValue, Semant
     }
     Ok(db)
 }
-fn entity_identifier(value: &EdnValue) -> Result<EntityIdentifier, SemanticError> {
-    Ok(match value {
-        EdnValue::Long(id) if *id >= 0 => EntityIdentifier::Id(*id as u64),
-        EdnValue::Keyword(name) => EntityIdentifier::Ident(name.clone()),
-        EdnValue::Vector(values) | EdnValue::List(values) if values.len() == 2 => {
-            let attribute = match &values[0] {
-                EdnValue::Keyword(name) => AttributeName::Ident(name.clone()),
-                EdnValue::Long(id) => AttributeName::Id(
-                    u32::try_from(*id)
-                        .map_err(|_| usage("lookup attribute ID is outside range"))?,
-                ),
-                _ => return Err(usage("lookup attribute must be an ident or attribute ID")),
-            };
-            EntityIdentifier::Lookup {
-                attribute,
-                value: edn_to_value(&values[1])?,
-            }
-        }
-        _ => match edn_to_value(value)? {
-            Value::Ref(id) => EntityIdentifier::Id(id),
-            _ => return Err(usage("entity must be an ID, ident or lookup reference")),
-        },
-    })
-}
 fn source_name(value: &EdnValue) -> Option<String> {
     match value {
         EdnValue::Symbol(s) => Some(s.qualified_name()),
         EdnValue::String(s) => Some(s.clone()),
         _ => None,
     }
+}
+fn source_descriptors(
+    fields: &[(EdnValue, EdnValue)],
+) -> Result<BTreeMap<String, &EdnValue>, SemanticError> {
+    let mut sources = BTreeMap::new();
+    for (key, value) in fields {
+        let name = source_name(key)
+            .filter(|name| name.starts_with('$'))
+            .ok_or_else(|| usage("query source names must be source symbols or strings"))?;
+        if sources.insert(name, value).is_some() {
+            return Err(usage("query source names collide after normalization"));
+        }
+    }
+    Ok(sources)
 }
 fn source_value(
     value: &EdnValue,
@@ -567,4 +536,28 @@ fn source_value(
         db = db.history();
     }
     Ok(QuerySourceValue::Database(db))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_source_index_rejects_aliases_and_handles_increasing_inputs() {
+        let EdnValue::Map(aliases) = read_edn(r#"{$x [] "$x" []}"#).unwrap() else {
+            unreachable!()
+        };
+        assert!(source_descriptors(&aliases).is_err());
+        for count in [32, 128, 512, 2048] {
+            let fields: Vec<_> = (0..count)
+                .map(|n| (EdnValue::String(format!("$s{n}")), EdnValue::Long(n)))
+                .collect();
+            let sources = source_descriptors(&fields).unwrap();
+            assert_eq!(sources.len(), count as usize);
+            // Each input is now one indexed lookup, not a fresh map scan.
+            for n in 0..count {
+                assert_eq!(sources.get(&format!("$s{n}")), Some(&&EdnValue::Long(n)));
+            }
+        }
+    }
 }

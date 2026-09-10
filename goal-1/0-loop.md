@@ -30,6 +30,9 @@
    criteria hold. Hand verified results and honest remaining uncertainties back
    to Goal 0; this child's completion is not the parent's finish line.
 
-Current state: execution authorized; Stage 1 active. Goal 0 now owns a concurrent
-documentation audit and explicitly delegates EDN to this independent workstream.
-Read its handoff, but preserve the other session's audit files and stage status.
+Current state: all four EDN stages accepted 2026-09-10. The integrated raw-relation
+gap was repaired and the unchanged CLI scenario passed on actual PostgreSQL.
+Results, commands, measured costs and explicit native-domain gaps are in the plan.
+Do not restart implementation without a new gap; return the handoff to Goal 0's
+independently owned documentation audit. Preserve its files/status and do not
+infer broader Datomic capability completion from this child's acceptance.

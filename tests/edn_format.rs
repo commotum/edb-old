@@ -316,6 +316,36 @@ fn exact_decimal_extreme_scale_printing_is_compact_and_preserves_stored_scale() 
 }
 
 #[test]
+fn finite_double_writer_round_trips_exact_bits_including_subnormals_and_signed_zero() {
+    let mut bits = 0x9e3779b97f4a7c15_u64;
+    let mut values = vec![
+        0.0,
+        -0.0,
+        f64::MAX,
+        f64::MIN,
+        f64::MIN_POSITIVE,
+        f64::from_bits(1),
+        -f64::from_bits(1),
+    ];
+    for _ in 0..512 {
+        bits = bits
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let value = f64::from_bits(bits);
+        if value.is_finite() {
+            values.push(value);
+        }
+    }
+    for expected in values {
+        let text = write_edn(&EdnValue::Double(expected)).unwrap();
+        let EdnValue::Double(actual) = read_edn(&text).unwrap() else {
+            panic!("{text}")
+        };
+        assert_eq!(actual.to_bits(), expected.to_bits(), "{text}");
+    }
+}
+
+#[test]
 fn input_output_token_node_depth_and_stream_work_admission_fail_safely() {
     let opts = |limits| EdnReadOptions {
         limits,
@@ -335,6 +365,14 @@ fn input_output_token_node_depth_and_stream_work_admission_fail_safely() {
         max_token_bytes: 3,
         ..Default::default()
     };
+    assert_eq!(
+        read_edn_with_options("1", &opts(small)).unwrap(),
+        EdnValue::Long(1)
+    );
+    assert_eq!(
+        write_edn_with_limits(&EdnValue::Long(1), small).unwrap(),
+        "1"
+    );
     assert!(read_edn_with_options("\"abcd\"", &opts(small)).is_err());
     assert!(read_edn_with_options("abcd", &opts(small)).is_err());
     let small = EdnLimits {

@@ -160,7 +160,12 @@ pub(super) fn evaluate_tuples(
     if let Some(term) = &pattern.added {
         terms.push((4, term));
     }
-    let width = terms.last().map_or(3, |(column, _)| column + 1);
+    // Raw relations need only the columns actually referenced by a pattern.
+    // Blank slots carry no value constraint or binding, including the implicit
+    // E/A/V blanks used when EDN elides trailing tuple components. Keep original
+    // column ordinals so internal blanks cannot shift subsequent bindings.
+    terms.retain(|(_, term)| !matches!(term, Term::Blank));
+    let width = terms.last().map_or(0, |(column, _)| column + 1);
     let shared: Vec<_> = terms
         .iter()
         .filter(|(_, term)| {

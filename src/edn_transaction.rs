@@ -121,7 +121,12 @@ pub fn read_edn_transaction(text: &str) -> Result<Vec<TxForm>, SemanticError> {
     };
     values
         .into_iter()
-        .map(|value| EdnTransactionForm::from_value(value).map(TxForm::Edn))
+        .enumerate()
+        .map(|(index, value)| {
+            EdnTransactionForm::from_value(value)
+                .map(TxForm::Edn)
+                .map_err(|error| form_error(error, index))
+        })
         .collect()
 }
 
@@ -169,9 +174,11 @@ pub(crate) fn lower_forms(
 ) -> Result<Vec<TxForm>, SemanticError> {
     let mut lowered = Vec::with_capacity(forms.len());
     let adapter = Adapter { database };
-    for form in forms {
+    for (index, form) in forms.iter().enumerate() {
         if let TxForm::Edn(form) = form {
-            adapter.form(form.value(), &mut lowered)?;
+            adapter
+                .form(form.value(), &mut lowered)
+                .map_err(|error| form_error(error, index))?;
         } else {
             lowered.push(form.clone());
         }
@@ -411,7 +418,12 @@ impl Adapter<'_> {
                 ));
             };
             if ident == &Keyword::new("db", "id") {
-                id = Some(self.entity(value)?);
+                // Recovered expand-map treats an absent/nil :db/id alike.
+                id = if matches!(value, EdnValue::Nil) {
+                    None
+                } else {
+                    Some(self.entity(value)?)
+                };
                 continue;
             }
             let (ident, reverse) = if let Some(name) = ident.name.strip_prefix('_') {
@@ -456,15 +468,18 @@ impl Adapter<'_> {
             return Ok(MapValue::Nested(Box::new(self.entity_map(entries)?)));
         }
         if let Some(values) = collection(value) {
-            // A lookup ref is one reference, not a cardinality-many collection.
-            let lookup = (reverse || attribute.value_type == ValueType::Ref)
+            // Recovered expand-map enumerates forward sequences only for Many;
+            // a many-ref lookup is therefore wrapped in an outer collection.
+            // One-valued tuple/ref sequences stay a single value. Reverse map
+            // navigation also retains the native explicit multi-owner surface.
+            let reverse_lookup = reverse
                 && sequence(value).is_some()
                 && values.len() == 2
                 && self.lookup_attribute(&values[0])?.is_some();
-            let tuple = !reverse
-                && attribute.value_type == ValueType::Tuple
-                && attribute.cardinality == Cardinality::One;
-            if !lookup && !tuple {
+            let many = matches!(value, EdnValue::Set(_))
+                || (!reverse && attribute.cardinality == Cardinality::Many)
+                || (reverse && !reverse_lookup);
+            if many {
                 return Ok(MapValue::Many(
                     values
                         .iter()
@@ -620,4 +635,12 @@ fn require_arity(values: &[EdnValue], arity: usize) -> Result<(), SemanticError>
 }
 fn error(code: &'static str, message: &'static str) -> SemanticError {
     SemanticError::incorrect(code, message)
+}
+
+fn form_error(mut error: SemanticError, index: usize) -> SemanticError {
+    error
+        .details
+        .entry("edn_path".into())
+        .or_insert_with(|| format!("tx[{index}]"));
+    error
 }
