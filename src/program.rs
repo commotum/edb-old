@@ -712,6 +712,7 @@ pub struct ProgramBudget<'a> {
     calls: usize,
     cancelled: Option<&'a AtomicBool>,
     deadline: Option<Instant>,
+    query_numeric_bytes: usize,
 }
 
 impl<'a> ProgramBudget<'a> {
@@ -742,6 +743,7 @@ impl<'a> ProgramBudget<'a> {
             calls: 0,
             cancelled: control.cancelled,
             deadline: None,
+            query_numeric_bytes: 16 * 1024 * 1024,
         })
     }
 
@@ -750,6 +752,18 @@ impl<'a> ProgramBudget<'a> {
     pub(crate) fn with_deadline(mut self, deadline: Option<Instant>) -> Self {
         self.deadline = deadline;
         self
+    }
+
+    /// Preserve an enclosing query's numeric admission policy without changing
+    /// the persisted program ABI or transaction-facing ProgramControl.
+    pub(crate) fn with_query_numeric_bytes(mut self, bytes: usize) -> Self {
+        self.query_numeric_bytes = bytes;
+        self
+    }
+
+    pub(crate) fn query_numeric_bytes(&self) -> usize {
+        self.query_numeric_bytes
+            .min(self.query_remaining_value_bytes())
     }
 
     pub fn remaining_fuel(&self) -> u64 {

@@ -258,7 +258,8 @@ fn retained_search_source_pins_protect_blocks_until_bounded_gc() {
     }
     let blocks = |sql: &mut Client| -> i64 {
         sql.query_one(
-            "SELECT count(*) FROM atomic_fulltext_blocks WHERE manifest_hash=$1",
+            "SELECT (SELECT count(*) FROM atomic_fulltext_blocks WHERE manifest_hash=$1) \
+                  + (SELECT count(*) FROM atomic_fulltext_pages WHERE created_for=$1)",
             &[&&source.manifest_hash[..]],
         )
         .unwrap()
@@ -274,6 +275,18 @@ fn retained_search_source_pins_protect_blocks_until_bounded_gc() {
     );
     drop(held);
     drop(old);
+    let retired = |sql: &mut Client| -> bool {
+        sql.query_one(
+            "SELECT NOT EXISTS(SELECT 1 FROM atomic_fulltext_projections WHERE manifest_hash=$1) \
+                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_roots WHERE manifest_hash=$1) \
+                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_blocks WHERE manifest_hash=$1) \
+                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_pages p WHERE p.created_for=$1 \
+                  AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_roots r WHERE r.root_hash=p.block_hash) \
+                  AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_edges e WHERE e.child_hash=p.block_hash) \
+                  AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_builds b WHERE b.manifest_hash=p.created_for))",
+            &[&&source.manifest_hash[..]],
+        ).unwrap().get(0)
+    };
     let mut removed = 0;
     for _ in 0..128 {
         let before = blocks(&mut sql);
@@ -283,11 +296,11 @@ fn retained_search_source_pins_protect_blocks_until_bounded_gc() {
         assert_eq!(applied.fulltext_blocks, preview.fulltext_blocks);
         assert!(applied.fulltext_blocks <= 4096);
         removed += applied.fulltext_blocks;
-        if blocks(&mut sql) == 0 {
+        if retired(&mut sql) {
             break;
         }
     }
-    assert_eq!(blocks(&mut sql), 0, "released search source did not retire");
+    assert!(retired(&mut sql), "released search source did not retire");
     assert!(removed > 0);
     assert_eq!(
         current
@@ -367,7 +380,7 @@ fn immutable_publication_interruption_merkle_reads_and_explicit_repair() {
     );
     let mut sql = Client::connect(url, NoTls).unwrap();
     let unpublished: i64 = sql
-        .query_one("SELECT count(*) FROM atomic_fulltext_blocks", &[])
+        .query_one("SELECT count(*) FROM atomic_fulltext_pages", &[])
         .unwrap()
         .get(0);
     assert!(unpublished > 1);
@@ -385,7 +398,7 @@ fn immutable_publication_interruption_merkle_reads_and_explicit_repair() {
     assert!(stats.spill_bytes > 0);
     assert!(stats.peak_buffer_bytes < 1200);
     let count: i64 = sql
-        .query_one("SELECT count(*) FROM atomic_fulltext_blocks", &[])
+        .query_one("SELECT count(*) FROM atomic_fulltext_pages", &[])
         .unwrap()
         .get(0);
     assert_eq!(count, unpublished, "retry duplicated immutable pages");
@@ -419,12 +432,23 @@ fn immutable_publication_interruption_merkle_reads_and_explicit_repair() {
     assert!(reader.get(b"term/000010x").unwrap().is_none());
     assert!(reader.get(b"term/999999").unwrap().is_none());
     // Missing non-root page is a hard integrity error, never an empty result.
-    let leaf:Vec<u8>=sql.query_one("SELECT block_hash FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash<>$2 AND get_byte(payload,8)=0 LIMIT 1",&[&&source.manifest_hash[..],&&projection.root_hash[..]]).unwrap().get(0);
-    sql.execute(
-        "DELETE FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash=$2",
-        &[&&source.manifest_hash[..], &leaf],
-    )
-    .unwrap();
+    let leaf:Vec<u8>=sql.query_one("SELECT block_hash FROM atomic_fulltext_pages WHERE created_for=$1 AND block_hash<>$2 AND get_byte(payload,8)=0 LIMIT 1",&[&&source.manifest_hash[..],&&projection.root_hash[..]]).unwrap().get(0);
+    // Owner-only fault injection deliberately removes the page and its
+    // incoming retention edges. Ordinary GC may never delete a referenced page.
+    let mut corrupt = sql.transaction().unwrap();
+    corrupt
+        .execute(
+            "DELETE FROM atomic_fulltext_page_edges WHERE child_hash=$1",
+            &[&leaf],
+        )
+        .unwrap();
+    corrupt
+        .execute(
+            "DELETE FROM atomic_fulltext_pages WHERE block_hash=$1",
+            &[&leaf],
+        )
+        .unwrap();
+    corrupt.commit().unwrap();
     let cold_connection = Connection::connect(url, "source", 128).unwrap();
     let cold_reader = cold_connection
         .db()
@@ -441,11 +465,27 @@ fn immutable_publication_interruption_merkle_reads_and_explicit_repair() {
         "fulltext/missing-block"
     );
     assert!(!store.discard_projection(source.manifest_hash, 1).unwrap());
-    assert!(
-        store
-            .discard_projection(source.manifest_hash, 4096)
+    // Shared DAG reclamation releases direct children into the next frontier;
+    // a large batch does not recursively cascade through newly orphaned pages.
+    let mut complete = false;
+    for _ in 0..32 {
+        let before: i64 = sql
+            .query_one("SELECT count(*) FROM atomic_fulltext_pages", &[])
             .unwrap()
-    );
+            .get(0);
+        complete = store
+            .discard_projection(source.manifest_hash, 4096)
+            .unwrap();
+        let after: i64 = sql
+            .query_one("SELECT count(*) FROM atomic_fulltext_pages", &[])
+            .unwrap()
+            .get(0);
+        assert!(before - after <= 4096);
+        if complete {
+            break;
+        }
+    }
+    assert!(complete);
     assert!(store.open(source.manifest_hash, 1).unwrap().is_none());
     store
         .build(

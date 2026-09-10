@@ -1,8 +1,73 @@
 # Product acceptance and operating envelope
 
-Integrated product acceptance was completed on September9,2026. The results
-below describe the delivered native product and its tested operating envelope;
-historical measurements are distinguished from newer verification.
+The September10,2026 repair pass completed all twelve review repairs and integrated
+acceptance. Results below distinguish complete test coverage from individual run
+exit status. The September9 section remains historical evidence.
+
+## September10 repair verification
+
+Permanent regressions now cover declarative negation/disjunction and anonymous
+identity, stack-safe component traversal/recent-log ownership, exact bounded
+arbitrary-precision arithmetic/comparison, delta-sized transaction bookkeeping,
+bounded Pull/indexed query ranges, and incremental fulltext maintenance.
+
+The fulltext primary optimized PostgreSQL matrix passed at64/256/1024documents:
+nontext changes process0search records and upload0pages; fixed text edits admit5
+records and tokenize50bytes. With64-datom canonical leaves, complete foreground
+transact/consolidate/reopen/search/check/drop samples were219–230ms nontext and
+264–276ms text. Routing metadata grows; default4096-datom leaves decode larger
+changed leaves. These are scoped single-host samples, not constant-time guarantees
+or universal transaction throughput. The [fulltext guide](fulltext.md) explains
+the separate counters, empty-corpus bulk path and retention behavior.
+
+The final runtime broad run finished all140targets:973passed,4failed,6ignored and
+7filtered. The four failures were resolved and the entire affected targets rerun:
+library408/408, backup/restore10/10 and service-worker9/9 pass. Thus all977normally
+executed cases have passing coverage across the broad run and clean target reruns;
+the broad command itself was not a zero-exit run. The manifest/backup fixtures now
+isolate intentional corruption from unrelated catalog-wide migration repair. The
+unchanged service target passed on the separate server after concurrent suites
+exhausted the main fixture's80connections. Final library harness concurrency was4;
+tests retain their own internal concurrency. Intermediate failures and interrupted
+polluted-catalog runs are not counted as passes.
+
+Real migration/runtime/search checks pass, including genuine old-binary
+schema26→30 upgrades preserving original4818-/4588-byte genesis values and exact
+retries, plus TLS1.3 on both PostgreSQL listener connections. Dedicated current
+application/transactor processes pass planning/partitions/fulltext and exact
+request replay after an actual immediate PostgreSQL crash. Basis11→13, full
+current/history fingerprints, retained/as-of values and independent reopening
+agree; the pre-crash basis2 reference remains readable. Restart1015ms/replacement
+2061ms, one tail transaction/one range and zero eager materializations are scoped
+samples, not an availability or throughput guarantee. The genuine pre-repair
+direct-map and stored-program receipts still verify without changing their file
+SHA256 `e625cb49f32df376c9cf1e5135582347ad502de21dd7ff713f52f210dd123c32`.
+
+Final saved lifecycle24actions and differential48steps replay successfully,
+byte-identical to their original traces:8writes/3interrupted uploads/3exact retries/
+4consumer resumes, and36accepted/12rejected outcomes respectively. Controlled
+9→3failure reduction was separately exercised as an explicitly injected fixture.
+The seven filtered old-data/crash/generated cases use their dedicated real-fixture
+runs, not missing-environment early returns. Of six ignored cases, the subprocess
+worker is executed by its parent and old-receipt verification ran explicitly;
+four optional comparative measurement campaigns remain unclaimed for this run.
+The Unix protocol witness ran explicitly:66nodes,132/2/3driver calls and396/6/9
+completed Sync/Ready cycles for per-node/batched/compressed upload—not packets or RTT.
+
+Integration also repaired two operations defects: program GC now compares exact
+membership without changing its oldest-first512-program batch policy; a permanent
+513-aged-program case proves both batches and young-program retention. Concurrent
+administrative indexers finish the authenticated winner's pending live-set fold
+instead of rebuilding an unchanged basis. A deterministic964-datom/340-node wasted
+rebuild is eliminated; complete connect/consolidate/drop still costs115.7ms and
+87SQLcalls in that fixture. Corrupt-root reconstruction remains tested.
+
+Builds used Rust1.90, PostgreSQL15.11 with durability enabled, release profile,
+incremental compilation disabled and-j4 on the shared development host. Formatting
+and all-target Clippy pass;24pre-existing warnings remain, with no new warning from
+the repairs. This is not a warning-free or deployment certification.
+
+## September9 historical acceptance
 
 ## What has been exercised
 
@@ -66,8 +131,9 @@ remain available in Git history at commit `d1670aeabffa92ad54fd200e86aee675351eb
   compression) for66nodes; driver calls are not TCP round trips.
 - Fulltext is eventual and supplied-view validated, not a basis-stable ranking
   service. A402-document native fixture read10167search bytes cold and0SQL warm;
-  its build wrote1543191cumulative spill bytes. Full source projection rebuilding
-  is not an incremental-build or arbitrary-scale claim.
+  its historical build wrote1543191cumulative spill bytes. That September9
+  full-projection build is superseded by the incremental maintenance above;
+  neither sample establishes arbitrary-scale search throughput.
 - The earlier100k-record G3 import/restore/inspection values remain
   [historical baselines](operations.md#historical-g3-integrated-acceptance--2026-09-09),
   not measurements of the newer reader/cache/maintenance paths.
@@ -108,8 +174,8 @@ Do not reuse the shared application server for an availability-destroying test.
 A default green test run with missing PostgreSQL/TLS/crash configuration is not
 evidence that those paths executed.
 
-The final supported binary/example build and all-target compile passed.
-The broad library run passed341tests with1ignored; PostgreSQL was deliberately
+The September9 supported binary/example build and all-target compile passed.
+That broad library run passed341tests with1ignored; PostgreSQL was deliberately
 unset there, so its early-return tests are not counted as live PostgreSQL proof.
 The configured suites above and the historical implementation records supply that proof. Thirty focused
 maintenance tests and ten commitment tests also passed against actual PostgreSQL.

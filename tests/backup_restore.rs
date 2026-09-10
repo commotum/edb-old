@@ -15,8 +15,29 @@ mod common;
 
 const ITEM_VALUE: u32 = 1_000;
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+fn connection() -> Option<common::PostgresFixture> {
+    let connection = std::env::var("ATOMIC_POSTGRES_URL").ok()?;
+    // Corruption and interrupted restore fixtures must not make another
+    // test's migrate discover exceptional offline catalog-repair work.
+    Some(common::PostgresFixture::new(&connection, "backup_restore"))
+}
+
+fn retry_semantic_fence<T>(
+    mut operation: impl FnMut() -> Result<T, atomic_core::SemanticError>,
+) -> Result<T, atomic_core::SemanticError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match operation() {
+            Err(error)
+                if error.category == ErrorCategory::Busy
+                    && error.code == "operations/semantic-gc-pinned"
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
 }
 
 fn user(eidx: u64) -> u64 {
@@ -118,9 +139,10 @@ fn assert_same_information(
 
 #[test]
 fn restored_native_receipts_survive_backup_restore_backup_and_exact_retry() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_request_base_source");
     let first_target = unique("backup_request_base_first_target");
     let second_target = unique("backup_request_base_second_target");
@@ -252,9 +274,10 @@ fn restored_native_receipts_survive_backup_restore_backup_and_exact_retry() {
 
 #[test]
 fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_source");
     let directory = backup_directory();
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
@@ -497,9 +520,10 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
 
 #[test]
 fn same_basis_generations_are_exact_points_and_restore_remains_lineage_local() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_generation_source");
     let directory = backup_directory();
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
@@ -660,9 +684,10 @@ fn same_basis_generations_are_exact_points_and_restore_remains_lineage_local() {
 
 #[test]
 fn live_backup_generation_pin_blocks_point_restore_cutover_and_retry_converges() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_pin_source");
     let directory = backup_directory();
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
@@ -730,9 +755,10 @@ fn live_backup_generation_pin_blocks_point_restore_cutover_and_retry_converges()
 
 #[test]
 fn interrupted_root_publication_never_exposes_a_partial_point_and_retry_converges() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_root_faults");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
@@ -827,9 +853,10 @@ fn interrupted_root_publication_never_exposes_a_partial_point_and_retry_converge
 
 #[test]
 fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_restore_faults");
     let directory = backup_directory();
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
@@ -898,7 +925,9 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
             &handoff_target,
             || {
                 probed = true;
-                let collection = handoff_operator.collect_garbage(Duration::ZERO).unwrap();
+                let collection =
+                    retry_semantic_fence(|| handoff_operator.collect_garbage(Duration::ZERO))
+                        .unwrap();
                 assert!(
                     collection
                         .log_generations
@@ -1093,7 +1122,8 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
     let abandoned_lineage: String = abandoned_identity.get(0);
     let abandoned_generation: i64 = abandoned_identity.get(1);
     let mut abandoned_operator = PostgresOperator::connect(&abandoned_connection).unwrap();
-    let first_collection = abandoned_operator.collect_garbage(Duration::ZERO).unwrap();
+    let first_collection =
+        retry_semantic_fence(|| abandoned_operator.collect_garbage(Duration::ZERO)).unwrap();
     assert!(
         first_collection
             .request_base_archives
@@ -1138,20 +1168,7 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
         // Other parallel fixtures can hold the catalog-wide GC fence. That
         // documented Busy response is retryable; corruption and other errors
         // must still fail immediately, and contention must not wait forever.
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match abandoned_operator.collect_garbage(Duration::ZERO) {
-                Ok(_) => break,
-                Err(error)
-                    if error.category == ErrorCategory::Busy
-                        && error.code == "operations/semantic-gc-pinned"
-                        && std::time::Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(error) => panic!("restore cleanup failed: {error}"),
-            }
-        }
+        retry_semantic_fence(|| abandoned_operator.collect_garbage(Duration::ZERO)).unwrap();
     }
     assert!(
         collected,
@@ -1213,9 +1230,10 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
 
 #[test]
 fn permanently_claimed_restore_build_is_never_resumed_or_activated() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_abandoned_restore_source");
     let directory = backup_directory();
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
@@ -1303,9 +1321,10 @@ fn permanently_claimed_restore_build_is_never_resumed_or_activated() {
 
 #[test]
 fn corrupted_external_object_fails_deep_verification() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_corrupt");
     let directory = backup_directory();
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
@@ -1340,9 +1359,10 @@ fn corrupted_external_object_fails_deep_verification() {
 
 #[test]
 fn corrupt_derived_roots_fall_back_to_older_tree_then_log_only() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_derived_fallback");
     let tree_directory = backup_directory();
     let log_directory = backup_directory();
@@ -1455,9 +1475,10 @@ fn corrupt_derived_roots_fall_back_to_older_tree_then_log_only() {
 
 #[test]
 fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let source = unique("backup_temporal_functions");
     let target = unique("restore_temporal_functions");
     let directory = backup_directory();
@@ -1587,7 +1608,7 @@ fn backup_restores_every_temporal_function_version_without_legacy_aliases() {
     // The exact active-generation marks, not a mutable alias, must keep the
     // whole temporal/transitive graph alive.
     let mut target_operator = PostgresOperator::connect(&target_connection).unwrap();
-    target_operator.collect_garbage(Duration::ZERO).unwrap();
+    retry_semantic_fence(|| target_operator.collect_garbage(Duration::ZERO)).unwrap();
     let mut restored_store = PostgresStore::connect(&target_connection).unwrap();
     assert_eq!(
         restored_store.resolve_program(old_hash).unwrap(),

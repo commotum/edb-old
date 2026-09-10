@@ -43,7 +43,67 @@ fn historical_function<'a>(sql: &'a str, name: &str) -> &'a str {
     &sql[start..end]
 }
 
+/// Strip the later optional artifacts from this private, stopped fixture before
+/// restoring schema23. Canonical log/program/tree values are never rewritten.
+fn remove_migrations_26_through_30(transaction: &mut postgres::Transaction<'_>) {
+    let installed: i64 = transaction
+        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
+        .unwrap()
+        .get(0);
+    if installed <= 25 {
+        return;
+    }
+    assert_eq!(
+        installed, 30,
+        "add explicit rollback for newer fixture artifacts"
+    );
+    for relation in [
+        "atomic_change_checkpoints",
+        "atomic_remote_writer_endpoints",
+    ] {
+        assert_eq!(
+            transaction
+                .query_one(&format!("SELECT count(*) FROM {relation}"), &[])
+                .unwrap()
+                .get::<_, i64>(0),
+            0,
+            "stopped upgrade fixture must not discard consumer or routing state",
+        );
+    }
+    // Search and compressed blocks are discardable projections. Remove their
+    // tables, functions and external trigger, not just migration version rows.
+    transaction
+        .batch_execute(
+            "DROP TRIGGER atomic_tree_manifest_fulltext_garbage ON atomic_tree_manifests;
+         DROP TABLE atomic_fulltext_page_edges, atomic_fulltext_page_roots,
+                    atomic_fulltext_page_builds, atomic_fulltext_page_garbage,
+                    atomic_fulltext_pages, atomic_fulltext_projections,
+                    atomic_fulltext_blocks, atomic_fulltext_garbage,
+                    atomic_change_checkpoints, atomic_remote_writer_endpoints,
+                    atomic_tree_node_blocks;
+         DROP FUNCTION atomic_fulltext_gc_pin_key(),
+                       atomic_validate_fulltext_page_source(),
+                       atomic_validate_fulltext_projection_root(),
+                       atomic_enqueue_fulltext_source_pages(BYTEA),
+                       atomic_track_fulltext_page_reference(),
+                       atomic_retire_fulltext_build(),
+                       atomic_finish_fulltext_build(BYTEA),
+                       atomic_fulltext_garbage_candidates(BIGINT),
+                       atomic_collect_fulltext_garbage(BIGINT),
+                       atomic_mark_fulltext_garbage(),
+                       atomic_validate_fulltext_block_insert(),
+                       atomic_reject_fulltext_mutation(),
+                       atomic_validate_remote_writer_endpoint(),
+                       atomic_discover_remote_writer(TEXT,TEXT),
+                       atomic_validate_tree_node_block_insert(),
+                       atomic_reject_tree_node_block_mutation();
+         DELETE FROM atomic_schema_migrations WHERE version BETWEEN 26 AND 30;",
+        )
+        .unwrap();
+}
+
 fn remove_migration_25(transaction: &mut postgres::Transaction<'_>) {
+    remove_migrations_26_through_30(transaction);
     let installed: i64 = transaction
         .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
         .unwrap()

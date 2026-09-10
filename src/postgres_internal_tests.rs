@@ -812,6 +812,14 @@ fn already_current_migrate_does_not_lock_live_log_tables_for_repair() {
         .unwrap();
 
     let mut client = client_in_schema(&connection, &isolated);
+    // Other isolated fixtures share the migrator's database-wide advisory
+    // lock. Wait for that setup contention before imposing the relation-lock
+    // deadline under test. The session guard must be on this same backend:
+    // migrate's nested transaction lock is reentrant, and dropping the
+    // migrator releases the guard without changing production lock semantics.
+    client
+        .query_one("SELECT pg_advisory_lock($1)", &[&0x41544f4d_i64])
+        .unwrap();
     client.batch_execute("SET lock_timeout TO '500ms'").unwrap();
     let mut concurrent_migrator = crate::PostgresMigrator::from_client(client);
     concurrent_migrator.migrate().unwrap();

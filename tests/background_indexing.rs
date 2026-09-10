@@ -1,3 +1,5 @@
+mod common;
+
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, BackgroundIndexingStats, Cardinality, EntityRef,
     ErrorCategory, Keyword, PostgresIndexer, PostgresStore, Schema, TransactionRequest,
@@ -9,8 +11,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ITEM_COUNT: u32 = 1_000;
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+fn connection() -> Option<common::PostgresFixture> {
+    std::env::var("ATOMIC_POSTGRES_URL")
+        .ok()
+        .map(|url| common::PostgresFixture::new(&url, "background_indexing"))
 }
 
 fn unique(prefix: &str) -> String {
@@ -339,9 +343,10 @@ fn wait_for_stats(
 
 #[test]
 fn default_service_adopts_the_creation_publication_without_rebuilding_it() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_default");
     let initial_basis = setup(&connection, &database_id);
     let service = TransactionService::start(service_config(
@@ -360,9 +365,10 @@ fn default_service_adopts_the_creation_publication_without_rebuilding_it() {
 
 #[test]
 fn basis_zero_is_published_at_creation_and_first_novelty_advances_it() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_empty");
     setup_empty(&connection, &database_id);
     let service = TransactionService::start_with_indexing(
@@ -407,9 +413,10 @@ fn basis_zero_is_published_at_creation_and_first_novelty_advances_it() {
 
 #[test]
 fn incomplete_live_fold_is_finished_before_the_bounded_tail_merge() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_incomplete_fold");
     setup(&connection, &database_id);
 
@@ -497,9 +504,10 @@ fn incomplete_live_fold_is_finished_before_the_bounded_tail_merge() {
 
 #[test]
 fn finishing_a_multibatch_publication_does_not_index_a_new_subthreshold_tail() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_finite_demand");
     setup(&connection, &database_id);
     let seed = TransactionService::start(service_config(
@@ -669,9 +677,10 @@ fn finishing_a_multibatch_publication_does_not_index_a_new_subthreshold_tail() {
 
 #[test]
 fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_corrupt_seed");
     let initial_basis = setup(&connection, &database_id);
 
@@ -775,9 +784,10 @@ fn restart_repairs_over_a_corrupt_latest_manifest_from_an_older_valid_base() {
 
 #[test]
 fn divergent_corrupt_root_requires_explicit_administrative_rebuild() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_divergent_corrupt");
     setup(&connection, &database_id);
     let seed_service = TransactionService::start(service_config(
@@ -855,9 +865,10 @@ fn divergent_corrupt_root_requires_explicit_administrative_rebuild() {
 
 #[test]
 fn background_publication_bounds_novelty_without_hiding_committed_replays() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_pressure");
     let initial_basis = setup(&connection, &database_id);
     let service = TransactionService::start_with_indexing(
@@ -952,9 +963,10 @@ fn background_publication_bounds_novelty_without_hiding_committed_replays() {
 
 #[test]
 fn lease_loss_settles_hard_limit_parked_and_queued_work_as_definitely_unavailable() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_lease_loss");
     setup(&connection, &database_id);
     let service = TransactionService::start_with_indexing(
@@ -1022,9 +1034,10 @@ fn lease_loss_settles_hard_limit_parked_and_queued_work_as_definitely_unavailabl
 
 #[test]
 fn competing_corrupt_revision_is_repaired_without_closing_writes() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("background_index_race");
     let initial_basis = setup(&connection, &database_id);
     let service = TransactionService::start_with_indexing(
@@ -1037,19 +1050,49 @@ fn competing_corrupt_revision_is_repaired_without_closing_writes() {
         stats.published_basis_t == initial_basis && stats.jobs_completed == 0
     });
 
-    // Hold node access so the worker selects the old revision but cannot reach
-    // publication. A competing corrupt root then wins the exact next physical
-    // coordinate. The indexer must reselect and repair it; this is normal CAS
-    // contention, not a reason to close the authoritative transaction writer.
+    // Permit startup/search checks and base reads, but stop an actual node
+    // INSERT after the worker has selected its predecessor. ACCESS EXCLUSIVE
+    // would also block the initial search check before any job can begin;
+    // synchronously seeded indexing stats do not promise that check finished.
+    // A competing corrupt root then wins the exact next physical coordinate.
+    // The indexer must reselect and repair it without closing the writer.
     let mut saboteur = Client::connect(&connection, NoTls).unwrap();
     let mut poison = saboteur.transaction().unwrap();
     poison
-        .batch_execute("LOCK TABLE atomic_tree_nodes IN ACCESS EXCLUSIVE MODE")
+        .batch_execute("LOCK TABLE atomic_tree_nodes IN SHARE MODE")
         .unwrap();
     let committed = client
         .transact(request("race-commit", 7), Duration::from_secs(2))
         .unwrap();
     wait_for_stats(&service, |stats| stats.job_in_flight);
+    // Use a separate observer so PostgreSQL activity snapshots refresh outside
+    // the long sabotage transaction. Do not assume job_in_flight alone means
+    // the worker has reached the intended immutable-node upload boundary.
+    let mut observer = Client::connect(&connection, NoTls).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting: bool = observer
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks l \
+                 JOIN pg_catalog.pg_stat_activity a ON a.pid=l.pid \
+                 WHERE a.datname=current_database() \
+                 AND l.relation='atomic_tree_nodes'::regclass \
+                 AND l.mode='RowExclusiveLock' AND NOT l.granted)",
+                &[],
+            )
+            .unwrap()
+            .get(0);
+        if waiting {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "background job did not reach its node-write barrier: {:?}",
+            service.background_indexing_stats()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eprintln!("BACKGROUND_RACE_BARRIER observed_node_write_lock=true");
     let row = poison
         .query_one(
             "SELECT tx_hash, state_hash, eidx_frontier \

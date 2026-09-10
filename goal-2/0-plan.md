@@ -6,7 +6,7 @@ Complete Stage2 of `/home/jake/Developer/atomic/goal-0/0-plan.md`: repair R6
 (recursive stored-component retraction in both assessors) and R12 (recursive
 last-owner destruction of the recent-log predecessor chain). Preserve all Goal1
 repairs, immutable values, exact transaction meaning, retained snapshots and
-durable request receipts. Status: **complete (2026-09-10)**. Goal0 now owns Goal3.
+durable request receipts. Status: **complete (2026-09-10)**. Goal0 is also complete.
 
 Use `/home/jake/Developer/atomic/datomic_pro_docs` as semantic authority and
 `/home/jake/Developer/atomic/1.0.7705` as architectural evidence. The recovered
@@ -128,6 +128,6 @@ rather than calling a skipped PG test proof.
   Formatting/diff checks and all-target Clippy pass with pre-existing warnings;
   lint hygiene remains Stage7. Logs are in the disposable fixture root.
 
-Continuation: Goal2 complete; return to Goal0 and execute Goal3 R4/R11. Preserve
+Continuation: Goal2 and Goal0's integrated acceptance are complete. Preserve
 the iterative release when Goal4 maintains counts. Reopen Goal2 for any integrated
 ownership/traversal/lease gap; no child-of-child folders or corrective parent.

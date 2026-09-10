@@ -41,6 +41,8 @@ const PEER_TABLES: &[&str] = &[
     "atomic_tree_node_blocks",
     "atomic_fulltext_blocks",
     "atomic_fulltext_projections",
+    "atomic_fulltext_pages",
+    "atomic_fulltext_page_roots",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
     "atomic_tree_publications",
@@ -54,6 +56,8 @@ const PEER_TABLES: &[&str] = &[
     "atomic_semantic_commitment_roots",
 ];
 const WRITER_SELECT_TABLES: &[&str] = &[
+    "atomic_fulltext_page_edges",
+    "atomic_fulltext_page_builds",
     "atomic_remote_writer_endpoints",
     "atomic_transactor_leases",
     "atomic_log_generation_checkpoints",
@@ -72,6 +76,10 @@ const WRITER_SELECT_TABLES: &[&str] = &[
     "atomic_semantic_commitment_roots",
 ];
 const WRITER_INSERT_TABLES: &[&str] = &[
+    "atomic_fulltext_pages",
+    "atomic_fulltext_page_edges",
+    "atomic_fulltext_page_roots",
+    "atomic_fulltext_page_builds",
     "atomic_remote_writer_endpoints",
     "atomic_transactions",
     "atomic_requests",
@@ -106,6 +114,7 @@ const WRITER_UPDATE_TABLES: &[&str] = &[
 ];
 
 const WRITER_FUNCTIONS: &[&str] = &[
+    "atomic_finish_fulltext_build(bytea)",
     "atomic_discover_remote_writer(text,text)",
     "atomic_apply_tree_publication_work(bytea,bigint)",
     "atomic_finish_tree_build(bytea)",

@@ -1,9 +1,11 @@
 use bigdecimal::BigDecimal;
 use num_bigint::BigInt;
-use num_traits::One;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
+
+#[path = "value_numeric.rs"]
+mod numeric;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Keyword {
@@ -97,31 +99,7 @@ impl Value {
     /// integral refs, decimals and binary floats share a hash when index_cmp
     /// considers them equal. This is internal: no persisted hash format changes.
     pub(crate) fn logical_hash(&self, state: &mut impl Hasher) {
-        if let Some(number) = Numeric::from_value(self) {
-            0u8.hash(state);
-            match number {
-                Numeric::NegativeInfinity => 0u8.hash(state),
-                Numeric::PositiveInfinity => 2u8.hash(state),
-                Numeric::NaN => 3u8.hash(state),
-                Numeric::Finite {
-                    numerator,
-                    denominator,
-                } => {
-                    1u8.hash(state);
-                    let mut left = numerator.clone();
-                    let mut right = denominator.clone();
-                    while right != BigInt::from(0) {
-                        let rest = &left % &right;
-                        left = right;
-                        right = rest;
-                    }
-                    if left < BigInt::from(0) {
-                        left = -left;
-                    }
-                    (&numerator / &left).hash(state);
-                    (&denominator / &left).hash(state);
-                }
-            }
+        if numeric::hash(self, state) {
             return;
         }
         self.non_numeric_rank().hash(state);
@@ -207,11 +185,8 @@ impl Value {
     /// explicit type rank for the supported non-numeric types instead of JVM
     /// class-name ordering.
     pub fn index_cmp(&self, other: &Self) -> Ordering {
-        match (Numeric::from_value(self), Numeric::from_value(other)) {
-            (Some(left), Some(right)) => return left.cmp(&right),
-            (Some(_), None) => return Ordering::Less,
-            (None, Some(_)) => return Ordering::Greater,
-            (None, None) => {}
+        if let Some(ordering) = numeric::compare(self, other) {
+            return ordering;
         }
 
         let rank = self.non_numeric_rank().cmp(&other.non_numeric_rank());
@@ -380,154 +355,10 @@ fn compare_tuple(left: &[Option<Value>], right: &[Option<Value>]) -> Ordering {
     left.len().cmp(&right.len())
 }
 
-#[derive(Clone, Debug)]
-enum Numeric {
-    NegativeInfinity,
-    Finite {
-        numerator: BigInt,
-        denominator: BigInt,
-    },
-    PositiveInfinity,
-    NaN,
-}
-
-impl Numeric {
-    fn from_value(value: &Value) -> Option<Self> {
-        match value {
-            Value::Long(value) => Some(Self::integer(BigInt::from(*value))),
-            Value::Ref(value) => Some(Self::integer(BigInt::from(*value))),
-            Value::BigInt(value) => Some(Self::integer(value.clone())),
-            Value::BigDec(value) => {
-                let (mut numerator, scale) = value.as_bigint_and_exponent();
-                if scale >= 0 {
-                    Some(Self::Finite {
-                        numerator,
-                        denominator: pow10(scale as u64),
-                    })
-                } else {
-                    numerator *= pow10(scale.unsigned_abs());
-                    Some(Self::integer(numerator))
-                }
-            }
-            Value::Float(value) => Some(Self::from_f32(*value)),
-            Value::Double(value) => Some(Self::from_f64(*value)),
-            _ => None,
-        }
-    }
-
-    fn integer(numerator: BigInt) -> Self {
-        Self::Finite {
-            numerator,
-            denominator: BigInt::one(),
-        }
-    }
-
-    fn from_f32(value: f32) -> Self {
-        if value.is_nan() {
-            return Self::NaN;
-        }
-        if value == f32::INFINITY {
-            return Self::PositiveInfinity;
-        }
-        if value == f32::NEG_INFINITY {
-            return Self::NegativeInfinity;
-        }
-        let bits = value.to_bits();
-        let negative = bits >> 31 != 0;
-        let exponent_bits = ((bits >> 23) & 0xff) as i32;
-        let fraction = bits & 0x7f_ffff;
-        let (significand, exponent) = if exponent_bits == 0 {
-            (BigInt::from(fraction), 1 - 127 - 23)
-        } else {
-            (BigInt::from((1 << 23) | fraction), exponent_bits - 127 - 23)
-        };
-        Self::binary(significand, exponent, negative)
-    }
-
-    fn from_f64(value: f64) -> Self {
-        if value.is_nan() {
-            return Self::NaN;
-        }
-        if value == f64::INFINITY {
-            return Self::PositiveInfinity;
-        }
-        if value == f64::NEG_INFINITY {
-            return Self::NegativeInfinity;
-        }
-        let bits = value.to_bits();
-        let negative = bits >> 63 != 0;
-        let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
-        let fraction = bits & 0x000f_ffff_ffff_ffff;
-        let (significand, exponent) = if exponent_bits == 0 {
-            (BigInt::from(fraction), 1 - 1023 - 52)
-        } else {
-            (
-                BigInt::from((1_u64 << 52) | fraction),
-                exponent_bits - 1023 - 52,
-            )
-        };
-        Self::binary(significand, exponent, negative)
-    }
-
-    fn binary(mut numerator: BigInt, exponent: i32, negative: bool) -> Self {
-        if negative {
-            numerator = -numerator;
-        }
-        if exponent >= 0 {
-            numerator <<= exponent as usize;
-            Self::integer(numerator)
-        } else {
-            Self::Finite {
-                numerator,
-                denominator: BigInt::one() << exponent.unsigned_abs() as usize,
-            }
-        }
-    }
-
-    fn cmp(&self, other: &Self) -> Ordering {
-        use Numeric::*;
-        match (self, other) {
-            (NaN, NaN) => Ordering::Equal,
-            (NaN, _) => Ordering::Greater,
-            (_, NaN) => Ordering::Less,
-            (NegativeInfinity, NegativeInfinity) | (PositiveInfinity, PositiveInfinity) => {
-                Ordering::Equal
-            }
-            (NegativeInfinity, _) | (_, PositiveInfinity) => Ordering::Less,
-            (PositiveInfinity, _) | (_, NegativeInfinity) => Ordering::Greater,
-            (
-                Finite {
-                    numerator: left_numerator,
-                    denominator: left_denominator,
-                },
-                Finite {
-                    numerator: right_numerator,
-                    denominator: right_denominator,
-                },
-            ) => (left_numerator * right_denominator).cmp(&(right_numerator * left_denominator)),
-        }
-    }
-}
-
-fn pow10(exponent: u64) -> BigInt {
-    let mut result = BigInt::one();
-    let mut base = BigInt::from(10_u8);
-    let mut exponent = exponent;
-    while exponent > 0 {
-        if exponent & 1 == 1 {
-            result *= &base;
-        }
-        exponent >>= 1;
-        if exponent > 0 {
-            base = &base * &base;
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use num_traits::One;
     use std::str::FromStr;
 
     #[test]

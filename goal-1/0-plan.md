@@ -6,7 +6,7 @@ Complete Stage1 of `/home/jake/Developer/atomic/goal-0/0-plan.md`: repair negati
 rule evaluation (R1), disjunction readiness (R3) and anonymous identity collisions
 (R2) in the existing product, preserving valid behavior and durable retries.
 
-Status: **complete (2026-09-10)**. Goal0 now owns continuation at Goal2. This
+Status: **complete (2026-09-10)**. Goal0's integrated acceptance is also complete. This
 child's internal steps do not create additional goal folders; the other parent
 stages remain required.
 
@@ -210,6 +210,6 @@ passes0.59s. Latest identity/remote batch passed7+3tests with PG configured.
 `cargo fmt --all -- --check`, `git diff --check`, and low-debug/nonincremental
 `cargo clippy --offline --all-targets` pass (existing warnings retained for Stage7).
 
-Continuation: return to Goal0; Goal2 is active. Preserve these regressions and
+Continuation: Goal0 and all seven children are complete. Preserve these regressions and
 the unchanged durable codecs. Reopen Goal1 if integrated checks reveal a query/
 identity regression. The parent product repair is not complete.

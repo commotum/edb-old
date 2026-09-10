@@ -121,7 +121,35 @@ fn earlier_work(inventory: &GarbageInventory) -> bool {
 
 fn exact_apply(operator: &mut PostgresOperator, mut preview: GarbageInventory) {
     preview.applied = true;
-    assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), preview);
+    assert_eq!(
+        retry_semantic_fence(|| operator.collect_garbage(Duration::ZERO)).unwrap(),
+        preview
+    );
+}
+
+fn retry_semantic_fence<T>(
+    mut operation: impl FnMut() -> Result<T, atomic_core::SemanticError>,
+) -> Result<T, atomic_core::SemanticError> {
+    // Isolated schemas still share the database-wide semantic-GC fence with
+    // parallel fixtures. Retry only that explicit advisory-lock contention;
+    // relation-lock timeouts and preview/apply disagreements remain failures.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match operation() {
+            Err(error)
+                if error.category == ErrorCategory::Busy
+                    && error.code == "operations/semantic-gc-pinned"
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+fn inventory(operator: &mut PostgresOperator) -> GarbageInventory {
+    retry_semantic_fence(|| operator.garbage_inventory(Duration::ZERO)).unwrap()
 }
 
 #[test]
@@ -160,7 +188,7 @@ fn published_intent_progress_does_not_scan_the_unrelated_semantic_catalog() {
     blocked
         .batch_execute("LOCK TABLE atomic_semantic_commitment_nodes IN ACCESS EXCLUSIVE MODE")
         .unwrap();
-    let preview = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let preview = inventory(&mut operator);
     assert!(!preview.tree_build_intents.is_empty());
     assert!(preview.semantic_commitment_node_hashes.is_empty());
     exact_apply(&mut operator, preview);
@@ -168,7 +196,7 @@ fn published_intent_progress_does_not_scan_the_unrelated_semantic_catalog() {
     // Once its earlier work is complete, the same lock must be encountered:
     // the repair defers the semantic sweep; it does not silently remove it.
     let started = Instant::now();
-    let error = operator.garbage_inventory(Duration::ZERO).unwrap_err();
+    let error = retry_semantic_fence(|| operator.garbage_inventory(Duration::ZERO)).unwrap_err();
     blocked.rollback().unwrap();
     assert_eq!(error.category, ErrorCategory::Busy);
     assert_eq!(error.code, "operations/gc-semantic-node-candidates");
@@ -177,12 +205,12 @@ fn published_intent_progress_does_not_scan_the_unrelated_semantic_catalog() {
         started.elapsed()
     );
 
-    let preview = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let preview = inventory(&mut operator);
     assert!(!earlier_work(&preview));
     assert_eq!(preview.semantic_commitment_node_hashes.len(), orphans.len());
     exact_apply(&mut operator, preview);
     assert_eq!(fixture.orphan_count(&orphans), 0);
-    let final_preview = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let final_preview = inventory(&mut operator);
     assert!(!earlier_work(&final_preview));
     assert!(final_preview.semantic_commitment_node_hashes.is_empty());
     common::assert_same_information(&expected, &store.recover(database).unwrap());
@@ -251,7 +279,7 @@ fn receipt_conversion_and_program_work_precede_exact_semantic_orphan_collection(
     let mut semantic_steps = 0;
     let mut quiescent = false;
     for _ in 0..128 {
-        let preview = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let preview = inventory(&mut operator);
         if !earlier_work(&preview) && preview.semantic_commitment_node_hashes.is_empty() {
             quiescent = true;
             break;

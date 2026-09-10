@@ -35,6 +35,17 @@ pub(crate) struct AssessmentReadWork {
     /// constituent reverse index. This must follow touched attributes rather
     /// than total installed schema width.
     pub(crate) composite_candidates: u64,
+    /// Definition checks include preparation, metadata derivation and final
+    /// successor validation, charged inside the schema validators themselves.
+    pub(crate) schema_validation: crate::schema::SchemaValidationWork,
+    /// Descriptor visits comparing db-before and proposed schema.
+    pub(crate) schema_transition_attributes: u64,
+    /// Descriptor visits rebuilding resident schema information/idents.
+    pub(crate) schema_projection_attributes: u64,
+    pub(crate) schema_reuses: u64,
+    /// Actual reverse-index requests/edges, including edges later deduplicated.
+    pub(crate) dependency_lookups: u64,
+    pub(crate) dependency_edges: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,7 +91,6 @@ pub(crate) struct TieredAssessment {
     pub(crate) tempids: BTreeMap<String, u64>,
     pub(crate) ensures: Vec<EnsureRequirement>,
     pub(crate) successor_schema: Arc<Schema>,
-    #[cfg(test)]
     pub(crate) read_work: AssessmentReadWork,
 }
 
@@ -546,7 +556,6 @@ pub(crate) fn assess_tiered_with_remaining_limits(
         tempids,
         ensures,
         successor_schema,
-        #[cfg(test)]
         read_work: reader.work,
     })
 }
@@ -569,6 +578,10 @@ fn prepare_schema_information(
     // A real schema edit needs one mutable candidate for cross-attribute
     // validation. Ordinary data transactions return above and never copy the
     // resident schema merely to discover that it did not change.
+    reader.work.schema_projection_attributes = reader
+        .work
+        .schema_projection_attributes
+        .saturating_add(reader.base.schema().attribute_count() as u64);
     let mut candidate = reader.base.schema().clone();
     let mut changes = Vec::<(crate::Attribute, bool)>::new();
     let exact_upgrade = is_exact_excision_bootstrap_ops(reader.base.schema(), ops)
@@ -621,14 +634,15 @@ fn prepare_schema_information(
                     )
                 })?;
             }
-            candidate.install(attribute.clone())?;
+            candidate.install_with_work(attribute.clone(), &mut reader.work.schema_validation)?;
             installed.push(attribute.id);
         } else {
-            candidate.alter(attribute.clone())?;
+            candidate.alter_with_work(attribute.clone(), &mut reader.work.schema_validation)?;
         }
         changes.push((attribute.clone(), install));
     }
-    candidate.validate_tuple_installations(&installed)?;
+    candidate
+        .validate_tuple_installations_with_work(&installed, &mut reader.work.schema_validation)?;
 
     let metadata_attributes = [
         DB_IDENT as u32,
@@ -798,11 +812,12 @@ fn derive_successor_schema(
     // directly instead of issuing one durable EAVT seek per attribute merely
     // to rediscover an unchanged schema.
     if !logical.iter().any(|datom| {
-        schema_information_attribute(datom.attribute)
-            || matches!(
-                u64::from(datom.attribute),
-                DB_INSTALL_ATTRIBUTE | DB_ALTER_ATTRIBUTE
-            )
+        reader.base.schema().datom_may_change_schema(
+            datom.entity,
+            datom.attribute,
+            &datom.value,
+            datom.added,
+        )
     }) {
         return Ok(reader.base.schema_arc());
     }
@@ -866,17 +881,12 @@ fn derive_successor_schema(
             (u64::from(previous) != datom.entity).then_some(previous)
         })
         .collect::<BTreeSet<_>>();
-    if !retargeted_attributes.is_empty() {
-        physical_entities.extend(reader.base.schema().attributes().filter_map(|attribute| {
-            let Some(TupleSpec::Composite(constituents)) = &attribute.tuple else {
-                return None;
-            };
-            (!attribute.tuple_discontinued
-                && constituents
-                    .iter()
-                    .any(|constituent| retargeted_attributes.contains(constituent)))
-            .then_some(attribute.id)
-        }));
+    for attribute in retargeted_attributes {
+        reader.work.dependency_lookups = reader.work.dependency_lookups.saturating_add(1);
+        for composite in reader.base.schema().composites_for_constituent(attribute) {
+            reader.work.dependency_edges = reader.work.dependency_edges.saturating_add(1);
+            physical_entities.insert(composite);
+        }
     }
 
     let mut current = Vec::new();
@@ -908,6 +918,8 @@ fn derive_successor_schema(
         });
     }
     for attribute in reader.base.schema().attributes() {
+        reader.work.schema_projection_attributes =
+            reader.work.schema_projection_attributes.saturating_add(1);
         current.push(Datom {
             entity: DB_PART_DB,
             attribute: DB_INSTALL_ATTRIBUTE as u32,
@@ -988,6 +1000,8 @@ fn derive_successor_schema(
         ident_assertions.push(ident_datom(entity, ident, 0));
     }
     for attribute in reader.base.schema().attributes() {
+        reader.work.schema_projection_attributes =
+            reader.work.schema_projection_attributes.saturating_add(1);
         ident_assertions.push(ident_datom(
             u64::from(attribute.id),
             attribute.ident.clone(),
@@ -1010,7 +1024,8 @@ fn derive_successor_schema(
             }),
     );
     let idents = IdentIndex::derive(ident_assertions.iter(), DB_IDENT as u32)?;
-    Schema::derive_from_information(&current, &idents).map(Arc::new)
+    Schema::derive_from_information_with_work(&current, &idents, &mut reader.work.schema_validation)
+        .map(Arc::new)
 }
 
 fn ident_datom(entity: u64, ident: crate::Keyword, tx: u64) -> Datom {
@@ -1028,10 +1043,14 @@ fn validate_schema_transition(
     successor: &Schema,
     logical: &[LogicalDatom],
 ) -> Result<(), SemanticError> {
-    reader
-        .base
-        .schema()
-        .validate_partition_successor(successor)?;
+    let unchanged = std::ptr::eq(reader.base.schema(), successor);
+    if !unchanged {
+        // Keep the original failure precedence for real schema changes.
+        reader
+            .base
+            .schema()
+            .validate_partition_successor(successor)?;
+    }
     for required in crate::canonical_genesis_datoms() {
         if logical.iter().any(|datom| {
             !datom.added
@@ -1044,6 +1063,15 @@ fn validate_schema_transition(
                 "native genesis information cannot be retracted or replaced",
             ));
         }
+    }
+    // Every database construction/recovery validates its schema, and schemas
+    // exposed by database values cannot be mutated. Reusing that exact
+    // allocation is therefore proof that no definition/partition transition
+    // occurred, not a comparison or an untrusted caller-set validity flag.
+    // The genesis-retraction guard above remains unconditional.
+    if unchanged {
+        reader.work.schema_reuses = reader.work.schema_reuses.saturating_add(1);
+        return Ok(());
     }
     for system in supported_system_attributes() {
         if reader.base.schema().attribute(system.id).is_ok()
@@ -1059,6 +1087,8 @@ fn validate_schema_transition(
         }
     }
     for current in reader.base.schema().attributes() {
+        reader.work.schema_transition_attributes =
+            reader.work.schema_transition_attributes.saturating_add(1);
         if successor.attribute(current.id).is_err() {
             return Err(SemanticError::incorrect(
                 "schema/removed-attribute",
@@ -1069,6 +1099,8 @@ fn validate_schema_transition(
 
     let mut installed = Vec::new();
     for proposed in successor.attributes() {
+        reader.work.schema_transition_attributes =
+            reader.work.schema_transition_attributes.saturating_add(1);
         match reader.base.schema().attribute(proposed.id) {
             Ok(current) if current == proposed => {}
             Ok(current) => {
@@ -1141,7 +1173,7 @@ fn validate_schema_transition(
             }
         }
     }
-    successor.validate_tuple_installations(&installed)
+    successor.validate_tuple_installations_with_work(&installed, &mut reader.work.schema_validation)
 }
 
 /// Visit the complete successor value of one attribute in a physical index
@@ -2118,10 +2150,14 @@ fn derive_composites(
     // transaction prefetcher consults that map for each touched attribute
     // (`composites-prefetcher` / `create-composite`). Preserve that shape:
     // schema size must not become ordinary transaction work.
-    let composite_ids = touched
-        .iter()
-        .flat_map(|(_, attribute)| reader.base.schema().composites_for_constituent(*attribute))
-        .collect::<BTreeSet<_>>();
+    let mut composite_ids = BTreeSet::new();
+    for (_, attribute) in touched {
+        reader.work.dependency_lookups = reader.work.dependency_lookups.saturating_add(1);
+        for composite in reader.base.schema().composites_for_constituent(*attribute) {
+            reader.work.dependency_edges = reader.work.dependency_edges.saturating_add(1);
+            composite_ids.insert(composite);
+        }
+    }
     reader.work.composite_candidates = reader
         .work
         .composite_candidates

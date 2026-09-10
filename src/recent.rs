@@ -21,6 +21,10 @@ use std::sync::Arc;
 const MAX_BTSET_REFERENCES_PER_DATOM: u64 = 5;
 const LOG_CHUNK_SIZE: usize = 32;
 
+#[cfg(test)]
+#[path = "recent_cursor_control_tests.rs"]
+mod cursor_control_tests;
+
 /// Transitional accounting name used by the transaction service. This now
 /// denotes one Arc-backed raw-tree reference, not an entry/ordinal array slot.
 pub(crate) type RecentLocator = RecentDatomRef;
@@ -158,6 +162,12 @@ pub struct RecentWork {
     pub node_visits: u64,
     pub nodes_copied: u64,
     pub node_splits: u64,
+    /// Immediate-child aggregate reads made while copying touched branches.
+    /// Includes bookkeeping beyond the root-to-leaf insertion comparisons.
+    pub aggregate_child_reads: u64,
+    /// Root summaries read to publish final statistics (four indexes and log).
+    /// No descendant tree or predecessor-log traversal is needed for stats.
+    pub statistics_root_reads: u64,
     pub bulk_rebuild_datoms: u64,
     /// Attributes inspected for an actual endpoint schema transition. An
     /// unchanged shared schema takes the pointer-identity fast path and keeps
@@ -165,6 +175,8 @@ pub struct RecentWork {
     pub schema_attributes_examined: u64,
     pub schema_backfill_datoms: u64,
     pub log_entries_copied: u64,
+    /// New immutable log chunks allocated, including replacement partial tails.
+    pub log_chunks_created: u64,
 }
 
 impl RecentWork {
@@ -173,6 +185,9 @@ impl RecentWork {
         self.node_visits = self.node_visits.saturating_add(work.node_visits);
         self.nodes_copied = self.nodes_copied.saturating_add(work.nodes_copied);
         self.node_splits = self.node_splits.saturating_add(work.node_splits);
+        self.aggregate_child_reads = self
+            .aggregate_child_reads
+            .saturating_add(work.aggregate_child_reads);
     }
 
     fn saturating_add(self, other: Self) -> Self {
@@ -187,6 +202,12 @@ impl RecentWork {
             node_visits: self.node_visits.saturating_add(other.node_visits),
             nodes_copied: self.nodes_copied.saturating_add(other.nodes_copied),
             node_splits: self.node_splits.saturating_add(other.node_splits),
+            aggregate_child_reads: self
+                .aggregate_child_reads
+                .saturating_add(other.aggregate_child_reads),
+            statistics_root_reads: self
+                .statistics_root_reads
+                .saturating_add(other.statistics_root_reads),
             bulk_rebuild_datoms: self
                 .bulk_rebuild_datoms
                 .saturating_add(other.bulk_rebuild_datoms),
@@ -199,6 +220,9 @@ impl RecentWork {
             log_entries_copied: self
                 .log_entries_copied
                 .saturating_add(other.log_entries_copied),
+            log_chunks_created: self
+                .log_chunks_created
+                .saturating_add(other.log_chunks_created),
         }
     }
 }
@@ -248,32 +272,16 @@ impl RecentIndexes {
         }
     }
 
-    fn entries(&self) -> u64 {
-        self.eavt
-            .len()
-            .saturating_add(self.aevt.len())
-            .saturating_add(self.avet.len())
-            .saturating_add(self.vaet.len())
-    }
-
-    fn nodes(&self) -> u64 {
-        self.eavt
-            .node_count()
-            .saturating_add(self.aevt.node_count())
-            .saturating_add(self.avet.node_count())
-            .saturating_add(self.vaet.node_count())
-    }
-
-    fn max_height(&self) -> u32 {
-        [
-            self.eavt.height(),
-            self.aevt.height(),
-            self.avet.height(),
-            self.vaet.height(),
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0)
+    fn summary(&self, work: &mut RecentWork) -> (u64, u64, u32) {
+        let (mut entries, mut nodes, mut height) = (0_u64, 0_u64, 0_u32);
+        for tree in [&self.eavt, &self.aevt, &self.avet, &self.vaet] {
+            work.statistics_root_reads = work.statistics_root_reads.saturating_add(1);
+            let (tree_entries, tree_nodes, tree_height) = tree.summary();
+            entries = entries.saturating_add(tree_entries);
+            nodes = nodes.saturating_add(tree_nodes);
+            height = height.max(tree_height);
+        }
+        (entries, nodes, height)
     }
 }
 
@@ -306,6 +314,10 @@ impl Drop for LogChunk {
 #[path = "recent_log_drop_tests.rs"]
 mod log_drop_tests;
 
+#[cfg(test)]
+#[path = "recent_stats_tests.rs"]
+mod stats_tests;
+
 /// Reverse-linked immutable chunks make successor extension bounded while
 /// retaining chronological replay. A partial tail copies at most 31 entry
 /// records; all older chunks and all transaction payloads remain shared.
@@ -319,17 +331,21 @@ impl PersistentLog {
         self.head.as_ref().map_or(0, |head| head.total_len)
     }
 
+    #[cfg(test)]
     fn chunks(&self) -> u64 {
-        let mut count = 0_u64;
-        let mut chunk = self.head.as_ref().map(Arc::clone);
-        while let Some(current) = chunk {
-            count = count.saturating_add(1);
-            chunk = current.previous.as_ref().map(Arc::clone);
-        }
-        count
+        self.len().div_ceil(LOG_CHUNK_SIZE as u64)
+    }
+
+    fn summary(&self, work: &mut RecentWork) -> (u64, u64) {
+        work.statistics_root_reads = work.statistics_root_reads.saturating_add(1);
+        let entries = self.len();
+        // Push seals every predecessor at LOG_CHUNK_SIZE. Only the current
+        // tail can be partial, so total_len also determines the chunk count.
+        (entries, entries.div_ceil(LOG_CHUNK_SIZE as u64))
     }
 
     fn push(&self, entry: RecentEntry, work: &mut RecentWork) -> Self {
+        work.log_chunks_created = work.log_chunks_created.saturating_add(1);
         let head = match &self.head {
             Some(head) if head.entries.len() < LOG_CHUNK_SIZE => {
                 let mut entries = Vec::with_capacity(head.entries.len() + 1);
@@ -543,6 +559,7 @@ impl RecentTier {
             accounted_count,
             expected_hash,
             limits,
+            &mut work,
         )?;
         Ok(Self {
             database_id,
@@ -683,6 +700,7 @@ impl RecentTier {
             accounted_count,
             end_hash,
             self.limits,
+            &mut last_work,
         )?;
         Ok(Self {
             database_id: Arc::clone(&self.database_id),
@@ -1190,21 +1208,50 @@ impl RecentCursor {
         }
     }
 
-    fn next_member(&mut self) -> Option<RecentDatomRef> {
+    fn poll(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<bool, SemanticError> {
+        if self.exhausted {
+            return Ok(false);
+        }
+        if !poll()? {
+            self.stop();
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
+    fn stop(&mut self) {
+        self.exhausted = true;
+        self.pending = None;
+        self.current_output.clear();
+    }
+
+    fn next_member(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<Option<RecentDatomRef>, SemanticError> {
         if let Some(candidate) = self.pending.take() {
-            return Some(candidate);
+            return Ok(Some(candidate));
         }
         loop {
+            if !self.poll(poll)? {
+                return Ok(None);
+            }
             let candidate = if self.reverse_boundary.is_some() {
-                self.inner.prev()?
+                self.inner.prev()
             } else {
-                self.inner.next()?
+                self.inner.next()
+            };
+            let Some(candidate) = candidate else {
+                return Ok(None);
             };
             self.examined = self.examined.saturating_add(1);
             if index_member(self.projection.schema(), candidate.datom(), self.order)
                 .expect("authenticated recent datom has an endpoint schema attribute")
             {
-                return Some(candidate);
+                return Ok(Some(candidate));
             }
         }
     }
@@ -1220,10 +1267,15 @@ impl RecentCursor {
         }
     }
 
-    fn next_reverse(&mut self) -> Option<Datom> {
+    fn next_reverse(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<Option<Datom>, SemanticError> {
         if self.history {
             loop {
-                let candidate = self.next_member()?;
+                let Some(candidate) = self.next_member(poll)? else {
+                    return Ok(None);
+                };
                 let datom = candidate.datom();
                 if self
                     .reverse_boundary
@@ -1233,21 +1285,28 @@ impl RecentCursor {
                     continue;
                 }
                 self.yielded = self.yielded.saturating_add(1);
-                return Some(datom.clone());
+                return Ok(Some(datom.clone()));
             }
         }
 
         loop {
             if self.current_output.is_empty() {
-                let first = self.next_member()?;
+                let Some(first) = self.next_member(poll)? else {
+                    return Ok(None);
+                };
                 let mut group = vec![first];
-                while let Some(candidate) = self.next_member() {
+                self.max_group_datoms = self.max_group_datoms.max(1);
+                while let Some(candidate) = self.next_member(poll)? {
                     if same_logical_eav(group[0].datom(), candidate.datom()) {
                         group.push(candidate);
+                        self.max_group_datoms = self.max_group_datoms.max(group.len() as u64);
                     } else {
                         self.pending = Some(candidate);
                         break;
                     }
+                }
+                if self.exhausted {
+                    return Ok(None);
                 }
                 self.max_group_datoms = self.max_group_datoms.max(group.len() as u64);
 
@@ -1260,6 +1319,9 @@ impl RecentCursor {
                 // This buffers only the current logical group, never an index.
                 let mut winners = Vec::<RecentDatomRef>::new();
                 for candidate in group {
+                    if !self.poll(poll)? {
+                        return Ok(None);
+                    }
                     let value = &candidate.datom().value;
                     match winners.binary_search_by(|prior| prior.datom().value.stored_cmp(value)) {
                         Ok(position) => winners[position] = candidate,
@@ -1278,28 +1340,45 @@ impl RecentCursor {
                 .pop_front()
                 .expect("a non-empty reverse current group retained an assertion");
             self.yielded = self.yielded.saturating_add(1);
-            return Some(winner.datom().clone());
+            return Ok(Some(winner.datom().clone()));
         }
     }
-}
 
-impl Iterator for RecentCursor {
-    type Item = Datom;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.exhausted {
-            return None;
+    /// Cooperative admission inside raw membership and current-group loops.
+    /// A false poll or error permanently ends this cursor: an incompletely
+    /// observed group must never be resumed and mistaken for current truth.
+    pub(crate) fn next_with_poll(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<Option<Datom>, SemanticError> {
+        let result = (|| {
+            if !self.poll(poll)? {
+                return Ok(None);
+            }
+            self.next_ordered(poll)
+        })();
+        if !matches!(result, Ok(Some(_))) {
+            self.stop();
         }
+        result
+    }
+
+    fn next_ordered(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<Option<Datom>, SemanticError> {
         if self.reverse_boundary.is_some() {
-            return self.next_reverse();
+            return self.next_reverse(poll);
         }
         if self.history {
             loop {
-                let candidate = self.next_member()?;
+                let Some(candidate) = self.next_member(poll)? else {
+                    return Ok(None);
+                };
                 let datom = candidate.datom();
                 if !self.prefix_member(datom) {
                     if self.exhausted {
-                        return None;
+                        return Ok(None);
                     }
                     continue;
                 }
@@ -1310,7 +1389,7 @@ impl Iterator for RecentCursor {
                     .is_some_and(|end| !datom.cmp_in(end, self.order).is_lt())
                 {
                     self.exhausted = true;
-                    return None;
+                    return Ok(None);
                 }
                 if self.range.contains(datom, self.order) {
                     if self
@@ -1321,22 +1400,29 @@ impl Iterator for RecentCursor {
                         continue;
                     }
                     self.yielded = self.yielded.saturating_add(1);
-                    return Some(datom.clone());
+                    return Ok(Some(datom.clone()));
                 }
             }
         }
 
         loop {
             if self.current_output.is_empty() {
-                let first = self.next_member()?;
+                let Some(first) = self.next_member(poll)? else {
+                    return Ok(None);
+                };
                 let mut group = vec![first];
-                while let Some(candidate) = self.next_member() {
+                self.max_group_datoms = self.max_group_datoms.max(1);
+                while let Some(candidate) = self.next_member(poll)? {
                     if same_logical_eav(group[0].datom(), candidate.datom()) {
                         group.push(candidate);
+                        self.max_group_datoms = self.max_group_datoms.max(group.len() as u64);
                     } else {
                         self.pending = Some(candidate);
                         break;
                     }
+                }
+                if self.exhausted {
+                    return Ok(None);
                 }
                 self.max_group_datoms = self.max_group_datoms.max(group.len() as u64);
                 // The recovered comparator makes this group newest-first.
@@ -1345,6 +1431,9 @@ impl Iterator for RecentCursor {
                 // hiding a scale-distinct assertion in the same logical group.
                 let mut seen = Vec::<RecentDatomRef>::new();
                 for candidate in group {
+                    if !self.poll(poll)? {
+                        return Ok(None);
+                    }
                     let value = &candidate.datom().value;
                     match seen.binary_search_by(|prior| prior.datom().value.stored_cmp(value)) {
                         Ok(_) => {}
@@ -1367,7 +1456,7 @@ impl Iterator for RecentCursor {
             let datom = winner.datom();
             if !self.prefix_member(datom) {
                 if self.exhausted {
-                    return None;
+                    return Ok(None);
                 }
                 continue;
             }
@@ -1378,7 +1467,7 @@ impl Iterator for RecentCursor {
                 .is_some_and(|end| !datom.cmp_in(end, self.order).is_lt())
             {
                 self.exhausted = true;
-                return None;
+                return Ok(None);
             }
             if datom.added && self.range.contains(datom, self.order) {
                 if self
@@ -1389,9 +1478,18 @@ impl Iterator for RecentCursor {
                     continue;
                 }
                 self.yielded = self.yielded.saturating_add(1);
-                return Some(datom.clone());
+                return Ok(Some(datom.clone()));
             }
         }
+    }
+}
+
+impl Iterator for RecentCursor {
+    type Item = Datom;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_poll(&mut || Ok(true))
+            .expect("uncontrolled recent cursor polling is infallible")
     }
 }
 
@@ -1590,24 +1688,27 @@ fn recent_stats(
     accounted_bytes: u64,
     end_hash: Digest,
     limits: RecentLimits,
+    work: &mut RecentWork,
 ) -> Result<RecentStats, SemanticError> {
+    let (transactions, log_chunks) = log.summary(work);
+    let (raw_index_entries, index_nodes, max_index_height) = indexes.summary(work);
     let end_t = base_t
-        .checked_add(log.len())
+        .checked_add(transactions)
         .ok_or_else(|| fault("recent/basis-overflow", "recent transaction basis overflow"))?;
     Ok(RecentStats {
         base_t,
         end_t,
-        transactions: log.len(),
+        transactions,
         datoms,
         encoded_bytes,
         accounted_bytes,
         base_hash,
         end_hash,
         needs_consolidation: datoms >= limits.soft_datoms || accounted_bytes >= limits.soft_bytes,
-        raw_index_entries: indexes.entries(),
-        index_nodes: indexes.nodes(),
-        max_index_height: indexes.max_height(),
-        log_chunks: log.chunks(),
+        raw_index_entries,
+        index_nodes,
+        max_index_height,
+        log_chunks,
     })
 }
 
@@ -2401,6 +2502,17 @@ mod tests {
                 .map(|datom| crate::tx_to_t(datom.tx).unwrap())
                 .collect::<Vec<_>>(),
             vec![2, 1]
+        );
+        let after = boundary.after_prefix();
+        assert!(
+            tier.boundary_cursor(false, &after).next().is_none(),
+            "exclusive T must not resurrect a stale assertion from the excluded winner's group"
+        );
+        assert_eq!(
+            tier.boundary_cursor(true, &after)
+                .map(|datom| crate::tx_to_t(datom.tx).unwrap())
+                .collect::<Vec<_>>(),
+            vec![1]
         );
     }
 

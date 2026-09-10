@@ -5,9 +5,10 @@
 use crate::fulltext_analysis::next_token;
 use crate::fulltext_store::FulltextRecord;
 use crate::{
-    DatabaseValue, DatabaseValuePrefixCursor, Datom, ErrorCategory, SemanticError, Value, sha256,
+    DatabaseValue, DatabaseValuePrefixCursor, Datom, ErrorCategory, FulltextReadStats,
+    NativeFulltextReader, Schema, SemanticError, Value, sha256,
 };
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) type DocId = [u8; 48];
 pub(super) fn doc_id(datom: &Datom) -> Result<DocId, SemanticError> {
@@ -117,7 +118,7 @@ struct PendingDocument {
     offset: usize,
     position: u32,
 }
-struct Records<'a> {
+pub(crate) struct Records<'a> {
     db: &'a DatabaseValue,
     attributes: VecDeque<u32>,
     active: Option<(u32, DatabaseValuePrefixCursor<'a>)>,
@@ -125,6 +126,8 @@ struct Records<'a> {
     documents: u64,
     total_length: u64,
     failed: bool,
+    pub stats: DeltaRecordStats,
+    pub datoms_examined: u64,
 }
 
 impl Records<'_> {
@@ -144,6 +147,7 @@ impl Records<'_> {
             if let Some((attribute, cursor)) = &mut self.active {
                 if let Some(datom) = cursor.next() {
                     let datom = datom?;
+                    self.datoms_examined += 1;
                     if !datom.added {
                         continue;
                     }
@@ -157,6 +161,11 @@ impl Records<'_> {
                             .count();
                     let length = u32::try_from(length)
                         .map_err(|_| corrupt("document token count overflow"))?;
+                    self.stats.documents_added += 1;
+                    self.stats.tokenized_bytes = self
+                        .stats
+                        .tokenized_bytes
+                        .saturating_add((text.len() as u64).saturating_mul(2));
                     self.documents = self
                         .documents
                         .checked_add(1)
@@ -212,10 +221,8 @@ impl Iterator for Records<'_> {
 
 /// Caller owns an authenticated, unfiltered native source and retains its pin
 /// throughout building. No full database or expanded posting list is collected.
-pub(crate) fn fulltext_records(
-    db: &DatabaseValue,
-) -> Result<Box<dyn Iterator<Item = Result<FulltextRecord, SemanticError>> + '_>, SemanticError> {
-    Ok(Box::new(Records {
+pub(crate) fn fulltext_records(db: &DatabaseValue) -> Result<Records<'_>, SemanticError> {
+    Ok(Records {
         db,
         attributes: db
             .schema()
@@ -228,5 +235,343 @@ pub(crate) fn fulltext_records(
         documents: 0,
         total_length: 0,
         failed: false,
-    }))
+        stats: DeltaRecordStats::default(),
+        datoms_examined: 0,
+    })
+}
+
+/// Only logical assertion changes reach the analyzer. Retractions are history
+/// facts, not document deletion requests; physical noHistory omissions arrive
+/// as removal of the corresponding assertion from the canonical tree diff.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct DeltaRecordStats {
+    pub documents_added: u64,
+    pub documents_removed: u64,
+    /// Both streaming analyzer passes (length, then postings) are counted.
+    pub tokenized_bytes: u64,
+    pub statistics_reads: u64,
+    pub statistics_read_bytes: u64,
+}
+
+/// Re-emit only the exact zero-stat bytes authenticated by the constructor.
+/// The schema is immutable, so no old records need to be collected or reread.
+pub(crate) struct EmptyFulltextCorpus<'a> {
+    attributes: Box<dyn Iterator<Item = u32> + 'a>,
+}
+
+impl Iterator for EmptyFulltextCorpus<'_> {
+    type Item = Result<FulltextRecord, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.attributes.next().map(|attribute| {
+            Ok(FulltextRecord {
+                key: stats_key(attribute),
+                value: vec![0; 16],
+            })
+        })
+    }
+}
+
+pub(crate) fn empty_fulltext_corpus<'a>(
+    schema: &'a Schema,
+    predecessor: &NativeFulltextReader,
+) -> Result<(Option<EmptyFulltextCorpus<'a>>, DeltaRecordStats), SemanticError> {
+    let (empty, work) = verified_empty_corpus(schema, predecessor.record_count(), |key| {
+        predecessor.get_with_stats(key)
+    })?;
+    Ok((
+        empty.then(|| EmptyFulltextCorpus {
+            attributes: Box::new(schema.attributes().filter(|a| a.fulltext).map(|a| a.id)),
+        }),
+        work,
+    ))
+}
+
+fn verified_empty_corpus(
+    schema: &Schema,
+    record_count: u64,
+    mut read: impl FnMut(&[u8]) -> Result<(Option<FulltextRecord>, FulltextReadStats), SemanticError>,
+) -> Result<(bool, DeltaRecordStats), SemanticError> {
+    let attribute_count = schema.attributes().filter(|a| a.fulltext).count() as u64;
+    let mut work = DeltaRecordStats::default();
+    // A document always has its own record, including empty/stop-word-only
+    // strings that have no postings. Counts alone are a rejection fast path,
+    // never proof of emptiness: every expected statistic must be authenticated.
+    if record_count > attribute_count {
+        return Ok((false, work));
+    }
+    if record_count < attribute_count {
+        return Err(corrupt(
+            "predecessor has fewer records than fulltext attributes",
+        ));
+    }
+    for attribute in schema.attributes().filter(|a| a.fulltext).map(|a| a.id) {
+        let (record, reads) = read(&stats_key(attribute))?;
+        work.statistics_reads += 1;
+        work.statistics_read_bytes += reads.block_bytes;
+        let record = record.ok_or_else(|| corrupt("empty predecessor lacks corpus statistics"))?;
+        if statistics(&record, attribute)? != (0, 0) {
+            return Err(corrupt(
+                "statistics-only predecessor reports a nonempty corpus",
+            ));
+        }
+    }
+    Ok((true, work))
+}
+
+pub(crate) struct DeltaRecords<'a> {
+    changes: Box<dyn Iterator<Item = Result<(Datom, bool), SemanticError>> + 'a>,
+    schema: &'a Schema,
+    predecessor: &'a NativeFulltextReader,
+    new_attributes: BTreeSet<u32>,
+    counts: BTreeMap<u32, (u64, u64)>,
+    document: Option<(PendingDocument, bool)>,
+    finished_changes: bool,
+    failed: bool,
+    pub stats: DeltaRecordStats,
+}
+
+impl<'a> DeltaRecords<'a> {
+    pub(crate) fn new(
+        changes: impl Iterator<Item = Result<(Datom, bool), SemanticError>> + 'a,
+        schema: &'a Schema,
+        predecessor: &'a NativeFulltextReader,
+        new_attributes: BTreeSet<u32>,
+    ) -> Self {
+        Self {
+            changes: Box::new(changes),
+            schema,
+            predecessor,
+            counts: new_attributes.iter().map(|a| (*a, (0, 0))).collect(),
+            new_attributes,
+            document: None,
+            finished_changes: false,
+            failed: false,
+            stats: DeltaRecordStats::default(),
+        }
+    }
+
+    fn change_count(
+        &mut self,
+        attribute: u32,
+        length: u32,
+        insert: bool,
+    ) -> Result<(), SemanticError> {
+        if !self.counts.contains_key(&attribute) {
+            let (record, reads) = self.predecessor.get_with_stats(&stats_key(attribute))?;
+            self.stats.statistics_reads += 1;
+            self.stats.statistics_read_bytes += reads.block_bytes;
+            let record = record.ok_or_else(|| corrupt("predecessor lacks corpus statistics"))?;
+            self.counts
+                .insert(attribute, statistics(&record, attribute)?);
+        }
+        if !insert && self.new_attributes.contains(&attribute) {
+            return Err(corrupt("new fulltext attribute has a predecessor document"));
+        }
+        let (documents, tokens) = self
+            .counts
+            .get_mut(&attribute)
+            .expect("corpus count initialized");
+        *documents = if insert {
+            documents.checked_add(1)
+        } else {
+            documents.checked_sub(1)
+        }
+        .ok_or_else(|| corrupt("corpus document count overflow or underflow"))?;
+        *tokens = if insert {
+            tokens.checked_add(u64::from(length))
+        } else {
+            tokens.checked_sub(u64::from(length))
+        }
+        .ok_or_else(|| corrupt("corpus token count overflow or underflow"))?;
+        Ok(())
+    }
+
+    fn next_record(&mut self) -> Result<Option<(FulltextRecord, bool)>, SemanticError> {
+        loop {
+            if let Some((doc, insert)) = &mut self.document {
+                if let Some(token) = next_token(&doc.text, &mut doc.offset, &mut doc.position) {
+                    let mut key = term_prefix(doc.attribute, &token.term, true);
+                    key.extend_from_slice(&doc.id);
+                    return Ok(Some((
+                        FulltextRecord {
+                            key,
+                            value: doc.length.to_be_bytes().to_vec(),
+                        },
+                        *insert,
+                    )));
+                }
+                self.document = None;
+            }
+            if self.finished_changes {
+                return Ok(self
+                    .counts
+                    .pop_first()
+                    .map(|(attribute, (documents, tokens))| {
+                        let mut value = documents.to_be_bytes().to_vec();
+                        value.extend_from_slice(&tokens.to_be_bytes());
+                        (
+                            FulltextRecord {
+                                key: stats_key(attribute),
+                                value,
+                            },
+                            true,
+                        )
+                    }));
+            }
+            let Some(change) = self.changes.next() else {
+                self.finished_changes = true;
+                continue;
+            };
+            let (datom, insert) = change?;
+            if !datom.added || !self.schema.attribute(datom.attribute)?.fulltext {
+                continue;
+            }
+            let id = doc_id(&datom)?;
+            let Value::String(text) = datom.value else {
+                unreachable!()
+            };
+            let (mut offset, mut position) = (0, 0);
+            let length =
+                std::iter::from_fn(|| next_token(&text, &mut offset, &mut position)).count();
+            let length =
+                u32::try_from(length).map_err(|_| corrupt("document token count overflow"))?;
+            self.change_count(datom.attribute, length, insert)?;
+            if insert {
+                self.stats.documents_added += 1;
+            } else {
+                self.stats.documents_removed += 1;
+            }
+            self.stats.tokenized_bytes = self
+                .stats
+                .tokenized_bytes
+                .saturating_add((text.len() as u64).saturating_mul(2));
+            let mut value = length.to_be_bytes().to_vec();
+            value.extend_from_slice(text.as_bytes());
+            let key = doc_key(datom.attribute, &id);
+            self.document = Some((
+                PendingDocument {
+                    attribute: datom.attribute,
+                    id,
+                    text,
+                    length,
+                    offset: 0,
+                    position: 0,
+                },
+                insert,
+            ));
+            return Ok(Some((FulltextRecord { key, value }, insert)));
+        }
+    }
+}
+
+impl Iterator for DeltaRecords<'_> {
+    type Item = Result<(FulltextRecord, bool), SemanticError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed {
+            return None;
+        }
+        match self.next_record() {
+            Ok(Some(record)) => Some(Ok(record)),
+            Ok(None) => None,
+            Err(error) => {
+                self.failed = true;
+                Some(Err(error))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Attribute, Cardinality, Database, EntityRef, Keyword, TxOp, ValueType};
+    use std::sync::Arc;
+
+    fn database() -> Database {
+        let mut schema = Schema::new();
+        for id in [1000, 1001] {
+            schema
+                .install(
+                    Attribute::new(
+                        id,
+                        Keyword::new("text", format!("a{id}")),
+                        ValueType::String,
+                        Cardinality::One,
+                    )
+                    .fulltext(),
+                )
+                .unwrap();
+        }
+        Database::new(schema).unwrap()
+    }
+
+    fn corpus(database: Database) -> (DatabaseValue, BTreeMap<Vec<u8>, FulltextRecord>) {
+        let db = DatabaseValue::eager(Arc::new(database));
+        let records = fulltext_records(&db)
+            .unwrap()
+            .map(|record| {
+                let record = record.unwrap();
+                (record.key.clone(), record)
+            })
+            .collect();
+        (db, records)
+    }
+
+    #[test]
+    fn empty_corpus_proof_requires_all_zero_statistics_not_only_header_count() {
+        let (db, mut records) = corpus(database());
+        assert_eq!(records.len(), 2);
+        let (empty, work) = verified_empty_corpus(db.schema(), records.len() as u64, |key| {
+            Ok((records.get(key).cloned(), FulltextReadStats::default()))
+        })
+        .unwrap();
+        assert!(empty);
+        assert_eq!(work.statistics_reads, 2);
+        let key = stats_key(1001);
+        records.get_mut(&key).unwrap().value[..8].copy_from_slice(&1u64.to_be_bytes());
+        let error = verified_empty_corpus(db.schema(), 2, |key| {
+            Ok((records.get(key).cloned(), FulltextReadStats::default()))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "fulltext/invalid-record");
+        records.remove(&key);
+        assert_eq!(
+            verified_empty_corpus(db.schema(), 2, |key| {
+                Ok((records.get(key).cloned(), FulltextReadStats::default()))
+            })
+            .unwrap_err()
+            .code,
+            "fulltext/invalid-record"
+        );
+    }
+
+    #[test]
+    fn even_empty_or_stopword_only_historical_documents_prevent_empty_bulk_selection() {
+        for text in ["", "the and", "quartz quartz"] {
+            let db = database()
+                .with(
+                    &[TxOp::Add {
+                        entity: EntityRef::Temp("document".into()),
+                        attribute: 1000,
+                        value: Value::String(text.into()).into(),
+                    }],
+                    2,
+                )
+                .unwrap()
+                .db_after;
+            let (db, records) = corpus(db);
+            assert!(records.len() > 2);
+            let (empty, work) = verified_empty_corpus(db.schema(), records.len() as u64, |_| {
+                panic!("nonempty record count should reject without page reads")
+            })
+            .unwrap();
+            assert!(!empty, "text={text:?}");
+            assert_eq!(work.statistics_reads, 0);
+            let mut full = fulltext_records(&db).unwrap();
+            full.by_ref().collect::<Result<Vec<_>, _>>().unwrap();
+            assert_eq!(full.stats.documents_added, 1);
+            assert_eq!(full.stats.tokenized_bytes, 2 * text.len() as u64);
+        }
+    }
 }

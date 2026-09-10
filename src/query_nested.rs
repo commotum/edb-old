@@ -51,6 +51,7 @@ pub(super) fn execute(
             parent.control.max_result_rows,
             &child.sources,
             &mut budget,
+            parent.control.max_numeric_bytes,
         );
         child.work = budget.work();
         child.stats.allocated_value_bytes = budget.value_bytes();

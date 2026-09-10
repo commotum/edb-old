@@ -1,4 +1,6 @@
 use crate::pull::QueryPullBudget;
+#[path = "query_numeric.rs"]
+mod numeric;
 use crate::{
     Database, DatabaseValue, ErrorCategory, IndexOrder, IndexPrefix, Program, ProgramControl,
     ProgramHash, ProgramKind, ProgramOutput, ProgramRuntime, PullPattern, SemanticError, Value,
@@ -32,6 +34,8 @@ use dependencies::EvaluationResult;
 mod fulltext;
 #[path = "query_join.rs"]
 mod join;
+#[path = "query_ranges.rs"]
+mod ranges;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Variable(String);
@@ -683,6 +687,10 @@ pub struct QueryControl {
     /// when its key exceeds the allowance; valid data is not rejected. Zero
     /// disables hash joins and groups native probes one row at a time.
     pub max_join_bytes: usize,
+    /// Maximum estimated temporary/output allocation of an exact numeric
+    /// operation. Compact decimal exponents do not themselves consume bytes.
+    /// Program queries additionally obey their shared remaining value budget.
+    pub max_numeric_bytes: usize,
 }
 
 impl Default for QueryControl {
@@ -695,6 +703,7 @@ impl Default for QueryControl {
             cancel: Arc::new(AtomicBool::new(false)),
             force_scan: false,
             max_join_bytes: 4 * 1024 * 1024,
+            max_numeric_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -822,8 +831,9 @@ impl QueryExtensions {
                         max_calls: 1,
                         cancelled: Some(control.cancel.as_ref()),
                     };
-                    let mut budget =
-                        crate::ProgramBudget::new(program_control)?.with_deadline(deadline);
+                    let mut budget = crate::ProgramBudget::new(program_control)?
+                        .with_deadline(deadline)
+                        .with_query_numeric_bytes(control.max_numeric_bytes);
                     let result = ProgramRuntime.execute_query_with_budget(
                         program,
                         database,
@@ -1121,6 +1131,7 @@ impl QueryEngine {
             max_intermediate_rows: budget.query_row_limit(),
             max_result_rows: budget.query_row_limit(),
             max_join_bytes: budget.query_remaining_value_bytes().min(4 * 1024 * 1024),
+            max_numeric_bytes: budget.query_numeric_bytes(),
             ..QueryControl::default()
         };
         let mut source_map = BTreeMap::new();
@@ -1222,6 +1233,7 @@ fn run_query(
         state.control.max_result_rows,
         &state.sources,
         &mut pull_budget,
+        state.control.max_numeric_bytes,
     );
     state.work = pull_budget.work();
     state.stats.allocated_value_bytes = pull_budget.value_bytes();
@@ -1768,7 +1780,8 @@ fn evaluate_clauses(
         })?;
         let clause = remaining.remove(selected);
         let before = rows.len();
-        let (next, access) = evaluate_clause(clause, rows, rules, inherited_source, state)?;
+        let (next, access) =
+            evaluate_clause(clause, rows, rules, inherited_source, clauses, state)?;
         rows = dedupe_rows(next);
         if rows.len() > state.control.max_intermediate_rows {
             return Err(resource(
@@ -1796,10 +1809,17 @@ fn evaluate_clause(
     rows: Vec<Row>,
     rules: &[Rule],
     inherited_source: Option<&str>,
+    conjunction: &[Clause],
     state: &mut State<'_>,
 ) -> EvaluationResult<(Vec<Row>, String)> {
     match clause {
-        Clause::Pattern(pattern) => Ok(evaluate_pattern(pattern, rows, inherited_source, state)?),
+        Clause::Pattern(pattern) => Ok(evaluate_pattern(
+            pattern,
+            rows,
+            inherited_source,
+            conjunction,
+            state,
+        )?),
         Clause::Predicate {
             predicate,
             source,
@@ -2008,6 +2028,7 @@ fn evaluate_pattern(
     pattern: &DataPattern,
     rows: Vec<Row>,
     inherited_source: Option<&str>,
+    conjunction: &[Clause],
     state: &mut State<'_>,
 ) -> Result<(Vec<Row>, String), SemanticError> {
     let source = effective_source(&pattern.source, inherited_source);
@@ -2030,8 +2051,7 @@ fn evaluate_pattern(
     while input.peek().is_some() {
         // Group identical *resolved* probes only within a bounded batch. The
         // selected native index remains the same as in the one-row evaluator.
-        let mut groups: BTreeMap<(Option<u64>, Option<u32>, Option<BoundValue>), Vec<Row>> =
-            BTreeMap::new();
+        let mut groups = BTreeMap::<_, Vec<Row>>::new();
         let mut bytes = 0usize;
         while let Some(row) = input.next() {
             state.check(1)?;
@@ -2049,11 +2069,21 @@ fn evaluate_pattern(
                 .and_then(BoundValue::stored)
                 .map(|value| resolve_pattern_value(database, attribute, value))
                 .transpose()?;
-            let key = (entity, attribute, value.map(BoundValue::Stored));
+            let range = if !state.control.force_scan
+                && entity.is_none()
+                && bound_value.is_none()
+                && attribute.is_some_and(|attribute| database.physical_avet_ready(attribute))
+            {
+                ranges::constraints(pattern, conjunction, &row, state)?
+            } else {
+                None
+            };
+            let key = (entity, attribute, value.map(BoundValue::Stored), range);
             bytes = bytes.saturating_add(
                 std::mem::size_of::<Row>()
                     + std::mem::size_of_val(&key)
-                    + key.2.as_ref().map_or(0, join::bound_bytes),
+                    + key.2.as_ref().map_or(0, join::bound_bytes)
+                    + key.3.as_ref().map_or(0, ranges::Range::retained_bytes),
             );
             groups.entry(key).or_default().push(row);
             if state.control.force_scan || bytes >= state.control.max_join_bytes {
@@ -2061,19 +2091,21 @@ fn evaluate_pattern(
             }
         }
         state.stats.peak_join_bytes = state.stats.peak_join_bytes.max(bytes);
-        for ((entity, attribute, value), rows) in groups {
+        for ((entity, attribute, value, range), rows) in groups {
             let value = value.as_ref().and_then(BoundValue::stored);
             state.stats.grouped_probes_saved += rows.len().saturating_sub(1) as u64;
-            let (datoms, selected) =
-                select_datoms(database, entity, attribute, value, state.control.force_scan)?;
+            let (mut datoms, selected) = select_datoms(
+                database,
+                entity,
+                attribute,
+                value,
+                range,
+                state.control.force_scan,
+            )?;
             access = selected;
-            if access != "EAVT scan" {
-                state.stats.index_seeks += 1;
-            }
-            for datom in datoms {
+            state.stats.index_seeks += datoms.initial_seeks();
+            while let Some(datom) = datoms.next(state) {
                 let datom = datom?;
-                state.check(1)?;
-                state.stats.datoms_examined = state.stats.datoms_examined.saturating_add(1);
                 for row in &rows {
                     state.check(1)?;
                     state.stats.join_candidates += 1;
@@ -2119,15 +2151,14 @@ fn evaluate_pattern(
     Ok((next, access))
 }
 
-type FallibleDatomIter<'a> = Box<dyn Iterator<Item = Result<crate::Datom, SemanticError>> + 'a>;
-
 fn select_datoms<'a>(
     database: &'a DatabaseValue,
     entity: Option<u64>,
     attribute: Option<u32>,
     value: Option<&Value>,
+    range: Option<ranges::Range>,
     force_scan: bool,
-) -> Result<(FallibleDatomIter<'a>, String), SemanticError> {
+) -> Result<(ranges::Datoms<'a>, String), SemanticError> {
     if !force_scan {
         if let Some(entity) = entity {
             let prefix = IndexPrefix::Eavt {
@@ -2136,7 +2167,7 @@ fn select_datoms<'a>(
                 value: attribute.and(value).cloned(),
             };
             return Ok((
-                Box::new(database.query_prefix_cursor(&prefix)?),
+                ranges::Datoms::prefix(database.query_prefix_cursor(&prefix)?),
                 "EAVT seek".into(),
             ));
         }
@@ -2150,8 +2181,14 @@ fn select_datoms<'a>(
                     entity: None,
                 };
                 return Ok((
-                    Box::new(database.query_prefix_cursor(&prefix)?),
+                    ranges::Datoms::prefix(database.query_prefix_cursor(&prefix)?),
                     "AVET seek".into(),
+                ));
+            }
+            if let Some(range) = range {
+                return Ok((
+                    ranges::Datoms::range(database, attribute, range)?,
+                    "AVET range".into(),
                 ));
             }
             let prefix = IndexPrefix::Aevt {
@@ -2160,7 +2197,7 @@ fn select_datoms<'a>(
                 value: None,
             };
             return Ok((
-                Box::new(database.query_prefix_cursor(&prefix)?),
+                ranges::Datoms::prefix(database.query_prefix_cursor(&prefix)?),
                 "AEVT seek".into(),
             ));
         }
@@ -2171,13 +2208,13 @@ fn select_datoms<'a>(
                 entity: None,
             };
             return Ok((
-                Box::new(database.query_prefix_cursor(&prefix)?),
+                ranges::Datoms::prefix(database.query_prefix_cursor(&prefix)?),
                 "VAET seek".into(),
             ));
         }
     }
     Ok((
-        Box::new(database.query_scan_cursor(IndexOrder::Eavt)?),
+        ranges::Datoms::scan(database.query_scan_cursor(IndexOrder::Eavt)?),
         "EAVT scan".into(),
     ))
 }
@@ -2504,7 +2541,8 @@ fn evaluate_function(
             )),
         },
         Function::Add | Function::Subtract | Function::Multiply | Function::Divide => {
-            numeric_function(function, args).map(|value| vec![vec![BoundValue::Stored(value)]])
+            numeric_function(function, args, state)
+                .map(|value| vec![vec![BoundValue::Stored(value)]])
         }
         Function::GetElse => {
             if args.len() != 3 {
@@ -2665,7 +2703,11 @@ fn require_stored<'a>(
     })
 }
 
-fn numeric_function(function: Function, args: &[BoundValue]) -> Result<Value, SemanticError> {
+fn numeric_function(
+    function: Function,
+    args: &[BoundValue],
+    state: &mut State<'_>,
+) -> Result<Value, SemanticError> {
     if args.len() != 2 {
         return Err(SemanticError::incorrect(
             "query/function-arity",
@@ -2674,41 +2716,23 @@ fn numeric_function(function: Function, args: &[BoundValue]) -> Result<Value, Se
     }
     let left = require_stored(&args[0], "query/numeric-type")?;
     let right = require_stored(&args[1], "query/numeric-type")?;
-    match (left, right) {
-        (Value::Long(left), Value::Long(right)) => {
-            let result = match function {
-                Function::Add => left.checked_add(*right),
-                Function::Subtract => left.checked_sub(*right),
-                Function::Multiply => left.checked_mul(*right),
-                Function::Divide if *right != 0 => left.checked_div(*right),
-                _ => None,
-            }
-            .ok_or_else(|| {
-                SemanticError::incorrect(
-                    "query/arithmetic",
-                    "integer arithmetic overflow or division by zero",
-                )
-            })?;
-            Ok(Value::Long(result))
-        }
-        _ => {
-            let left = as_f64(left)?;
-            let right = as_f64(right)?;
-            if function == Function::Divide && right == 0.0 {
-                return Err(SemanticError::incorrect(
-                    "query/arithmetic",
-                    "division by zero",
-                ));
-            }
-            Ok(Value::Double(match function {
-                Function::Add => left + right,
-                Function::Subtract => left - right,
-                Function::Multiply => left * right,
-                Function::Divide => left / right,
-                _ => unreachable!(),
-            }))
-        }
-    }
+    let max_bytes = state.control.max_numeric_bytes.min(
+        state
+            .max_value_bytes
+            .saturating_sub(state.stats.allocated_value_bytes),
+    );
+    numeric::binary(
+        &function,
+        left,
+        right,
+        &mut numeric::Budget {
+            max_bytes,
+            charge: |work, bytes| {
+                state.check(work)?;
+                state.charge_value_bytes(bytes)
+            },
+        },
+    )
 }
 
 fn bind_output(
@@ -2774,6 +2798,7 @@ fn shape_results(
     max: usize,
     sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
+    max_numeric_bytes: usize,
 ) -> Result<QueryResult, SemanticError> {
     let elements = match &query.find {
         FindSpec::Relation(elements) | FindSpec::Tuple(elements) => elements.as_slice(),
@@ -2807,7 +2832,14 @@ fn shape_results(
         .iter()
         .any(|element| matches!(element, FindElement::Aggregate { .. }))
     {
-        aggregate_rows(elements, &basis_variables, &basis, sources, pull_budget)?
+        aggregate_rows(
+            elements,
+            &basis_variables,
+            &basis,
+            sources,
+            pull_budget,
+            max_numeric_bytes,
+        )?
     } else {
         basis
             .into_iter()
@@ -2854,6 +2886,7 @@ fn aggregate_rows(
     basis: &[Vec<BoundValue>],
     sources: &BTreeMap<&str, SourceRef<'_>>,
     pull_budget: &mut QueryPullBudget,
+    max_numeric_bytes: usize,
 ) -> Result<Vec<Vec<QueryValue>>, SemanticError> {
     let group_variables: Vec<_> = elements
         .iter()
@@ -2939,6 +2972,7 @@ fn aggregate_rows(
                             *function,
                             rows.iter().map(|row| &row[index]).collect(),
                             pull_budget,
+                            max_numeric_bytes,
                         )
                     }
                 })
@@ -2951,6 +2985,7 @@ fn aggregate(
     function: Aggregate,
     mut values: Vec<&BoundValue>,
     budget: &mut QueryPullBudget,
+    max_numeric_bytes: usize,
 ) -> Result<QueryValue, SemanticError> {
     match function {
         Aggregate::Rand(count) => {
@@ -3003,89 +3038,23 @@ fn aggregate(
         | Aggregate::Median
         | Aggregate::Variance
         | Aggregate::StandardDeviation => {
-            if values.is_empty() && function == Aggregate::Sum {
-                return Ok(QueryValue::Scalar(Value::Long(0)));
-            }
-            if values.is_empty() {
-                return Err(SemanticError::incorrect(
-                    "query/empty-aggregate",
-                    "numeric aggregate has no values",
-                ));
-            }
-            let all_long = values
-                .iter()
-                .all(|value| matches!(value, BoundValue::Stored(Value::Long(_))));
-            if all_long && matches!(function, Aggregate::Sum | Aggregate::Median) {
-                if function == Aggregate::Median {
-                    values.sort_by(|left, right| left.index_cmp(right));
-                    let middle = values.len() / 2;
-                    let value = if values.len() % 2 == 1 {
-                        let BoundValue::Stored(Value::Long(value)) = values[middle] else {
-                            unreachable!()
-                        };
-                        *value
-                    } else {
-                        let (
-                            BoundValue::Stored(Value::Long(left)),
-                            BoundValue::Stored(Value::Long(right)),
-                        ) = (values[middle - 1], values[middle])
-                        else {
-                            unreachable!()
-                        };
-                        left.checked_add(*right).ok_or_else(|| {
-                            SemanticError::incorrect("query/arithmetic", "median sum overflow")
-                        })? / 2
-                    };
-                    return Ok(QueryValue::Scalar(Value::Long(value)));
-                }
-                let total = values
-                    .iter()
-                    .try_fold(0_i64, |total, value| {
-                        if let BoundValue::Stored(Value::Long(value)) = value {
-                            total.checked_add(*value)
-                        } else {
-                            None
-                        }
-                    })
-                    .ok_or_else(|| {
-                        SemanticError::incorrect("query/arithmetic", "aggregate sum overflow")
-                    })?;
-                Ok(QueryValue::Scalar(Value::Long(total)))
-            } else {
-                let mut numeric = values
-                    .iter()
-                    .map(|value| as_f64(require_stored(value, "query/numeric-type")?))
-                    .collect::<Result<Vec<_>, _>>()?;
-                let total: f64 = numeric.iter().sum();
-                let mean = total / numeric.len() as f64;
-                let result = match function {
-                    Aggregate::Sum => total,
-                    Aggregate::Average => mean,
-                    Aggregate::Median => {
-                        numeric.sort_by(|left, right| left.total_cmp(right));
-                        let middle = numeric.len() / 2;
-                        if numeric.len() % 2 == 1 {
-                            numeric[middle]
-                        } else {
-                            (numeric[middle - 1] + numeric[middle]) / 2.0
-                        }
-                    }
-                    Aggregate::Variance | Aggregate::StandardDeviation => {
-                        let variance = numeric
-                            .iter()
-                            .map(|value| (value - mean).powi(2))
-                            .sum::<f64>()
-                            / numeric.len() as f64;
-                        if function == Aggregate::StandardDeviation {
-                            variance.sqrt()
-                        } else {
-                            variance
-                        }
-                    }
-                    _ => unreachable!(),
-                };
-                Ok(QueryValue::Scalar(Value::Double(result)))
-            }
+            let max_bytes = max_numeric_bytes.min(budget.remaining_value_bytes());
+            let values = values
+                .into_iter()
+                .map(|value| require_stored(value, "query/numeric-type"))
+                .collect::<Result<Vec<_>, _>>()?;
+            numeric::aggregate(
+                function,
+                values,
+                &mut numeric::Budget {
+                    max_bytes,
+                    charge: |work, bytes| {
+                        budget.check(work)?;
+                        budget.charge_value_bytes(bytes)
+                    },
+                },
+            )
+            .map(QueryValue::Scalar)
         }
         Aggregate::Distinct => {
             values.sort_by(|left, right| left.index_cmp(right));
@@ -3566,17 +3535,6 @@ fn effective_source<'a>(source: &'a str, inherited_source: Option<&'a str>) -> &
         inherited_source.unwrap_or(source)
     } else {
         source
-    }
-}
-fn as_f64(value: &Value) -> Result<f64, SemanticError> {
-    match value {
-        Value::Long(value) => Ok(*value as f64),
-        Value::Float(value) => Ok(f64::from(*value)),
-        Value::Double(value) => Ok(*value),
-        _ => Err(SemanticError::incorrect(
-            "query/numeric-type",
-            "numeric operation requires long, float, or double",
-        )),
     }
 }
 fn result_len(result: &QueryResult) -> usize {

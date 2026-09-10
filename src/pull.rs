@@ -1,6 +1,7 @@
 use crate::{
-    Cardinality, Database, DatabaseValue, ErrorCategory, IndexPrefix, Keyword, QueryValue,
-    SemanticError, Symbol, Value, ValueType, schema_eid_to_attr_id,
+    Cardinality, Database, DatabaseValue, Datom, ErrorCategory, IndexBoundary, IndexComponents,
+    IndexPrefix, Keyword, QueryValue, SemanticError, Symbol, Value, ValueType,
+    schema_eid_to_attr_id,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
@@ -8,6 +9,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Instant;
+
+#[cfg(test)]
+#[path = "pull_bounded_tests.rs"]
+mod bounded_tests;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum AttributeName {
@@ -402,6 +407,10 @@ impl<'a> QueryPullBudget<'a> {
         self.value_bytes
     }
 
+    pub(crate) fn remaining_value_bytes(&self) -> usize {
+        self.max_value_bytes.saturating_sub(self.value_bytes)
+    }
+
     pub(crate) fn charge_value_bytes(&mut self, bytes: usize) -> Result<(), SemanticError> {
         self.value_bytes = self.value_bytes.saturating_add(bytes);
         if self.value_bytes > self.max_value_bytes {
@@ -453,6 +462,20 @@ impl<'a> QueryPullBudget<'a> {
 }
 
 impl PullState<'_, '_> {
+    fn read_candidate(&mut self, datom: Option<&Datom>) -> Result<bool, SemanticError> {
+        // Polls are traversal work too: an overlay may skip many removed base
+        // facts before yielding a candidate. Charge those advances, not only
+        // datoms that happen to survive its merge/window.
+        self.check(1)?;
+        if let Some(datom) = datom {
+            // Cursor items are owned. Charge their actual inline/heap payload
+            // before view filtering and before retaining values or tasks. A
+            // filtered-out candidate still consumed work and an owned item.
+            self.charge_value_bytes(usize::try_from(datom.retained_bytes()).unwrap_or(usize::MAX))?;
+        }
+        Ok(true)
+    }
+
     fn charge_value_bytes(&mut self, bytes: usize) -> Result<(), SemanticError> {
         if let Some(budget) = self.query_budget.as_deref_mut() {
             budget.charge_value_bytes(bytes)?;
@@ -874,15 +897,21 @@ impl DatabaseValue {
     ) -> Result<QueryValue, SemanticError> {
         validate_pattern(self, pattern)?;
         self.require_point_in_time("pull")?;
-        let Some(entity) = self.resolve_entity_identifier(&entity.into())? else {
-            return Ok(unresolved_pull(pattern));
-        };
         let mut state = PullState {
             control,
             query_budget: None,
             recursions: BTreeMap::new(),
             entities: 0,
         };
+        state.check(0)?;
+        let Some(entity) = self
+            .resolve_entity_identifier_with_control(&entity.into(), &mut |datom| {
+                state.read_candidate(datom)
+            })?
+        else {
+            return Ok(unresolved_pull(pattern));
+        };
+        state.check(0)?;
         pull_entity(self, entity, pattern, &[], &mut state, 0)
     }
 
@@ -1067,17 +1096,13 @@ fn pull_entity(
                         keyword_key(db_id()),
                         QueryValue::Scalar(Value::Ref(entity)),
                     );
-                    let datoms = database.datoms_with_prefix(&IndexPrefix::Eavt {
-                        entity,
-                        attribute: None,
-                        value: None,
-                    })?;
-                    state.check(datoms.len())?;
-                    let attributes = datoms
-                        .into_iter()
-                        .map(|datom| datom.attribute)
-                        .collect::<BTreeSet<_>>();
-                    for attribute in attributes {
+                    // Recovered `a-iter`/`next-a` seeks to the next attribute,
+                    // not the next datom. A many-valued attribute's unselected
+                    // tail must not be scanned just to discover its neighbor.
+                    let mut after = None;
+                    while let Some(attribute) = next_pull_attribute(database, entity, after, state)?
+                    {
+                        after = Some(attribute);
                         let explicit =
                             context
                                 .pattern
@@ -1087,6 +1112,7 @@ fn pull_entity(
                                 .find(|(_, selector)| {
                                     selector_selects_forward(database, selector, attribute)
                                 });
+                        state.charge_value_bytes(std::mem::size_of::<Selector>())?;
                         selectors.push(match explicit {
                             Some((index, selector)) => {
                                 wildcard_processed.insert(index);
@@ -1478,45 +1504,54 @@ fn prepare_attribute(
         };
         keyword_key(reverse_ident(ident, reverse))
     });
-    let mut values: Vec<Value> = if reverse {
-        database
-            .datoms_with_prefix(&IndexPrefix::Vaet {
-                value: Value::Ref(entity),
-                attribute: Some(attribute),
-                entity: None,
-            })?
-            .iter()
-            .map(|datom| Value::Ref(datom.entity))
-            .collect()
-    } else {
-        database.values(entity, attribute)?
-    };
-    state.check(values.len())?;
     state.charge_value_bytes(crate::query::query_value_allocation_bytes(&key))?;
-    state.charge_value_bytes(values.iter().fold(0usize, |bytes, value| {
-        bytes
-            .saturating_add(std::mem::size_of::<Value>())
-            .saturating_add(usize::try_from(value.retained_heap_bytes()).unwrap_or(usize::MAX))
-    }))?;
-    if values.is_empty() {
-        return Ok(PreparedAttribute::Complete(key, None));
-    }
     let multiple = if reverse {
         !schema.component
     } else {
         schema.cardinality == Cardinality::Many
     };
-    if multiple {
-        let limit = match selector.limit {
-            PullLimit::Default => Some(1_000),
-            PullLimit::Limit(limit) => Some(limit),
-            PullLimit::Unlimited => None,
-        };
-        if let Some(limit) = limit {
-            values.truncate(limit);
+    let limit = if multiple {
+        match selector.limit {
+            PullLimit::Default => 1_000,
+            PullLimit::Limit(limit) => limit,
+            PullLimit::Unlimited => usize::MAX,
         }
     } else {
-        values.truncate(1);
+        1
+    };
+    let prefix = if reverse {
+        IndexPrefix::Vaet {
+            value: Value::Ref(entity),
+            attribute: Some(attribute),
+            entity: None,
+        }
+    } else {
+        IndexPrefix::Eavt {
+            entity,
+            attribute: Some(attribute),
+            value: None,
+        }
+    };
+    let mut cursor = database.prefix_cursor(&prefix)?;
+    let mut values = Vec::new();
+    while values.len() < limit {
+        let Some(datom) = cursor
+            .next_with_control(&mut |datom| state.read_candidate(datom))
+            .transpose()?
+        else {
+            break;
+        };
+        // A filter callback may have canceled while accepting the last value.
+        state.check(0)?;
+        state.charge_value_bytes(std::mem::size_of::<Value>())?;
+        values.push(if reverse {
+            Value::Ref(datom.entity)
+        } else {
+            datom.value
+        });
+    }
+    if values.is_empty() {
+        return Ok(PreparedAttribute::Complete(key, None));
     }
     Ok(PreparedAttribute::Values {
         key,
@@ -1525,6 +1560,33 @@ fn prepare_attribute(
         value_type: schema.value_type,
         component: schema.component,
     })
+}
+
+fn next_pull_attribute(
+    database: &DatabaseValue,
+    entity: u64,
+    after: Option<u32>,
+    state: &mut PullState<'_, '_>,
+) -> Result<Option<u32>, SemanticError> {
+    state.check(0)?;
+    let boundary = match after {
+        None => IndexBoundary::Eavt(IndexComponents::One(entity)),
+        Some(attribute) => match attribute.checked_add(1) {
+            Some(next) => IndexBoundary::Eavt(IndexComponents::Two(entity, next)),
+            None => return Ok(None),
+        },
+    };
+    let mut cursor = database.seek_cursor(&boundary)?;
+    let datom = cursor
+        .next_with_control(&mut |datom| {
+            state.read_candidate(datom)?;
+            // Apply the entity fence before filtering so an empty remainder
+            // cannot wander through other entities while looking for a match.
+            Ok(datom.is_none_or(|datom| datom.entity == entity))
+        })
+        .transpose()?;
+    state.check(0)?;
+    Ok(datom.map(|datom| datom.attribute))
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]

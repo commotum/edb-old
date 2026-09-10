@@ -29,8 +29,17 @@ use crate::{
 #[cfg(test)]
 use crate::{SegmentRef, encode_index_manifest, encode_index_segment};
 #[cfg(test)]
+#[path = "peer_boundary_bias_tests.rs"]
+mod boundary_bias_tests;
+#[cfg(test)]
+#[path = "peer_cache_cost_tests.rs"]
+mod cache_cost_tests;
+#[cfg(test)]
 #[path = "peer_merge_preload_tests.rs"]
 mod merge_preload_tests;
+#[cfg(test)]
+#[path = "peer_readiness_tests.rs"]
+mod readiness_tests;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -529,6 +538,15 @@ struct MetadataProjection {
     schema_current: Arc<[Datom]>,
     idents: Arc<IdentIndex>,
     schema: Arc<crate::Schema>,
+    // The projection is immutable. Compute its diagnostic sizes only when
+    // deriving new metadata, never on an ordinary writer's statistics read.
+    residency: ResidentMetadataStats,
+}
+
+#[cfg(test)]
+thread_local! {
+    static METADATA_STAT_COMPUTATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static METADATA_SCHEMA_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl MetadataProjection {
@@ -548,10 +566,12 @@ impl MetadataProjection {
         sort_dedup_datoms(&mut schema_current, IndexOrder::Eavt);
         retain_schema_working_set(&mut schema_current);
         let schema = crate::Schema::derive_from_information(&schema_current, &idents)?;
+        let residency = Self::compute_residency(&schema_current, &schema, &idents);
         Ok(Self {
             schema_current: schema_current.into(),
             idents: Arc::new(idents),
             schema: Arc::new(schema),
+            residency,
         })
     }
 
@@ -577,6 +597,47 @@ impl MetadataProjection {
                 .any(|datom| schema_information_attribute(datom.attribute))
         }) {
             return Ok(self.clone());
+        }
+
+        if !transactions
+            .iter()
+            .flat_map(|transaction| &transaction.tx_data)
+            .any(|datom| {
+                self.schema.datom_may_change_schema(
+                    datom.entity,
+                    datom.attribute,
+                    &datom.value,
+                    datom.added,
+                )
+            })
+        {
+            // General entity idents change the identity projection, not the
+            // installed schema. Keep its validated descriptors/information and
+            // size totals shared. Attribute/partition renames and repurposed
+            // schema aliases deliberately take the full derivation below.
+            let mut updates = transactions
+                .iter()
+                .flat_map(|transaction| &transaction.tx_data)
+                .filter(|datom| datom.added && datom.attribute == crate::DB_IDENT as u32)
+                .collect::<Vec<_>>();
+            if updates.is_empty() {
+                return Ok(self.clone());
+            }
+            updates.sort_by(|left, right| ident_assertion_cmp(left, right));
+            let mut idents = (*self.idents).clone();
+            for datom in updates {
+                idents.apply_assertion(datom, crate::DB_IDENT as u32)?;
+            }
+            let mut residency = self.residency;
+            residency.ident_names = idents.name_count();
+            residency.ident_entities = idents.entity_count();
+            residency.ident_estimated_bytes = idents.estimated_retained_bytes();
+            return Ok(Self {
+                schema_current: Arc::clone(&self.schema_current),
+                schema: Arc::clone(&self.schema),
+                idents: Arc::new(idents),
+                residency,
+            });
         }
 
         // Schema/ident edits are rare. Only those edits copy the small
@@ -640,19 +701,40 @@ impl MetadataProjection {
     }
 
     fn resident_stats(&self) -> ResidentMetadataStats {
-        let schema_information_bytes = self.schema_current.iter().fold(0_u64, |bytes, datom| {
+        self.residency
+    }
+
+    fn matches_schema(&self, schema: &crate::Schema) -> bool {
+        // Both native assessment and metadata apply preserve the validated
+        // schema allocation when descriptors do not change. Do not dereference
+        // away that proof and then compare every map/tuple on each commit.
+        if std::ptr::eq(self.schema.as_ref(), schema) {
+            return true;
+        }
+        #[cfg(test)]
+        METADATA_SCHEMA_COMPARISONS.with(|count| count.set(count.get() + 1));
+        self.schema.as_ref() == schema
+    }
+
+    fn compute_residency(
+        schema_current: &[Datom],
+        schema: &crate::Schema,
+        idents: &IdentIndex,
+    ) -> ResidentMetadataStats {
+        #[cfg(test)]
+        METADATA_STAT_COMPUTATIONS.with(|count| count.set(count.get() + 1));
+        let schema_information_bytes = schema_current.iter().fold(0_u64, |bytes, datom| {
             bytes.saturating_add(datom.retained_bytes())
         });
         ResidentMetadataStats {
-            schema_attributes: self.schema.attributes().count(),
-            schema_information_datoms: self.schema_current.len(),
-            schema_estimated_bytes: self
-                .schema
+            schema_attributes: schema.attributes().count(),
+            schema_information_datoms: schema_current.len(),
+            schema_estimated_bytes: schema
                 .estimated_retained_bytes()
                 .saturating_add(schema_information_bytes),
-            ident_names: self.idents.name_count(),
-            ident_entities: self.idents.entity_count(),
-            ident_estimated_bytes: self.idents.estimated_retained_bytes(),
+            ident_names: idents.name_count(),
+            ident_entities: idents.entity_count(),
+            ident_estimated_bytes: idents.estimated_retained_bytes(),
         }
     }
 }
@@ -668,15 +750,17 @@ impl MetadataProjection {
 /// the recovered `has-values?` decision without scanning an attribute range.
 fn apply_metadata_and_avet_readiness<F>(
     base: &MetadataProjection,
-    initial_unready: &BTreeSet<u32>,
+    initial_unready: &Arc<BTreeSet<u32>>,
     transactions: &[DurableTransaction],
     mut has_base_history: F,
-) -> Result<(MetadataProjection, BTreeSet<u32>), SemanticError>
+) -> Result<(MetadataProjection, Arc<BTreeSet<u32>>), SemanticError>
 where
     F: FnMut(u32) -> Result<bool, SemanticError>,
 {
     let mut metadata = base.clone();
-    let mut unready = initial_unready.clone();
+    // Ordinary successors share even a wide pending-backfill set. Copy only
+    // for an actual membership change, retaining old snapshots' readiness.
+    let mut unready = Arc::clone(initial_unready);
     let mut base_history = BTreeMap::<u32, bool>::new();
     let mut prior_tail_history = BTreeSet::<u32>::new();
 
@@ -692,13 +776,13 @@ where
             changed_avet_attributes(&metadata.schema, &endpoint.schema)
         };
         for (attribute, before, after) in changed_avet {
-            if !after {
+            let needs_backfill = if !after {
                 // Dropping AVET also drops any pending backfill. This matters
                 // to an unqualified AVET scan, which must not be poisoned by
                 // a no-longer-indexed attribute.
-                unready.remove(&attribute);
+                false
             } else if !before {
-                let had_history = if prior_tail_history.contains(&attribute) {
+                if prior_tail_history.contains(&attribute) {
                     true
                 } else if let Some(had_history) = base_history.get(&attribute) {
                     *had_history
@@ -706,8 +790,13 @@ where
                     let had_history = has_base_history(attribute)?;
                     base_history.insert(attribute, had_history);
                     had_history
-                };
-                if had_history {
+                }
+            } else {
+                continue;
+            };
+            if unready.contains(&attribute) != needs_backfill {
+                let unready = Arc::make_mut(&mut unready);
+                if needs_backfill {
                     unready.insert(attribute);
                 } else {
                     // Empty attributes can toggle physical AVET membership
@@ -1095,6 +1184,26 @@ impl PostgresIndexer {
                     "the newest native publication has no resumable live-set work",
                 ));
             }
+            drop(transaction);
+            self.tree_store.advance_publication_work(manifest_hash)?;
+            return Ok(None);
+        }
+        if scope == IndexBuildScope::Administrative
+            && !selection.newest_live_complete
+            && selection.newest_live_work_pending
+            && let Some((previous, manifest_hash, _, _)) = selection.usable.as_ref()
+            && previous.publication_revision == selection.newest_observed_revision
+            && previous.basis_t == basis_t
+            && previous.tx_hash == tx_hash
+            && previous.state_hash == stored_state
+        {
+            // A competing builder can publish the correct head before its
+            // bounded live-set fold finishes. Complete that authenticated
+            // winner, then reselect it instead of rebuilding an identical
+            // logical value under another physical revision. A corrupt or
+            // missing witness does not qualify: administrative reconstruction
+            // below must remain available for those repair cases.
+            let manifest_hash = *manifest_hash;
             drop(transaction);
             self.tree_store.advance_publication_work(manifest_hash)?;
             return Ok(None);
@@ -2343,8 +2452,11 @@ fn build_incremental_native(
         })
         .collect::<Vec<_>>();
 
-    let (_, endpoint_avet_unready) =
-        apply_metadata_and_avet_readiness(base_projection, &BTreeSet::new(), tail, |attribute| {
+    let (_, endpoint_avet_unready) = apply_metadata_and_avet_readiness(
+        base_projection,
+        &Arc::new(BTreeSet::new()),
+        tail,
+        |attribute| {
             let (lower, upper) = attribute_bounds(attribute)?;
             Ok(
                 postgres_tree_seek(store, &history_aevt.descriptor, &lower, &mut old_cache)?
@@ -2353,7 +2465,8 @@ fn build_incremental_native(
                             && datom.cmp_in(&upper, IndexOrder::Aevt).is_lt()
                     }),
             )
-        })?;
+        },
+    )?;
     let mut projection_changes =
         changed_avet_attributes(&base_projection.schema, &endpoint_projection.schema)
             .into_iter()
@@ -2366,7 +2479,7 @@ fn build_incremental_native(
     // A false->true transition can be hidden by a disable/re-enable cycle
     // inside one uncovered tail. The recovered storageHasAVET fold retains
     // that fact even when base and endpoint schemas compare equal.
-    for attribute in endpoint_avet_unready {
+    for attribute in endpoint_avet_unready.iter().copied() {
         projection_changes.entry(attribute).or_insert((
             attribute,
             effective_avet(&base_projection.schema, attribute),
@@ -4878,7 +4991,7 @@ impl Peer {
             }
             let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
                 &base_metadata,
-                &manifest_avet_unready(&base.manifest),
+                &Arc::new(manifest_avet_unready(&base.manifest)),
                 &tail.transactions,
                 |attribute| {
                     tree_base_has_attribute_history(
@@ -4891,7 +5004,6 @@ impl Peer {
                 },
             )?;
             let metadata = Arc::new(metadata);
-            let avet_unready = Arc::new(avet_unready);
             let AuthenticatedTail {
                 transactions,
                 transaction_hashes,
@@ -5768,7 +5880,7 @@ impl Peer {
             } = &mut *io;
             apply_metadata_and_avet_readiness(
                 &base_metadata,
-                &manifest_avet_unready(&tree_base.manifest),
+                &Arc::new(manifest_avet_unready(&tree_base.manifest)),
                 &tail.transactions,
                 |attribute| {
                     tree_base_has_attribute_history(
@@ -5782,7 +5894,6 @@ impl Peer {
             )?
         };
         let metadata = Arc::new(metadata);
-        let avet_unready = Arc::new(avet_unready);
         let recent = Arc::new(RecentTier::new_authenticated_existing(
             &self.core.read.database_id,
             tree_base.manifest.basis_t,
@@ -5872,7 +5983,7 @@ impl Peer {
         successor.current_state_hash = tail.end_state_hash;
         successor.recent = Arc::new(recent);
         successor.metadata = metadata;
-        successor.avet_unready = Arc::new(avet_unready);
+        successor.avet_unready = avet_unready;
         successor.generation = successor.generation.saturating_add(1);
         let compatibility = Arc::new(PeerCompatibility {
             value: OnceLock::new(),
@@ -5961,7 +6072,7 @@ impl Peer {
         )?;
         let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
             &base.metadata,
-            &manifest_avet_unready(&base.manifest),
+            &Arc::new(manifest_avet_unready(&base.manifest)),
             &tail.transactions,
             |attribute| {
                 tree_base_has_attribute_history(
@@ -5991,7 +6102,7 @@ impl Peer {
         successor.tree_base = Some(Arc::new(base));
         successor.recent = Arc::new(recent);
         successor.metadata = Arc::new(metadata);
-        successor.avet_unready = Arc::new(avet_unready);
+        successor.avet_unready = avet_unready;
         successor.generation = successor.generation.saturating_add(1);
         let published = Arc::new(PeerState {
             tiered: Arc::new(successor),
@@ -6042,7 +6153,7 @@ impl Peer {
             after.current_state_hash = *state_hash;
             after.recent = Arc::new(recent);
             after.metadata = Arc::new(metadata);
-            after.avet_unready = Arc::new(avet_unready);
+            after.avet_unready = avet_unready;
             after.generation = after.generation.saturating_add(1);
             let after = Arc::new(after);
             let value = |state| {
@@ -6268,7 +6379,7 @@ impl Peer {
                 } = &mut *io;
                 apply_metadata_and_avet_readiness(
                     &base_metadata,
-                    &manifest_avet_unready(&base.manifest),
+                    &Arc::new(manifest_avet_unready(&base.manifest)),
                     &tail.transactions,
                     |attribute| {
                         tree_base_has_attribute_history(
@@ -6282,7 +6393,6 @@ impl Peer {
                 )?
             };
             let metadata = Arc::new(metadata);
-            let avet_unready = Arc::new(avet_unready);
             let recent = Arc::new(RecentTier::new_authenticated_existing(
                 &self.core.read.database_id,
                 base.manifest.basis_t,
@@ -6548,7 +6658,7 @@ struct TreeBoundary {
 
 impl TreeBoundary {
     fn new(normalized: NormalizedIndexBoundary) -> Self {
-        let (routing_prefix, tx) = match &normalized {
+        let (routing_prefix, tx) = match normalized.unbiased() {
             NormalizedIndexBoundary::Eavt(components) => match components {
                 IndexComponents::Empty => (None, None),
                 IndexComponents::One(e) => (
@@ -6689,6 +6799,9 @@ impl TreeBoundary {
                     Some(*t),
                 ),
             },
+            NormalizedIndexBoundary::After(_) => {
+                unreachable!("after_prefix creates at most one internal bias wrapper")
+            }
         };
         Self {
             normalized,
@@ -6698,24 +6811,29 @@ impl TreeBoundary {
     }
 
     fn compare_routing_key(&self, key: &crate::persistent_tree::RoutingKey) -> std::cmp::Ordering {
-        let Some(prefix) = &self.routing_prefix else {
-            return std::cmp::Ordering::Equal;
-        };
-        let primary = key.cmp_prefix(prefix);
-        if primary.is_ne() {
-            return primary;
-        }
-        let Some(tx) = self.tx else {
-            return std::cmp::Ordering::Equal;
-        };
-        if key.tx == 0 {
+        let primary = self
+            .routing_prefix
+            .as_ref()
+            .map_or(std::cmp::Ordering::Equal, |prefix| key.cmp_prefix(prefix));
+        let comparison = if primary.is_ne() || self.tx.is_none() {
+            primary
+        } else if key.tx == 0 {
             // A validated sparse routing key with omitted T is below every
             // concrete member of the tied logical prefix.
             std::cmp::Ordering::Less
         } else {
             // T sorts descending. Equality intentionally covers assertion,
             // retraction, and every strict stored representation at this T.
-            tx.cmp(&key.tx)
+            self.tx
+                .expect("transaction comparison selected")
+                .cmp(&key.tx)
+        };
+        if self.normalized.is_after_prefix() {
+            // Apply strictness to routing keys too: ties can span arbitrarily
+            // many leaves/directories and must not be visited one by one.
+            comparison.then(std::cmp::Ordering::Less)
+        } else {
+            comparison
         }
     }
 }
@@ -7067,8 +7185,14 @@ impl PeerIndexCursor {
         }
     }
 
-    fn fill_durable(&mut self) -> Result<(), SemanticError> {
+    fn fill_durable(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<bool, SemanticError> {
         while self.durable_next.is_none() {
+            if !poll()? {
+                return Ok(false);
+            }
             let Some(datom) = self.durable.next_datom()? else {
                 break;
             };
@@ -7087,13 +7211,23 @@ impl PeerIndexCursor {
             }
             self.durable_next = Some(datom);
         }
-        Ok(())
+        Ok(true)
     }
 
-    fn next_result(&mut self) -> Result<Option<Datom>, SemanticError> {
-        self.fill_durable()?;
+    fn next_result(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Result<Option<Datom>, SemanticError> {
+        if !self.fill_durable(poll)? {
+            self.failed = true;
+            return Ok(None);
+        }
         while self.recent_next.is_none() {
-            let Some(datom) = self.recent.next() else {
+            if !poll()? {
+                self.failed = true;
+                return Ok(None);
+            }
+            let Some(datom) = self.recent.next_with_poll(poll)? else {
                 break;
             };
             if self.order == IndexOrder::Avet
@@ -7131,17 +7265,35 @@ impl PeerIndexCursor {
             Ok(self.recent_next.take())
         }
     }
-}
 
-impl Iterator for PeerIndexCursor {
-    type Item = Result<Datom, SemanticError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// Poll every merge-source advancement, including facts hidden by recent
+    /// replacements or index readiness. Datom fences must stay above the
+    /// ordered merge: either source may be looking beyond an earlier value
+    /// buffered by the other source.
+    pub(crate) fn next_with_poll(
+        &mut self,
+        poll: &mut dyn FnMut() -> Result<bool, SemanticError>,
+    ) -> Option<Result<Datom, SemanticError>> {
         let _operation = self.operation.as_ref().map(|operation| operation.enter());
         if self.failed {
             return None;
         }
-        match self.next_result() {
+        let mut stopped = false;
+        let result = self.next_result(&mut || {
+            if stopped {
+                return Ok(false);
+            }
+            let proceed = poll()?;
+            stopped = !proceed;
+            Ok(proceed)
+        });
+        if stopped {
+            // A recent source may have stopped while a durable lookahead was
+            // already buffered. Do not leak that lookahead as a final result.
+            self.failed = true;
+            return None;
+        }
+        match result {
             Ok(Some(datom)) => Some(Ok(datom)),
             Ok(None) => None,
             Err(error) => {
@@ -7149,6 +7301,14 @@ impl Iterator for PeerIndexCursor {
                 Some(Err(error))
             }
         }
+    }
+}
+
+impl Iterator for PeerIndexCursor {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_poll(&mut || Ok(true))
     }
 }
 
@@ -7690,7 +7850,7 @@ impl TieredSnapshot {
             |attribute| self.has_attribute_history(attribute, read_observer, read_context),
         )?;
         let metadata = Arc::new(metadata);
-        if successor_schema.is_some_and(|schema| metadata.schema.as_ref() != schema) {
+        if successor_schema.is_some_and(|schema| !metadata.matches_schema(schema)) {
             return Err(fault(
                 "peer/successor-schema-mismatch",
                 "committed transaction metadata does not derive the assessed successor schema",
@@ -7717,7 +7877,7 @@ impl TieredSnapshot {
         state.current_state_hash = state_hash;
         state.recent = Arc::new(recent);
         state.metadata = metadata;
-        state.avet_unready = Arc::new(avet_unready);
+        state.avet_unready = avet_unready;
         state.generation = state.generation.saturating_add(1);
         Ok(Self {
             core: Arc::clone(&self.core),
@@ -7952,7 +8112,22 @@ impl TieredSnapshot {
         boundary: &IndexBoundary,
         reverse: bool,
     ) -> Result<PeerIndexCursor, SemanticError> {
-        let normalized = boundary.normalized()?;
+        self.normalized_boundary_cursor_existing_projection(
+            history,
+            boundary.normalized()?,
+            reverse,
+        )
+    }
+
+    /// Internal virtual positions may lie after an entire logical prefix.
+    /// Callers own the same schema/readiness checks as the public-boundary
+    /// adapter above; neither path invents persisted or sentinel components.
+    pub(crate) fn normalized_boundary_cursor_existing_projection(
+        &self,
+        history: bool,
+        normalized: NormalizedIndexBoundary,
+        reverse: bool,
+    ) -> Result<PeerIndexCursor, SemanticError> {
         let order = normalized.order();
         let (_, root) = self.exact_tree(history, order)?;
         let recent = if reverse {
@@ -9792,12 +9967,11 @@ fn build_exact_tiered_state<C: GenericClient>(
     let tail_range_reads = tail.range_reads;
     let (metadata, avet_unready) = apply_metadata_and_avet_readiness(
         &base_metadata,
-        &manifest_avet_unready(&base.manifest),
+        &Arc::new(manifest_avet_unready(&base.manifest)),
         &tail.transactions,
         |attribute| tree_base_has_attribute_history(client, &base, attribute, counters, tree_cache),
     )?;
     let metadata = Arc::new(metadata);
-    let avet_unready = Arc::new(avet_unready);
     let recent = Arc::new(RecentTier::new_authenticated_existing(
         database_id,
         base.manifest.basis_t,
@@ -11144,6 +11318,161 @@ mod tests {
     }
 
     #[test]
+    fn metadata_residency_bookkeeping_reuses_immutable_totals() {
+        for width in [16_u32, 128, 512] {
+            let mut schema = Schema::new();
+            for id in 1_000..1_000 + width {
+                schema
+                    .install(Attribute::new(
+                        id,
+                        Keyword::new("metadata-cost", format!("attribute-{id}")),
+                        ValueType::Long,
+                        Cardinality::One,
+                    ))
+                    .unwrap();
+            }
+            let database = Database::new(schema).unwrap();
+            let metadata = MetadataProjection::from_database(&database).unwrap();
+            let expected = ResidentMetadataStats {
+                schema_attributes: metadata.schema.attributes().count(),
+                schema_information_datoms: metadata.schema_current.len(),
+                schema_estimated_bytes: metadata.schema.estimated_retained_bytes()
+                    + metadata
+                        .schema_current
+                        .iter()
+                        .map(Datom::retained_bytes)
+                        .sum::<u64>(),
+                ident_names: metadata.idents.name_count(),
+                ident_entities: metadata.idents.entity_count(),
+                ident_estimated_bytes: metadata.idents.estimated_retained_bytes(),
+            };
+            let assessed = database
+                .with(
+                    &[TxOp::Add {
+                        entity: EntityRef::Temp("item".into()),
+                        attribute: 1_000,
+                        value: Value::Long(1).into(),
+                    }],
+                    10,
+                )
+                .unwrap();
+            let transaction = DurableTransaction {
+                database_id: "metadata-cost".into(),
+                basis_t: assessed.db_after.basis_t(),
+                previous_hash: [7; 32],
+                eidx_frontier: assessed.db_after.eidx_frontier(),
+                tempids: assessed.tempids,
+                tx_data: assessed.tx_data,
+            };
+            METADATA_STAT_COMPUTATIONS.with(|count| count.set(0));
+            METADATA_SCHEMA_COMPARISONS.with(|count| count.set(0));
+            let started = Instant::now();
+            for _ in 0..1_000 {
+                let successor = metadata.apply(std::slice::from_ref(&transaction)).unwrap();
+                assert_eq!(successor.resident_stats(), expected);
+                assert!(Arc::ptr_eq(&successor.schema, &metadata.schema));
+                assert!(successor.matches_schema(&metadata.schema));
+                drop(successor);
+            }
+            let elapsed = started.elapsed();
+            assert_eq!(
+                METADATA_STAT_COMPUTATIONS.with(|count| count.get()),
+                0,
+                "ordinary metadata apply/statistics/drop must not recompute full schema totals"
+            );
+            assert_eq!(METADATA_SCHEMA_COMPARISONS.with(|count| count.get()), 0);
+            let named = database
+                .with(
+                    &[TxOp::Add {
+                        entity: EntityRef::Temp("named".into()),
+                        attribute: crate::DB_IDENT as u32,
+                        value: Value::Keyword(Keyword::new("status", "pending")).into(),
+                    }],
+                    10,
+                )
+                .unwrap();
+            let named_transaction = DurableTransaction {
+                database_id: "metadata-cost".into(),
+                basis_t: named.db_after.basis_t(),
+                previous_hash: [7; 32],
+                eidx_frontier: named.db_after.eidx_frontier(),
+                tempids: named.tempids.clone(),
+                tx_data: named.tx_data.clone(),
+            };
+            let named_metadata = metadata.apply(&[named_transaction]).unwrap();
+            assert!(Arc::ptr_eq(&named_metadata.schema, &metadata.schema));
+            assert!(Arc::ptr_eq(
+                &named_metadata.schema_current,
+                &metadata.schema_current
+            ));
+            assert!(named_metadata.matches_schema(&metadata.schema));
+            assert_eq!(
+                named_metadata
+                    .idents
+                    .resolve(&Keyword::new("status", "pending")),
+                Some(named.tempids["named"])
+            );
+            assert_eq!(
+                named_metadata.resident_stats().schema_estimated_bytes,
+                expected.schema_estimated_bytes
+            );
+            assert_eq!(
+                named_metadata.resident_stats().ident_names,
+                expected.ident_names + 1
+            );
+            assert_eq!(METADATA_STAT_COMPUTATIONS.with(|count| count.get()), 0);
+            assert_eq!(METADATA_SCHEMA_COMPARISONS.with(|count| count.get()), 0);
+            // Identity maps really changed. Their reconstruction may cost work;
+            // compare all new totals to a fresh independent projection outside
+            // the measured unchanged-metadata path.
+            let named_reference = MetadataProjection::from_database(&named.db_after).unwrap();
+            assert_eq!(
+                named_metadata.resident_stats(),
+                named_reference.resident_stats()
+            );
+            assert!(named_metadata.matches_schema(&named_reference.schema));
+            assert_eq!(METADATA_SCHEMA_COMPARISONS.with(|count| count.get()), 1);
+            METADATA_STAT_COMPUTATIONS.with(|count| count.set(0));
+            // A real schema change rebuilds the projection and its totals once;
+            // retained snapshots keep their independently checked old totals.
+            let installed = database
+                .with(
+                    &[TxOp::InstallAttribute(Attribute::new(
+                        1_000 + width,
+                        Keyword::new("metadata-cost", "new"),
+                        ValueType::String,
+                        Cardinality::One,
+                    ))],
+                    11,
+                )
+                .unwrap();
+            let schema_transaction = DurableTransaction {
+                database_id: "metadata-cost".into(),
+                basis_t: installed.db_after.basis_t(),
+                previous_hash: [7; 32],
+                eidx_frontier: installed.db_after.eidx_frontier(),
+                tempids: installed.tempids,
+                tx_data: installed.tx_data,
+            };
+            let changed = metadata.apply(&[schema_transaction]).unwrap();
+            assert_eq!(
+                changed.resident_stats().schema_attributes,
+                expected.schema_attributes + 1
+            );
+            assert!(
+                changed.resident_stats().schema_estimated_bytes > expected.schema_estimated_bytes
+            );
+            assert_eq!(metadata.resident_stats(), expected);
+            assert_eq!(METADATA_STAT_COMPUTATIONS.with(|count| count.get()), 1);
+            assert!(!changed.matches_schema(&metadata.schema));
+            eprintln!(
+                "METADATA_BOOKKEEPING width={width} apply_stats_drop=1000 recomputations=0 elapsed_us={}",
+                elapsed.as_micros()
+            );
+        }
+    }
+
+    #[test]
     fn ordinary_wide_schema_metadata_transition_reuses_the_projection() {
         let mut schema = Schema::new();
         for attribute in 1_000..1_128 {
@@ -11176,11 +11505,13 @@ mod tests {
             tempids: assessed.tempids,
             tx_data: assessed.tx_data,
         };
-        let (endpoint, unready) =
-            apply_metadata_and_avet_readiness(&metadata, &BTreeSet::new(), &[transaction], |_| {
-                panic!("ordinary data must not perform an AVET history probe")
-            })
-            .unwrap();
+        let (endpoint, unready) = apply_metadata_and_avet_readiness(
+            &metadata,
+            &Arc::new(BTreeSet::new()),
+            &[transaction],
+            |_| panic!("ordinary data must not perform an AVET history probe"),
+        )
+        .unwrap();
         assert!(Arc::ptr_eq(&metadata.schema, &endpoint.schema));
         assert!(Arc::ptr_eq(&metadata.idents, &endpoint.idents));
         assert!(Arc::ptr_eq(
@@ -11530,6 +11861,38 @@ mod tests {
         let Some(connection) = std::env::var("ATOMIC_POSTGRES_URL").ok() else {
             return;
         };
+        // This fixture intentionally corrupts the newest manifest while
+        // preserving a separately known node closure. Concurrent catalog
+        // migration legitimately reauthenticates all live sets and would
+        // replace that marker with a corruption diagnostic. Isolate the
+        // administrative fault scenario, not just its logical database ID.
+        struct CatalogScope {
+            admin: Client,
+            schema: String,
+        }
+        impl Drop for CatalogScope {
+            fn drop(&mut self) {
+                let _ = self
+                    .admin
+                    .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema));
+            }
+        }
+        let schema = unique_database("manifest_selection_scope");
+        let mut admin = Client::connect(&connection, NoTls).unwrap();
+        admin
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
+            .unwrap();
+        let scoped_connection =
+            if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+                format!(
+                    "{connection}{}options=-csearch_path%3D{schema}%2Cpg_catalog",
+                    if connection.contains('?') { "&" } else { "?" }
+                )
+            } else {
+                format!("{connection} options='-csearch_path={schema},pg_catalog'")
+            };
+        let _scope = CatalogScope { admin, schema };
+        let connection = scoped_connection;
         let mut migrator = crate::PostgresMigrator::connect(&connection).unwrap();
         migrator.migrate().unwrap();
 

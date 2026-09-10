@@ -134,17 +134,52 @@ results. Operational benchmarks should report dataset/index coverage, cold
 versus warmed reads, measured SQL/payload I/O and real memory separately from
 logical work counters.
 
-The current builder streams fulltext history into bounded external sorted runs
-and builds a separate Merkle tree for each canonical source manifest. It does
-not incrementally reuse the previous search corpus; rebuild cost grows with
-that corpus. It preserves canonical datom roots and their old encodings.
+The first build and explicit reconstruction stream fulltext history through
+bounded external sorted runs. Ordinary later publications compare authenticated
+canonical history trees, skip matching subtrees, and update only changed search
+records and their routing paths. An unrelated change reuses the search root;
+normal retractions retain historical assertion documents, while physical
+`noHistory` omissions remove the corresponding documents and postings. Corpus
+statistics are updated for touched attributes. Unchanged facts in repacked leaves
+cancel before tokenization. The supplied-view checks described above still apply.
+An authenticated predecessor containing only zero-valued corpus statistics can
+use the bulk builder for its first text load. It merges the admitted mutations
+with unchanged statistics without charging those old records as new input.
+An empty-string document is still a document and prevents this shortcut;
+non-text changes to an empty corpus still reuse its root without rebuilding.
+
+Search pages are immutable and content-addressed, with explicit root/child
+references for retention. Successors do not depend on predecessor lookup chains
+or copy every predecessor page into their own namespace. SQL migration30 retains
+the earlier source-owned sidecars; their first incremental reuse imports and
+authenticates their pages once. Page/header FORMAT1 and canonical datom encodings
+are unchanged. This one-off conversion, missing compatible predecessors, generation
+changes and explicit repair can legitimately require whole-projection work.
+
+Incremental does not mean constant cost: canonical roots/directories must be
+inspected, changed leaves decoded, affected search paths read/written, and all
+publication/pinning SQL completed. A small corpus can fit inside one changed
+canonical leaf. Root/directory metadata grows with tree width. Maintenance
+statistics distinguish this source work, tokenization, search-page I/O, legacy
+imports and unchanged-root reuse.
+Page-upload statistics include verification reads, physically inserted pages
+and direct child/root references. Releasing a build guard counts the source-origin
+pages examined and candidates added in the same indexed retention pass. These
+reference counts do not claim to measure every internal trigger row operation.
 `PostgresIndexer::with_fulltext_build_limits` controls sort memory, target page
 size, record/key capacities, record count, cumulative spill writes and the work
 directory. Default sort admission is8 MiB, target pages64 KiB, at most10 million
-input records and4 GiB cumulative spill writes. One admitted record/page can
+input records per operation and4 GiB cumulative spill writes. Incremental input
+counts mutations; reused records are not new input, and this allowance is not a
+new maximum database size. One admitted record/page can
 exceed the target sort/page size; hard format limits remain enforced, never
 silently truncating tokens. Spill counts include merge rewrites, not live disk
-occupancy; `peak_buffer_bytes` measures the sort buffer, not total process RSS.
+occupancy. `FulltextBuildStats::blocks`/`encoded_bytes` count complete page upload
+attempts, including intermediate and deduplicated pages; `FulltextProjection`
+totals describe the final reachable tree. `peak_buffer_bytes` tracks sort/editor
+workspace, not total process RSS or all live source caches and retained values.
+Use complete operation timing and `OperationContext` for foreground SQL, including
+metadata/control calls; separate worker work needs its own attribution.
 
 `NativeFulltextReader::cache_stats` exposes cache-owned decoded bytes, entries
 and configured bounds. This positive header/page cache has a separate allowance
@@ -169,7 +204,17 @@ reconstructs them from authenticated restored facts. Owner-only
 source; it never edits source facts. During repair, retained readers may cold-fail;
 reopen peers after repair that changes the search root/analyzer to discard cached
 headers. Ordinary GC preserves pinned sources, retires unpinned canonical sources
-under existing policy, and reclaims orphan search blocks in bounded ledger batches.
+under existing policy, and reclaims unreferenced search pages in bounded batches.
+Removing an old root does not remove pages reachable from a successor. A shared
+build/exclusive-GC fence protects publication, and a persisted source build guard
+retains interrupted uploads until retry, explicit discard or source retirement.
+GC can report Busy while a build is active. Each collected page releases its direct
+child references; later batches reclaim newly unreferenced descendants, without
+recursive whole-tree deletion. Candidate discovery uses an indexed rootless-page
+frontier, not a scan of every live page. The batch limit bounds physical removals;
+rechecking guarded candidates may inspect more frontier entries. Explicit discard
+detaches the named source only;
+shared pages can remain reachable and it is not an erasure guarantee.
 Excision publishes a new generation; search is reconstructed from that generation
 and may be unavailable until its projection is ready. New current and history
 views cannot return removed facts. Already-held authorized old values
@@ -186,3 +231,9 @@ with the setup in [application.md](application.md).
 [fulltext_schema.rs](../tests/fulltext_schema.rs) covers schema installation and
 immutable-flag enforcement. These tests do not establish Lucene parity or a
 general-purpose search throughput claim.
+The incremental cost/view oracle is in
+[fulltext_incremental.rs](../tests/fulltext_incremental.rs); admission and empty
+corpus guards are in [fulltext_empty_bulk.rs](../tests/fulltext_empty_bulk.rs).
+[fulltext_incremental_lifecycle.rs](../tests/fulltext_incremental_lifecycle.rs)
+covers legacy sidecars, shared-page retirement, interrupted builds and restricted
+runtime roles.

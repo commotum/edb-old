@@ -385,12 +385,27 @@ struct IndexingBacklog {
     newest_observed_revision: u64,
     target_basis_t: u64,
     pending: VecDeque<Novelty>,
-    total_datoms: u64,
-    total_bytes: u64,
+    // Keep exact private totals so subtraction after publication still reports
+    // the correct suffix even if a public u64 counter has saturated. A queue
+    // of at most usize::MAX entries, each carrying u64 counts, fits in u128.
+    total_datoms: u128,
+    total_bytes: u128,
     indexing_through: Option<u64>,
+    indexing_totals: IndexingTotals,
     publication_work_through: Option<u64>,
     required_publication_t: u64,
     needs_publication: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct IndexingTotals {
+    transactions: u64,
+    datoms: u128,
+    bytes: u128,
+}
+
+fn public_index_count(count: u128) -> u64 {
+    u64::try_from(count).unwrap_or(u64::MAX)
 }
 
 /// Finite committed frontier captured by an asynchronous indexing request.
@@ -430,14 +445,15 @@ impl BackgroundIndexing {
         seed: IndexingSeed,
         sender: mpsc::SyncSender<IndexCommand>,
     ) -> Self {
-        let total_datoms = seed
-            .pending
-            .iter()
-            .fold(0_u64, |total, item| total.saturating_add(item.datoms));
-        let total_bytes = seed
-            .pending
-            .iter()
-            .fold(0_u64, |total, item| total.saturating_add(item.bytes));
+        let (total_datoms, total_bytes) =
+            seed.pending
+                .iter()
+                .fold((0_u128, 0_u128), |(datoms, bytes), item| {
+                    (
+                        datoms + u128::from(item.datoms),
+                        bytes + u128::from(item.bytes),
+                    )
+                });
         Self {
             config,
             backlog: Mutex::new(IndexingBacklog {
@@ -450,6 +466,7 @@ impl BackgroundIndexing {
                 total_datoms,
                 total_bytes,
                 indexing_through: None,
+                indexing_totals: IndexingTotals::default(),
                 publication_work_through: seed.publication_work_through,
                 required_publication_t: seed.required_publication_t,
                 needs_publication: seed.needs_publication,
@@ -483,8 +500,8 @@ impl BackgroundIndexing {
             }
             backlog.target_basis_t = backlog.target_basis_t.max(novelty.basis_t);
             backlog.pending.push_back(novelty);
-            backlog.total_datoms = backlog.total_datoms.saturating_add(novelty.datoms);
-            backlog.total_bytes = backlog.total_bytes.saturating_add(novelty.bytes);
+            backlog.total_datoms += u128::from(novelty.datoms);
+            backlog.total_bytes += u128::from(novelty.bytes);
             // AVET membership is information-derived from :db/index and
             // :db/unique. Enabling either requires a broad durable rebuild of
             // prior values even when ordinary novelty is below the byte
@@ -585,6 +602,19 @@ impl BackgroundIndexing {
         let through = backlog
             .publication_work_through
             .unwrap_or(backlog.target_basis_t);
+        // An ordinary job freezes the entire currently committed tail. A
+        // maintenance job works only on an already-published value: pending
+        // novelty is strictly newer and stays in the live memory index.
+        backlog.indexing_totals = if backlog.publication_work_through.is_some() {
+            debug_assert!(through <= backlog.published_basis_t);
+            IndexingTotals::default()
+        } else {
+            IndexingTotals {
+                transactions: backlog.pending.len() as u64,
+                datoms: backlog.total_datoms,
+                bytes: backlog.total_bytes,
+            }
+        };
         backlog.indexing_through = Some(through);
         self.jobs_started.fetch_add(1, Ordering::Relaxed);
         Some(through)
@@ -609,11 +639,12 @@ impl BackgroundIndexing {
             .is_some_and(|novelty| novelty.basis_t <= published_basis_t)
         {
             if let Some(novelty) = backlog.pending.pop_front() {
-                backlog.total_datoms = backlog.total_datoms.saturating_sub(novelty.datoms);
-                backlog.total_bytes = backlog.total_bytes.saturating_sub(novelty.bytes);
+                backlog.total_datoms -= u128::from(novelty.datoms);
+                backlog.total_bytes -= u128::from(novelty.bytes);
             }
         }
         backlog.indexing_through = None;
+        backlog.indexing_totals = IndexingTotals::default();
         backlog.publication_work_through = index_work_remaining.then_some(published_basis_t);
         backlog.needs_publication = index_work_remaining
             || pending_avet_projections != 0
@@ -623,10 +654,11 @@ impl BackgroundIndexing {
     }
 
     fn fail_job(&self, error: SemanticError) {
-        self.backlog
-            .lock()
-            .expect("index backlog mutex poisoned")
-            .indexing_through = None;
+        {
+            let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
+            backlog.indexing_through = None;
+            backlog.indexing_totals = IndexingTotals::default();
+        }
         *self
             .last_failure
             .lock()
@@ -661,14 +693,14 @@ impl BackgroundIndexing {
             .lock()
             .expect("index backlog mutex poisoned")
             .total_bytes;
-        if total_bytes > self.config.memory_index_max_bytes {
+        if total_bytes > u128::from(self.config.memory_index_max_bytes) {
             return Some(
                 SemanticError::new(
                     ErrorCategory::Busy,
                     "service/index-backpressure",
                     "recent index novelty reached the configured hard limit",
                 )
-                .detail("backlog_bytes", total_bytes.to_string())
+                .detail("backlog_bytes", public_index_count(total_bytes).to_string())
                 .detail(
                     "memory_index_max_bytes",
                     self.config.memory_index_max_bytes.to_string(),
@@ -685,12 +717,19 @@ impl BackgroundIndexing {
             .is_some()
     }
 
+    fn published_revision(&self) -> u64 {
+        self.backlog
+            .lock()
+            .expect("index backlog mutex poisoned")
+            .published_revision
+    }
+
     fn at_hard_limit(&self) -> bool {
         self.backlog
             .lock()
             .expect("index backlog mutex poisoned")
             .total_bytes
-            > self.config.memory_index_max_bytes
+            > u128::from(self.config.memory_index_max_bytes)
     }
 
     fn record_backpressure_stall(&self) {
@@ -703,26 +742,11 @@ impl BackgroundIndexing {
 
     fn stats(&self) -> BackgroundIndexingStats {
         let backlog = self.backlog.lock().expect("index backlog mutex poisoned");
-        let mut memory_transactions = 0_u64;
-        let mut memory_datoms = 0_u64;
-        let mut memory_bytes = 0_u64;
-        let mut indexing_transactions = 0_u64;
-        let mut indexing_datoms = 0_u64;
-        let mut indexing_bytes = 0_u64;
-        for novelty in &backlog.pending {
-            if backlog
-                .indexing_through
-                .is_some_and(|through| novelty.basis_t <= through)
-            {
-                indexing_transactions = indexing_transactions.saturating_add(1);
-                indexing_datoms = indexing_datoms.saturating_add(novelty.datoms);
-                indexing_bytes = indexing_bytes.saturating_add(novelty.bytes);
-            } else {
-                memory_transactions = memory_transactions.saturating_add(1);
-                memory_datoms = memory_datoms.saturating_add(novelty.datoms);
-                memory_bytes = memory_bytes.saturating_add(novelty.bytes);
-            }
-        }
+        // Status sampling must not make fixed-size commits proportional to the
+        // accumulated tail. Only startup and retiring a published prefix walk
+        // pending entries; frozen/live counts are maintained by their writers.
+        let indexing = backlog.indexing_totals;
+        let total_transactions = backlog.pending.len() as u64;
         let last_failure = self
             .last_failure
             .lock()
@@ -739,15 +763,15 @@ impl BackgroundIndexing {
             pending_avet_projections: backlog.pending_avet_projections,
             newest_observed_revision: backlog.newest_observed_revision,
             target_basis_t: backlog.target_basis_t,
-            memory_index_transactions: memory_transactions,
-            memory_index_datoms: memory_datoms,
-            memory_index_bytes: memory_bytes,
-            indexing_transactions,
-            indexing_datoms,
-            indexing_bytes,
-            total_transactions: memory_transactions.saturating_add(indexing_transactions),
-            total_datoms: backlog.total_datoms,
-            total_bytes: backlog.total_bytes,
+            memory_index_transactions: total_transactions - indexing.transactions,
+            memory_index_datoms: public_index_count(backlog.total_datoms - indexing.datoms),
+            memory_index_bytes: public_index_count(backlog.total_bytes - indexing.bytes),
+            indexing_transactions: indexing.transactions,
+            indexing_datoms: public_index_count(indexing.datoms),
+            indexing_bytes: public_index_count(indexing.bytes),
+            total_transactions,
+            total_datoms: public_index_count(backlog.total_datoms),
+            total_bytes: public_index_count(backlog.total_bytes),
             jobs_started: self.jobs_started.load(Ordering::Relaxed),
             jobs_completed: self.jobs_completed.load(Ordering::Relaxed),
             jobs_failed: self.jobs_failed.load(Ordering::Relaxed),
@@ -770,7 +794,7 @@ fn should_index(backlog: &IndexingBacklog, config: BackgroundIndexingConfig) -> 
     // same-basis repair even before the first ordinary transaction.
     backlog.needs_publication
         || (backlog.target_basis_t > backlog.published_basis_t
-            && backlog.total_bytes > config.memory_index_threshold_bytes)
+            && backlog.total_bytes > u128::from(config.memory_index_threshold_bytes))
 }
 
 #[derive(Debug)]
@@ -1258,6 +1282,7 @@ impl TransactionClient {
         }
     }
 
+    /// Snapshot maintained live/frozen aggregates without scanning the backlog.
     pub fn background_indexing_stats(&self) -> BackgroundIndexingStats {
         self.shared.indexing.stats()
     }
@@ -1292,8 +1317,7 @@ impl TransactionClient {
     }
 
     pub fn is_available(&self) -> bool {
-        self.shared.accepting.load(Ordering::Acquire)
-            && self.shared.indexing.stats().last_failure.is_none()
+        self.shared.accepting.load(Ordering::Acquire) && !self.shared.indexing.has_failure()
     }
 }
 
@@ -2026,7 +2050,7 @@ fn run_worker(
         let request_key = work.request.request_key.clone();
         let result = match gate {
             Ok(()) => {
-                let published_revision = shared.indexing.stats().published_revision;
+                let published_revision = shared.indexing.published_revision();
                 match store.adopt_published_tree(database_id, published_revision) {
                     Ok(()) => crate::transaction_hints::overlap(
                         store.hint_database_value(database_id),
@@ -2238,9 +2262,9 @@ fn run_index_worker(
             let result = if retry == Some(true) {
                 indexer
                     .reconnect()
-                    .and_then(|()| indexer.rebuild_fulltext())
+                    .and_then(|()| indexer.ensure_latest_fulltext())
             } else {
-                indexer.rebuild_fulltext()
+                indexer.ensure_latest_fulltext()
             };
             let checked_basis = result
                 .as_ref()
@@ -2735,6 +2759,311 @@ mod tests {
         }
     }
 
+    fn bookkeeping_seed(width: usize) -> IndexingSeed {
+        IndexingSeed {
+            lineage_id: "bookkeeping-lineage".into(),
+            published_revision: 7,
+            published_basis_t: 1,
+            pending_avet_projections: 0,
+            newest_observed_revision: 7,
+            target_basis_t: width as u64 + 1,
+            pending: (0..width)
+                .map(|offset| Novelty {
+                    basis_t: offset as u64 + 2,
+                    datoms: offset as u64 % 3 + 1,
+                    bytes: offset as u64 % 7 + 17,
+                })
+                .collect(),
+            publication_work_through: None,
+            required_publication_t: 0,
+            needs_publication: false,
+        }
+    }
+
+    fn bookkeeping_config() -> BackgroundIndexingConfig {
+        BackgroundIndexingConfig {
+            memory_index_threshold_bytes: u64::MAX - 1,
+            memory_index_max_bytes: u64::MAX,
+        }
+    }
+
+    fn assert_backlog_oracle(indexing: &BackgroundIndexing) {
+        // This deliberately independent full scan is test-only and outside
+        // measured operations. Never consult any maintained aggregate here.
+        let (total, frozen, revision, basis, through) = {
+            let backlog = indexing.backlog.lock().unwrap();
+            let mut total = [0_u128; 3];
+            let mut frozen = [0_u128; 3];
+            for novelty in &backlog.pending {
+                let counts = [1, u128::from(novelty.datoms), u128::from(novelty.bytes)];
+                for column in 0..3 {
+                    total[column] += counts[column];
+                    if backlog
+                        .indexing_through
+                        .is_some_and(|through| novelty.basis_t <= through)
+                    {
+                        frozen[column] += counts[column];
+                    }
+                }
+            }
+            (
+                total,
+                frozen,
+                backlog.published_revision,
+                backlog.published_basis_t,
+                backlog.indexing_through,
+            )
+        };
+        let saturated = |value: u128| value.min(u128::from(u64::MAX)) as u64;
+        let stats = indexing.stats();
+        assert_eq!(
+            [
+                stats.total_transactions,
+                stats.total_datoms,
+                stats.total_bytes
+            ],
+            total.map(saturated)
+        );
+        assert_eq!(
+            [
+                stats.indexing_transactions,
+                stats.indexing_datoms,
+                stats.indexing_bytes
+            ],
+            frozen.map(saturated)
+        );
+        assert_eq!(
+            [
+                stats.memory_index_transactions,
+                stats.memory_index_datoms,
+                stats.memory_index_bytes
+            ],
+            std::array::from_fn(|column| saturated(total[column] - frozen[column]))
+        );
+        assert_eq!(stats.published_revision, revision);
+        assert_eq!(indexing.published_revision(), revision);
+        assert_eq!(stats.published_basis_t, basis);
+        assert_eq!(stats.job_in_flight, through.is_some());
+        assert_eq!(stats.last_failure.is_some(), indexing.has_failure());
+    }
+
+    #[test]
+    fn backlog_aggregates_match_oracle_across_failure_retry_and_partial_adoption() {
+        for width in [1, 32, 512, 8_192] {
+            let (sender, _receiver) = mpsc::sync_channel(1);
+            let indexing =
+                BackgroundIndexing::new(bookkeeping_config(), bookkeeping_seed(width), sender);
+            assert_backlog_oracle(&indexing);
+            let target = width as u64 + 1;
+            assert_eq!(indexing.request_index().target_t, target);
+            assert_eq!(indexing.begin_job(), Some(target));
+            assert_eq!(indexing.begin_job(), None);
+            assert_backlog_oracle(&indexing);
+            let frozen = indexing.stats();
+            assert_eq!(frozen.indexing_transactions, width as u64);
+            assert_eq!(frozen.memory_index_transactions, 0);
+
+            indexing.note_commit(
+                Novelty {
+                    basis_t: target,
+                    datoms: 100,
+                    bytes: 999,
+                },
+                true,
+            );
+            assert_eq!(
+                indexing.stats(),
+                frozen,
+                "duplicate receipt changed accounting"
+            );
+            indexing.note_commit(
+                Novelty {
+                    basis_t: target + 1,
+                    datoms: 3,
+                    bytes: 71,
+                },
+                true,
+            );
+            assert_backlog_oracle(&indexing);
+            assert_eq!(indexing.stats().memory_index_transactions, 1);
+
+            let partial = 1 + width as u64 / 2;
+            indexing.complete_job(8, partial, 1, true);
+            assert_backlog_oracle(&indexing);
+            assert_eq!(indexing.stats().pending_avet_projections, 1);
+            assert_eq!(indexing.begin_job(), Some(partial));
+            assert_eq!(
+                indexing.stats().indexing_transactions,
+                0,
+                "maintenance froze an unpublished suffix"
+            );
+            indexing.note_commit(
+                Novelty {
+                    basis_t: target + 2,
+                    datoms: 2,
+                    bytes: 41,
+                },
+                false,
+            );
+            assert_backlog_oracle(&indexing);
+            indexing.complete_job(9, partial, 0, false);
+            assert_backlog_oracle(&indexing);
+            assert!(
+                indexing.should_continue(),
+                "older maintenance lost new publication demand"
+            );
+
+            assert_eq!(indexing.begin_job(), Some(target + 2));
+            let before_retry = indexing.stats();
+            let mut attempts = 0;
+            retry_index_job(
+                || {
+                    attempts += 1;
+                    if attempts < 3 {
+                        Err(SemanticError::new(
+                            ErrorCategory::Conflict,
+                            "index/test-cas",
+                            "retry unchanged job",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+                || true,
+            )
+            .unwrap();
+            assert_eq!(attempts, 3);
+            assert_eq!(
+                indexing.stats(),
+                before_retry,
+                "transient retry moved the frozen boundary"
+            );
+            indexing.fail_job(SemanticError::new(
+                ErrorCategory::Fault,
+                "index/test-failure",
+                "terminal failure",
+            ));
+            assert_backlog_oracle(&indexing);
+            assert_eq!(indexing.stats().indexing_transactions, 0);
+            assert_eq!(indexing.stats().jobs_failed, 1);
+            assert!(indexing.has_failure());
+            assert_eq!(
+                indexing.limiting_error().unwrap().code,
+                "service/indexing-failed"
+            );
+
+            // Fatal indexing failure still closes the writer. Reconstructing
+            // from authenticated startup state, not a stats read, clears it.
+            let seed = {
+                let backlog = indexing.backlog.lock().unwrap();
+                IndexingSeed {
+                    lineage_id: "bookkeeping-lineage".into(),
+                    published_revision: backlog.published_revision,
+                    published_basis_t: backlog.published_basis_t,
+                    pending_avet_projections: backlog.pending_avet_projections,
+                    newest_observed_revision: backlog.newest_observed_revision,
+                    target_basis_t: backlog.target_basis_t,
+                    pending: backlog.pending.clone(),
+                    publication_work_through: backlog.publication_work_through,
+                    required_publication_t: backlog.required_publication_t,
+                    needs_publication: backlog.needs_publication,
+                }
+            };
+            let (sender, _receiver) = mpsc::sync_channel(1);
+            let restarted = BackgroundIndexing::new(bookkeeping_config(), seed, sender);
+            assert!(!restarted.has_failure());
+            assert_eq!(restarted.begin_job(), Some(target + 2));
+            assert_backlog_oracle(&restarted);
+            restarted.complete_job(10, target + 2, 0, false);
+            assert_backlog_oracle(&restarted);
+            assert_eq!(restarted.stats().total_transactions, 0);
+            assert!(!restarted.should_continue());
+            restarted.complete_job(9, partial, 0, false);
+            assert_eq!(
+                restarted.published_revision(),
+                10,
+                "adoption revision regressed"
+            );
+            assert_backlog_oracle(&restarted);
+        }
+    }
+
+    #[test]
+    fn saturated_public_backlog_counts_recover_exact_suffix_after_adoption() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let mut seed = bookkeeping_seed(2);
+        seed.pending[0].datoms = u64::MAX;
+        seed.pending[0].bytes = u64::MAX;
+        seed.pending[1].datoms = 7;
+        seed.pending[1].bytes = 7;
+        let indexing = BackgroundIndexing::new(bookkeeping_config(), seed, sender);
+        assert_backlog_oracle(&indexing);
+        assert_eq!(indexing.stats().total_datoms, u64::MAX);
+        assert!(indexing.at_hard_limit());
+        assert_eq!(indexing.begin_job(), Some(3));
+        indexing.note_commit(
+            Novelty {
+                basis_t: 4,
+                datoms: 9,
+                bytes: 9,
+            },
+            false,
+        );
+        assert_backlog_oracle(&indexing);
+        assert_eq!(indexing.stats().memory_index_datoms, 9);
+        indexing.complete_job(8, 2, 0, false);
+        assert_backlog_oracle(&indexing);
+        assert_eq!(indexing.stats().total_datoms, 16);
+        assert_eq!(indexing.stats().total_bytes, 16);
+        assert!(!indexing.at_hard_limit());
+    }
+
+    #[test]
+    fn fixed_append_revision_availability_and_status_work_does_not_scan_backlog() {
+        use std::hint::black_box;
+        const APPENDS: u64 = 256;
+        for width in [32, 128, 512, 2_048, 8_192, 32_768] {
+            let (sender, _receiver) = mpsc::sync_channel(1);
+            let indexing =
+                BackgroundIndexing::new(bookkeeping_config(), bookkeeping_seed(width), sender);
+            indexing.request_index();
+            let through = indexing.begin_job().unwrap();
+            assert_backlog_oracle(&indexing);
+            let started = Instant::now();
+            for offset in 1..=APPENDS {
+                indexing.note_commit(
+                    Novelty {
+                        basis_t: through + offset,
+                        datoms: 1,
+                        bytes: 64,
+                    },
+                    false,
+                );
+                black_box(indexing.published_revision());
+                black_box(indexing.has_failure());
+                black_box(indexing.at_hard_limit());
+                black_box(indexing.limiting_error());
+                // Include the complete public aggregate snapshot and drop,
+                // not only insertion or the dedicated revision getter.
+                black_box(indexing.stats());
+            }
+            let append_elapsed = started.elapsed();
+            assert_backlog_oracle(&indexing);
+            assert_eq!(indexing.stats().indexing_transactions, width as u64);
+            assert_eq!(indexing.stats().memory_index_transactions, APPENDS);
+            let adoption_started = Instant::now();
+            indexing.complete_job(8, through, 0, false);
+            let adoption_elapsed = adoption_started.elapsed();
+            assert_backlog_oracle(&indexing);
+            assert_eq!(indexing.stats().total_transactions, APPENDS);
+            eprintln!(
+                "SERVICE_BOOKKEEPING retained={width} fixed_appends={APPENDS} append_revision_availability_stats_drop_ns_per_op={} adoption_removed={width} adoption_us={}",
+                append_elapsed.as_nanos() / u128::from(APPENDS),
+                adoption_elapsed.as_micros()
+            );
+        }
+    }
+
     #[test]
     fn fulltext_idle_retry_is_bounded_and_clears_only_its_own_failure() {
         let now = Instant::now();
@@ -3024,8 +3353,9 @@ mod tests {
             target_basis_t: 2,
             pending: VecDeque::new(),
             total_datoms: 1,
-            total_bytes: config.memory_index_threshold_bytes,
+            total_bytes: u128::from(config.memory_index_threshold_bytes),
             indexing_through: None,
+            indexing_totals: IndexingTotals::default(),
             publication_work_through: None,
             required_publication_t: 0,
             needs_publication: false,

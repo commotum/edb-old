@@ -23,6 +23,10 @@ const MAX_PAGE: usize = MAX_RECORD + 16384;
 const FANOUT: usize = 128;
 const MAX_DEPTH: usize = 32;
 
+#[path = "fulltext_store_incremental.rs"]
+mod incremental;
+pub(crate) use incremental::FulltextMutation;
+
 fn projection_lock_key(source: Digest) -> i64 {
     let mut input = b"atomic/fulltext-projection-lock/v1".to_vec();
     input.extend_from_slice(&source);
@@ -257,12 +261,41 @@ impl FulltextBuildLimits {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FulltextBuildStats {
+    /// Input records or mutations admitted by this operation, before dedup.
     pub input_records: u64,
+    /// Records reachable from the resulting projection root.
     pub records: u64,
+    /// Complete page uploads, including deduplication and intermediate paths.
     pub blocks: u64,
+    /// Encoded page bytes uploaded, including deduplication/intermediate paths.
     pub encoded_bytes: u64,
     pub spill_bytes: u64,
     pub peak_buffer_bytes: usize,
+    /// Page payload reads, including upload verification reads.
+    pub blocks_read: u64,
+    pub block_bytes_read: u64,
+    pub blocks_inserted: u64,
+    /// Successfully inserted direct page-DAG references (not SQL calls).
+    pub edges_inserted: u64,
+    pub roots_inserted: u64,
+    /// Source-origin pages examined when releasing the interrupted-build guard.
+    pub retention_pages_examined: u64,
+    pub retention_candidates_added: u64,
+    pub imported_blocks: u64,
+    pub source_nodes_read: u64,
+    pub source_node_bytes: u64,
+    pub source_datoms_examined: u64,
+    pub source_references_examined: u64,
+    pub documents_added: u64,
+    pub documents_removed: u64,
+    pub tokenized_bytes: u64,
+    pub statistics_reads: u64,
+    pub statistics_read_bytes: u64,
+    pub predecessor_candidates: u64,
+    pub reused_projections: u64,
+    /// Initial bulk construction after proving the predecessor contains only
+    /// zero-valued attribute statistics and finding new canonical text.
+    pub empty_corpus_bulk_builds: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -860,7 +893,7 @@ pub(crate) fn load_page(
 ) -> Result<Arc<Page>, SemanticError> {
     let row = client
         .query_opt(
-            "SELECT payload FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash=$2",
+            "SELECT payload FROM atomic_fulltext_pages WHERE block_hash=$2 UNION ALL SELECT payload FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash=$2 AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_pages WHERE block_hash=$2) LIMIT 1",
             &[&&source[..], &&hash[..]],
         )
         .map_err(|e| postgres_error("fulltext/read-block", e))?
@@ -941,19 +974,7 @@ impl FulltextStore {
         limits: &FulltextBuildLimits,
         fault_injection: FulltextBuildFault,
     ) -> Result<(FulltextProjection, FulltextBuildStats), SemanticError> {
-        let key = projection_lock_key(source);
-        let locked: bool = self
-            .client
-            .query_one("SELECT pg_try_advisory_lock($1)", &[&key])
-            .map_err(|e| postgres_error("fulltext/build-lock", e))?
-            .get(0);
-        if !locked {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "fulltext/projection-busy",
-                "search projection build or repair already active",
-            ));
-        }
+        self.lock_build(source)?;
         let result = self.build_locked(
             source,
             source_basis_t,
@@ -963,10 +984,7 @@ impl FulltextStore {
             limits,
             fault_injection,
         );
-        let release = self
-            .client
-            .query_one("SELECT pg_advisory_unlock($1)", &[&key])
-            .map_err(|e| postgres_error("fulltext/build-unlock", e));
+        let release = self.unlock_build(source);
         match (result, release) {
             (Err(error), _) => Err(error),
             (Ok(_), Err(error)) => Err(error),
@@ -1016,6 +1034,7 @@ impl FulltextStore {
         if let Some(p) = self.open(source, analyzer_version)? {
             return Ok((p, FulltextBuildStats::default()));
         }
+        self.begin_build(source)?;
         let mut stats = FulltextBuildStats::default();
         let mut sorter = Sorter::new(limits);
         for record in records {
@@ -1037,10 +1056,35 @@ impl FulltextStore {
             sorter.push(record, &mut stats)?;
         }
         let mut sorted = sorter.finish(&mut stats)?;
+        self.build_sorted(
+            source,
+            source_basis_t,
+            source_generation,
+            analyzer_version,
+            std::iter::from_fn(move || read_record(&mut sorted).transpose()),
+            limits,
+            stats,
+            fault_injection,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_sorted(
+        &mut self,
+        source: Digest,
+        source_basis_t: u64,
+        source_generation: u64,
+        analyzer_version: u32,
+        records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
+        limits: &FulltextBuildLimits,
+        mut stats: FulltextBuildStats,
+        fault_injection: FulltextBuildFault,
+    ) -> Result<(FulltextProjection, FulltextBuildStats), SemanticError> {
         let mut levels: Vec<Vec<Child>> = Vec::new();
         let mut leaf = Vec::new();
         let mut leaf_bytes = 13;
-        while let Some(record) = read_record(&mut sorted)? {
+        for record in records {
+            let record = record?;
             let bytes = record.key.len() + record.value.len() + 8;
             if !leaf.is_empty() && (leaf.len() >= FANOUT || leaf_bytes + bytes > limits.page_bytes)
             {
@@ -1086,7 +1130,6 @@ impl FulltextStore {
             encoded_bytes: stats.encoded_bytes,
             block_count: stats.blocks,
         };
-        let header = projection.encode();
         if fault_injection == FulltextBuildFault::BeforePublication {
             return Err(SemanticError::new(
                 ErrorCategory::Interrupted,
@@ -1094,25 +1137,16 @@ impl FulltextStore {
                 "search blocks uploaded; publication intentionally interrupted",
             ));
         }
-        let header_hash = sha256(&header);
-        self.client.execute("INSERT INTO atomic_fulltext_projections(manifest_hash,analyzer_version,root_hash,header_hash,header) VALUES($1,$2,$3,$4,$5) ON CONFLICT(manifest_hash) DO NOTHING", &[&&source[..],&(analyzer_version as i32),&&root.hash[..],&&header_hash[..],&header])
-            .map_err(|e|postgres_error("fulltext/publish",e))?;
-        let published = self
-            .open(source, analyzer_version)?
-            .ok_or_else(|| fault("fulltext/missing-header", "search publication disappeared"))?;
-        if published != projection {
-            return Err(fault(
-                "fulltext/publication-conflict",
-                "same source produced a different search projection",
-            ));
-        }
+        self.publish(&projection, &mut stats)?;
         Ok((projection, stats))
     }
 
     /// Explicit operator repair invalidates this source's derived search bytes.
     /// Canonical data is untouched. Previously opened search readers may fail
     /// cold reads until reconstruction; this is not an erasure guarantee.
-    /// Returns true once all blocks for this exact source have been removed.
+    /// Returns true once this source has no remaining reclaimable pages or
+    /// legacy blocks. Pages still shared by another root/parent are retained;
+    /// they no longer require this source's header to remain readable.
     pub fn discard_projection(
         &mut self,
         source: Digest,
@@ -1137,6 +1171,20 @@ impl FulltextStore {
                 "search repair requires the catalog owner",
             ));
         }
+        let gc_locked: bool = tx
+            .query_one(
+                "SELECT pg_try_advisory_xact_lock(atomic_fulltext_gc_pin_key())",
+                &[],
+            )
+            .map_err(|e| postgres_error("fulltext/discard-gc-lock", e))?
+            .get(0);
+        if !gc_locked {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "fulltext/projection-busy",
+                "search build or garbage collection already active",
+            ));
+        }
         let locked: bool = tx
             .query_one(
                 "SELECT pg_try_advisory_xact_lock($1)",
@@ -1156,11 +1204,48 @@ impl FulltextStore {
             &[&&source[..]],
         )
         .map_err(|e| postgres_error("fulltext/discard-header", e))?;
-        tx.execute("WITH candidates AS (SELECT block_hash FROM atomic_fulltext_blocks WHERE manifest_hash=$1 ORDER BY block_hash LIMIT $2) DELETE FROM atomic_fulltext_blocks b USING candidates c WHERE b.manifest_hash=$1 AND b.block_hash=c.block_hash", &[&&source[..],&(maximum_blocks as i64)])
+        tx.execute(
+            "DELETE FROM atomic_fulltext_page_roots WHERE manifest_hash=$1",
+            &[&&source[..]],
+        )
+        .map_err(|e| postgres_error("fulltext/discard-root", e))?;
+        let removed_build = tx
+            .execute(
+                "DELETE FROM atomic_fulltext_page_builds WHERE manifest_hash=$1",
+                &[&&source[..]],
+            )
+            .map_err(|e| postgres_error("fulltext/discard-build", e))?;
+        if removed_build != 0 {
+            tx.query_one(
+                "SELECT * FROM atomic_enqueue_fulltext_source_pages($1)",
+                &[&&source[..]],
+            )
+            .map_err(|e| postgres_error("fulltext/discard-frontier", e))?;
+        }
+        tx.execute("WITH candidates AS MATERIALIZED (\
+            SELECT legacy,block_hash FROM (\
+              SELECT true AS legacy,block_hash FROM atomic_fulltext_blocks WHERE manifest_hash=$1 \
+              UNION ALL \
+              SELECT false AS legacy,p.block_hash FROM atomic_fulltext_page_garbage g \
+              JOIN atomic_fulltext_pages p ON p.block_hash=g.block_hash \
+              WHERE p.created_for=$1 \
+                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_roots r WHERE r.root_hash=p.block_hash) \
+                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_edges e WHERE e.child_hash=p.block_hash) \
+                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_builds b WHERE b.manifest_hash=p.created_for)\
+            ) eligible ORDER BY legacy,block_hash LIMIT $2\
+          ), old AS (\
+            DELETE FROM atomic_fulltext_blocks b USING candidates c \
+            WHERE c.legacy AND b.manifest_hash=$1 AND b.block_hash=c.block_hash RETURNING 1\
+          ) DELETE FROM atomic_fulltext_pages p USING candidates c WHERE NOT c.legacy AND p.block_hash=c.block_hash", &[&&source[..],&(maximum_blocks as i64)])
             .map_err(|e|postgres_error("fulltext/discard-blocks",e))?;
         let complete: bool = tx
             .query_one(
-                "SELECT NOT EXISTS(SELECT 1 FROM atomic_fulltext_blocks WHERE manifest_hash=$1)",
+                "SELECT NOT EXISTS(SELECT 1 FROM atomic_fulltext_blocks WHERE manifest_hash=$1) \
+                    AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_garbage g \
+                      JOIN atomic_fulltext_pages p ON p.block_hash=g.block_hash WHERE p.created_for=$1 \
+                      AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_roots r WHERE r.root_hash=p.block_hash) \
+                      AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_edges e WHERE e.child_hash=p.block_hash) \
+                      AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_builds b WHERE b.manifest_hash=p.created_for))",
                 &[&&source[..]],
             )
             .map_err(|e| postgres_error("fulltext/discard-status", e))?
@@ -1184,19 +1269,7 @@ impl FulltextStore {
                 "search build exceeds maximum depth",
             ));
         }
-        let bytes = page.encode()?;
-        let hash = sha256(&bytes);
-        let child = page.descriptor(hash);
-        self.client.execute("INSERT INTO atomic_fulltext_blocks(manifest_hash,block_hash,payload) VALUES($1,$2,$3) ON CONFLICT DO NOTHING", &[&&source[..],&&hash[..],&bytes]).map_err(|e|postgres_error("fulltext/write-block",e))?;
-        let stored:Vec<u8>=self.client.query_one("SELECT payload FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash=$2", &[&&source[..],&&hash[..]]).map_err(|e|postgres_error("fulltext/verify-block",e))?.get(0);
-        if stored != bytes {
-            return Err(fault(
-                "fulltext/block-conflict",
-                "content-addressed search block differs",
-            ));
-        }
-        stats.blocks += 1;
-        stats.encoded_bytes = stats.encoded_bytes.saturating_add(bytes.len() as u64);
+        let child = self.store_page(source, &page, stats)?;
         while levels.len() <= level {
             levels.push(Vec::new());
         }
@@ -1408,7 +1481,9 @@ fn read_record(file: &mut File) -> Result<Option<FulltextRecord>, SemanticError>
     file.read_exact(&mut value_length)
         .map_err(|e| io_error("fulltext/spill-frame", e))?;
     let n = u32::from_be_bytes(value_length) as usize;
-    if n > MAX_RECORD.saturating_sub(key_length) {
+    // Incremental mutation spools carry one private operation byte. Persisted
+    // pages still enforce MAX_RECORD, independently of this temporary format.
+    if n > (MAX_RECORD + 1).saturating_sub(key_length) {
         return Err(fault("fulltext/spill-frame", "invalid spill value length"));
     }
     let mut value = vec![0; n];

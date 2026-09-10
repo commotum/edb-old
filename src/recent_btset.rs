@@ -39,6 +39,8 @@ pub(crate) struct BtWork {
     pub(crate) node_visits: u64,
     pub(crate) nodes_copied: u64,
     pub(crate) node_splits: u64,
+    /// Immediate-child aggregate reads while constructing copied branches.
+    pub(crate) aggregate_child_reads: u64,
 }
 
 impl BtWork {
@@ -57,10 +59,21 @@ enum Node {
         first: RecentDatomRef,
         separators: Vec<RecentDatomRef>,
         children: Vec<Arc<Node>>,
+        node_count: u64,
+        height: u32,
     },
 }
 
 impl Node {
+    fn aggregate(&self) -> (u64, u32) {
+        match self {
+            Self::Leaf { .. } => (1, 1),
+            Self::Branch {
+                node_count, height, ..
+            } => (*node_count, *height),
+        }
+    }
+
     fn first(&self) -> &RecentDatomRef {
         match self {
             Self::Leaf { items } => &items[0],
@@ -91,30 +104,25 @@ impl RecentBtSet {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> u64 {
         self.len
     }
 
+    #[cfg(test)]
     pub(crate) fn height(&self) -> u32 {
-        fn height(node: &Node) -> u32 {
-            match node {
-                Node::Leaf { .. } => 1,
-                Node::Branch { children, .. } => 1 + height(&children[0]),
-            }
-        }
-        self.root.as_deref().map_or(0, height)
+        self.root.as_deref().map_or(0, |root| root.aggregate().1)
     }
 
+    #[cfg(test)]
     pub(crate) fn node_count(&self) -> u64 {
-        fn count(node: &Node) -> u64 {
-            match node {
-                Node::Leaf { .. } => 1,
-                Node::Branch { children, .. } => {
-                    1 + children.iter().map(|child| count(child)).sum::<u64>()
-                }
-            }
-        }
-        self.root.as_deref().map_or(0, count)
+        self.root.as_deref().map_or(0, |root| root.aggregate().0)
+    }
+
+    /// Read the immutable root summary, without traversing retained children.
+    pub(crate) fn summary(&self) -> (u64, u64, u32) {
+        let (nodes, height) = self.root.as_deref().map_or((0, 0), Node::aggregate);
+        (self.len, nodes, height)
     }
 
     pub(crate) fn insert(&self, item: RecentDatomRef, work: &mut BtWork) -> (Self, bool) {
@@ -142,7 +150,7 @@ impl RecentBtSet {
             ),
             Inserted::Split(left, right) => {
                 work.nodes_copied = work.nodes_copied.saturating_add(1);
-                let root = branch(vec![left, right]);
+                let root = branch(vec![left, right], work);
                 (
                     Self {
                         order: self.order,
@@ -188,6 +196,30 @@ impl RecentBtSet {
     }
 
     #[cfg(test)]
+    pub(crate) fn recompute_summary(&self) -> (u64, u64, u32) {
+        // Test-only oracle: explicitly walk nodes/leaves, never read cached
+        // node_count/height or set len. Do not call on measured append paths.
+        let mut pending = Vec::new();
+        if let Some(root) = self.root.as_deref() {
+            pending.push((root, 1_u32));
+        }
+        let (mut entries, mut nodes, mut height) = (0, 0, 0);
+        while let Some((node, depth)) = pending.pop() {
+            nodes += 1;
+            match node {
+                Node::Leaf { items } => {
+                    entries += items.len() as u64;
+                    height = height.max(depth);
+                }
+                Node::Branch { children, .. } => {
+                    pending.extend(children.iter().map(|child| (child.as_ref(), depth + 1)));
+                }
+            }
+        }
+        (entries, nodes, height)
+    }
+
+    #[cfg(test)]
     pub(crate) fn node_ids(&self) -> BTreeSet<usize> {
         fn collect(node: &Arc<Node>, result: &mut BTreeSet<usize>) {
             let id = Arc::as_ptr(node) as usize;
@@ -217,17 +249,29 @@ fn compare(
     work.compared(left.datom().cmp_in(right.datom(), order))
 }
 
-fn branch(children: Vec<Arc<Node>>) -> Arc<Node> {
+fn branch(children: Vec<Arc<Node>>, work: &mut BtWork) -> Arc<Node> {
     debug_assert!(children.len() >= 2 && children.len() <= NODE_WIDTH);
     let first = children[0].first().clone();
-    let separators = children[1..]
-        .iter()
-        .map(|child| child.first().clone())
-        .collect();
+    let mut separators = Vec::with_capacity(children.len() - 1);
+    let mut node_count = 1_u64;
+    let mut height = 0_u32;
+    // These children are already visited to build the copied branch. Read only
+    // their cached summaries; untouched descendant subtrees remain shared.
+    for (index, child) in children.iter().enumerate() {
+        work.aggregate_child_reads = work.aggregate_child_reads.saturating_add(1);
+        let (child_nodes, child_height) = child.aggregate();
+        node_count = node_count.saturating_add(child_nodes);
+        height = height.max(child_height);
+        if index > 0 {
+            separators.push(child.first().clone());
+        }
+    }
     Arc::new(Node::Branch {
         first,
         separators,
         children,
+        node_count,
+        height: height.saturating_add(1),
     })
 }
 
@@ -276,7 +320,7 @@ fn insert_node(
                     let mut next = children.clone();
                     next[child_index] = child;
                     work.nodes_copied = work.nodes_copied.saturating_add(1);
-                    Inserted::One(branch(next))
+                    Inserted::One(branch(next, work))
                 }
                 Inserted::Split(left, right) => {
                     let mut next = Vec::with_capacity(children.len() + 1);
@@ -286,12 +330,12 @@ fn insert_node(
                     next.extend_from_slice(&children[child_index + 1..]);
                     if next.len() <= NODE_WIDTH {
                         work.nodes_copied = work.nodes_copied.saturating_add(1);
-                        Inserted::One(branch(next))
+                        Inserted::One(branch(next, work))
                     } else {
                         let right_children = next.split_off(next.len() / 2);
                         work.nodes_copied = work.nodes_copied.saturating_add(2);
                         work.node_splits = work.node_splits.saturating_add(1);
-                        Inserted::Split(branch(next), branch(right_children))
+                        Inserted::Split(branch(next, work), branch(right_children, work))
                     }
                 }
             }
@@ -657,6 +701,8 @@ mod tests {
                 assert_eq!(inserted, oracle.insert(value));
                 assert!(work.node_visits <= u64::from(tree.height()) + 1);
                 tree = next;
+                assert_eq!(tree.summary(), tree.recompute_summary());
+                assert!(work.aggregate_child_reads <= NODE_WIDTH as u64 * work.nodes_copied);
                 if offset == 127 {
                     predecessor = Some(tree.clone());
                     predecessor_oracle = oracle.iter().copied().collect();
@@ -678,6 +724,14 @@ mod tests {
             assert!(!inserted);
             assert_eq!(same.len(), tree.len());
             assert_eq!(collect(&same), collect(&tree));
+            assert_eq!(same.summary(), same.recompute_summary());
+            assert_eq!(same.summary(), tree.summary());
+            assert_eq!(duplicate_work.aggregate_child_reads, 0);
+            assert_eq!(duplicate_work.nodes_copied, 0);
+            assert!(Arc::ptr_eq(
+                same.root.as_ref().unwrap(),
+                tree.root.as_ref().unwrap()
+            ));
         }
     }
 

@@ -16,12 +16,19 @@ struct Fixture {
     raw: Client,
     trees: PostgresTreeStore,
     operator: PostgresOperator,
+    // Keep the isolated catalog alive until every connected client is dropped.
+    _scope: common::PostgresFixture,
 }
 
 impl Fixture {
     fn new() -> Option<Self> {
         let url = std::env::var("ATOMIC_POSTGRES_URL").ok()?;
-        PostgresMigrator::connect(&url).unwrap().migrate().unwrap();
+        // GC legitimately resumes any pending publication in an installation.
+        // These tests intentionally pause/corrupt that work between SQL calls,
+        // so a unique database ID alone cannot isolate them from maintenance.
+        let scope = common::PostgresFixture::new(&url, "inspection_pending");
+        let url = &scope.connection;
+        PostgresMigrator::connect(url).unwrap().migrate().unwrap();
         let id = format!(
             "inspection_pending_{}_{}",
             std::process::id(),
@@ -39,16 +46,17 @@ impl Fixture {
                 Cardinality::One,
             ))
             .unwrap();
-        let database = PostgresStore::connect(&url)
+        let database = PostgresStore::connect(url)
             .unwrap()
             .create_database(&id, schema)
             .unwrap();
         Some(Self {
             id,
             database,
-            raw: Client::connect(&url, NoTls).unwrap(),
-            trees: PostgresTreeStore::connect(&url).unwrap(),
-            operator: PostgresOperator::connect(&url).unwrap(),
+            raw: Client::connect(url, NoTls).unwrap(),
+            trees: PostgresTreeStore::connect(url).unwrap(),
+            operator: PostgresOperator::connect(url).unwrap(),
+            _scope: scope,
         })
     }
 
@@ -180,6 +188,7 @@ impl Fixture {
         (hash, all)
     }
 
+    #[track_caller]
     fn inspect(&mut self, pending: bool, deep: bool) -> IntegrityReport {
         let report = self.operator.inspect_database(&self.id, deep).unwrap();
         assert!(report.healthy(), "{:?}", report.problems);

@@ -552,7 +552,53 @@ enum DatabaseValueScanCursorInner<'a> {
     Window(Box<DatabaseValueWindowCursor<'a>>),
 }
 
+/// Cooperative controls belong below a temporal/custom window: one request
+/// for a visible datom may otherwise examine an unbounded rejected prefix.
+/// A stopped range is not a completed prefix and must never enter its memo.
+struct ReadCursorControl<'a> {
+    check: &'a mut dyn FnMut(Option<&Datom>) -> Result<bool, SemanticError>,
+    stopped: bool,
+}
+
+impl ReadCursorControl<'_> {
+    fn check(&mut self, datom: Option<&Datom>) -> Result<bool, SemanticError> {
+        if self.stopped {
+            return Ok(false);
+        }
+        let proceed = (self.check)(datom)?;
+        self.stopped = !proceed;
+        Ok(proceed)
+    }
+
+    fn accept(
+        &mut self,
+        item: Option<Result<Datom, SemanticError>>,
+    ) -> Option<Result<Datom, SemanticError>> {
+        match item {
+            Some(Ok(datom)) => match self.check(Some(&datom)) {
+                Ok(true) => Some(Ok(datom)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            },
+            item => item,
+        }
+    }
+}
+
 impl DatabaseValueScanCursor<'_> {
+    /// Poll before source advancement (`None`) and inspect each ordered source
+    /// candidate (`Some`) before view filters/collapse. False ends this cursor
+    /// without claiming that its underlying source prefix was exhausted.
+    pub(crate) fn next_with_control(
+        &mut self,
+        check: &mut dyn FnMut(Option<&Datom>) -> Result<bool, SemanticError>,
+    ) -> Option<Result<Datom, SemanticError>> {
+        self.next_controlled(&mut ReadCursorControl {
+            check,
+            stopped: false,
+        })
+    }
+
     fn record_physical_work(&mut self) -> Result<(), SemanticError> {
         if self.physical_recorded {
             return Ok(());
@@ -565,12 +611,11 @@ impl DatabaseValueScanCursor<'_> {
         }
         Ok(())
     }
-}
 
-impl Iterator for DatabaseValueScanCursor<'_> {
-    type Item = Result<Datom, SemanticError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    fn next_controlled(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Option<Result<Datom, SemanticError>> {
         let operation = self.operation.clone();
         let _scope = operation
             .as_ref()
@@ -578,13 +623,31 @@ impl Iterator for DatabaseValueScanCursor<'_> {
         if self.failed {
             return None;
         }
+        match control.check(None) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.failed = true;
+                let _ = self.record_physical_work();
+                return None;
+            }
+            Err(error) => {
+                self.failed = true;
+                let _ = self.record_physical_work();
+                return Some(Err(error));
+            }
+        }
+        let window = matches!(&self.inner, DatabaseValueScanCursorInner::Window(_));
         let item = match &mut self.inner {
-            DatabaseValueScanCursorInner::Native(cursor) => cursor.next(),
-            DatabaseValueScanCursorInner::Overlay(cursor) => cursor.next(),
+            DatabaseValueScanCursorInner::Native(cursor) => {
+                cursor.next_with_poll(&mut || control.check(None))
+            }
+            DatabaseValueScanCursorInner::Overlay(cursor) => cursor.next_controlled(control),
             DatabaseValueScanCursorInner::Eager(cursor) => cursor.next().map(Ok),
             DatabaseValueScanCursorInner::EagerReverse(cursor) => cursor.next().map(Ok),
-            DatabaseValueScanCursorInner::Window(cursor) => cursor.next(),
+            DatabaseValueScanCursorInner::Window(cursor) => cursor.next_controlled(control),
         };
+        let item = if window { item } else { control.accept(item) };
+        self.failed |= control.stopped;
         let Some(item) = item else {
             if let Err(error) = self.record_physical_work() {
                 self.failed = true;
@@ -609,6 +672,14 @@ impl Iterator for DatabaseValueScanCursor<'_> {
                 Some(Err(error))
             }
         }
+    }
+}
+
+impl Iterator for DatabaseValueScanCursor<'_> {
+    type Item = Result<Datom, SemanticError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_control(&mut |_| Ok(true))
     }
 }
 
@@ -717,14 +788,26 @@ impl OverlayDeltaCursor {
     }
 }
 
-impl Iterator for OverlayDeltaCursor {
-    type Item = OverlayCursorDatom;
-    fn next(&mut self) -> Option<Self::Item> {
+impl OverlayDeltaCursor {
+    fn next_controlled(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Result<Option<OverlayCursorDatom>, SemanticError> {
         if self.indexed_next.is_none() {
-            self.indexed_next = self.indexed.by_ref().find(|datom| {
-                overlay_index_member(&self.schema, datom, self.order)
-                    && (self.history || !self.backfill_eavs.contains(datom))
-            });
+            loop {
+                if !control.check(None)? {
+                    return Ok(None);
+                }
+                let Some(datom) = self.indexed.next() else {
+                    break;
+                };
+                if overlay_index_member(&self.schema, &datom, self.order)
+                    && (self.history || !self.backfill_eavs.contains(&datom))
+                {
+                    self.indexed_next = Some(datom);
+                    break;
+                }
+            }
         }
         let take_indexed = match (&self.indexed_next, self.backfill.peek()) {
             (None, _) => false,
@@ -738,14 +821,14 @@ impl Iterator for OverlayDeltaCursor {
                 }
             }
         };
-        if take_indexed {
+        Ok(if take_indexed {
             self.indexed_next.take().map(|datom| OverlayCursorDatom {
                 datom: (*datom).clone(),
                 precharged: false,
             })
         } else {
             self.backfill.next()
-        }
+        })
     }
 }
 
@@ -775,6 +858,16 @@ enum DatabaseValuePrefixCursorInner<'a> {
 }
 
 impl DatabaseValuePrefixCursor<'_> {
+    pub(crate) fn next_with_control(
+        &mut self,
+        check: &mut dyn FnMut(Option<&Datom>) -> Result<bool, SemanticError>,
+    ) -> Option<Result<Datom, SemanticError>> {
+        self.next_controlled(&mut ReadCursorControl {
+            check,
+            stopped: false,
+        })
+    }
+
     pub(crate) fn is_memo_hit(&self) -> bool {
         self.memo_hit
     }
@@ -806,6 +899,15 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
     type Item = Result<Datom, SemanticError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.next_with_control(&mut |_| Ok(true))
+    }
+}
+
+impl DatabaseValuePrefixCursor<'_> {
+    fn next_controlled(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Option<Result<Datom, SemanticError>> {
         let operation = self.operation.clone();
         let _scope = operation
             .as_ref()
@@ -813,17 +915,35 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
         if self.failed {
             return None;
         }
+        match control.check(None) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.failed = true;
+                let _ = self.record_physical_work();
+                return None;
+            }
+            Err(error) => {
+                self.failed = true;
+                let _ = self.record_physical_work();
+                return Some(Err(error));
+            }
+        }
+        let window = matches!(&self.inner, DatabaseValuePrefixCursorInner::Window(_));
         let item = match &mut self.inner {
             DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
-            DatabaseValuePrefixCursorInner::Native(cursor) => cursor.next(),
-            DatabaseValuePrefixCursorInner::Overlay(cursor) => cursor.next(),
-            DatabaseValuePrefixCursorInner::Window(cursor) => cursor.next(),
+            DatabaseValuePrefixCursorInner::Native(cursor) => {
+                cursor.next_with_poll(&mut || control.check(None))
+            }
+            DatabaseValuePrefixCursorInner::Overlay(cursor) => cursor.next_controlled(control),
+            DatabaseValuePrefixCursorInner::Window(cursor) => cursor.next_controlled(control),
             DatabaseValuePrefixCursorInner::Memoized { datoms, next } => {
                 let datom = datoms.get(*next).cloned();
                 *next = next.saturating_add(1);
                 datom.map(Ok)
             }
         };
+        let item = if window { item } else { control.accept(item) };
+        self.failed |= control.stopped;
         let Some(item) = item else {
             if let Err(error) = self.record_physical_work() {
                 self.failed = true;
@@ -833,7 +953,7 @@ impl Iterator for DatabaseValuePrefixCursor<'_> {
                 && !source.completed
             {
                 source.completed = true;
-                let result = if source.cacheable {
+                let result = if source.cacheable && !control.stopped {
                     source.context.admit(
                         source
                             .key
@@ -962,6 +1082,18 @@ impl Iterator for DatabaseValueWindowSource<'_> {
     }
 }
 
+impl DatabaseValueWindowSource<'_> {
+    fn next_controlled(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Option<Result<Datom, SemanticError>> {
+        match self {
+            Self::Scan(cursor) => cursor.next_controlled(control),
+            Self::Prefix(cursor) => cursor.next_controlled(control),
+        }
+    }
+}
+
 struct WindowGroup {
     entity: u64,
     attribute: u32,
@@ -1009,9 +1141,12 @@ impl<'a> DatabaseValueWindowCursor<'a> {
         }
     }
 
-    fn next_filtered(&mut self) -> Result<Option<Datom>, SemanticError> {
+    fn next_filtered(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Result<Option<Datom>, SemanticError> {
         loop {
-            let Some(datom) = self.source.next().transpose()? else {
+            let Some(datom) = self.source.next_controlled(control).transpose()? else {
                 return Ok(None);
             };
             let t = tx_to_t(datom.tx)?;
@@ -1033,7 +1168,10 @@ impl<'a> DatabaseValueWindowCursor<'a> {
     /// the last visible event determines current membership. Atomic retains
     /// one winner per strict stored V representation, consistent with the
     /// native kernel's representation-distinct top-level BigDecimals.
-    fn next_reverse_current(&mut self) -> Result<Option<Datom>, SemanticError> {
+    fn next_reverse_current(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Result<Option<Datom>, SemanticError> {
         loop {
             if let Some(datom) = self.reverse_output.pop_front() {
                 return Ok(Some(datom));
@@ -1042,7 +1180,7 @@ impl<'a> DatabaseValueWindowCursor<'a> {
             let first = match self.reverse_pending.take() {
                 Some(datom) => datom,
                 None => {
-                    let Some(datom) = self.next_filtered()? else {
+                    let Some(datom) = self.next_filtered(control)? else {
                         return Ok(None);
                     };
                     datom
@@ -1059,7 +1197,7 @@ impl<'a> DatabaseValueWindowCursor<'a> {
             };
             retain(first, &mut winners);
 
-            while let Some(candidate) = self.next_filtered()? {
+            while let Some(candidate) = self.next_filtered(control)? {
                 if group.matches(&candidate) {
                     retain(candidate, &mut winners);
                 } else {
@@ -1109,15 +1247,16 @@ impl<'a> DatabaseValueWindowCursor<'a> {
     }
 }
 
-impl Iterator for DatabaseValueWindowCursor<'_> {
-    type Item = Result<Datom, SemanticError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl DatabaseValueWindowCursor<'_> {
+    fn next_controlled(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Option<Result<Datom, SemanticError>> {
         if self.failed {
             return None;
         }
         if self.reverse && !self.history {
-            return match self.next_reverse_current() {
+            return match self.next_reverse_current(control) {
                 Ok(Some(datom)) => Some(Ok(datom)),
                 Ok(None) => None,
                 Err(error) => {
@@ -1127,7 +1266,7 @@ impl Iterator for DatabaseValueWindowCursor<'_> {
             };
         }
         loop {
-            let datom = match self.next_filtered() {
+            let datom = match self.next_filtered(control) {
                 Ok(Some(datom)) => datom,
                 Ok(None) => return None,
                 Err(error) => {
@@ -2129,6 +2268,48 @@ impl DatabaseValue {
         self.scan_cursor(order)
     }
 
+    /// Query-only AVET lower bound. A strict bound advances past every logical
+    /// A/V tie, without inventing a greatest entity/transaction sentinel.
+    pub(crate) fn query_avet_start_cursor(
+        &self,
+        attribute: u32,
+        lower: Option<(&Value, bool)>,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        let boundary = IndexBoundary::Avet(match lower {
+            Some((value, _)) => IndexComponents::Two(attribute, value.clone()),
+            None => IndexComponents::One(attribute),
+        });
+        self.validate_raw_boundary_access(&boundary)?;
+        let after = lower.is_some_and(|(_, inclusive)| !inclusive);
+        let source = self.basis_seek_boundary_cursor_biased(
+            !self.direct_current(),
+            &boundary,
+            after,
+            if self.direct_current() || self.direct_history() {
+                self.read_observer.clone()
+            } else {
+                None
+            },
+            self.read_context.clone(),
+        )?;
+        if self.direct_current() || self.direct_history() {
+            return Ok(source);
+        }
+        Ok(DatabaseValueScanCursor {
+            inner: DatabaseValueScanCursorInner::Window(Box::new(DatabaseValueWindowCursor::new(
+                self,
+                DatabaseValueWindowSource::Scan(Box::new(source)),
+                IndexOrder::Avet,
+                false,
+            ))),
+            observer: self.read_observer.clone(),
+            physical_context: None,
+            physical_recorded: false,
+            operation: crate::sql_io::OperationContext::current(),
+            failed: false,
+        })
+    }
+
     /// Open a lazy cursor over one left-contiguous logical index prefix.
     pub fn prefix_cursor(
         &self,
@@ -2258,6 +2439,15 @@ impl DatabaseValue {
     /// Resolve a lookup ref against this exact value. `:db/ident` follows the
     /// recovered dictionary fast path; all other identities use windowed AVET.
     pub fn lookup(&self, attribute: u32, value: &Value) -> Result<Option<u64>, SemanticError> {
+        self.lookup_with_control(attribute, value, &mut |_| Ok(true))
+    }
+
+    fn lookup_with_control(
+        &self,
+        attribute: u32,
+        value: &Value,
+        control: &mut dyn FnMut(Option<&Datom>) -> Result<bool, SemanticError>,
+    ) -> Result<Option<u64>, SemanticError> {
         let schema = self.schema().attribute(attribute)?;
         if schema.unique.is_none() {
             return Err(SemanticError::incorrect(
@@ -2273,12 +2463,13 @@ impl DatabaseValue {
             return Ok(self.entid(ident));
         }
         Ok(self
-            .datoms_with_prefix(&IndexPrefix::Avet {
+            .prefix_cursor(&IndexPrefix::Avet {
                 attribute,
                 value: Some(value.clone()),
                 entity: None,
             })?
-            .first()
+            .next_with_control(control)
+            .transpose()?
             .map(|datom| datom.entity))
     }
 
@@ -2596,6 +2787,14 @@ impl DatabaseValue {
         &self,
         identifier: &EntityIdentifier,
     ) -> Result<Option<u64>, SemanticError> {
+        self.resolve_entity_identifier_with_control(identifier, &mut |_| Ok(true))
+    }
+
+    pub(crate) fn resolve_entity_identifier_with_control(
+        &self,
+        identifier: &EntityIdentifier,
+        control: &mut dyn FnMut(Option<&Datom>) -> Result<bool, SemanticError>,
+    ) -> Result<Option<u64>, SemanticError> {
         match identifier {
             EntityIdentifier::Id(entity) => {
                 eid_to_eidx(*entity)?;
@@ -2604,7 +2803,7 @@ impl DatabaseValue {
             EntityIdentifier::Ident(ident) => Ok(self.entid(ident)),
             EntityIdentifier::Lookup { attribute, value } => {
                 let attribute = self.resolve_attribute(attribute)?;
-                self.lookup(attribute, value)
+                self.lookup_with_control(attribute, value, control)
             }
         }
     }
@@ -2690,7 +2889,7 @@ impl DatabaseValue {
                     order,
                     observer,
                     physical_context,
-                    Some((boundary, false)),
+                    Some((boundary, false, false)),
                 )?)),
                 observer: None,
                 physical_context: None,
@@ -2699,6 +2898,58 @@ impl DatabaseValue {
                 failed: false,
             }),
         }
+    }
+
+    fn basis_seek_boundary_cursor_biased(
+        &self,
+        history: bool,
+        boundary: &IndexBoundary,
+        after: bool,
+        observer: Option<Arc<LogicalReadObserver>>,
+        physical_context: Option<Arc<TransactionReadContext>>,
+    ) -> Result<DatabaseValueScanCursor<'_>, SemanticError> {
+        if !after {
+            return self.basis_seek_boundary_cursor(history, boundary, observer, physical_context);
+        }
+        let normalized = boundary.normalized()?.after_prefix();
+        let order = normalized.order();
+        let inner = match &self.basis {
+            ReadBasis::Eager(database) => {
+                let datoms = database.index_datoms(history, order);
+                let start = datoms.partition_point(|datom| normalized.compare_datom(datom).is_lt());
+                DatabaseValueScanCursorInner::Eager(datoms[start..].iter().cloned())
+            }
+            ReadBasis::Native(snapshot) => DatabaseValueScanCursorInner::Native(Box::new(
+                snapshot
+                    .normalized_boundary_cursor_existing_projection(history, normalized, false)?,
+            )),
+            ReadBasis::TransactionOverlay(overlay) => {
+                return Ok(DatabaseValueScanCursor {
+                    inner: DatabaseValueScanCursorInner::Overlay(Box::new(
+                        overlay.scan_cursor_from(
+                            history,
+                            order,
+                            observer,
+                            physical_context,
+                            Some((boundary, false, true)),
+                        )?,
+                    )),
+                    observer: None,
+                    physical_context: None,
+                    physical_recorded: false,
+                    operation: crate::sql_io::OperationContext::current(),
+                    failed: false,
+                });
+            }
+        };
+        Ok(DatabaseValueScanCursor {
+            inner,
+            observer,
+            physical_context,
+            physical_recorded: false,
+            operation: crate::sql_io::OperationContext::current(),
+            failed: false,
+        })
     }
 
     fn basis_reverse_boundary_cursor(
@@ -2741,7 +2992,7 @@ impl DatabaseValue {
                     order,
                     observer,
                     physical_context,
-                    Some((boundary, true)),
+                    Some((boundary, true, false)),
                 )?)),
                 observer: None,
                 physical_context: None,
@@ -2930,18 +3181,26 @@ impl TransactionOverlay {
         order: IndexOrder,
         observer: Option<Arc<LogicalReadObserver>>,
         physical_context: Option<Arc<TransactionReadContext>>,
-        seek: Option<(&IndexBoundary, bool)>,
+        seek: Option<(&IndexBoundary, bool, bool)>,
     ) -> Result<TransactionOverlayScanCursor<'_>, SemanticError> {
-        let reverse = seek.is_some_and(|(_, reverse)| reverse);
+        let reverse = seek.is_some_and(|(_, reverse, _)| reverse);
         let base = TransactionOverlayBaseCursor::Scan(match (&self.base.basis, seek) {
-            (ReadBasis::Native(snapshot), Some((boundary, reverse)))
+            (ReadBasis::Native(snapshot), Some((boundary, reverse, after)))
                 if boundary.avet_attribute().is_some_and(|attribute| {
                     self.newly_enabled_avet.binary_search(&attribute).is_ok()
                 }) =>
             {
                 DatabaseValueScanCursor {
                     inner: DatabaseValueScanCursorInner::Native(Box::new(
-                        snapshot.boundary_cursor_existing_projection(history, boundary, reverse)?,
+                        snapshot.normalized_boundary_cursor_existing_projection(
+                            history,
+                            if after {
+                                boundary.normalized()?.after_prefix()
+                            } else {
+                                boundary.normalized()?
+                            },
+                            reverse,
+                        )?,
                     )),
                     observer: None,
                     physical_context: physical_context.clone(),
@@ -2950,15 +3209,16 @@ impl TransactionOverlay {
                     failed: false,
                 }
             }
-            (_, Some((boundary, true))) => self.base.basis_reverse_boundary_cursor(
+            (_, Some((boundary, true, _))) => self.base.basis_reverse_boundary_cursor(
                 history,
                 boundary,
                 None,
                 physical_context.clone(),
             )?,
-            (_, Some((boundary, false))) => self.base.basis_seek_boundary_cursor(
+            (_, Some((boundary, false, after))) => self.base.basis_seek_boundary_cursor_biased(
                 history,
                 boundary,
+                after,
                 None,
                 physical_context.clone(),
             )?,
@@ -3001,7 +3261,15 @@ impl TransactionOverlay {
         }
 
         let normalized = seek
-            .map(|(boundary, _)| boundary.normalized())
+            .map(|(boundary, _, after)| {
+                boundary.normalized().map(|normalized| {
+                    if after {
+                        normalized.after_prefix()
+                    } else {
+                        normalized
+                    }
+                })
+            })
             .transpose()?;
         let indexed = self.indexes.cursor(
             history,
@@ -3135,8 +3403,15 @@ impl TransactionOverlay {
 }
 
 impl TransactionOverlayScanCursor<'_> {
-    fn fill_base(&mut self) -> Result<(), SemanticError> {
+    fn fill_base(&mut self, control: &mut ReadCursorControl<'_>) -> Result<(), SemanticError> {
         while self.base_next.is_none() {
+            // Removed/disabled base facts can form a long prefix. Poll even
+            // when none of them survives the overlay merge to reach a window.
+            // Range-stop predicates still see only ordered merged datoms, not
+            // out-of-order base/delta peeks.
+            if !control.check(None)? {
+                break;
+            }
             let Some(candidate) = self.base.next().transpose()? else {
                 break;
             };
@@ -3154,10 +3429,19 @@ impl TransactionOverlayScanCursor<'_> {
         Ok(())
     }
 
-    fn next_result(&mut self) -> Result<Option<OverlayCursorDatom>, SemanticError> {
-        self.fill_base()?;
+    fn next_result(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Result<Option<OverlayCursorDatom>, SemanticError> {
+        self.fill_base(control)?;
+        if control.stopped {
+            return Ok(None);
+        }
         if self.delta_next.is_none() {
-            self.delta_next = self.delta.next();
+            self.delta_next = self.delta.next_controlled(control)?;
+        }
+        if control.stopped {
+            return Ok(None);
         }
         match (&self.base_next, &self.delta_next) {
             (None, None) => Ok(None),
@@ -3192,14 +3476,15 @@ impl TransactionOverlayScanCursor<'_> {
     }
 }
 
-impl Iterator for TransactionOverlayScanCursor<'_> {
-    type Item = Result<Datom, SemanticError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
+impl TransactionOverlayScanCursor<'_> {
+    fn next_controlled(
+        &mut self,
+        control: &mut ReadCursorControl<'_>,
+    ) -> Option<Result<Datom, SemanticError>> {
         if self.failed {
             return None;
         }
-        match self.next_result() {
+        match self.next_result(control) {
             Ok(Some(item)) => {
                 if !item.precharged
                     && let Some(observer) = &self.observer

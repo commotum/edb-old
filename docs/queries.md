@@ -5,6 +5,38 @@ immutable transaction logs can be explicit named arguments to the same query.
 Existing `DatabaseValue::query`, `QuerySource`, relation inputs, rules and nested
 queries continue to work.
 
+## Numeric operations
+
+Arithmetic supports Long, BigInt, BigDec, Float and Double. Long-only operations
+retain checked overflow and truncating integer division. BigInt participation
+promotes integral operations to BigInt; BigDec with exact operands produces exact
+decimals. Decimal division must terminate or returns an arithmetic error: the
+engine does not silently round an exact result or add a ratio value type.
+Calculated zero/one shortcuts preserve the nonzero operand's compact representation
+instead of padding to the other operand's preferred scale. Intermediate scales
+outside `i64` are rebalanced only when the exact coefficient/result is representable
+and admitted; this is not JVM preferred-scale parity.
+Explicit floating inputs select Double approximation; out-of-range exact-to-double
+conversions fail explicitly. Numeric refs remain valid identity/join keys, not
+arithmetic operands.
+
+`sum` preserves the group's exact integer/decimal domain unless a floating value
+selects Double. Median keeps truncation for integral middle pairs and computes an
+exact midpoint for decimal pairs. `avg`, `variance` and `stddev` deliberately return
+approximate Double statistics. Numeric logical equality still unifies equivalent
+representations; changing a top-level stored decimal's scale remains a real fact
+change. Query arithmetic does not rewrite persisted representations or receipts.
+Statistics widen integral intermediates and center/scale exact values before
+approximation, so an overflowing intermediate does not reject a finite result.
+Genuine final range failures remain explicit.
+
+`QueryControl.max_numeric_bytes` (default16MiB) bounds per-operation temporary coefficient work
+separately from `max_join_bytes`; coefficient growth is admitted before large
+alignment or multiplication. Numeric work also observes query work/cancellation
+controls, and transaction-program queries share their remaining resource budget.
+Compact decimal exponents do not themselves require padding or a scale-sized
+allocation in comparisons or logical join hashes.
+
 ## Raw tuples and datoms
 
 Use `QueryDataSource::tuples` for ordinary E/A/V rows, optionally followed by
@@ -161,6 +193,16 @@ selective EAVT/AEVT/AVET/VAET access; they do not replace selective seeks with
 whole-database scans. Existing demand-driven recursive-rule evaluation remains
 in use.
 
+Direct `Eq`, `NotEq`, `Less`, `LessOrEqual`, `Greater` and `GreaterOrEqual`
+constraints on a pattern's value can narrow an available AVET index. Bounds may
+be literals or already-bound input values; they use logical value ordering,
+including cross-numeric equality, without coercing the bound to the attribute's
+stored type. Strict bounds skip the entire equal-value prefix, and `NotEq` can
+use disjoint ranges. Original predicate clauses remain in the query. Unindexed
+attributes and AVET projections awaiting backfill retain the ordinary fallback;
+marking an attribute indexed does not imply that its physical projection is ready.
+The supplied history, time window and filters remain authoritative.
+
 `QueryControl::max_join_bytes` controls auxiliary retention (default 4 MiB).
 Larger joins process multiple chunks. Zero disables hash joins and groups native
 probes one row at a time. A single ordinary native probe remains admissible even
@@ -170,7 +212,8 @@ controls remain available. Persisted native query programs share their enclosing
 program's fuel, cancellation, deadline and value-allocation allowance, including
 when evaluation fails.
 
-Query relations have set semantics and no guaranteed row order. Join strategy can
+Query relations have set semantics and no guaranteed row order; top-level find
+collections likewise do not provide a presentation-order contract. Join strategy can
 change enumeration order. Applications needing presentation order should sort
 explicitly. Result shape and `:with`/aggregate multiplicity remain meaningful;
 do not deduplicate or reorder nested tuple/collection values as if they were
@@ -180,6 +223,29 @@ top-level relation rows.
 seeks, examined datoms and conservative auxiliary/value-allocation accounting.
 Use `OperationContext` for actual SQL API-call attribution. These counters are
 not network round trips, measured allocator peaks or general throughput claims.
+
+## Bounded Pull navigation
+
+`PullLimit::Limit(n)` stops after the requested visible values;
+`PullLimit::Default` returns at most 1,000 values for a many-valued attribute and
+`PullLimit::Unlimited` requests them all. Limits must be positive. Forward,
+reverse and nested navigation consume lazy index cursors. Wildcard discovery
+seeks between attributes instead of walking an unused many-valued tail. Transforms
+receive the selected value after limits/nesting, with defaults applied afterward.
+
+Filters may require examining additional candidates to find enough visible values;
+proving absence through an opaque filter can require exhausting the range. Pull
+cancellation is checked during consumption. Query-projected Pull also shares the
+query's work, deadline and allocation admission. These are cooperative controls,
+not preemption of arbitrary Rust callbacks or an interrupt inside one node decode.
+Pull requires a point-in-time database value; raw history remains available to
+queries/index access, not entity navigation.
+
+Small logical reads may still fetch an entire immutable node on a cache miss.
+`Connection::load_stats()` reports cursor node/SQL/byte activity after cursors are
+completed or dropped. Cache hits avoid those SQL reads but still incur cache
+bookkeeping; the decoded-node cache's current LRU hit operation is linear in its
+configured resident entries, not in total database size. Accounted bytes are not RSS.
 
 The opt-in `measured_query_runtime_scaling` test in
 [`query_runtime_sources.rs`](../tests/query_runtime_sources.rs) runs a numeric

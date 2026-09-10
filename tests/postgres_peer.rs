@@ -21,8 +21,10 @@ const ITEM_NAME: u32 = 1_000;
 const ITEM_COUNT: u32 = 1_001;
 const ITEM_PARENT: u32 = 1_002;
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+fn connection() -> Option<common::PostgresFixture> {
+    std::env::var("ATOMIC_POSTGRES_URL")
+        .ok()
+        .map(|url| common::PostgresFixture::new(&url, "postgres_peer"))
 }
 
 fn unique(prefix: &str) -> String {
@@ -215,9 +217,10 @@ fn finish_publication_work(connection: &str, manifest_hash: Digest) {
 
 #[test]
 fn native_database_value_prefix_cursor_matches_eager_with_bounded_tree_reads() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("database_value_prefix");
     let (mut store, entity) = populated(&connection, &database_id, false, 32);
     let eager = store.recover(&database_id).unwrap().database_value();
@@ -323,9 +326,10 @@ fn native_database_value_prefix_cursor_matches_eager_with_bounded_tree_reads() {
 
 #[test]
 fn native_bidirectional_raw_seek_is_lazy_and_matches_every_eager_index_view() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("database_value_raw_seek");
     let (mut store, _) = populated(&connection, &database_id, false, 24);
     let eager = store.recover(&database_id).unwrap().database_value();
@@ -441,9 +445,10 @@ fn native_bidirectional_raw_seek_is_lazy_and_matches_every_eager_index_view() {
 
 #[test]
 fn peers_use_verified_base_tail_and_keep_old_snapshots() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer");
     let (mut store, entity) = populated(&connection, &database_id, false, 8);
     let expected = store.recover(&database_id).unwrap();
@@ -699,9 +704,10 @@ fn peers_use_verified_base_tail_and_keep_old_snapshots() {
 
 #[test]
 fn transaction_reports_are_opt_in_and_removable_connection_state() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_reports_opt_in");
     let (mut store, entity) = populated(&connection, &database_id, false, 0);
     let basis = store.recover(&database_id).unwrap().basis_t();
@@ -775,9 +781,10 @@ fn transaction_reports_are_opt_in_and_removable_connection_state() {
 
 #[test]
 fn corrupt_current_root_is_repaired_at_the_same_basis_and_peer_adopts_revision() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_same_basis_root_repair");
     let (mut store, entity) = populated(&connection, &database_id, false, 3);
     let expected = store.recover(&database_id).unwrap();
@@ -854,9 +861,10 @@ fn corrupt_current_root_is_repaired_at_the_same_basis_and_peer_adopts_revision()
 
 #[test]
 fn native_metadata_rebuild_and_recent_tail_preserve_ident_alias_lifecycle() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_ident_projection");
     let (mut store, _) = populated(&connection, &database_id, false, 1);
     let initial = store.recover(&database_id).unwrap();
@@ -946,9 +954,10 @@ fn native_metadata_rebuild_and_recent_tail_preserve_ident_alias_lifecycle() {
 
 #[test]
 fn interrupted_build_is_invisible_and_corrupt_derived_data_falls_back_to_log() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("index_fault");
     let (mut store, _) = populated(&connection, &database_id, false, 3);
     let expected = store.recover(&database_id).unwrap();
@@ -1018,6 +1027,14 @@ fn interrupted_build_is_invisible_and_corrupt_derived_data_falls_back_to_log() {
     client
         .batch_execute("ALTER TABLE atomic_tree_nodes ENABLE TRIGGER USER")
         .unwrap();
+    let corrupted_payload: Vec<u8> = client
+        .query_one(
+            "SELECT payload FROM atomic_tree_nodes WHERE node_hash=$1",
+            &[&&corrupt_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert_ne!(sha256(&corrupted_payload), corrupt_hash);
     let peer = Peer::connect(&connection, &database_id, 32).unwrap();
     // Startup reads only roots and resident metadata paths, not arbitrary
     // application leaves. Corruption is detected as soon as the affected path
@@ -1025,33 +1042,36 @@ fn interrupted_build_is_invisible_and_corrupt_derived_data_falls_back_to_log() {
     // available from the authoritative log.
     assert_eq!(peer.durable_base_t(), expected.basis_t());
     assert!(peer.load_stats().leaf_reads > 0);
-    assert_eq!(
-        peer.snapshot()
-            .datoms_with_prefix(
-                false,
-                &IndexPrefix::Eavt {
-                    entity: expected
-                        .datoms(View::Current, IndexOrder::Eavt)
-                        .into_iter()
-                        .find(|datom| datom.value == Value::String(database_id.clone()))
-                        .unwrap()
-                        .entity,
-                    attribute: Some(ITEM_NAME),
-                    value: None,
-                },
-            )
-            .unwrap_err()
-            .code,
-        "tree/content-hash-mismatch"
-    );
+    let corruption = peer
+        .snapshot()
+        .datoms_with_prefix(
+            false,
+            &IndexPrefix::Eavt {
+                entity: expected
+                    .datoms(View::Current, IndexOrder::Eavt)
+                    .into_iter()
+                    .find(|datom| datom.value == Value::String(database_id.clone()))
+                    .unwrap()
+                    .entity,
+                attribute: Some(ITEM_NAME),
+                value: None,
+            },
+        )
+        .unwrap_err();
+    // Native block loading now checks canonical content before the lower-level
+    // tree decoder. The corrupt path must still fail closed as a hash fault;
+    // only the explicit compatibility recovery below may use the log instead.
+    assert_eq!(corruption.category, atomic_core::ErrorCategory::Fault);
+    assert_eq!(corruption.code, "tree/node-content-corrupt");
     assert_current_eq(&peer.db_compatibility(), &expected);
 }
 
 #[test]
 fn self_consistent_legacy_manifest_falls_back_but_invalid_native_authority_fails_closed() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("manifest_log_fault");
     let (mut store, _) = populated(&connection, &database_id, false, 2);
     let expected = store.recover(&database_id).unwrap();
@@ -1120,9 +1140,10 @@ fn self_consistent_legacy_manifest_falls_back_but_invalid_native_authority_fails
 
 #[test]
 fn no_history_consolidation_forgets_old_values_without_changing_current_state() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("nohistory");
     let (mut store, entity) = populated(&connection, &database_id, true, 5);
     let before_parent_replacement = store.recover(&database_id).unwrap();
@@ -1226,9 +1247,10 @@ fn no_history_consolidation_forgets_old_values_without_changing_current_state() 
 
 #[test]
 fn enabling_no_history_changes_only_future_indexing_jobs() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("nohistory_preserves_prior");
     let (mut store, entity) = populated(&connection, &database_id, false, 2);
     // Establish an exact pre-toggle durable base. Changing :db/noHistory does
@@ -1321,9 +1343,10 @@ fn enabling_no_history_changes_only_future_indexing_jobs() {
 
 #[test]
 fn no_history_false_resumes_retention_across_a_pruned_base() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("nohistory_resume");
     let (mut store, entity) = populated(&connection, &database_id, true, 2);
 
@@ -1403,10 +1426,128 @@ fn no_history_false_resumes_retention_across_a_pruned_base() {
 }
 
 #[test]
-fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
-    let Some(connection) = connection() else {
+fn administrative_consolidation_finishes_a_visible_same_head_fold_without_republishing() {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
+    let database_id = unique("admin_pending_fold");
+    let (mut store, _) = populated(&connection, &database_id, false, 2);
+    let expected = store.recover(&database_id).unwrap();
+    let first = PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .consolidate()
+        .unwrap();
+    finish_publication_work(&connection, first.manifest_hash);
+
+    // Pause at the real root-publication / live-fold boundary. This is an
+    // authenticated physical successor at exactly the same logical head, not
+    // a corrupt fixture or a race that depends on either builder being fast.
+    let mut trees = PostgresTreeStore::connect(&connection).unwrap();
+    let mut pending = trees
+        .load_manifest(&database_id, first.publication_revision)
+        .unwrap()
+        .unwrap();
+    pending.publication_revision += 1;
+    let mut manifest = atomic_core::PersistentTreeManifest::decode(&pending.payload).unwrap();
+    manifest.publication_revision = pending.publication_revision;
+    pending.payload = manifest.encode().unwrap();
+    pending.manifest_hash = sha256(&pending.payload);
+    let delta = atomic_core::TreePublicationDelta::Incremental {
+        predecessor_manifest_hash: first.manifest_hash,
+        added_nodes: Default::default(),
+        retired_nodes: Default::default(),
+    };
+    trees
+        .begin_build_intent(
+            &database_id,
+            pending.excision_generation,
+            first.publication_revision,
+            pending.manifest_hash,
+            &Default::default(),
+        )
+        .unwrap();
+    trees
+        .stage_manifest_with_delta(&pending, first.publication_revision, &delta)
+        .unwrap();
+    let mut raw = Client::connect(&connection, NoTls).unwrap();
+    raw.query_one(
+        "SELECT atomic_publish_tree($1,$2,$3,$4,$5)",
+        &[
+            &database_id,
+            &(pending.publication_revision as i64),
+            &(pending.basis_t as i64),
+            &&pending.tx_hash[..],
+            &&pending.manifest_hash[..],
+        ],
+    )
+    .unwrap();
+    trees.release_build_intent().unwrap();
+    let pending_work: bool = raw
+        .query_one(
+            "SELECT NOT COALESCE(l.complete, false) AND h.delta_state = 2 \
+               FROM atomic_tree_publications p JOIN atomic_tree_delta_headers h \
+                 ON h.manifest_hash = p.manifest_hash \
+               LEFT JOIN atomic_tree_live_sets l \
+                 ON l.database_id = p.database_id AND l.manifest_hash = p.manifest_hash \
+              WHERE p.database_id = $1 AND p.manifest_hash = $2",
+            &[&database_id, &&pending.manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert!(
+        pending_work,
+        "the fixture must stop before live-set folding"
+    );
+
+    let io = atomic_core::OperationContext::new(atomic_core::OperationKind::Query);
+    let started = std::time::Instant::now();
+    let resumed = {
+        let _scope = io.enter();
+        PostgresIndexer::connect(&connection, &database_id)
+            .unwrap()
+            .with_segment_datoms(3)
+            .unwrap()
+            .consolidate()
+            .unwrap()
+    };
+    // The receipt describes only the final selection attempt; this outer
+    // measurement also includes connection, every fold batch and reselect,
+    // optional fulltext maintenance, and indexer destruction.
+    eprintln!(
+        "ADMIN_PENDING_FOLD expected_revision={} connect_consolidate_drop_us={} io={:?} receipt={resumed:?}",
+        pending.publication_revision,
+        started.elapsed().as_micros(),
+        io.snapshot()
+    );
+    assert_eq!(resumed.publication_revision, pending.publication_revision);
+    assert_eq!(resumed.manifest_hash, pending.manifest_hash);
+    assert!(resumed.reused);
+    assert_eq!(resumed.input_datoms, 0);
+    assert_eq!(resumed.node_writes, 0);
+    assert_eq!(
+        trees.current_publication_revision(&database_id).unwrap(),
+        pending.publication_revision
+    );
+    let complete: bool = raw
+        .query_one(
+            "SELECT complete FROM atomic_tree_live_sets \
+              WHERE database_id = $1 AND manifest_hash = $2",
+            &[&database_id, &&pending.manifest_hash[..]],
+        )
+        .unwrap()
+        .get(0);
+    assert!(complete);
+    let peer = Peer::connect(&connection, &database_id, 2).unwrap();
+    assert_current_eq(&peer.db_compatibility(), &expected);
+}
+
+#[test]
+fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
+    let Some(fixture) = connection() else {
+        return;
+    };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_concurrency");
     let (mut store, entity) = populated(&connection, &database_id, false, 30);
     let mut basis = store.recover(&database_id).unwrap().basis_t();
@@ -1459,6 +1600,7 @@ fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
         .into_iter()
         .map(|handle| handle.join().unwrap().unwrap())
         .collect();
+    eprintln!("PEER_BUILD_RACE initial_revision={initial_revision} receipts={receipts:?}");
     assert_eq!(receipts[0].manifest_hash, receipts[1].manifest_hash);
     assert_eq!(
         receipts[0].publication_revision,
@@ -1612,9 +1754,10 @@ fn concurrent_builders_waiting_peer_and_postgres_restart_converge() {
 
 #[test]
 fn waiting_native_sync_does_not_block_lazy_snapshot_reads() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_waiter_cache_lane");
     let (mut store, entity) = populated(&connection, &database_id, false, 12);
     let basis = store.recover(&database_id).unwrap().basis_t();
@@ -1672,9 +1815,10 @@ fn waiting_native_sync_does_not_block_lazy_snapshot_reads() {
 
 #[test]
 fn avet_transition_waits_for_a_covering_native_publication() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_avet_readiness");
     let mut application = Schema::new();
     application
@@ -1809,9 +1953,10 @@ fn avet_transition_waits_for_a_covering_native_publication() {
 
 #[test]
 fn failed_multi_row_tail_does_not_tear_peer_state_and_can_retry() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("peer_atomic_tail");
     let (mut store, entity) = populated(&connection, &database_id, false, 1);
     let initial = store.recover(&database_id).unwrap();
@@ -1903,9 +2048,10 @@ fn failed_multi_row_tail_does_not_tear_peer_state_and_can_retry() {
 
 #[test]
 fn peer_native_api_transacts_syncs_queries_navigates_and_pulls_one_basis() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("native_api");
     let (store, entity) = populated(&connection, &database_id, false, 1);
     drop(store);
@@ -1990,9 +2136,10 @@ fn peer_native_api_transacts_syncs_queries_navigates_and_pulls_one_basis() {
 
 #[test]
 fn native_entity_and_pull_pin_one_snapshot_without_compatibility_materialization() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("native_entity_pull");
     let (_store, entity) = populated(&connection, &database_id, false, 1);
     let mut indexer = PostgresIndexer::connect(&connection, &database_id)
@@ -2084,9 +2231,10 @@ fn native_entity_and_pull_pin_one_snapshot_without_compatibility_materialization
 
 #[test]
 fn native_queries_pin_exact_snapshots_and_read_bounded_tree_paths() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("native_query_snapshot");
     let (_store, entity) = populated(&connection, &database_id, false, 1);
     let mut indexer = PostgresIndexer::connect(&connection, &database_id)
@@ -2173,9 +2321,19 @@ fn native_queries_pin_exact_snapshots_and_read_bounded_tree_paths() {
         filtered.result,
         QueryResult::Scalar(Some(QueryValue::Scalar(Value::Long(1))))
     );
-    for outcome in [&old, &current, &as_of, &filtered] {
+    // Current sources yield one candidate. Windowed sources must examine all
+    // five actual history facts before filtering/collapsing: assertions of
+    // 0/1/77 and retractions of 0/1. Goal5's control hook charges those hidden
+    // candidates too; it must not report just the single visible result.
+    for (name, outcome, examined) in [
+        ("old", &old, 1),
+        ("current", &current, 1),
+        ("as_of", &as_of, 5),
+        ("filtered", &filtered, 5),
+    ] {
+        eprintln!("NATIVE_QUERY_VIEW {name} stats={:?}", outcome.stats);
         assert_eq!(outcome.stats.index_seeks, 1);
-        assert_eq!(outcome.stats.datoms_examined, 1);
+        assert_eq!(outcome.stats.datoms_examined, examined, "{name}");
     }
 
     let after_queries = peer.load_stats();
@@ -2274,9 +2432,10 @@ fn native_queries_pin_exact_snapshots_and_read_bounded_tree_paths() {
 
 #[test]
 fn generated_queries_match_eager_native_and_force_scan_references() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("native_query_differential");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();

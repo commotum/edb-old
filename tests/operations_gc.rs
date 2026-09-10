@@ -14,7 +14,7 @@ use postgres::{Client, NoTls};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::{Arc, Barrier};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 mod common;
 
@@ -22,8 +22,60 @@ const ITEM_VALUE: u32 = 1_000;
 const MAX_TEST_GC_STEPS: usize = 128;
 const MAX_TEST_LOG_GC_STEPS: usize = 128;
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+/// The semantic-node collector's advisory fence is database-wide even for
+/// independent installation schemas. Retry only its transient Busy outcome:
+/// preview divergence, integrity errors, and every other failure remain hard
+/// failures with the original error. This does not change production limits.
+fn retry_busy<T>(
+    mut action: impl FnMut() -> Result<T, atomic_core::SemanticError>,
+) -> Result<T, atomic_core::SemanticError> {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        match action() {
+            Err(error)
+                if error.category == atomic_core::ErrorCategory::Busy && Instant::now() < until =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
+
+trait GcTestRetry {
+    fn test_garbage_inventory(
+        &mut self,
+        age: Duration,
+    ) -> Result<GarbageInventory, atomic_core::SemanticError>;
+    fn test_collect_garbage(
+        &mut self,
+        age: Duration,
+    ) -> Result<GarbageInventory, atomic_core::SemanticError>;
+}
+
+impl GcTestRetry for PostgresOperator {
+    fn test_garbage_inventory(
+        &mut self,
+        age: Duration,
+    ) -> Result<GarbageInventory, atomic_core::SemanticError> {
+        retry_busy(|| self.garbage_inventory(age))
+    }
+
+    fn test_collect_garbage(
+        &mut self,
+        age: Duration,
+    ) -> Result<GarbageInventory, atomic_core::SemanticError> {
+        retry_busy(|| self.collect_garbage(age))
+    }
+}
+
+fn connection() -> Option<(common::PostgresFixture, String)> {
+    let base = std::env::var("ATOMIC_POSTGRES_URL").ok()?;
+    // GC and maintenance address the complete installation catalog, so a
+    // unique database ID cannot isolate fault injection or exact inventories.
+    let catalog = common::PostgresFixture::new(&base, "operations_gc");
+    let connection = catalog.connection.clone();
+    Some((catalog, connection))
 }
 
 fn user(eidx: u64) -> u64 {
@@ -41,28 +93,12 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-fn isolated_catalog(connection: &str, label: &str) -> String {
-    let schema = unique(label);
-    assert!(
-        schema
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-    );
-    let mut client = Client::connect(connection, NoTls).unwrap();
-    client
-        .batch_execute(&format!("CREATE SCHEMA {schema}"))
-        .unwrap();
-    let scoped = if connection.trim_start().starts_with("postgres://")
-        || connection.trim_start().starts_with("postgresql://")
-    {
-        let separator = if connection.contains('?') { '&' } else { '?' };
-        format!("{connection}{separator}options=-csearch_path%3D{schema}")
-    } else {
-        format!("{connection} options='-c search_path={schema}'")
-    };
+fn isolated_catalog(connection: &str, label: &str) -> (common::PostgresFixture, String) {
+    let catalog = common::PostgresFixture::new(connection, label);
+    let scoped = catalog.connection.clone();
     let mut migrator = atomic_core::PostgresMigrator::connect(&scoped).unwrap();
     migrator.migrate().unwrap();
-    scoped
+    (catalog, scoped)
 }
 
 fn unique_long() -> i64 {
@@ -461,15 +497,18 @@ fn inventory_has_work(inventory: &GarbageInventory) -> bool {
 fn apply_exact_inventory(operator: &mut PostgresOperator, dry: &GarbageInventory) {
     let mut expected = dry.clone();
     expected.applied = true;
-    assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+    assert_eq!(
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
+        expected
+    );
 }
 
 #[test]
 fn semantic_node_gc_is_age_gated_and_bounded() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
-    let scoped = isolated_catalog(&connection, "gc_semantic_frontier");
+    let (_scoped_catalog, scoped) = isolated_catalog(&connection, "gc_semantic_frontier");
     let database_id = unique("gc_semantic_live");
     let mut store = PostgresStore::connect(&scoped).unwrap();
     store.create_database(&database_id, Schema::new()).unwrap();
@@ -514,11 +553,11 @@ fn semantic_node_gc_is_age_gated_and_bounded() {
         values.len() as u64
     );
     let protected = operator
-        .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+        .test_garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
         .unwrap();
     assert!(protected.semantic_commitment_node_hashes.is_empty());
 
-    let first = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let first = operator.test_garbage_inventory(Duration::ZERO).unwrap();
     assert_eq!(
         first.semantic_commitment_node_hashes.len(),
         atomic_core::MAX_SEMANTIC_COMMITMENT_NODES_PER_GC
@@ -535,7 +574,7 @@ fn semantic_node_gc_is_age_gated_and_bounded() {
         1
     );
 
-    let second = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let second = operator.test_garbage_inventory(Duration::ZERO).unwrap();
     assert_eq!(second.semantic_commitment_node_hashes.len(), 1);
     apply_exact_inventory(&mut operator, &second);
     assert_eq!(
@@ -567,7 +606,7 @@ fn preview_next_tree_build_intent(
     manifest_hash: Digest,
 ) -> GarbageInventory {
     for attempt in 0..MAX_TEST_GC_STEPS {
-        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let dry = operator.test_garbage_inventory(Duration::ZERO).unwrap();
         if dry.tree_build_intents.iter().any(|candidate| {
             candidate.database_id == database_id && candidate.manifest_hash == manifest_hash
         }) {
@@ -603,7 +642,7 @@ fn drain_tree_build_intents_for_database(
         if remaining == 0 {
             return;
         }
-        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let dry = operator.test_garbage_inventory(Duration::ZERO).unwrap();
         assert!(
             inventory_has_work(&dry),
             "database still has {remaining} build intent(s), but no GC work is eligible: \
@@ -630,7 +669,7 @@ fn preview_next_tree_retirement(
     publication_revision: u64,
 ) -> GarbageInventory {
     for _ in 0..MAX_TEST_GC_STEPS {
-        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let dry = operator.test_garbage_inventory(Duration::ZERO).unwrap();
         if dry.tree_publications.iter().any(|candidate| {
             candidate.database_id == database_id
                 && candidate.publication_revision == publication_revision
@@ -662,7 +701,7 @@ fn preview_next_log_generation_at_age(
     minimum_age: Duration,
 ) -> GarbageInventory {
     for _ in 0..MAX_TEST_LOG_GC_STEPS {
-        let dry = operator.garbage_inventory(minimum_age).unwrap();
+        let dry = operator.test_garbage_inventory(minimum_age).unwrap();
         if dry.log_generations.iter().any(|candidate| {
             candidate.database_id == database_id && candidate.generation == generation
         }) {
@@ -675,7 +714,10 @@ fn preview_next_log_generation_at_age(
         );
         let mut expected = dry.clone();
         expected.applied = true;
-        assert_eq!(operator.collect_garbage(minimum_age).unwrap(), expected);
+        assert_eq!(
+            operator.test_collect_garbage(minimum_age).unwrap(),
+            expected
+        );
     }
     panic!("target log generation did not become collectible");
 }
@@ -694,7 +736,10 @@ fn collect_log_generation_to_completion(
         });
         let mut expected = dry.clone();
         expected.applied = true;
-        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+        assert_eq!(
+            operator.test_collect_garbage(Duration::ZERO).unwrap(),
+            expected
+        );
         if complete {
             return;
         }
@@ -704,7 +749,7 @@ fn collect_log_generation_to_completion(
 
 #[test]
 fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc");
@@ -776,7 +821,7 @@ fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments(
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     // The month is guidance, not a semantic gate. A deliberate zero-age run
     // is useful after a controlled import and still obeys exact liveness.
-    let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry = operator.test_garbage_inventory(Duration::ZERO).unwrap();
     assert!(!dry.applied);
     assert!(dry.segment_hashes.is_empty());
     assert!(dry.program_hashes.contains(&program_hash));
@@ -803,7 +848,7 @@ fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments(
             .get::<_, i64>(0),
         1
     );
-    let applied = operator.collect_garbage(Duration::ZERO).unwrap();
+    let applied = operator.test_collect_garbage(Duration::ZERO).unwrap();
     assert_eq!(applied, expected);
     assert!(applied.applied);
     assert!(applied.segment_hashes.is_empty());
@@ -849,7 +894,7 @@ fn gc_reclaims_proven_unreferenced_values_but_retains_untracked_legacy_segments(
 
 #[test]
 fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_log_generation");
@@ -962,7 +1007,7 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
 
     assert!(
         operator
-            .garbage_inventory(Duration::ZERO)
+            .test_garbage_inventory(Duration::ZERO)
             .unwrap()
             .log_generations
             .iter()
@@ -980,7 +1025,7 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
     drop(peer);
     assert!(
         operator
-            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .test_garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
             .unwrap()
             .log_generations
             .iter()
@@ -1021,7 +1066,7 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
     let mut expected_first = first.clone();
     expected_first.applied = true;
     assert_eq!(
-        operator.collect_garbage(Duration::ZERO).unwrap(),
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
         expected_first
     );
     assert_eq!(
@@ -1094,7 +1139,10 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
         }
         let mut expected = dry.clone();
         expected.applied = true;
-        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+        assert_eq!(
+            operator.test_collect_garbage(Duration::ZERO).unwrap(),
+            expected
+        );
         if candidate.is_complete {
             completed = true;
             break;
@@ -1130,7 +1178,7 @@ fn retired_log_generation_gc_is_pinned_phased_bounded_and_restart_safe() {
 
 #[test]
 fn retired_generation_collection_preserves_shared_atlc_content() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_shared_atlc");
@@ -1214,7 +1262,7 @@ fn retired_generation_collection_preserves_shared_atlc_content() {
         .get(0);
     assert!(
         operator
-            .garbage_inventory(Duration::ZERO)
+            .test_garbage_inventory(Duration::ZERO)
             .unwrap()
             .log_generations
             .iter()
@@ -1265,7 +1313,7 @@ fn retired_generation_collection_preserves_shared_atlc_content() {
 
 #[test]
 fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_abandoned_generation");
@@ -1328,7 +1376,7 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
         .get(0);
     assert!(
         operator
-            .garbage_inventory(Duration::ZERO)
+            .test_garbage_inventory(Duration::ZERO)
             .unwrap()
             .log_generations
             .iter()
@@ -1351,7 +1399,7 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
     assert!(restored.basis_t() < request_basis);
     assert!(
         operator
-            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .test_garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
             .unwrap()
             .log_generations
             .iter()
@@ -1372,7 +1420,10 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
     assert!(first_candidate.abandoned);
     let mut expected = first.clone();
     expected.applied = true;
-    assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+    assert_eq!(
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
+        expected
+    );
     drop(operator);
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     collect_log_generation_to_completion(&mut operator, &database_id, candidate_generation as u64);
@@ -1401,7 +1452,7 @@ fn superseded_inactive_generation_is_abandoned_in_restart_safe_phases() {
 
 #[test]
 fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let source = unique("gc_initial_restore_source");
@@ -1447,7 +1498,8 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
     // A separate catalog is the supported renamed-restore shape: lineage IDs
     // are unique inside a catalog, while the portable archive preserves the
     // source lineage in the target catalog.
-    let target_connection = isolated_catalog(&connection, "gc_initial_restore_catalog");
+    let (_target_catalog, target_connection) =
+        isolated_catalog(&connection, "gc_initial_restore_catalog");
     let mut restore = PortableBackup::connect(&target_connection).unwrap();
     let interrupted = restore
         .restore_backup_with_fault(
@@ -1479,7 +1531,7 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
     let mut operator = PostgresOperator::connect(&target_connection).unwrap();
     assert!(
         operator
-            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .test_garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
             .unwrap()
             .log_generations
             .iter()
@@ -1489,7 +1541,7 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
     let mut archive_steps = 0_usize;
     let mut saw_bounded_resume = false;
     for _ in 0..MAX_TEST_GC_STEPS {
-        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let dry = operator.test_garbage_inventory(Duration::ZERO).unwrap();
         let Some(candidate) = dry.request_base_archives.iter().find(|candidate| {
             candidate.database_id == target && candidate.generation == generation as u64
         }) else {
@@ -1543,7 +1595,7 @@ fn failed_initial_restore_is_collected_before_the_alias_is_reused() {
 
 #[test]
 fn forged_publication_time_cannot_backdate_the_retirement_mark() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_retirement_clock");
@@ -1583,7 +1635,7 @@ fn forged_publication_time_cannot_backdate_the_retirement_mark() {
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     assert!(
         operator
-            .garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+            .test_garbage_inventory(RECOMMENDED_GARBAGE_COLLECTION_AGE)
             .unwrap()
             .tree_publications
             .is_empty()
@@ -1593,7 +1645,7 @@ fn forged_publication_time_cannot_backdate_the_retirement_mark() {
 
 #[test]
 fn concurrent_consolidation_and_gc_never_remove_published_segments() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_race");
@@ -1631,7 +1683,7 @@ fn concurrent_consolidation_and_gc_never_remove_published_segments() {
             let mut operator = PostgresOperator::connect(&connection).unwrap();
             barrier.wait();
             operator
-                .collect_garbage(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+                .test_collect_garbage(RECOMMENDED_GARBAGE_COLLECTION_AGE)
                 .unwrap();
         })
     };
@@ -1652,7 +1704,7 @@ fn concurrent_consolidation_and_gc_never_remove_published_segments() {
 
 #[test]
 fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_abandoned_build");
@@ -1748,7 +1800,7 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
     assert!(!predicted.is_empty());
     let mut expected = dry.clone();
     expected.applied = true;
-    let collected = operator.collect_garbage(Duration::ZERO).unwrap();
+    let collected = operator.test_collect_garbage(Duration::ZERO).unwrap();
     assert_eq!(collected, expected);
     assert!(collected.tree_build_intents.iter().any(|candidate| {
         candidate.database_id == database_id && candidate.manifest_hash == manifest_hash
@@ -1807,7 +1859,7 @@ fn abandoned_content_first_build_is_exactly_collected_and_can_be_retried() {
 
 #[test]
 fn gc_retains_current_and_historical_temporal_function_blobs() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_temporal_functions");
@@ -1890,7 +1942,7 @@ fn gc_retains_current_and_historical_temporal_function_blobs() {
 
     let mut operator = PostgresOperator::connect(&connection).unwrap();
     let inventory = operator
-        .collect_garbage(RECOMMENDED_GARBAGE_COLLECTION_AGE)
+        .test_collect_garbage(RECOMMENDED_GARBAGE_COLLECTION_AGE)
         .unwrap();
     assert!(!inventory.program_hashes.contains(&old_hash));
     assert!(!inventory.program_hashes.contains(&current_hash));
@@ -1911,7 +1963,7 @@ fn gc_retains_current_and_historical_temporal_function_blobs() {
 
 #[test]
 fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_native_roots");
@@ -2014,7 +2066,10 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
         let dry = preview_next_tree_retirement(&mut operator, &database_id, revision);
         let mut expected = dry.clone();
         expected.applied = true;
-        assert_eq!(operator.collect_garbage(Duration::ZERO).unwrap(), expected);
+        assert_eq!(
+            operator.test_collect_garbage(Duration::ZERO).unwrap(),
+            expected
+        );
     }
 
     // One PeerCore uses exactly one pin backend even while two physical roots
@@ -2030,7 +2085,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     assert_eq!(pin_backends, 1);
     assert_eq!(peer.pinned_manifest_hashes().len(), 2);
 
-    let dry_pinned = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let dry_pinned = operator.test_garbage_inventory(Duration::ZERO).unwrap();
     let pinned_candidates = dry_pinned
         .tree_publications
         .iter()
@@ -2092,7 +2147,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     // revision two, so no later root can be reclaimed out of order.
     let mut expected_pinned = dry_pinned.clone();
     expected_pinned.applied = true;
-    let applied_pinned = operator.collect_garbage(Duration::ZERO).unwrap();
+    let applied_pinned = operator.test_collect_garbage(Duration::ZERO).unwrap();
     assert_eq!(applied_pinned, expected_pinned);
     assert!(
         applied_pinned
@@ -2131,7 +2186,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     );
     let mut expected_released = dry_released.clone();
     expected_released.applied = true;
-    let released = operator.collect_garbage(Duration::ZERO).unwrap();
+    let released = operator.test_collect_garbage(Duration::ZERO).unwrap();
     assert_eq!(released, expected_released);
     // A serialized reference is not a retention pin. Do not silently replace
     // its collected physical witness with another publication of the same key.
@@ -2171,7 +2226,7 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
     );
     let mut expected_changed = dry_changed.clone();
     expected_changed.applied = true;
-    let changed = operator.collect_garbage(Duration::ZERO).unwrap();
+    let changed = operator.test_collect_garbage(Duration::ZERO).unwrap();
     assert_eq!(changed, expected_changed);
     assert!(changed.tree_publications.iter().any(|candidate| {
         candidate.database_id == database_id
@@ -2212,10 +2267,11 @@ fn native_root_retirement_honors_snapshot_pins_and_reclaims_released_values() {
 
 #[test]
 fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
-    let Some(base_connection) = connection() else {
+    let Some((_catalog, base_connection)) = connection() else {
         return;
     };
-    let connection = isolated_catalog(&base_connection, "gc_request_base_catalog");
+    let (_request_catalog, connection) =
+        isolated_catalog(&base_connection, "gc_request_base_catalog");
     let database_id = unique("gc_request_base");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
@@ -2304,7 +2360,7 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
     // The durable association is a real root pin even without a connected
     // Peer session.  Preview and the owner SQL function agree that the active
     // generation's oldest root cannot be claimed.
-    let active_inventory = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let active_inventory = operator.test_garbage_inventory(Duration::ZERO).unwrap();
     assert!(active_inventory.tree_publications.iter().all(|candidate| {
         candidate.database_id != database_id
             || candidate.manifest_hash != genesis_publication.manifest_hash
@@ -2377,7 +2433,7 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
     // Transaction reports intentionally hold exact immutable db-before and
     // db-after values. They are live report witnesses, and therefore retain
     // the old manifest/generation until the application releases them.
-    let report_pinned = operator.garbage_inventory(Duration::ZERO).unwrap();
+    let report_pinned = operator.test_garbage_inventory(Duration::ZERO).unwrap();
     assert!(report_pinned.log_generations.iter().all(|candidate| {
         candidate.database_id != database_id || candidate.generation != source_generation as u64
     }));
@@ -2394,7 +2450,7 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
     // collector can become eligible without a dependency cycle.
     assert!(
         operator
-            .garbage_inventory(Duration::ZERO)
+            .test_garbage_inventory(Duration::ZERO)
             .unwrap()
             .log_generations
             .iter()
@@ -2403,7 +2459,7 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
     );
     let mut generation_became_collectible = false;
     for _ in 0..MAX_TEST_GC_STEPS {
-        let inventory = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let inventory = operator.test_garbage_inventory(Duration::ZERO).unwrap();
         if inventory.log_generations.iter().any(|candidate| {
             candidate.database_id == database_id && candidate.generation == source_generation as u64
         }) {
@@ -2557,16 +2613,30 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
 
     // Claim, deletion, and cursor creation are one transaction. A crash-like
     // rollback restores every root and leaves the exact dry run repeatable.
-    let mut rollback = raw.transaction().unwrap();
-    let rolled_back = rollback
-        .query(
+    let until = Instant::now() + Duration::from_secs(10);
+    let rolled_back = loop {
+        // A Busy SQL error aborts its transaction, so retry the whole
+        // rollback witness with a fresh transaction, not the failed query.
+        let mut rollback = raw.transaction().unwrap();
+        let result = rollback.query(
             "SELECT basis_t FROM atomic_collect_semantic_commitment_generation_roots(\
                  $1, $2, 0, 512, false)",
             &[&database_id, &source_generation],
-        )
-        .unwrap();
+        );
+        rollback.rollback().unwrap();
+        match result {
+            Err(error)
+                if error.as_db_error().is_some_and(|error| {
+                    error.code().code() == "55006"
+                        && error.message() == "Atomic semantic commitment collector is busy"
+                }) && Instant::now() < until =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => break result.unwrap(),
+        }
+    };
     assert_eq!(rolled_back.len(), old_root_count as usize);
-    rollback.rollback().unwrap();
     assert_eq!(
         raw.query_one(
             "SELECT count(*) FROM atomic_semantic_commitment_roots \
@@ -2623,7 +2693,7 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
         if remaining == 0 {
             break;
         }
-        let dry = operator.garbage_inventory(Duration::ZERO).unwrap();
+        let dry = operator.test_garbage_inventory(Duration::ZERO).unwrap();
         assert!(
             inventory_has_work(&dry),
             "{remaining} old semantic nodes remained without GC work at attempt {attempt}"
@@ -2654,7 +2724,7 @@ fn native_request_base_pins_active_root_and_releases_before_generation_gc() {
 
 #[test]
 fn large_replacement_publishes_root_before_bounded_membership_fold() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_bounded_publication_fold");
@@ -2861,7 +2931,7 @@ fn large_replacement_publishes_root_before_bounded_membership_fold() {
 
 #[test]
 fn abandoned_intent_ledger_is_staged_and_collected_in_bounded_batches() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_bounded_intent");
@@ -2925,7 +2995,7 @@ fn abandoned_intent_ledger_is_staged_and_collected_in_bounded_batches() {
     let mut expected_first = dry_first.clone();
     expected_first.applied = true;
     assert_eq!(
-        operator.collect_garbage(Duration::ZERO).unwrap(),
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
         expected_first
     );
     let after_first = raw
@@ -2952,7 +3022,7 @@ fn abandoned_intent_ledger_is_staged_and_collected_in_bounded_batches() {
     let mut expected_second = dry_second.clone();
     expected_second.applied = true;
     assert_eq!(
-        operator.collect_garbage(Duration::ZERO).unwrap(),
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
         expected_second
     );
     assert_eq!(
@@ -2978,7 +3048,7 @@ fn abandoned_intent_ledger_is_staged_and_collected_in_bounded_batches() {
 
 #[test]
 fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
-    let Some(connection) = connection() else {
+    let Some((_catalog, connection)) = connection() else {
         return;
     };
     let database_id = unique("gc_bounded_retirement");
@@ -3079,7 +3149,7 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
     let mut expected_first = dry_first.clone();
     expected_first.applied = true;
     assert_eq!(
-        operator.collect_garbage(Duration::ZERO).unwrap(),
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
         expected_first
     );
     assert_eq!(
@@ -3124,7 +3194,7 @@ fn claimed_retirement_ledger_is_unobservable_and_drains_in_bounded_batches() {
     let mut expected_second = dry_second.clone();
     expected_second.applied = true;
     assert_eq!(
-        operator.collect_garbage(Duration::ZERO).unwrap(),
+        operator.test_collect_garbage(Duration::ZERO).unwrap(),
         expected_second
     );
     assert_eq!(

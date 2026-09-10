@@ -15,7 +15,9 @@ use crate::recent::RecentLimits;
 use crate::sql_io::{GenericClient, SqlClient as Client};
 use crate::state_commitment::CommitmentWork;
 use crate::state_commitment::{checkpoint_state_hash, verify_checkpoint_state_hash};
-use crate::tiered_assessor::{AssessmentLimits, assess_tiered_with_remaining_limits};
+use crate::tiered_assessor::{
+    AssessmentLimits, AssessmentReadWork, assess_tiered_with_remaining_limits,
+};
 use crate::{
     Database, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, OperationContext,
     OperationKind, PostgresConnectionConfig, Program, ProgramBudget, ProgramHash, ProgramKind,
@@ -265,12 +267,16 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         29,
         include_str!("../migrations/0029_change_checkpoints.sql"),
     ),
+    (
+        30,
+        include_str!("../migrations/0030_shared_fulltext_pages.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 29;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 30;
 
 /// Version of the authenticated fixed-dependency walker whose result GC may
 /// trust. Any future traversal change that adds roots must bump this version
@@ -314,6 +320,8 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_tree_node_blocks",
     "atomic_fulltext_blocks",
     "atomic_fulltext_projections",
+    "atomic_fulltext_pages",
+    "atomic_fulltext_page_roots",
     "atomic_change_checkpoints",
     "atomic_tree_manifests",
     "atomic_tree_manifest_roots",
@@ -329,6 +337,8 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
 ];
 
 const WRITER_RUNTIME_TABLES: &[&str] = &[
+    "atomic_fulltext_page_edges",
+    "atomic_fulltext_page_builds",
     "atomic_remote_writer_endpoints",
     "atomic_transactor_leases",
     // The invoker tree-manifest validation trigger authenticates a positive
@@ -350,6 +360,10 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
 ];
 
 const WRITER_INSERT_TABLES: &[&str] = &[
+    "atomic_fulltext_pages",
+    "atomic_fulltext_page_edges",
+    "atomic_fulltext_page_roots",
+    "atomic_fulltext_page_builds",
     "atomic_remote_writer_endpoints",
     "atomic_transactions",
     "atomic_requests",
@@ -1761,6 +1775,8 @@ fn grant_runtime_privileges(
                                        {schema_ident}.atomic_tree_database_build_pin_key(text), \
                                        {schema_ident}.atomic_semantic_commitment_gc_pin_key(), \
                                        {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {writer_ident}; \
+             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_fulltext_gc_pin_key(), \
+                                       {schema_ident}.atomic_finish_fulltext_build(bytea) TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_discover_remote_writer(text,text) TO {writer_ident}, {peer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {peer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
@@ -2191,6 +2207,20 @@ pub struct WriterResidencyStats {
     pub last_transaction_read_datoms: u64,
     /// Deterministic retained width of those delivered logical datoms.
     pub last_transaction_read_bytes: u64,
+    /// Actual descriptor/dependency visits in the last fresh transaction's
+    /// assessment, including unchanged-schema validation and tuple helpers.
+    /// These are process-local work counts, not persisted bytes or RSS.
+    pub last_schema_transition_attributes: u64,
+    pub last_schema_projection_attributes: u64,
+    pub last_schema_validation_attributes: u64,
+    pub last_schema_validation_predicates: u64,
+    pub last_schema_validation_tuple_types: u64,
+    pub last_schema_validation_tuple_constituents: u64,
+    pub last_schema_validation_installations: u64,
+    pub last_schema_reuses: u64,
+    pub last_schema_dependency_lookups: u64,
+    pub last_schema_dependency_edges: u64,
+    pub last_schema_composite_candidates: u64,
     /// Successful datoms delivered by underlying exact-prefix cursors. Memo
     /// replays increase logical reads but leave this source count unchanged.
     pub last_transaction_source_read_datoms: u64,
@@ -2248,6 +2278,7 @@ struct WriterState {
     commitment: PersistentCommitmentCoordinate,
     publication_revision: u64,
     last_read_work: TransactionReadWork,
+    last_assessment_work: AssessmentReadWork,
     last_commitment_work: CommitmentWork,
 }
 
@@ -2411,6 +2442,36 @@ impl PostgresStore {
             publication_revision: state.publication_revision,
             last_transaction_read_datoms: state.last_read_work.logical_datoms,
             last_transaction_read_bytes: state.last_read_work.logical_retained_bytes,
+            last_schema_transition_attributes: state
+                .last_assessment_work
+                .schema_transition_attributes,
+            last_schema_projection_attributes: state
+                .last_assessment_work
+                .schema_projection_attributes,
+            last_schema_validation_attributes: state
+                .last_assessment_work
+                .schema_validation
+                .attributes,
+            last_schema_validation_predicates: state
+                .last_assessment_work
+                .schema_validation
+                .predicates,
+            last_schema_validation_tuple_types: state
+                .last_assessment_work
+                .schema_validation
+                .tuple_types,
+            last_schema_validation_tuple_constituents: state
+                .last_assessment_work
+                .schema_validation
+                .tuple_constituents,
+            last_schema_validation_installations: state
+                .last_assessment_work
+                .schema_validation
+                .installations,
+            last_schema_reuses: state.last_assessment_work.schema_reuses,
+            last_schema_dependency_lookups: state.last_assessment_work.dependency_lookups,
+            last_schema_dependency_edges: state.last_assessment_work.dependency_edges,
+            last_schema_composite_candidates: state.last_assessment_work.composite_candidates,
             last_transaction_source_read_datoms: state.last_read_work.source_datoms,
             last_transaction_source_read_bytes: state.last_read_work.source_retained_bytes,
             last_transaction_prefix_memo_hits: state.last_read_work.prefix_hits,
@@ -2600,6 +2661,7 @@ impl PostgresStore {
                 commitment,
                 publication_revision: opened.selected_publication_revision,
                 last_read_work: TransactionReadWork::default(),
+                last_assessment_work: AssessmentReadWork::default(),
                 last_commitment_work: CommitmentWork::default(),
             },
         );
@@ -3990,6 +4052,7 @@ impl PostgresStore {
             commitment: next_commitment,
             publication_revision: writer_before.publication_revision,
             last_read_work: read_context.snapshot()?,
+            last_assessment_work: assessed.read_work,
             last_commitment_work: commitment_work,
         };
         drop(report_phase);
@@ -4647,6 +4710,7 @@ fn finish_exact_state(
         commitment,
         publication_revision: opened.selected_publication_revision,
         last_read_work: TransactionReadWork::default(),
+        last_assessment_work: AssessmentReadWork::default(),
         last_commitment_work: CommitmentWork::default(),
     })
 }
@@ -4803,6 +4867,7 @@ fn reconstruct_exact_request_receipt<C: GenericClient>(
             commitment: committed,
             publication_revision: before_state.publication_revision,
             last_read_work: TransactionReadWork::default(),
+            last_assessment_work: AssessmentReadWork::default(),
             last_commitment_work: CommitmentWork::default(),
         },
     ))

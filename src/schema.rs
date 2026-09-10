@@ -131,8 +131,23 @@ pub struct Schema {
     /// transaction expansion touches only composites affected by an E/A
     /// change rather than scanning the complete schema.
     constituents: BTreeMap<AttrId, BTreeSet<AttrId>>,
+    /// Derived dependency names, counted so changing one attribute does not
+    /// remove a predicate still used by another. Ordinary ident transactions
+    /// can test dependency without enumerating all attribute definitions.
+    attribute_predicate_refs: BTreeMap<String, usize>,
     /// Named partition installation is ordinary information, not a new store.
     partitions: BTreeMap<u32, Keyword>,
+}
+
+/// Actual visits inside schema definition validation, not an estimate from
+/// schema width. Native assessment uses this across every validation phase.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct SchemaValidationWork {
+    pub(crate) attributes: u64,
+    pub(crate) predicates: u64,
+    pub(crate) tuple_types: u64,
+    pub(crate) tuple_constituents: u64,
+    pub(crate) installations: u64,
 }
 
 fn active_composite_constituents(attribute: &Attribute) -> Vec<AttrId> {
@@ -146,6 +161,48 @@ fn active_composite_constituents(attribute: &Attribute) -> Vec<AttrId> {
 }
 
 impl Schema {
+    /// Whether one datom can change the operative schema projection. General
+    /// idents still update the separate identity index, but need not rebuild
+    /// unchanged attributes. Retargeting an attribute's current/old name does
+    /// affect schema aliases and potentially composite constituent resolution.
+    pub(crate) fn datom_may_change_schema(
+        &self,
+        entity: u64,
+        attribute: AttrId,
+        value: &Value,
+        added: bool,
+    ) -> bool {
+        if u64::from(attribute) == DB_IDENT {
+            let installed_target = u32::try_from(entity).is_ok_and(|id| {
+                self.attributes.contains_key(&id) || self.partitions.contains_key(&id)
+            });
+            return installed_target
+                || added
+                    && match value {
+                        Value::Keyword(ident) => self.resolve_ident(ident).is_some(),
+                        _ => true,
+                    };
+        }
+        matches!(
+            u64::from(attribute),
+            crate::DB_INSTALL_PARTITION
+                | DB_INSTALL_ATTRIBUTE
+                | DB_ALTER_ATTRIBUTE
+                | DB_VALUE_TYPE
+                | DB_CARDINALITY
+                | DB_UNIQUE
+                | DB_IS_COMPONENT
+                | DB_INDEX
+                | DB_NO_HISTORY
+                | crate::DB_FULLTEXT
+                | DB_TUPLE_TYPE
+                | DB_TUPLE_TYPES
+                | DB_TUPLE_ATTRS
+                | DB_TUPLE_DISCONTINUED
+                | DB_ATTR_PREDS
+        )
+    }
+
     /// Installed named partitions, including the three builtin partitions.
     /// Implicit partitions are computed by `implicit_part`, not enumerated.
     pub fn partitions(&self) -> impl Iterator<Item = (u32, &Keyword)> {
@@ -188,7 +245,15 @@ impl Schema {
     }
 
     pub fn install(&mut self, attribute: Attribute) -> Result<(), SemanticError> {
-        self.validate_attribute(&attribute)?;
+        self.install_with_work(attribute, &mut SchemaValidationWork::default())
+    }
+
+    pub(crate) fn install_with_work(
+        &mut self,
+        attribute: Attribute,
+        work: &mut SchemaValidationWork,
+    ) -> Result<(), SemanticError> {
+        self.validate_attribute_with_work(&attribute, work)?;
         if self.attributes.contains_key(&attribute.id) {
             return Err(SemanticError::conflict(
                 "schema/attribute-id-exists",
@@ -208,6 +273,12 @@ impl Schema {
             .insert(attribute.ident.clone(), attribute.id);
         let attribute_id = attribute.id;
         let constituent_ids = active_composite_constituents(&attribute);
+        for predicate in &attribute.predicates {
+            *self
+                .attribute_predicate_refs
+                .entry(predicate.clone())
+                .or_default() += 1;
+        }
         self.attributes.insert(attribute_id, attribute);
         for constituent in constituent_ids {
             self.constituents
@@ -250,7 +321,15 @@ impl Schema {
     /// `alter-attribute`, which updates the immutable database value only after
     /// the complete transaction has passed its hooks.
     pub(crate) fn alter(&mut self, proposed: Attribute) -> Result<(), SemanticError> {
-        self.validate_attribute(&proposed)?;
+        self.alter_with_work(proposed, &mut SchemaValidationWork::default())
+    }
+
+    pub(crate) fn alter_with_work(
+        &mut self,
+        proposed: Attribute,
+        work: &mut SchemaValidationWork,
+    ) -> Result<(), SemanticError> {
+        self.validate_attribute_with_work(&proposed, work)?;
         let current = self.attributes.get(&proposed.id).ok_or_else(|| {
             SemanticError::incorrect(
                 "schema/unknown-attribute",
@@ -301,6 +380,22 @@ impl Schema {
                 .insert(proposed.ident.clone(), proposed.id);
         }
         let previous_constituents = active_composite_constituents(current);
+        for predicate in &current.predicates {
+            let count = self
+                .attribute_predicate_refs
+                .get_mut(predicate)
+                .expect("installed attribute predicate has a dependency count");
+            *count -= 1;
+            if *count == 0 {
+                self.attribute_predicate_refs.remove(predicate);
+            }
+        }
+        for predicate in &proposed.predicates {
+            *self
+                .attribute_predicate_refs
+                .entry(predicate.clone())
+                .or_default() += 1;
+        }
         let proposed_id = proposed.id;
         let proposed_constituents = active_composite_constituents(&proposed);
         self.attributes.insert(proposed_id, proposed);
@@ -339,6 +434,18 @@ impl Schema {
 
     pub fn attributes(&self) -> impl Iterator<Item = &Attribute> {
         self.attributes.values()
+    }
+
+    pub(crate) fn attribute_count(&self) -> usize {
+        self.attributes.len()
+    }
+
+    pub(crate) fn has_attribute_predicate(&self, name: &str) -> bool {
+        self.attribute_predicate_refs.contains_key(name)
+    }
+
+    pub(crate) fn attribute_predicate_names(&self) -> impl Iterator<Item = &str> {
+        self.attribute_predicate_refs.keys().map(String::as_str)
     }
 
     pub(crate) fn estimated_retained_bytes(&self) -> u64 {
@@ -402,12 +509,22 @@ impl Schema {
                 .saturating_add(size_of::<u32>() as u64)
                 .saturating_add(keyword_bytes(ident))
         });
+        let predicate_refs = self
+            .attribute_predicate_refs
+            .keys()
+            .fold(0_u64, |bytes, name| {
+                bytes
+                    .saturating_add(size_of::<String>() as u64)
+                    .saturating_add(name.capacity() as u64)
+                    .saturating_add(size_of::<usize>() as u64)
+            });
         (size_of::<Self>() as u64)
             .saturating_add(attributes)
             .saturating_add(current_idents)
             .saturating_add(ident_aliases)
             .saturating_add(constituents)
             .saturating_add(partitions)
+            .saturating_add(predicate_refs)
     }
 
     /// Active composite attributes that depend on `constituent`.
@@ -463,6 +580,18 @@ impl Schema {
         current: &[Datom],
         idents: &IdentIndex,
     ) -> Result<Self, SemanticError> {
+        Self::derive_from_information_with_work(
+            current,
+            idents,
+            &mut SchemaValidationWork::default(),
+        )
+    }
+
+    pub(crate) fn derive_from_information_with_work(
+        current: &[Datom],
+        idents: &IdentIndex,
+        work: &mut SchemaValidationWork,
+    ) -> Result<Self, SemanticError> {
         let mut installed = BTreeSet::new();
         for datom in current.iter().filter(|datom| {
             datom.added
@@ -493,7 +622,7 @@ impl Schema {
                 facts.push(datom);
             }
         }
-        Self::derive_from_entity_information(installed, idents, current, |entity| {
+        Self::derive_from_entity_information(installed, idents, current, work, |entity| {
             by_entity[&entity].as_slice()
         })
     }
@@ -502,6 +631,7 @@ impl Schema {
         installed: BTreeSet<u64>,
         idents: &IdentIndex,
         partition_information: &[Datom],
+        work: &mut SchemaValidationWork,
         entity_facts: impl Fn(u64) -> &'a [&'a Datom],
     ) -> Result<Self, SemanticError> {
         let mut schema = Self::new();
@@ -613,22 +743,25 @@ impl Schema {
             predicates.sort();
             predicates.dedup();
 
-            schema.install(Attribute {
-                id,
-                ident,
-                value_type,
-                cardinality,
-                unique,
-                // `indexed` records the explicit :db/index fact. Unique
-                // attributes are effective AVET members independently.
-                indexed: explicitly_indexed,
-                component,
-                no_history,
-                fulltext,
-                tuple,
-                tuple_discontinued,
-                predicates,
-            })?;
+            schema.install_with_work(
+                Attribute {
+                    id,
+                    ident,
+                    value_type,
+                    cardinality,
+                    unique,
+                    // `indexed` records the explicit :db/index fact. Unique
+                    // attributes are effective AVET members independently.
+                    indexed: explicitly_indexed,
+                    component,
+                    no_history,
+                    fulltext,
+                    tuple,
+                    tuple_discontinued,
+                    predicates,
+                },
+                work,
+            )?;
         }
 
         // Attribute aliases are the subset of the general historical ident
@@ -700,7 +833,7 @@ impl Schema {
                 "the three builtin partition markers must remain installed",
             ));
         }
-        schema.validate_tuple_definitions()?;
+        schema.validate_tuple_definitions_with_work(work)?;
         Ok(schema)
     }
 
@@ -745,8 +878,15 @@ impl Schema {
     /// assemble or transition a schema must therefore invoke this after all
     /// proposed attributes have been installed or altered.
     pub fn validate_tuple_definitions(&self) -> Result<(), SemanticError> {
+        self.validate_tuple_definitions_with_work(&mut SchemaValidationWork::default())
+    }
+
+    pub(crate) fn validate_tuple_definitions_with_work(
+        &self,
+        work: &mut SchemaValidationWork,
+    ) -> Result<(), SemanticError> {
         for attribute in self.attributes.values() {
-            self.validate_attribute(attribute)?;
+            self.validate_attribute_with_work(attribute, work)?;
 
             let Some(TupleSpec::Composite(constituents)) = &attribute.tuple else {
                 continue;
@@ -761,6 +901,7 @@ impl Schema {
             }
 
             for constituent_id in constituents {
+                work.tuple_constituents = work.tuple_constituents.saturating_add(1);
                 let Some(constituent) = self.attributes.get(constituent_id) else {
                     return Err(SemanticError::incorrect(
                         "schema/invalid-tuple-attributes",
@@ -800,7 +941,19 @@ impl Schema {
         &self,
         installed_attributes: &[AttrId],
     ) -> Result<(), SemanticError> {
+        self.validate_tuple_installations_with_work(
+            installed_attributes,
+            &mut SchemaValidationWork::default(),
+        )
+    }
+
+    pub(crate) fn validate_tuple_installations_with_work(
+        &self,
+        installed_attributes: &[AttrId],
+        work: &mut SchemaValidationWork,
+    ) -> Result<(), SemanticError> {
         for attribute_id in installed_attributes {
+            work.installations = work.installations.saturating_add(1);
             let attribute = self.attribute(*attribute_id)?;
             if attribute.tuple_discontinued {
                 return Err(SemanticError::incorrect(
@@ -809,10 +962,19 @@ impl Schema {
                 ));
             }
         }
-        self.validate_tuple_definitions()
+        self.validate_tuple_definitions_with_work(work)
     }
 
     pub(crate) fn validate_attribute(&self, attribute: &Attribute) -> Result<(), SemanticError> {
+        self.validate_attribute_with_work(attribute, &mut SchemaValidationWork::default())
+    }
+
+    fn validate_attribute_with_work(
+        &self,
+        attribute: &Attribute,
+        work: &mut SchemaValidationWork,
+    ) -> Result<(), SemanticError> {
+        work.attributes = work.attributes.saturating_add(1);
         if attribute.fulltext && attribute.value_type != ValueType::String {
             return Err(SemanticError::incorrect(
                 "schema/fulltext-must-be-string",
@@ -820,6 +982,7 @@ impl Schema {
             ));
         }
         if attribute.predicates.iter().any(|predicate| {
+            work.predicates = work.predicates.saturating_add(1);
             let Some((namespace, name)) = predicate.split_once('/') else {
                 return true;
             };
@@ -855,6 +1018,12 @@ impl Schema {
                 "tuple discontinuation applies only to composite tuple attributes",
             ));
         }
+        if matches!(
+            (&attribute.value_type, &attribute.tuple),
+            (ValueType::Tuple, Some(TupleSpec::Homogeneous(_)))
+        ) {
+            work.tuple_types = work.tuple_types.saturating_add(1);
+        }
         match (&attribute.value_type, &attribute.tuple) {
             (ValueType::Tuple, Some(TupleSpec::Homogeneous(value_type)))
                 if !is_tuple_scalar_type(*value_type) =>
@@ -873,9 +1042,10 @@ impl Schema {
                 ))
             }
             (ValueType::Tuple, Some(TupleSpec::Heterogeneous(types)))
-                if types
-                    .iter()
-                    .any(|value_type| !is_tuple_scalar_type(*value_type)) =>
+                if types.iter().any(|value_type| {
+                    work.tuple_types = work.tuple_types.saturating_add(1);
+                    !is_tuple_scalar_type(*value_type)
+                }) =>
             {
                 Err(SemanticError::incorrect(
                     "schema/invalid-tuple-element-type",
@@ -1392,7 +1562,13 @@ mod grouped_information_tests {
             installed.insert(entity);
         }
         let all: Vec<_> = current.iter().collect();
-        Schema::derive_from_entity_information(installed, idents, current, |_| &all)
+        Schema::derive_from_entity_information(
+            installed,
+            idents,
+            current,
+            &mut SchemaValidationWork::default(),
+            |_| &all,
+        )
     }
 
     fn fixture() -> (Vec<Datom>, IdentIndex) {

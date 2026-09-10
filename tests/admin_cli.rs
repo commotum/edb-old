@@ -507,7 +507,8 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
     assert_eq!(
         common::with_replica_triggers_disabled(&mut fault_client, |client| {
             client.execute(
-                "DELETE FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash=$2",
+                "DELETE FROM atomic_fulltext_pages p USING atomic_fulltext_page_roots r \
+                 WHERE r.manifest_hash=$1 AND r.root_hash=$2 AND p.block_hash=r.root_hash",
                 &[&&projection.source_manifest[..], &&projection.root_hash[..]],
             )
         })

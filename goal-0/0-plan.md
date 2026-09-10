@@ -9,8 +9,10 @@ correct, ownership stack-safe, and routine work proportional to the information
 actually consumed or changed. Finish with integrated application and PostgreSQL
 evidence, not merely a collection of completed child goals.
 
-Status: **executing Stage 3**. Active child: **Goal 3**.
-Stages 1–7 map directly to `goal-1` through `goal-7`; Goals1–3 are scaffolded.
+Status: **complete (2026-09-10)**. All twelve repairs and integrated acceptance
+are established; all seven children are complete. No child is active. Stage6's
+integrated retention/publication reopening is repaired and verified.
+Stages 1–7 map directly to `goal-1` through `goal-7`; all seven are scaffolded.
 
 ## Authority and constraints
 
@@ -127,9 +129,14 @@ into ordinary repository regression tests during implementation; do not depend o
   cast decimals to f64 or change persisted index ordering to gain speed.
   Re-run earlier joins/rules after comparator changes; arithmetic promotion does
   not by itself authorize changing equality, index order or canonical commitments.
-- **Status:** In progress: Goal3 active. Reconcile arithmetic promotion and bounded
-  comparison/hash representation against docs, existing contracts and source before
-  changing shared numeric behavior. Preserve durable bytes and exact old receipts.
+- **Status:** Complete (2026-09-10). R4/R11 exact arithmetic and scale-bounded
+  comparison/hash pass independent rational/canonical witnesses, actual PG
+  scale/history/index/restart/retry,50 adjacent query checks and17 final optimized
+  checks. Integrated persisted-query numeric-cap reset and premature statistical
+  intermediate overflow are repaired with permanent regressions. Complete query
+  work193/769/3073 at32/128/512rows is invariant across five decimal scales through
+  i64 extremes; ordinary Long/Ref compare/hash allocates zero. Durable codecs,
+  index order and exact receipt identity are unchanged; full evidence in Goal3.
 
 ### 4. Restore delta-sized transaction bookkeeping — Goal 4
 
@@ -143,7 +150,15 @@ into ordinary repository regression tests during implementation; do not depend o
   path with instrumentation that does not itself scan the measured structures.
   Statistics match independently computed reference totals. Changed schema, tuples,
   predicates, recovery, concurrent indexing/adoption and real PG writes still pass.
-- **Status:** Not started.
+- **Status:** Complete (2026-09-10). Maintained recent/backlog totals,
+  validated-schema reuse, cached metadata sizes and pending-readiness sharing are
+  implemented and verified. Actual PG fixed-delta schema scan76→0 is reproduced/
+  repaired; widths38/122/410, tails1/33/129, restart/adoption, programs/tuples and
+  earlier CLI repairs pass. The adjacent index gate now measures complete reads
+  at1024/4096items:91/91reads,41/41metadata reads,32/32newnodes, with independent
+  current/history and failed-publication recovery checks. Read bytes grow with
+  directory width; no constant-byte-cost claim. Optimized complete-path samples,
+  formatting and all-target Clippy pass; detailed evidence/limits in Goal4.
 
 ### 5. Bound peer reads and exploit index ranges — Goal 5
 
@@ -159,7 +174,16 @@ into ordinary repository regression tests during implementation; do not depend o
   can legitimately examine extra candidates. Required scans are acceptable when
   accounted for; universal zero-I/O
   or constant-time promises are not the goal.
-- **Status:** Not started.
+- **Status:** Complete (2026-09-10). Lazy Pull, all six comparison hints and strict
+  prefix seeks pass permanent local and final optimized CLI/PG128/1024/4096 matrix
+  (22.18s), including views, pending AVET, restart/exact retries. Pull visits1/1/2/4
+  for forward/reverse/nested/wildcard; selective range5 candidates/work52 at all
+  sizes. Hidden native/recent skips now poll and charge work:512-fact counterexample
+  formerly reported4, now521 and interrupts at max_work32. Final local optimized34,
+  configured privatePG8 and adjacent suites pass. Driver calls include pin checks,
+  separately from cursor SQL/bytes; growing page widths remain visible. Bounded
+  cache-recency cost retained explicitly. Clippy passes with25 warnings, including
+  one new bounded per-probe iterator-layout warning for Stage7 hygiene. Goal5 details.
 
 ### 6. Maintain fulltext incrementally — Goal 6
 
@@ -174,7 +198,20 @@ into ordinary repository regression tests during implementation; do not depend o
   rebuild/repair for genuine invalidation; authenticate reused projections to their
   retained source and never reuse pages to bypass excision. No Lucene format/ranking
   parity needed.
-- **Status:** Not started.
+- **Status:** Complete, including integrated reopening (2026-09-10). Program GC
+  now compares exact batch membership while preserving oldest-first public order;
+  512+1 aged-program regression and operations15/15 pass. Administrative indexing
+  completes an authenticated same-head winner's pending live fold instead of a
+  redundant full rebuild; deterministic regression, peer20/20 and background9/9 pass.
+  R10 authenticated history diff/shared-page
+  maintenance passes optimized primaryPG2/2(27.47s), storage4/4, lifecycle4/4 and
+  local16/16.64/256/1024corpora: nontext0input/0pageuploads, fixedtext5inputs and
+  21/23/31uploads,50tokenbytes. Complete source/SQL/retention costs remain visible;
+  metadata and changed-leaf work are not claimed constant. Full-rebuild oracles,
+  noHistory, views, restart/retry, excision, legacyFORMAT1 and restricted-role GC
+  pass. Initial empty-corpus loading uses admission-preserving bulk merge, repairing
+  a newly caught COW setup regression. Stage7 repaired the five mechanical lint
+  sites here and the bounded iterator-layout warning from Stage5.
 
 ### 7. Establish integrated acceptance and finish Rust hygiene — Goal 7
 
@@ -191,7 +228,18 @@ into ordinary repository regression tests during implementation; do not depend o
   Replay saved/generated semantic and lifecycle cases, publish reproducible scoped
   measurements, and reopen owning stages for gaps. All twelve findings are repaired
   or decisively disproved against their original observations; no silent omissions.
-- **Status:** Not started.
+- **Status:** Complete (2026-09-10). Initial configured broad run
+  finished:954 reported passes/21 failures/6 ignored/7 separately exercised
+  filters across139 target summaries. One reported pass early-returned the opt-in
+  protocol check, which was subsequently run explicitly. Nine failed targets are
+  individually pass after repairs. The final runtime broad run finished973passes/
+  4failures; full corrected targets library408/408, backup10/10 and unchanged
+  service-worker9/9 subsequently pass, establishing977ordinary cases of supported
+  coverage across runs, not a claim that one broad command had zero exit status.
+  Real final application/crash/old-receipt and saved24-action/48-step replay checks
+  pass. Formatting/all-target Clippy pass with24pre-existing warnings. Evidence,
+  failed-fixture history and qualified costs are reconciled in Goal7 and
+  `docs/acceptance.md`; no repair or integrated gap remains open.
 
 ## Adjacent observations: explicit disposition, not automatic feature expansion
 
@@ -206,6 +254,16 @@ or request a scope decision for materially new behavior. In particular, measure
 cache recency when assessing peer costs, and resolve the docs/source ambiguity
 before relaxing nested-map rules. Do not silently promote optional feature work
 to a parent completion gate, or use this paragraph to exclude an R1–R12 defect.
+
+Disposition: keep the measured bounded cache-recency policy (Goal5), existing
+documented report-opening deadlines and current catalog APIs. Refactor only the
+touched responsibilities, not large files for their own sake. Docs transaction
+data/Nested Maps requires component or unique attributes; recovered
+`db/expand-submap` additionally bypasses child-ID creation when an explicit ID is
+present. The native stricter authoring guard follows the literal docs contract;
+relaxing that form is optional new input support, not required for anonymous-ID
+collision repair. No such relaxation was silently introduced; explicit references
+and separate top-level entity maps remain available.
 
 ## Execution evidence and continuation
 
@@ -225,9 +283,13 @@ decisions and any outstanding uncertainty. A scaffold, green lint count or compl
 child is not Goal0's finish line. Parent completion requires Stage7 plus reconciled
 completion signals for all earlier stages.
 
-Continuation (2026-09-10): Goals1–2 complete, Goal3 active. Real PostgreSQL15.11 fixture
+Continuation (2026-09-10): Goal0 and Goals1–7 are complete. Preserve the repairs,
+regressions, immutable data and genuine old-engine witnesses. Future work requires
+a new user objective or a reproduced regression; do not restart completed stages
+or add optional features automatically. Detailed qualifications, failed-fixture
+history and final saved-trace/application evidence are in Goal7 and the acceptance guide.
+Real PostgreSQL15.11 fixture
 is `/tmp/atomic-repair-pg.vA037i/data`, port55471, with normal durability enabled;
-connection/upgrade witness details are in Goal1. Next: R4/R11 exact query arithmetic
-and aggregates, scale-safe comparison/hash with current equality/index contracts,
-then real PG/joins/retry evidence. Parent completion still requires all remaining repairs
-and Stage7 integrated acceptance.
+connection/upgrade witness details are in Goal1. Independent TLS55472 and crash55473
+fixtures remain available; Goal7 records their exact paths. They are disposable
+verification infrastructure, not a deployed production service.

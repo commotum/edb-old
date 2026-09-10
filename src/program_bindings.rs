@@ -312,9 +312,11 @@ pub(crate) fn validate_successor_program_bindings(
     // change therefore affects every active predicate name that resolves to
     // the function entity, not merely the entity's current :db/ident datom.
     // Resolve operative names through the immutable db-after dictionary so
-    // repurposed aliases follow their new entity. This dependency scan occurs
-    // only for a function-binding change; the outer attribute gate keeps
-    // ordinary data transactions off this path entirely.
+    // repurposed aliases follow their new entity. Attribute dependencies have
+    // a schema-owned name index, so an ident change needs only point lookups;
+    // changing :db/fn must inspect the active names to include retained aliases.
+    // Entity predicate declarations still use the exact, read-budgeted source
+    // range below. The outer gate keeps ordinary data writes off both paths.
     let changed_roles = predicate_roles(
         db_after,
         &changed_predicate_names,
@@ -346,25 +348,41 @@ fn predicate_roles(
     function_entities: &BTreeSet<u64>,
 ) -> Result<BTreeMap<String, PredicateRole>, SemanticError> {
     let mut roles = BTreeMap::<String, (bool, bool)>::new();
-    for name in database
-        .schema()
-        .attributes()
-        .flat_map(|attribute| &attribute.predicates)
-    {
-        let affected = names.contains(name)
-            || (!function_entities.is_empty()
-                && database
-                    .entid(&qualified_program_ident(name)?)
-                    .is_some_and(|entity| function_entities.contains(&entity)));
-        if affected {
+    for name in names {
+        #[cfg(test)]
+        dependency_work::record(|work| work.attribute_point_lookups += 1);
+        if database.schema().has_attribute_predicate(name) {
             roles.entry(name.clone()).or_default().0 = true;
         }
     }
+    if !function_entities.is_empty() {
+        // Scan distinct active predicate names, never unchanged attribute
+        // descriptors. A function can have arbitrarily many retained aliases,
+        // and the current ident datom alone cannot identify its dependents.
+        for name in database.schema().attribute_predicate_names() {
+            #[cfg(test)]
+            dependency_work::record(|work| work.active_attribute_names += 1);
+            if !names.contains(name)
+                && database
+                    .entid(&qualified_program_ident(name)?)
+                    .is_some_and(|entity| function_entities.contains(&entity))
+            {
+                roles.entry(name.to_owned()).or_default().0 = true;
+            }
+        }
+    }
+    // :db.entity/preds is data, not an attribute descriptor. Until its own
+    // dependency index exists, this source range is necessary even for a new
+    // non-function ident: that ident may bind a previously unresolved symbol.
+    // Use the database value's observed cursor path so admission budgets still
+    // account for every source datom examined.
     for datom in database.datoms_with_prefix(&crate::IndexPrefix::Aevt {
         attribute: crate::DB_ENTITY_PREDS as u32,
         entity: None,
         value: None,
     })? {
+        #[cfg(test)]
+        dependency_work::record(|work| work.entity_predicate_datoms += 1);
         let Value::Symbol(symbol) = &datom.value else {
             return Err(fault(
                 "postgres/invalid-entity-predicate",
@@ -393,6 +411,34 @@ fn predicate_roles(
             Ok((name, role))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod dependency_work {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub(super) struct Work {
+        pub attribute_point_lookups: u64,
+        pub active_attribute_names: u64,
+        pub entity_predicate_datoms: u64,
+    }
+
+    thread_local! {
+        static WORK: Cell<Work> = Cell::new(Work::default());
+    }
+
+    pub(super) fn record(update: impl FnOnce(&mut Work)) {
+        WORK.with(|cell| {
+            let mut work = cell.get();
+            update(&mut work);
+            cell.set(work);
+        });
+    }
+
+    pub(super) fn take() -> Work {
+        WORK.with(Cell::take)
+    }
 }
 
 pub(crate) fn persisted_predicates(
@@ -585,6 +631,10 @@ fn collect_program_hashes_vec(value: &Value, output: &mut Vec<Digest>) {
     collect_program_hashes(value, &mut hashes);
     output.extend(hashes);
 }
+
+#[cfg(test)]
+#[path = "program_binding_dependency_tests.rs"]
+mod dependency_tests;
 
 #[cfg(test)]
 mod tests {

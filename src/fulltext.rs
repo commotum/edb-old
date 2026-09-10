@@ -10,7 +10,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 #[path = "fulltext_records.rs"]
 mod records;
-pub(crate) use records::fulltext_records;
+pub(crate) use records::{DeltaRecords, empty_fulltext_corpus, fulltext_records};
 
 #[derive(Clone, Debug)]
 pub struct FulltextOptions {

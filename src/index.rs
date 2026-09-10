@@ -226,15 +226,37 @@ pub(crate) enum NormalizedIndexBoundary {
     Aevt(IndexComponents<u32, u64, Value, u64>),
     Avet(IndexComponents<u32, Value, u64, u64>),
     Vaet(IndexComponents<Value, u32, u64, u64>),
+    /// Internal forward position after every datom equal to the supplied
+    /// logical prefix. It changes neither public components nor stored keys.
+    After(Box<Self>),
 }
 
 impl NormalizedIndexBoundary {
-    pub(crate) const fn order(&self) -> IndexOrder {
+    pub(crate) fn order(&self) -> IndexOrder {
         match self {
             Self::Eavt(_) => IndexOrder::Eavt,
             Self::Aevt(_) => IndexOrder::Aevt,
             Self::Avet(_) => IndexOrder::Avet,
             Self::Vaet(_) => IndexOrder::Vaet,
+            Self::After(boundary) => boundary.order(),
+        }
+    }
+
+    pub(crate) fn after_prefix(self) -> Self {
+        match self {
+            Self::After(_) => self,
+            _ => Self::After(Box::new(self)),
+        }
+    }
+
+    pub(crate) fn is_after_prefix(&self) -> bool {
+        matches!(self, Self::After(_))
+    }
+
+    pub(crate) fn unbiased(&self) -> &Self {
+        match self {
+            Self::After(boundary) => boundary,
+            _ => self,
         }
     }
 
@@ -252,6 +274,7 @@ impl NormalizedIndexBoundary {
         }
 
         match self {
+            Self::After(boundary) => boundary.compare_datom(datom).then(Ordering::Less),
             Self::Eavt(components) => match components {
                 IndexComponents::Empty => Ordering::Equal,
                 IndexComponents::One(e) => datom.entity.cmp(e),
@@ -337,6 +360,19 @@ impl NormalizedIndexBoundary {
     /// newer operation that sorts just before the requested T.
     pub(crate) fn compare_current_group_start(&self, datom: &Datom) -> Ordering {
         match self {
+            Self::After(boundary)
+                if matches!(
+                    boundary.as_ref(),
+                    Self::Eavt(IndexComponents::Four(..))
+                        | Self::Aevt(IndexComponents::Four(..))
+                        | Self::Avet(IndexComponents::Four(..))
+                        | Self::Vaet(IndexComponents::Four(..))
+                ) =>
+            {
+                // T-qualified current reads must still select the winner
+                // from its entire group before applying an exclusive T.
+                boundary.compare_current_group_start(datom)
+            }
             Self::Eavt(IndexComponents::Four(e, a, v, _)) => datom
                 .entity
                 .cmp(e)

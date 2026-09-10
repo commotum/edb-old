@@ -985,7 +985,12 @@ impl PostgresOperator {
             .map(|row| digest(row.get(0), "collected program hash"))
             .collect::<Result<Vec<_>, _>>()?;
         collected_programs.sort_unstable();
-        if collected_programs != candidates.programs {
+        // Selection and public inventory retain oldest-first order before the
+        // bounded LIMIT. DELETE RETURNING has no corresponding order guarantee:
+        // compare the selected membership without changing that batch policy.
+        let mut expected_programs = candidates.programs.clone();
+        expected_programs.sort_unstable();
+        if collected_programs != expected_programs {
             return Err(SemanticError::new(
                 crate::ErrorCategory::Conflict,
                 "operations/gc-program-preview-diverged",
@@ -4266,9 +4271,13 @@ fn garbage_candidates<C: crate::sql_io::GenericClient>(
         Vec::new()
     };
     semantic_nodes.sort_unstable();
-    let fulltext_blocks: i64 = client.query_one(
-        "SELECT count(*) FROM (SELECT b.block_hash FROM atomic_fulltext_garbage g JOIN atomic_fulltext_blocks b USING(manifest_hash) WHERE NOT EXISTS (SELECT 1 FROM atomic_tree_manifests m WHERE m.manifest_hash=b.manifest_hash) ORDER BY b.manifest_hash,b.block_hash LIMIT 4096) bounded", &[])
-        .map_err(|error| operation_error("operations/gc-fulltext-candidates", error))?.get(0);
+    let fulltext_blocks: i64 = client
+        .query_one(
+            "SELECT count(*) FROM atomic_fulltext_garbage_candidates(4096)",
+            &[],
+        )
+        .map_err(|error| operation_error("operations/gc-fulltext-candidates", error))?
+        .get(0);
     Ok(GarbageCandidates {
         segments,
         programs,

@@ -20,6 +20,340 @@ fn wide_schema(attribute_count: u32) -> Schema {
 }
 
 #[test]
+fn fixed_delta_complete_schema_validation_and_dependency_work() {
+    for width in [32, 256, 1_024] {
+        let mut schema = wide_schema(width);
+        for pair in 0..width / 2 {
+            schema
+                .install(
+                    Attribute::new(
+                        1_000 + width + pair,
+                        Keyword::new("wide", format!("tuple-{pair}")),
+                        ValueType::Tuple,
+                        Cardinality::One,
+                    )
+                    .tuple(TupleSpec::Composite(vec![
+                        1_000 + pair * 2,
+                        1_001 + pair * 2,
+                    ])),
+                )
+                .unwrap();
+        }
+        let setup = std::time::Instant::now();
+        let database = Database::new(schema).unwrap();
+        let value = DatabaseValue::eager(Arc::new(database));
+        let attributes = value.schema().attributes().count() as u64;
+        let setup_elapsed = setup.elapsed();
+        let started = std::time::Instant::now();
+        let report = assess_tiered(
+            &value,
+            &[TxOp::Add {
+                entity: EntityRef::Temp("fixed".into()),
+                attribute: 1_000,
+                value: Value::Long(7).into(),
+            }],
+            10,
+        )
+        .unwrap();
+        let work = report.read_work;
+        assert_eq!(work.schema_transition_attributes, 0);
+        assert_eq!(
+            work.schema_validation,
+            crate::schema::SchemaValidationWork::default()
+        );
+        assert_eq!(work.schema_projection_attributes, 0);
+        assert_eq!(work.schema_reuses, 1);
+        assert_eq!(work.dependency_lookups, 1);
+        assert_eq!(work.dependency_edges, 1);
+        assert_eq!(work.composite_candidates, 1);
+        assert!(
+            report
+                .tx_data
+                .iter()
+                .any(|datom| datom.attribute == 1_000 + width
+                    && datom.value == Value::Tuple(vec![Some(Value::Long(7)), None]))
+        );
+        drop(report);
+        eprintln!(
+            "fixed schema width={width} attributes={attributes} setup={setup_elapsed:?} full_assess_and_drop={:?} work={work:?}",
+            started.elapsed()
+        );
+    }
+}
+
+#[test]
+fn general_idents_reuse_schema_but_attribute_alias_repurposing_does_not() {
+    let value = Database::new(wide_schema(8)).unwrap().database_value();
+    let resident = value.schema_arc();
+    let name = Keyword::new("status", "queued");
+    let first = assess_tiered(
+        &value,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("enum".into()),
+            attribute: DB_IDENT as u32,
+            value: Value::Keyword(name.clone()).into(),
+        }],
+        10,
+    )
+    .unwrap();
+    let enum_id = first.tempids["enum"];
+    assert_eq!(first.db_after.entid(&name), Some(enum_id));
+    assert!(Arc::ptr_eq(&resident, &first.successor_schema));
+    assert_eq!(
+        first.read_work.schema_validation,
+        crate::schema::SchemaValidationWork::default()
+    );
+    assert_eq!(first.read_work.schema_reuses, 1);
+    let renamed = Keyword::new("status", "waiting");
+    let second = assess_tiered(
+        &first.db_after,
+        &[TxOp::Add {
+            entity: EntityRef::Id(enum_id),
+            attribute: DB_IDENT as u32,
+            value: Value::Keyword(renamed.clone()).into(),
+        }],
+        11,
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&resident, &second.successor_schema));
+    assert_eq!(second.db_after.entid(&name), Some(enum_id));
+    assert_eq!(second.db_after.entid(&renamed), Some(enum_id));
+    assert_eq!(first.db_after.entid(&renamed), None);
+
+    let old_attribute_name = value.schema().attribute(1_000).unwrap().ident.clone();
+    let new_attribute_name = Keyword::new("wide", "renamed");
+    let rename = assess_tiered(
+        &value,
+        &[TxOp::Add {
+            entity: EntityRef::Id(1_000),
+            attribute: DB_IDENT as u32,
+            value: Value::Keyword(new_attribute_name.clone()).into(),
+        }],
+        10,
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(&resident, &rename.successor_schema));
+    assert!(rename.read_work.schema_validation.attributes > 0);
+    assert_eq!(
+        rename.successor_schema.resolve_ident(&old_attribute_name),
+        Some(1_000)
+    );
+    let repurpose = assess_tiered(
+        &rename.db_after,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("enum".into()),
+            attribute: DB_IDENT as u32,
+            value: Value::Keyword(old_attribute_name.clone()).into(),
+        }],
+        11,
+    )
+    .unwrap();
+    assert!(!Arc::ptr_eq(
+        &rename.successor_schema,
+        &repurpose.successor_schema
+    ));
+    assert_eq!(
+        repurpose
+            .successor_schema
+            .resolve_ident(&old_attribute_name),
+        None
+    );
+    assert_eq!(
+        repurpose
+            .successor_schema
+            .resolve_ident(&new_attribute_name),
+        Some(1_000)
+    );
+    assert_eq!(
+        repurpose.db_after.entid(&old_attribute_name),
+        Some(repurpose.tempids["enum"])
+    );
+    assert!(resident.datom_may_change_schema(
+        DB_PART_DB,
+        DB_IDENT as u32,
+        &Value::Keyword(name),
+        true
+    ));
+}
+
+#[test]
+fn validation_reuse_requires_the_validated_allocation_and_keeps_genesis_guard() {
+    let value = Database::new(wide_schema(8)).unwrap().database_value();
+    let candidate = value.schema().clone();
+    let mut reader = Reader::new(&value, AssessmentLimits::unbounded());
+    validate_schema_transition(&mut reader, &candidate, &[]).unwrap();
+    assert_eq!(reader.work.schema_reuses, 0);
+    assert_eq!(
+        reader.work.schema_transition_attributes,
+        candidate.attribute_count() as u64 * 2
+    );
+    assert_eq!(
+        reader.work.schema_validation.attributes,
+        candidate.attribute_count() as u64
+    );
+    let forbidden = crate::canonical_genesis_datoms()
+        .into_iter()
+        .next()
+        .unwrap();
+    let retraction = LogicalDatom {
+        entity: forbidden.entity,
+        attribute: forbidden.attribute,
+        value: forbidden.value,
+        added: false,
+    };
+    assert_eq!(
+        validate_schema_transition(&mut reader, value.schema(), &[retraction])
+            .unwrap_err()
+            .code,
+        "schema/native-information-immutable"
+    );
+
+    let mut invalid = wide_schema(2);
+    invalid
+        .install(
+            Attribute::new(
+                1_002,
+                Keyword::new("bad", "tuple"),
+                ValueType::Tuple,
+                Cardinality::One,
+            )
+            .tuple(TupleSpec::Composite(vec![1_000, 9_999])),
+        )
+        .unwrap();
+    assert_eq!(
+        Database::new(invalid).unwrap_err().code,
+        "schema/invalid-tuple-attributes"
+    );
+}
+
+#[test]
+fn unchanged_schema_reuse_preserves_data_predicates_and_changed_tuple_validation() {
+    let mut schema = wide_schema(2);
+    let mut positive = schema.attribute(1_000).unwrap().clone();
+    positive.predicates.push("test/positive".into());
+    schema.alter(positive).unwrap();
+    schema
+        .install(
+            Attribute::new(
+                1_002,
+                Keyword::new("wide", "pair"),
+                ValueType::Tuple,
+                Cardinality::One,
+            )
+            .tuple(TupleSpec::Composite(vec![1_000, 1_001])),
+        )
+        .unwrap();
+    let value = Database::new(schema).unwrap().database_value();
+    let mut functions = TxFunctions::default();
+    functions.register_attribute_predicate("test/positive", |value| {
+        Ok(matches!(value, Value::Long(n) if *n > 0))
+    });
+    let negative = assess_tiered(
+        &value,
+        &[TxOp::Add {
+            entity: EntityRef::Temp("item".into()),
+            attribute: 1_000,
+            value: Value::Long(-1).into(),
+        }],
+        10,
+    )
+    .unwrap();
+    assert_eq!(negative.read_work.schema_reuses, 1);
+    assert_eq!(
+        negative.validate_exact(Some(&functions)).unwrap_err().code,
+        "transaction/attribute-predicate"
+    );
+    assert_eq!(value.basis_t(), 1);
+    let mut constituent = value.schema().attribute(1_000).unwrap().clone();
+    constituent.cardinality = Cardinality::Many;
+    assert_eq!(
+        assess_tiered(&value, &[TxOp::AlterAttribute(constituent.clone())], 10)
+            .unwrap_err()
+            .code,
+        "schema/invalid-tuple-attributes"
+    );
+    let mut tuple = value.schema().attribute(1_002).unwrap().clone();
+    tuple.tuple_discontinued = true;
+    let discontinued = assess_tiered(&value, &[TxOp::AlterAttribute(tuple)], 10).unwrap();
+    assert!(discontinued.read_work.schema_validation.attributes > 0);
+    assert!(
+        discontinued
+            .successor_schema
+            .composites_for_constituent(1_000)
+            .next()
+            .is_none()
+    );
+    let widened = assess_tiered(
+        &discontinued.db_after,
+        &[TxOp::AlterAttribute(constituent)],
+        11,
+    )
+    .unwrap();
+    assert_eq!(
+        widened
+            .successor_schema
+            .attribute(1_000)
+            .unwrap()
+            .cardinality,
+        Cardinality::Many
+    );
+    assert_eq!(
+        value.schema().attribute(1_000).unwrap().cardinality,
+        Cardinality::One
+    );
+}
+
+#[test]
+fn cached_attribute_predicate_dependencies_track_all_owners_and_failed_changes() {
+    let mut schema = wide_schema(3);
+    for id in [1_000, 1_001] {
+        let mut attribute = schema.attribute(id).unwrap().clone();
+        attribute.predicates = vec!["test/shared".into(), format!("test/p{id}")];
+        schema.alter(attribute).unwrap();
+    }
+    assert_eq!(
+        schema.attribute_predicate_names().collect::<Vec<_>>(),
+        vec!["test/p1000", "test/p1001", "test/shared"]
+    );
+    let retained = schema.clone();
+    let mut first = schema.attribute(1_000).unwrap().clone();
+    first.predicates.clear();
+    schema.alter(first).unwrap();
+    assert!(schema.has_attribute_predicate("test/shared"));
+    assert!(!schema.has_attribute_predicate("test/p1000"));
+    let mut second = schema.attribute(1_001).unwrap().clone();
+    second.predicates = vec!["unqualified".into()];
+    assert!(schema.alter(second).is_err());
+    assert!(schema.has_attribute_predicate("test/shared"));
+    let mut second = schema.attribute(1_001).unwrap().clone();
+    second.predicates.clear();
+    schema.alter(second).unwrap();
+    assert_eq!(schema.attribute_predicate_names().count(), 0);
+    assert!(retained.has_attribute_predicate("test/shared"));
+
+    let database = Database::new(retained).unwrap();
+    assert_eq!(
+        database
+            .schema()
+            .attribute_predicate_names()
+            .collect::<Vec<_>>(),
+        vec!["test/p1000", "test/p1001", "test/shared"]
+    );
+    let expected = database
+        .schema()
+        .attributes()
+        .flat_map(|attribute| attribute.predicates.iter().map(String::as_str))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        database
+            .schema()
+            .attribute_predicate_names()
+            .collect::<BTreeSet<_>>(),
+        expected
+    );
+}
+
+#[test]
 fn ordinary_assessment_shares_schema_and_real_schema_edits_replace_it() {
     let database = Database::new(wide_schema(64)).unwrap();
     let value = DatabaseValue::eager(Arc::new(database));

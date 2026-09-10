@@ -1,7 +1,8 @@
 use atomic_core::{
-    Attribute, Cardinality, DB_ALTER_ATTRIBUTE, Digest, EntityRef, IndexBuildFault, IndexOrder,
-    IndexPrefix, Keyword, Peer, PersistentTreeManifest, PostgresIndexer, PostgresStore,
-    PostgresTreeStore, Schema, TxOp, TxValue, Value, ValueType, View, t_to_tx,
+    Attribute, Cardinality, DB_ALTER_ATTRIBUTE, Digest, EntityRef, IndexBuildFault,
+    IndexBuildReceipt, IndexOrder, IndexPrefix, Keyword, Peer, PersistentTreeManifest,
+    PostgresIndexer, PostgresStore, PostgresTreeStore, Schema, TxOp, TxValue, Value, ValueType,
+    View, t_to_tx,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -168,38 +169,74 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
     let Some(connection) = connection() else {
         return;
     };
+    let costs = [1_024, 4_096].map(|items| localized_successor_case(&connection, items));
+    let (small_initial, small_metadata, small_successor) = &costs[0];
+    let (large_initial, large_metadata, large_successor) = &costs[1];
+    assert!(large_initial.segment_count > small_initial.segment_count * 3);
+    // The fixed schema/history has the same authenticated metadata cost at
+    // both sizes. The larger business tree may introduce adjacent directory
+    // paths: one directory and one boundary leaf on either side of each of
+    // the three changed datoms in each of eight indexes. It must not turn a
+    // fixed delta into a scan of the larger tree.
+    assert_eq!(large_metadata.node_reads, small_metadata.node_reads);
+    let adjacent_paths = 4 * 8 * small_successor.tail_datoms;
+    assert!(
+        large_successor.node_reads <= small_successor.node_reads + adjacent_paths,
+        "complete fixed-delta read work grew beyond adjacent paths: {costs:?}"
+    );
+}
+
+fn localized_successor_case(
+    connection: &str,
+    items: usize,
+) -> (IndexBuildReceipt, IndexBuildReceipt, IndexBuildReceipt) {
+    let case_started = Instant::now();
+    eprintln!("localized_items={items} phase=population");
     let database_id = unique("incremental_tree");
+    // Unique fixed-width values preserve the same ordering/packing shape while
+    // keeping business leaves distinct across test runs. Read counters include
+    // every loaded node even when its content already exists globally.
     let salt = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos() as i64
         & 0x3fff_ffff_ffff_ffff;
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
+    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
     migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    let mut store = PostgresStore::connect(connection).unwrap();
     let created = store
         .create_database(&database_id, schema(false, true))
         .unwrap();
 
-    let service = common::start_service(&connection, &database_id);
-    let operations = (0..1_024)
+    let service = common::start_service(connection, &database_id);
+    let operations = (0..items)
         .map(|index| TxOp::Add {
             entity: EntityRef::Temp(format!("item-{index}")),
             attribute: ITEM_COUNT,
-            value: TxValue::Scalar(Value::Long(salt + index)),
+            value: TxValue::Scalar(Value::Long(salt + index as i64)),
         })
         .collect::<Vec<_>>();
-    let populated = common::transact(
-        &service,
-        "populate-large-tree",
-        created.basis_t(),
-        &operations,
-        1_000,
+    // The larger fixture is one bulk transaction, not the measured delta.
+    // Give its caller a bounded setup allowance without changing the ordinary
+    // five-second lease or either localized transaction's five-second wait.
+    let populated = service
+        .client()
+        .transact(
+            atomic_core::TransactionRequest::new("populate-large-tree", operations)
+                .comparing_basis(created.basis_t())
+                .with_tx_instant(1_000),
+            Duration::from_secs(30),
+        )
+        .unwrap();
+    eprintln!(
+        "localized_items={items} phase=population-complete elapsed={:?}",
+        case_started.elapsed()
     );
-    let entity = populated.tempids["item-512"];
+    let changed_index = items / 2;
+    let entity = populated.tempids[&format!("item-{changed_index}")];
     service.shutdown();
 
-    let mut indexer = PostgresIndexer::connect(&connection, &database_id)
+    let mut indexer = PostgresIndexer::connect(connection, &database_id)
         .unwrap()
         .with_segment_datoms(8)
         .unwrap();
@@ -211,9 +248,17 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
     // Publication is atomic before derived live-set bookkeeping is complete.
     // This witness drives the indexer manually, so finish those bounded batches
     // before measuring whether the next build chose the incremental path.
-    finish_publication_work(&connection, initial.manifest_hash);
+    finish_publication_work(connection, initial.manifest_hash);
+    // A no-op consolidation still authenticates all roots and reconstructs
+    // schema/identity metadata. Keep this measured overhead in the total
+    // successor count; do not compare it with an arbitrary percentage of a
+    // tiny-page fixture's size. Stats/cache are reset by each consolidation.
+    let metadata = indexer.consolidate().unwrap();
+    assert!(metadata.reused);
+    assert_eq!(metadata.input_datoms, 0);
+    assert_eq!(metadata.segment_count, 0);
 
-    let service = common::start_service(&connection, &database_id);
+    let service = common::start_service(connection, &database_id);
     let updated = common::transact(
         &service,
         "localized-update",
@@ -227,15 +272,28 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
     );
     service.shutdown();
     let successor = indexer.consolidate().unwrap();
-    eprintln!("initial={initial:?}\nsuccessor={successor:?}");
+    eprintln!(
+        "localized_items={items}\ninitial={initial:?}\nmetadata={metadata:?}\nsuccessor={successor:?}"
+    );
+    assert_eq!(successor.tail_datoms, 3);
     assert_eq!(successor.tail_datoms, updated.tx_data.len() as u64);
     assert_eq!(successor.input_datoms, successor.tail_datoms);
-    assert!(successor.node_reads * 10 < initial.segment_count as u64);
+    // `select_merge_leaves` loads up to three directories, three point-neighbor
+    // leaves, two touched-directory boundary leaves and two adjacent-directory
+    // boundary leaves per point (10). Allow two additional packing-boundary
+    // leaves and the three-level exact EAV lookup per tail datom. All eight
+    // root reads are already included in `metadata.node_reads`. This is a
+    // conservative fixed-delta path bound, not a whole-tree percentage.
+    let path_bound = successor.tail_datoms * (8 * 12 + 3);
+    assert!(
+        successor.node_reads <= metadata.node_reads + path_bound,
+        "complete reads exceeded metadata plus localized paths"
+    );
     assert!(successor.segment_count * 10 < initial.segment_count);
     assert!(successor.reused_subtrees > 100);
-    finish_publication_work(&connection, successor.manifest_hash);
+    finish_publication_work(connection, successor.manifest_hash);
 
-    let mut client = Client::connect(&connection, NoTls).unwrap();
+    let mut client = Client::connect(connection, NoTls).unwrap();
     let initial_manifest = manifest(&mut client, &database_id, populated.basis_t);
     let successor_manifest = manifest(&mut client, &database_id, updated.basis_t);
     let unchanged = initial_manifest
@@ -246,13 +304,53 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
         .count();
     assert!(unchanged > 0, "localized update reused no complete roots");
     assert_snapshot_matches(
-        &Peer::connect(&connection, &database_id, 64)
+        &Peer::connect(connection, &database_id, 64)
             .unwrap()
             .snapshot(),
         &updated.db_after,
     );
+    // Independent application-data oracle: do not prove the physical result
+    // correct only by comparing it with another view of the same transaction.
+    let snapshot = Peer::connect(connection, &database_id, 64)
+        .unwrap()
+        .snapshot();
+    let actual = snapshot
+        .datoms(false, IndexOrder::Eavt)
+        .unwrap()
+        .datoms
+        .into_iter()
+        .filter(|datom| datom.attribute == ITEM_COUNT)
+        .map(|datom| (datom.entity, datom.value))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected = (0..items)
+        .map(|index| {
+            (
+                populated.tempids[&format!("item-{index}")],
+                Value::Long(if index == changed_index {
+                    salt + 10_000
+                } else {
+                    salt + index as i64
+                }),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
+    let history = snapshot
+        .datoms(true, IndexOrder::Eavt)
+        .unwrap()
+        .datoms
+        .into_iter()
+        .filter(|datom| datom.attribute == ITEM_COUNT)
+        .collect::<Vec<_>>();
+    assert_eq!(history.len(), items + 2);
+    assert_eq!(history.iter().filter(|datom| !datom.added).count(), 1);
+    assert!(history.iter().any(|datom| {
+        datom.entity == entity
+            && !datom.added
+            && datom.value == Value::Long(salt + changed_index as i64)
+    }));
 
-    let service = common::start_service(&connection, &database_id);
+    let service = common::start_service(connection, &database_id);
     let next = common::transact(
         &service,
         "interrupted-update",
@@ -282,7 +380,7 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
         .get(0);
     assert_eq!(published, 0, "interrupted candidate became visible");
     assert_snapshot_matches(
-        &Peer::connect(&connection, &database_id, 64)
+        &Peer::connect(connection, &database_id, 64)
             .unwrap()
             .snapshot(),
         &next.db_after,
@@ -304,6 +402,11 @@ fn localized_successor_reads_and_writes_paths_not_the_whole_tree() {
         flat_writes, 0,
         "native indexer still dual-wrote flat manifests"
     );
+    eprintln!(
+        "localized_items={items} phase=complete elapsed={:?}",
+        case_started.elapsed()
+    );
+    (initial, metadata, successor)
 }
 
 #[test]
