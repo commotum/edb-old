@@ -1,0 +1,7 @@
+```text
+Continue Goal 13, persistent index trees and live peers for the native Rust database, using /home/jake/Developer/atomic/goal-13/0-plan.md and /home/jake/Developer/atomic/goal-13/0-loop.md.
+
+Treat datomic_pro_docs as semantic authority, the completed Goal 10–12 kernel/transactor contracts as executable boundaries, and 1.0.7705 RootNode/DirNode/Leaf, Index.seek, merge-one-index/merge-db, multi-tier Db.seek*, connection caching, and root-plus-tail recovery as the default blueprint. Use Rust throughout and PostgreSQL only. Keep the transaction log authoritative and Database as an independent pure oracle, but replace production eager whole-database arrays with canonical shallow immutable trees, a bounded recent tier, lazy hash-cached seeks, incremental affected-range consolidation and state commitment, cloneable atomically advancing peer state, and safe immutable snapshots/pins.
+
+Sync the plan with current artifacts and source evidence, advance the first unfinished stage with measurable working behavior, and verify exact oracle equivalence plus node I/O, reuse, cache residency, concurrency, corruption, long-history, and actual PostgreSQL restart evidence. Do not count self-skips or counters that merely restate intended work. Avoid generic storage abstraction, Goal 14 query-language expansion, Goal 15 lifecycle ceremony, or a second peer path beside an eager production path. Continue through the full exit condition and fold truthful evidence back into Goal 13, Goal 9, and Goal 0; report genuine blockers or uncertainty plainly.
+```
