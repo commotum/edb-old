@@ -2,8 +2,9 @@
 
 This is the active operator guide. Archived goal runbooks are historical
 evidence. Archived G3 Goal5 records integrity/recovery checks; G3 Goal6 records
-the historical core deployment envelope. Goal0 owns the active product phase;
-Goals1–6 are delivered and Goal7 is measuring integrated operating acceptance.
+the historical core deployment envelope. [Archived G4 Goal0](../goal-archive/G4/goal-0/0-plan.md)
+records the completed product phase, including all seven stages and integrated
+operating acceptance.
 No deployment-independent throughput, recovery
 time or network-outage bound is implied.
 
@@ -43,7 +44,7 @@ other live semantic/failure evidence.
 
 Data exceeded configured caches, not this host's physical RAM. Warm selective
 queries in that G3 scale run still performed SQL; it did not establish a zero-I/O
-warm-cache benefit. Goals2–6 subsequently verified zero-SQL resident native reads
+warm-cache benefit. Archived G4 Goals2–6 subsequently verified zero-SQL resident native reads
 and secure remote applications on their declared fixtures; those are separate
 results, not a revision of the G3 measurement. Broad restore/inspection were
 expensive and eager. Source GC ran
@@ -439,7 +440,7 @@ archives: at most 128 nodes or 8MiB per ordinary batch, with a valid oversized
 node admitted alone under the existing codec maximum. A next incoming node can
 temporarily coexist with the batch; these limits do not describe total process
 RSS. Build intents, complete root-last publication, independent semantic replay
-and exact retry authentication are unchanged. The accompanying Goal7 commitment
+and exact retry authentication are unchanged. The accompanying G4 Goal7 commitment
 prefetch also reduces point SQL calls during restore, but returns more bytes.
 
 The before/after experiment used one unchanged source and one exact portable

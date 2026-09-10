@@ -1,7 +1,7 @@
 # Product acceptance and operating envelope
 
 All seven stages and integrated acceptance are complete as of September9,2026.
-[Goal0](../goal-0/0-plan.md) owns the required capability set and completion
+[Archived G4 Goal0](../goal-archive/G4/goal-0/0-plan.md) records the required capability set and completion
 evidence. The results below describe the delivered native product and its tested
 operating envelope, not the historical G3 finish line.
 
@@ -25,9 +25,9 @@ certification, an uptime SLA or Datomic wire/storage parity.
 | Generated lifecycle | Final24-action V2 saved trace replays after both repairs:8writes,3interrupted uploads,3writer restarts,3exact retries and4consumer resumes. A48-step durable-versus-pure comparison preserves36accepted/12rejected outcomes across restart. Controlled failure reduces9actions→3 and passes without the injected assertion. V1 action meanings remain readable. |
 
 Source details and scoped measurements are retained in
-[Goal2](../goal-2/0-plan.md), [Goal3](../goal-3/0-plan.md),
-[Goal4](../goal-4/0-plan.md), [Goal5](../goal-5/0-plan.md),
-[Goal6](../goal-6/0-plan.md) and [Goal7](../goal-7/0-plan.md).
+[G4 Goal2](../goal-archive/G4/goal-2/0-plan.md), [G4 Goal3](../goal-archive/G4/goal-3/0-plan.md),
+[G4 Goal4](../goal-archive/G4/goal-4/0-plan.md), [G4 Goal5](../goal-archive/G4/goal-5/0-plan.md),
+[G4 Goal6](../goal-archive/G4/goal-6/0-plan.md) and [G4 Goal7](../goal-archive/G4/goal-7/0-plan.md).
 
 ## Cost evidence to interpret separately
 

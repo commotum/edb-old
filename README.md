@@ -14,7 +14,7 @@ transaction planning, named/implicit partitions, UUID helpers and peer-local
 fulltext. Bounded restartable transaction consumers and an administrative CLI
 cover observation, backup/restore, inspection, GC and explicit recovery.
 
-[Goal 0](goal-0/0-plan.md) owns the completed seven-stage acceptance, including
+[Archived G4 Goal 0](goal-archive/G4/goal-0/0-plan.md) records the completed seven-stage acceptance, including
 final operating measurements and rebuilt integration. See
 [product acceptance](docs/acceptance.md) for verified boundaries
 and limits. Historical100,000-record G3 results remain in
@@ -33,15 +33,16 @@ newer implementation or a universal production/Datomic-parity certification.
   recursive rules, negation, historical sources and dynamic attributes.
 - [Compose native database, tuple and log queries](docs/queries.md), reuse query
   structure and configure join/resource limits.
-- [`goal-0/0-plan.md`](goal-0/0-plan.md) defines the product objective and
-  required capabilities; [`0-loop.md`](goal-0/0-loop.md) guides execution and
-  [`0-prompt.md`](goal-0/0-prompt.md) provides the continuation prompt.
-- [`goal-1/0-plan.md`](goal-1/0-plan.md) is the first child: runnable local
-  transactor/application, minimal explicit setup and reusable verification.
-  Goal0 scaffolds and executes each following child, reconciling results until
-  the overall objective is complete.
+- [Archived G4 Goal 0](goal-archive/G4/goal-0/0-plan.md) records the completed
+  product objective, required capabilities and integrated acceptance;
+  [`0-loop.md`](goal-archive/G4/goal-0/0-loop.md) and
+  [`0-prompt.md`](goal-archive/G4/goal-0/0-prompt.md) preserve its execution instructions.
+- [Archived G4 Goal 1](goal-archive/G4/goal-1/0-plan.md) records the first delivered
+  stage: runnable local transactor/application, minimal explicit setup and reusable
+  verification. G4 Goal0 records the completed integration of all seven stages.
 - [`goal-archive/`](goal-archive/README.md) indexes original Goals0–8 in G1,
-  corrective Goals9–17 in G2, and the completed native-core Goals0–6 in G3.
+  corrective Goals9–17 in G2, completed native-core Goals0–6 in G3, and
+  completed product Goals0–7 in G4.
   Their plans and completion labels are historical evidence, not active policy.
 - [The corrective evidence ledger](goal-archive/G2/goal-9/EVIDENCE_LEDGER.md)
   maps prior repairs and unresolved questions to the docs and recovered source.
@@ -207,9 +208,9 @@ Immutable PostgreSQL search projections are built in the background; every hit
 is checked against the supplied database view. Coverage may lag and is explicit;
 search is not a complete-membership correctness constraint. Schema upgrades,
 stored ABI9 programs and the separate-process application are verified on real
-PostgreSQL; Goal5 records lifecycle and measured-cost acceptance.
+PostgreSQL; archived G4 Goal5 records lifecycle and measured-cost acceptance.
 Native advisory read tracing/prefetch is implemented and verified in
-Goal3; Goal6 adds versioned authenticated cross-host hint transport. Hints never become
+G4 Goal3; G4 Goal6 records versioned authenticated cross-host hint transport. Hints never become
 transaction meaning or durable request identity. Cold submissions may still
 incur additional index reads. Neither search lag nor missing hint transport changes
 identity, transactions, history, or local Datalog/Pull semantics. See archived
