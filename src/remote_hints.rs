@@ -212,3 +212,86 @@ impl<'a> Input<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn origin() -> SnapshotReference {
+        // References are explicitly non-capability data; decoding a synthetic
+        // coordinate exercises the grammar without claiming it can be reopened.
+        let mut bytes = b"ATSN\0\x01".to_vec();
+        for name in [b"fixture".as_slice(), b"lineage".as_slice()] {
+            bytes.extend_from_slice(&(name.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(name);
+        }
+        for n in [1u64, 1, 1000] {
+            bytes.extend_from_slice(&n.to_be_bytes());
+        }
+        for digest in [[1u8; 32], [2; 32], [3; 32]] {
+            bytes.extend_from_slice(&digest);
+        }
+        for _ in 0..2 {
+            bytes.push(0);
+            bytes.extend_from_slice(&0u64.to_be_bytes());
+        }
+        bytes.push(0);
+        bytes.extend_from_slice(&crate::sha256(&bytes));
+        SnapshotReference::decode(&bytes).unwrap()
+    }
+    #[test]
+    fn bounded_versioned_advisory_prefix_codec_roundtrips_and_rejects_tamper() {
+        let entity = crate::make_eid(crate::USER_PARTITION, 42).unwrap();
+        let reads = vec![
+            ReadHint {
+                history: false,
+                prefix: IndexPrefix::Eavt {
+                    entity,
+                    attribute: Some(1000),
+                    value: Some(Value::String("word".into())),
+                },
+            },
+            ReadHint {
+                history: true,
+                prefix: IndexPrefix::Aevt {
+                    attribute: 1000,
+                    entity: Some(entity),
+                    value: None,
+                },
+            },
+            ReadHint {
+                history: false,
+                prefix: IndexPrefix::Avet {
+                    attribute: 1000,
+                    value: Some(Value::Long(7)),
+                    entity: Some(entity),
+                },
+            },
+            ReadHint {
+                history: true,
+                prefix: IndexPrefix::Vaet {
+                    value: Value::Ref(entity),
+                    attribute: Some(1001),
+                    entity: None,
+                },
+            },
+        ];
+        let hints = TransactionHints::from_reads(origin(), reads, HintLimits::default()).unwrap();
+        let bytes = encode(&hints).unwrap();
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.origin(), hints.origin());
+        assert_eq!(decoded.reads(), hints.reads());
+        let mut tampered = bytes.clone();
+        *tampered.last_mut().unwrap() ^= 1;
+        assert!(decode(&tampered).is_err());
+        let mut newer = bytes[..bytes.len() - 32].to_vec();
+        newer[7] = 2;
+        newer.extend_from_slice(&crate::sha256(&newer));
+        assert!(decode(&newer).is_err());
+        let mut huge = bytes[..bytes.len() - 32].to_vec();
+        let offset = 12 + hints.origin().encode().unwrap().len();
+        huge[offset..offset + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        huge.extend_from_slice(&crate::sha256(&huge));
+        assert!(decode(&huge).is_err());
+        assert!(decode(&vec![0; MAX_WIRE_BYTES + 1]).is_err());
+    }
+}

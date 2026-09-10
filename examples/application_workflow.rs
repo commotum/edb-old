@@ -31,23 +31,34 @@ const WAIT: Duration = Duration::from_secs(20);
 
 enum AppEndpoint {
     Local(PathBuf),
-    Remote { postgres:atomic_core::PostgresConnectionConfig, client:atomic_core::RemoteClientConfig },
+    Remote {
+        postgres: atomic_core::PostgresConnectionConfig,
+        client: atomic_core::RemoteClientConfig,
+    },
 }
 trait AppSubmit {
-    fn transact_application(&self,endpoint:&AppEndpoint,request:TransactionRequest,timeout:Duration)
-        ->std::result::Result<atomic_core::CommittedTransaction,SemanticError>;
+    fn transact_application(
+        &self,
+        endpoint: &AppEndpoint,
+        request: TransactionRequest,
+        timeout: Duration,
+    ) -> std::result::Result<atomic_core::CommittedTransaction, SemanticError>;
 }
 impl AppSubmit for Connection {
-    fn transact_application(&self,endpoint:&AppEndpoint,request:TransactionRequest,timeout:Duration)
-        ->std::result::Result<atomic_core::CommittedTransaction,SemanticError> {
+    fn transact_application(
+        &self,
+        endpoint: &AppEndpoint,
+        request: TransactionRequest,
+        timeout: Duration,
+    ) -> std::result::Result<atomic_core::CommittedTransaction, SemanticError> {
         match endpoint {
-            AppEndpoint::Local(path)=>self.transact_socket(path,request,timeout),
-            AppEndpoint::Remote{postgres,client}=>{
+            AppEndpoint::Local(path) => self.transact_socket(path, request, timeout),
+            AppEndpoint::Remote { postgres, client } => {
                 // Discover from authorized durable metadata on each explicit
                 // submission. A restart can replace the endpoint; no new key
                 // is invented for an unknown outcome or semantic rejection.
-                let endpoint=self.discover_remote_writer(postgres)?;
-                self.transact_remote(&endpoint,client,request,timeout)
+                let endpoint = self.discover_remote_writer(postgres)?;
+                self.transact_remote(&endpoint, client, request, timeout)
             }
         }
     }
@@ -721,9 +732,9 @@ fn run() -> Result<()> {
     let _application_scope = application_context.enter();
     let mut database_id = None;
     let mut endpoint = None;
-    let mut reference_in:Option<PathBuf>=None;
-    let mut reference_out:Option<PathBuf>=None;
-    let mut remote=false;
+    let mut reference_in: Option<PathBuf> = None;
+    let mut reference_out: Option<PathBuf> = None;
+    let mut remote = false;
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
@@ -733,33 +744,63 @@ fn run() -> Result<()> {
             "--endpoint" if endpoint.is_none() => {
                 endpoint = Some(PathBuf::from(arguments.next().ok_or("missing endpoint")?))
             }
-            "--remote" if !remote=>remote=true,
-            "--reference-in" if reference_in.is_none()=>reference_in=Some(arguments.next().ok_or("missing reference input")?.into()),
-            "--reference-out" if reference_out.is_none()=>reference_out=Some(arguments.next().ok_or("missing reference output")?.into()),
-            _ => return Err("usage: application_workflow --database ID (--endpoint PATH | --remote)".into()),
+            "--remote" if !remote => remote = true,
+            "--reference-in" if reference_in.is_none() => {
+                reference_in = Some(arguments.next().ok_or("missing reference input")?.into())
+            }
+            "--reference-out" if reference_out.is_none() => {
+                reference_out = Some(arguments.next().ok_or("missing reference output")?.into())
+            }
+            _ => {
+                return Err(
+                    "usage: application_workflow --database ID (--endpoint PATH | --remote)".into(),
+                );
+            }
         }
     }
     let database_id = database_id.ok_or("--database is required")?;
     let started = Instant::now();
     let config = postgres_config_from_env()?;
-    if let Some(path)=reference_in {
+    if let Some(path) = reference_in {
         use std::io::Read;
-        if endpoint.is_some() || remote || reference_out.is_some() {return Err("reference-in is a read-only invocation; no endpoint/output options".into());}
-        let mut bytes=Vec::new();
-        std::fs::File::open(path)?.take(256*1024+1).read_to_end(&mut bytes)?;
-        let reference=atomic_core::SnapshotReference::decode(&bytes)?;
-        require(reference.database_id()==database_id,"reference route differs from selected database")?;
-        let value=reference.open(&config,128,16*1024*1024)?;
-        require(&value.snapshot_key()?==reference.key(),"reopened reference has different logical identity")?;
-        let summary=calculation(&value)?;
-        require(summary.total_hours==8 && summary.projects.len()==2,"handoff did not reproduce the captured application result")?;
-        println!("REFERENCE_OK basis_t={} projects=2 hours=8 exact_key=true read_only=true",value.basis_t());
+        use std::os::unix::fs::OpenOptionsExt;
+        if endpoint.is_some() || remote || reference_out.is_some() {
+            return Err(
+                "reference-in is a read-only invocation; no endpoint/output options".into(),
+            );
+        }
+        let mut bytes = Vec::new();
+        let file=std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW|libc::O_NONBLOCK).open(path)?;
+        require(file.metadata()?.is_file(),"snapshot reference must be a regular file")?;
+        file.take(256 * 1024 + 1).read_to_end(&mut bytes)?;
+        let reference = atomic_core::SnapshotReference::decode(&bytes)?;
+        require(
+            reference.database_id() == database_id,
+            "reference route differs from selected database",
+        )?;
+        let value = reference.open(&config, 128, 16 * 1024 * 1024)?;
+        require(
+            &value.snapshot_key()? == reference.key(),
+            "reopened reference has different logical identity",
+        )?;
+        let summary = calculation(&value)?;
+        require(
+            summary.total_hours == 8 && summary.projects.len() == 2,
+            "handoff did not reproduce the captured application result",
+        )?;
+        println!(
+            "REFERENCE_OK basis_t={} projects=2 hours=8 exact_key=true read_only=true",
+            value.basis_t()
+        );
         return Ok(());
     }
-    let endpoint=match (endpoint,remote) {
-        (Some(path),false)=>AppEndpoint::Local(path),
-        (None,true)=>AppEndpoint::Remote{postgres:config.clone(),client:atomic_core::remote_client_config_from_env()?},
-        _=>return Err("choose exactly one of --endpoint PATH or --remote".into()),
+    let endpoint = match (endpoint, remote) {
+        (Some(path), false) => AppEndpoint::Local(path),
+        (None, true) => AppEndpoint::Remote {
+            postgres: config.clone(),
+            client: atomic_core::remote_client_config_from_env()?,
+        },
+        _ => return Err("choose exactly one of --endpoint PATH or --remote".into()),
     };
     let connection = Connection::connect_configured(config.clone(), &database_id, 8)?;
 
@@ -804,14 +845,22 @@ fn run() -> Result<()> {
         old.total_hours == 8 && old.projects.len() == 2,
         "unexpected initial calculation",
     )?;
-    if let Some(path)=reference_out {
+    if let Some(path) = reference_out {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
-        let bytes=captured.snapshot_reference()?.encode()?;
-        let mut file=std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+        let bytes = captured.snapshot_reference()?.encode()?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        println!("REFERENCE_WRITTEN basis_t={} bytes={} retains_storage=false",captured.basis_t(),bytes.len());
+        println!(
+            "REFERENCE_WRITTEN basis_t={} bytes={} retains_storage=false",
+            captured.basis_t(),
+            bytes.len()
+        );
     }
 
     let updated = connection.transact_application(

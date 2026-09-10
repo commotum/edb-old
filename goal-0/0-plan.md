@@ -16,7 +16,7 @@ equivalence are not objectives.
 
 ## Current state and execution ownership
 
-**Status:** In progress. Goals1–5 are complete; Goal6 is the sole active child.
+**Status:** In progress. Goals1–6 are complete; Goal7 is the sole active child.
 [Goal1](../goal-1/0-plan.md) records the runnable baseline; Goal2 records storage.
 G1 (original Goals0–8), G2 (Goals9–17) and G3 (the completed native-engine pass)
 under goal-archive are historical evidence, not active instructions.
@@ -302,7 +302,14 @@ peers over PostgreSQL-backed search data; substring matching is not fulltext.
 
 ### 6. Complete distributed applications and operator delivery
 
-**Status:** Active in Goal6.
+**Status:** Complete in Goal6; secure remote SDK/CLI, bounded consumers/wakeups,
+snapshot handoff and operator commands are implemented. Actual two-network
+application crash/retry/reference/excision acceptance passed; stored program
+replacement/rebinding retains exact receipts. Consumer6/6, legacy connection8/8
+and real admin interruption/retry passed. Final rebuilt suite passed all6 target
+suites; actual PostgreSQL TLS2/2 verifies both async LISTEN backends with TLS1.3,
+consumer checkpoint/peer advancement and rejection of missing trust/plaintext.
+Goal6 records limits, measured idle SQL/latency and full evidence.
 
 **Outcome:** Secure multi-host applications and operators use the completed
 capabilities through supported deployment and administrative interfaces.
@@ -338,7 +345,11 @@ failure/retry without source edits or acceptance-harness setup.
 
 ### 7. Establish integrated operating acceptance
 
-**Status:** Pending.
+**Status:** Active in Goal7. Expanded V2 lifecycle traces and saved replay pass,
+including writer replacement, exact receipts and durable consumers; controlled
+failure reduces9→3. Fresh actual old-binary genesis upgrades and separate
+PostgreSQL immediate-stop/WAL recovery passed. Commitment/maintenance performance
+repairs and independent-reader measurements remain in progress.
 
 **Outcome:** Every required capability works together, with reproducible
 instructions and a measured, honest operating envelope.
@@ -370,12 +381,13 @@ product and integrated acceptance close Goal0.
 
 ## Continuation
 
-Active: Goal6, on 2026-09-09. Goals1–5 passed their real PostgreSQL/application,
+Active: Goal7, on 2026-09-09. Goals1–6 passed their real PostgreSQL/application,
 semantic/failure and measured-cost signals; see their evidence records. Goal2
 retains ordered transaction processing and records commitment-tree I/O for Stage7.
-Next: implement authenticated remote delivery, bounded durable consumers and
-administrative commands. Disposable user/network namespaces are available for
-real isolated-network acceptance (`unshare --user --map-root-user --net true`
-passed); PostgreSQL stays in the isolated fixture, reachable by private socket.
+Next: profile/improve commitment point-load and restore/inspection costs, measure
+multi-reader warm/cold/mixed native workloads, and extend/replay existing seeded
+lifecycle acceptance. Secure remote delivery, bounded durable consumers and
+administrative commands passed final actual acceptance. All fault targets remain
+disposable and separate from user data.
 No later stage or integrated completion is claimed. Keep this plan authoritative;
 loops/prompts are continuation guides.

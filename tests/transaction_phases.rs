@@ -144,7 +144,10 @@ fn queued_dependent_transaction_phase_sample() {
             // Populate this exact access set before either sample mode. Setup,
             // startup and final semantic checks are outside the measured scope.
             let seeded = client
-                .transact(TransactionRequest::new("seed", seed), WAIT)
+                .transact(
+                    TransactionRequest::new("seed", seed).with_tx_instant(1_000),
+                    WAIT,
+                )
                 .unwrap();
             let counter = seeded.tempids["sample-0"];
             let entities: Vec<_> = (0..=data_count)
@@ -163,6 +166,9 @@ fn queued_dependent_transaction_phase_sample() {
                 });
                 requests.push(
                     TransactionRequest::new(format!("measured-{index}"), operations)
+                        // The tx instant participates in commitment keys: fix
+                        // it so before/after runs traverse the same treaps.
+                        .with_tx_instant(2_000 + index as i64)
                         .comparing_basis(seeded.basis_t + index as u64),
                 );
             }

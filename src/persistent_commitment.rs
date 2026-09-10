@@ -3,7 +3,9 @@
 //! This is deliberately not another commitment scheme. Nodes use the exact
 //! key, deterministic priority, empty root, leaf, node and database-coordinate
 //! digests from `state_commitment`. PostgreSQL owns immutable content nodes;
-//! one update retains only the paths it reads/rebuilds. The eager in-memory
+//! one update retains its touched paths and bounded prefetched fringes. This
+//! trades additional returned nodes/bytes for fewer SQL round trips, not a
+//! whole-state or cross-transaction cache. The eager in-memory
 //! commitment remains the semantic oracle while the writer is converted.
 
 use crate::sql_io::GenericClient;
@@ -20,6 +22,11 @@ const PAYLOAD_MAGIC: &[u8; 4] = b"ATSC";
 const PAYLOAD_VERSION: u8 = 1;
 // Bound statement payloads independently of transaction/administrative size.
 const NODE_WRITE_BATCH: usize = 256;
+// Fetch a small immutable subtree per cold update-path read, never the whole
+// commitment. Four descendant levels yield at most 31 rows even if corrupt
+// normalized child columns form a cycle. Coordinate-only checks stay point reads.
+const NODE_READ_DEPTH: i32 = 4;
+const NODE_READ_BATCH: usize = (1 << (NODE_READ_DEPTH + 1)) - 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PersistentSemanticRoot {
@@ -183,6 +190,7 @@ impl StoredNode {
 struct NodeStore<'a, C: GenericClient> {
     client: &'a mut C,
     load_statement: Option<postgres::Statement>,
+    read_depth: i32,
     cache: BTreeMap<Digest, StoredNode>,
     /// Nodes constructed by this update but not yet known durable. Multiple
     /// logical changes can replace an earlier path again before a coordinate
@@ -197,6 +205,7 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         Self {
             client,
             load_statement: None,
+            read_depth: 0,
             cache: BTreeMap::new(),
             pending: BTreeMap::new(),
             work: CommitmentWork::default(),
@@ -207,6 +216,9 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
         if let Some(node) = self.cache.get(&hash) {
             return Ok(node.clone());
         }
+        if self.read_depth > 0 {
+            return self.load_subtree(hash);
+        }
         // One touched-path update performs many point loads on the same
         // connection. Preparing the identical SQL for each node adds protocol
         // round trips without adding authentication or isolation.
@@ -214,7 +226,7 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
             self.load_statement = Some(
                 self.client
                     .prepare(
-                        "SELECT payload, left_hash, right_hash, subtree_count \
+                        "SELECT substring(payload FROM 1 FOR 115), left_hash, right_hash, subtree_count \
                    FROM atomic_semantic_commitment_nodes WHERE node_hash = $1",
                     )
                     .map_err(|error| pg_error("persistent-commitment/node-read", error))?,
@@ -235,25 +247,109 @@ impl<'a, C: GenericClient> NodeStore<'a, C> {
                     "semantic commitment names a missing content node",
                 )
             })?;
-        let payload: Vec<u8> = row.get(0);
+        let node = self.authenticate_row(hash, &row, 0)?;
+        self.cache.insert(hash, node.clone());
+        Ok(node)
+    }
+
+    fn authenticate_row(
+        &mut self,
+        hash: Digest,
+        row: &postgres::Row,
+        offset: usize,
+    ) -> Result<StoredNode, SemanticError> {
+        let payload: Vec<u8> = row.get(offset);
         self.work.read_sql_node(payload.len());
         let node = StoredNode::decode(&payload)?;
-        let left = optional_digest(row.get(1), "semantic commitment left child")?;
-        let right = optional_digest(row.get(2), "semantic commitment right child")?;
-        let count = from_sql_u64(row.get(3), "semantic commitment subtree count")?;
+        let left = optional_digest(row.get(offset + 1), "semantic commitment left child")?;
+        let right = optional_digest(row.get(offset + 2), "semantic commitment right child")?;
+        let count = from_sql_u64(row.get(offset + 3), "semantic commitment subtree count")?;
         if node.left != left || node.right != right || node.count != count || node.hash() != hash {
             return Err(corrupt(
                 "persistent-commitment/node-authentication",
                 "semantic commitment node payload, columns, or content hash disagree",
             ));
         }
-        self.cache.insert(hash, node.clone());
         Ok(node)
     }
 
+    fn load_subtree(&mut self, hash: Digest) -> Result<StoredNode, SemanticError> {
+        if self.load_statement.is_none() {
+            self.load_statement = Some(self.client.prepare(
+                "WITH RECURSIVE nodes AS ( \
+                     SELECT node_hash, substring(payload FROM 1 FOR 115) AS payload, \
+                            left_hash, right_hash, subtree_count, 0 AS depth \
+                       FROM atomic_semantic_commitment_nodes WHERE node_hash = $1 \
+                     UNION ALL \
+                     SELECT child.node_hash, substring(child.payload FROM 1 FOR 115), \
+                            child.left_hash, child.right_hash, child.subtree_count, parent.depth + 1 \
+                       FROM nodes parent \
+                       CROSS JOIN LATERAL (VALUES (parent.left_hash), (parent.right_hash)) link(hash) \
+                       JOIN LATERAL (SELECT node_hash, payload, left_hash, right_hash, subtree_count \
+                                       FROM atomic_semantic_commitment_nodes \
+                                      WHERE node_hash = link.hash LIMIT 1) child ON true \
+                      WHERE parent.depth < $2 \
+                 ) SELECT node_hash, payload, left_hash, right_hash, subtree_count FROM nodes"
+            ).map_err(|error| pg_error("persistent-commitment/node-read", error))?);
+        }
+        let rows = self
+            .client
+            .query(
+                self.load_statement
+                    .as_ref()
+                    .expect("subtree-load statement prepared"),
+                &[&&hash[..], &self.read_depth],
+            )
+            .map_err(|error| pg_error("persistent-commitment/node-read", error))?;
+        if rows.len() > NODE_READ_BATCH {
+            return Err(corrupt(
+                "persistent-commitment/read-bound",
+                "semantic commitment subtree read exceeded its fixed row bound",
+            ));
+        }
+        // A canonical node has at most 114 payload bytes. Selecting 115 bytes
+        // preserves strict rejection of any oversize payload without pulling
+        // arbitrary corrupt BYTEA contents into one bounded batch.
+        let mut authenticated = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let child_hash = required_digest(row.get(0), "semantic commitment node hash")?;
+            let node = self.authenticate_row(child_hash, row, 1)?;
+            if self
+                .cache
+                .get(&child_hash)
+                .is_some_and(|cached| cached != &node)
+            {
+                return Err(corrupt(
+                    "persistent-commitment/node-collision",
+                    "semantic commitment node hash resolves to different canonical content",
+                ));
+            }
+            authenticated.push((child_hash, node));
+        }
+        let requested = authenticated
+            .iter()
+            .find(|(key, _)| *key == hash)
+            .map(|(_, node)| node.clone())
+            .ok_or_else(|| {
+                corrupt(
+                    "persistent-commitment/missing-node",
+                    "semantic commitment names a missing content node",
+                )
+            })?;
+        // Authenticate the entire bounded result before admitting any node.
+        // Prefetch is not a structural proof: links() still verifies counts,
+        // BST and heap ordering exactly where the update used to verify them.
+        // Repeated returned rows are charged even if a prior batch cached them.
+        for (child_hash, node) in authenticated {
+            self.cache.insert(child_hash, node);
+        }
+        Ok(requested)
+    }
+
     /// Load the immediate children needed to prove this node's count and the
-    /// local BST/heap invariants. This intentionally does not descend into an
-    /// untouched sibling subtree; its authenticated root remains sufficient.
+    /// local BST/heap invariants. The proof need not descend into an untouched
+    /// sibling subtree; its authenticated root remains sufficient even when a
+    /// bounded read also prefetched some descendants.
     fn links(
         &mut self,
         node: &StoredNode,
@@ -626,6 +722,13 @@ pub(crate) fn advance_persistent_commitment<C: GenericClient>(
     changes: &[SemanticSetChange],
 ) -> Result<(PersistentSemanticRoot, CommitmentWork), SemanticError> {
     let mut store = NodeStore::new(client);
+    // Small changes need only a shallow fringe. More logical set changes make
+    // deeper prefetch useful, capped at 31 nodes per read independently of the
+    // database and transaction size. Empty coordinate checks do not prefetch.
+    store.read_depth = changes
+        .len()
+        .checked_ilog2()
+        .map_or(0, |depth| (depth as i32).clamp(1, NODE_READ_DEPTH));
     store.verify_root(before)?;
     let mut root = before.root.map(|hash| NodeRef {
         hash,
@@ -1235,6 +1338,234 @@ mod codec_tests {
             root.state_hash(database.basis_t(), database.eidx_frontier()),
             checkpoint_state_hash(database).unwrap()
         );
+    }
+
+    #[test]
+    fn bounded_subtree_updates_match_point_reads_and_rollback() {
+        let Some(connection) = connection() else {
+            return;
+        };
+        let schema_name = isolated_schema(&connection, "commitment_batch");
+        crate::PostgresMigrator::from_client(client_in_schema(&connection, &schema_name))
+            .migrate()
+            .unwrap();
+        let mut client = client_in_schema(&connection, &schema_name);
+        let seed = Database::new(test_schema())
+            .unwrap()
+            .with(
+                &(0..512)
+                    .map(|index| TxOp::Add {
+                        entity: EntityRef::Temp(format!("item-{index}")),
+                        attribute: ITEM_COUNT,
+                        value: Value::Long(0).into(),
+                    })
+                    .collect::<Vec<_>>(),
+                1_000,
+            )
+            .unwrap();
+        let database = &seed.db_after;
+        let before = persist_eager_snapshot(&mut client, database).unwrap();
+        let durable_rows: i64 = client
+            .query_one("SELECT count(*) FROM atomic_semantic_commitment_nodes", &[])
+            .unwrap()
+            .get(0);
+        for count in [1, 256] {
+            let report = database
+                .with(
+                    &(0..count)
+                        .map(|index| TxOp::Add {
+                            entity: EntityRef::Id(seed.tempids[&format!("item-{index}")]),
+                            attribute: ITEM_COUNT,
+                            value: Value::Long(1).into(),
+                        })
+                        .collect::<Vec<_>>(),
+                    2_000,
+                )
+                .unwrap();
+            let changes = eager_semantic_changes(database, &report.tx_data).unwrap();
+            let mut samples = Vec::new();
+            for depth in [0, 1, NODE_READ_DEPTH] {
+                let mut transaction = GenericClient::transaction(&mut client).unwrap();
+                let context =
+                    crate::OperationContext::new(crate::OperationKind::TransactionEncoding);
+                let started = std::time::Instant::now();
+                let (root, work, cache_entries, pending_entries) = {
+                    let _scope = context.enter();
+                    let mut store = NodeStore::new(&mut transaction);
+                    store.read_depth = depth;
+                    store.verify_root(before).unwrap();
+                    let mut root = before.root.map(|hash| NodeRef {
+                        hash,
+                        count: before.count,
+                    });
+                    for change in &changes {
+                        let (next, changed) = match *change {
+                            SemanticSetChange::Insert(key) => store.insert(root, key).unwrap(),
+                            SemanticSetChange::Remove(key) => store.remove(root, key).unwrap(),
+                        };
+                        root = next;
+                        if changed {
+                            store.work.change_leaf();
+                        }
+                    }
+                    let root = PersistentSemanticRoot {
+                        root: root.map(|node| node.hash),
+                        count: root.map_or(0, |node| node.count),
+                    };
+                    store.flush_reachable(root.root).unwrap();
+                    (root, store.work, store.cache.len(), store.pending.len())
+                };
+                let elapsed = started.elapsed();
+                let io = context.snapshot();
+                assert_matches_eager(root, &report.db_after);
+                assert_eq!(work.leaf_changes, changes.len() as u64);
+                assert_eq!(io.errors, 0);
+                // Both maps grow monotonically during this update. This is
+                // their peak key/value ownership, excluding BTreeMap allocator
+                // overhead, SQL result buffers, stack, and all process RSS.
+                let map_key_value_bytes = (cache_entries + pending_entries)
+                    * (std::mem::size_of::<Digest>() + std::mem::size_of::<StoredNode>());
+                println!(
+                    "COMMITMENT_READ_SAMPLE members={} replaced={} depth={} sql_calls={} result_cell_bytes={} payload_read_bytes={} returned_node_rows={} cache_entries={} pending_entries={} map_key_value_bytes={} elapsed_ns={} work={:?}",
+                    before.count(),
+                    count,
+                    depth,
+                    io.sql_calls,
+                    io.result_cell_bytes,
+                    work.sql_node_read_bytes,
+                    work.sql_node_reads,
+                    cache_entries,
+                    pending_entries,
+                    map_key_value_bytes,
+                    elapsed.as_nanos(),
+                    work
+                );
+                samples.push((root, work, io));
+                transaction.rollback().unwrap();
+                assert_eq!(
+                    client
+                        .query_one("SELECT count(*) FROM atomic_semantic_commitment_nodes", &[],)
+                        .unwrap()
+                        .get::<_, i64>(0),
+                    durable_rows,
+                    "all candidate nodes roll back"
+                );
+            }
+            for sample in &samples[1..] {
+                assert_eq!(samples[0].0, sample.0);
+                assert_eq!(samples[0].1.node_hashes, sample.1.node_hashes);
+                assert_eq!(samples[0].1.node_visits, sample.1.node_visits);
+                assert_eq!(samples[0].1.sql_node_writes, sample.1.sql_node_writes);
+                assert!(sample.2.sql_calls < samples[0].2.sql_calls);
+            }
+        }
+        let mut store = NodeStore::new(&mut client);
+        store.read_depth = NODE_READ_DEPTH;
+        store.load(before.root.unwrap()).unwrap();
+        assert!(store.cache.len() <= NODE_READ_BATCH);
+        assert!(store.work.sql_node_reads <= NODE_READ_BATCH as u64);
+        assert!(store.cache.len() < before.count() as usize);
+        drop(store);
+        drop(client);
+        drop_schema(&connection, &schema_name);
+    }
+
+    #[test]
+    fn subtree_prefetch_rejects_corrupt_payload_columns_and_structural_proofs() {
+        let Some(connection) = connection() else {
+            return;
+        };
+        let schema_name = isolated_schema(&connection, "commitment_batch_corrupt");
+        crate::PostgresMigrator::from_client(client_in_schema(&connection, &schema_name))
+            .migrate()
+            .unwrap();
+        let mut client = client_in_schema(&connection, &schema_name);
+        let before =
+            persist_eager_snapshot(&mut client, &Database::new(test_schema()).unwrap()).unwrap();
+        let root_hash = before.root.unwrap();
+        for corruption in ["cycle-column", "oversize-payload", "corrupt-child"] {
+            let mut transaction = GenericClient::transaction(&mut client).unwrap();
+            transaction.batch_execute("ALTER TABLE atomic_semantic_commitment_nodes DISABLE TRIGGER atomic_semantic_commitment_nodes_immutable").unwrap();
+            match corruption {
+                "cycle-column" => {
+                    transaction.execute("UPDATE atomic_semantic_commitment_nodes SET left_hash=node_hash WHERE node_hash=$1", &[&&root_hash[..]]).unwrap();
+                }
+                "oversize-payload" => {
+                    transaction.execute("UPDATE atomic_semantic_commitment_nodes SET payload=payload || decode(repeat('00',4096),'hex') WHERE node_hash=$1", &[&&root_hash[..]]).unwrap();
+                }
+                "corrupt-child" => {
+                    transaction.execute("UPDATE atomic_semantic_commitment_nodes SET payload=set_byte(payload,0,0) WHERE node_hash=(SELECT coalesce(left_hash,right_hash) FROM atomic_semantic_commitment_nodes WHERE node_hash=$1)", &[&&root_hash[..]]).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let mut store = NodeStore::new(&mut transaction);
+            store.read_depth = NODE_READ_DEPTH;
+            let error = store.load(root_hash).unwrap_err();
+            assert!(
+                matches!(
+                    error.code,
+                    "persistent-commitment/node-authentication"
+                        | "persistent-commitment/node-codec"
+                ),
+                "{corruption}: {error:?}"
+            );
+            assert!(store.cache.is_empty(), "no partial result admitted");
+            assert!(store.work.sql_node_read_bytes <= (NODE_READ_BATCH * 115) as u64);
+            drop(store);
+            transaction.rollback().unwrap();
+        }
+        let mut keys = (0..32)
+            .map(|byte| SemanticDatomKey {
+                attribute: 900,
+                digest: [byte; 32],
+            })
+            .collect::<Vec<_>>();
+        keys.sort_by_key(|key| semantic_key_priority(*key));
+        for (name, parent_key, child_key, child_on_left, count) in [
+            ("tree-count", keys[0], keys[1], keys[1] < keys[0], 3),
+            // Correct heap priority, child deliberately on the wrong BST side.
+            ("tree-invariant", keys[0], keys[1], keys[1] > keys[0], 2),
+            // Correct BST side, child deliberately preceding parent priority.
+            ("tree-invariant", keys[1], keys[0], keys[0] < keys[1], 2),
+        ] {
+            let mut transaction = GenericClient::transaction(&mut client).unwrap();
+            let child = StoredNode {
+                key: child_key,
+                left: None,
+                right: None,
+                count: 1,
+            };
+            let parent = StoredNode {
+                key: parent_key,
+                left: child_on_left.then(|| child.hash()),
+                right: (!child_on_left).then(|| child.hash()),
+                count,
+            };
+            let mut store = NodeStore::new(&mut transaction);
+            store
+                .persist_nodes(&[(child.hash(), child), (parent.hash(), parent.clone())])
+                .unwrap();
+            store.read_depth = NODE_READ_DEPTH;
+            let error = store
+                .verify_root(PersistentSemanticRoot {
+                    root: Some(parent.hash()),
+                    count,
+                })
+                .unwrap_err();
+            assert_eq!(error.code, format!("persistent-commitment/{name}"));
+            drop(store);
+            transaction.rollback().unwrap();
+        }
+        let mut store = NodeStore::new(&mut client);
+        store.read_depth = NODE_READ_DEPTH;
+        assert_eq!(
+            store.load([0x55; 32]).unwrap_err().code,
+            "persistent-commitment/missing-node"
+        );
+        store.verify_root(before).unwrap();
+        drop(store);
+        drop(client);
+        drop_schema(&connection, &schema_name);
     }
 
     #[test]

@@ -70,7 +70,7 @@ mod value;
 mod vocabulary;
 
 pub use backup::{BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault};
-pub use change_notices::{NoticePublisherStats, ObservationConfig, notice_publisher_stats};
+pub use change_notices::{NoticeListenerStats, NoticePublisherStats, ObservationConfig, notice_listener_stats, notice_publisher_stats};
 pub use change_consumer::{ChangeCheckpoint, ChangeConsumer, ChangeConsumerConfig, ChangeConsumerStats, ChangeEvent};
 pub use compressed_nodes::{NodeBlockReadStats, NodeBlockWriteStats};
 pub use connection::{Connection, ConnectionTransactionTicket, DatabaseIdentity};

@@ -139,7 +139,7 @@ atomic fulltext-rebuild --database application \
 Obtain the manifest from an earlier `FULLTEXT_REBUILT source_manifest=...` result
 or an authorized `NativeFulltextReader::projection()` observation. The supplied
 digest must be this logical database's newest canonical publication, not an
-arbitrary hash. Each discard batch removes at most4,096 blocks; the owner-only
+arbitrary hash. Each discard batch removes at most 4,096 blocks; the owner-only
 library repair serializes with builds. A `status=pending` result is partial
 progress: repeat the same command. Once discard completes, reconstruction runs.
 If the database advances meanwhile, the command reports a conflict rather than
@@ -171,7 +171,7 @@ substituted. Connected snapshots retain existing pins, but short retention can
 break disconnected long-lived readers or unpinned snapshot references. It does
 not erase already observed values or live receipt-owned information.
 
-`--batches` is a positive finite number, default1, and applies only with
+`--batches` is a positive finite number, default 1, and applies only with
 `--apply`. Each existing collector call limits victim/ownership work (typically
 512 items for node phases, with separate fixed limits for other owners).
 Candidate searches can still scan large catalogs; this is not a total-memory,
@@ -200,5 +200,9 @@ completion.
 repeat backup, offline verification, separately targeted restore/preview/retry,
 deep inspection, restricted/authorized GC and derived search repair. Its live
 test creates two dedicated disposable PostgreSQL databases; catalog-wide GC
-never runs on the shared connection's original database. Missing
+never runs on the shared connection's original database. On Unix it also holds
+an ordinary destination node-table lock, observes the restore process waiting
+to write a node, sends SIGTERM, releases the lock and retries the exact restore
+selection before checking current/history/search. No production fault hook is
+used. Missing
 `ATOMIC_POSTGRES_URL` is explicitly reported as skipped, not as verified coverage.

@@ -333,6 +333,7 @@ fn remote_handshake_deadline_and_inflight_admission_are_bounded() {
         RemoteTransportConfig {
             max_in_flight: 1,
             request_timeout: Duration::from_millis(500),
+            max_hint_bytes: 0,
             ..Default::default()
         },
         token,
@@ -362,10 +363,35 @@ fn remote_handshake_deadline_and_inflight_admission_are_bounded() {
     assert_eq!(server.stats().max_active, 1);
     assert!(server.stats().rejected_full >= 1);
     assert!(start.elapsed() < Duration::from_secs(2));
-    peer.transact_remote(&endpoint, &client, request("after-timeout", 2), WAIT)
+    let report = peer
+        .transact_remote(&endpoint, &client, request("after-timeout", 2), WAIT)
         .unwrap()
         .report
         .unwrap();
+    let hints = TransactionHints::from_reads(
+        report.db_after.snapshot_reference().unwrap(),
+        [ReadHint {
+            history: false,
+            prefix: IndexPrefix::Eavt {
+                entity: report.tempids["item"],
+                attribute: Some(1000),
+                value: None,
+            },
+        }],
+        HintLimits::default(),
+    )
+    .unwrap();
+    let ignored = peer
+        .transact_remote_with_hints(
+            &endpoint,
+            &client,
+            request("over-hint-policy", 3),
+            hints,
+            WAIT,
+        )
+        .unwrap();
+    assert_eq!(ignored.basis_t, report.basis_t + 1);
+    assert_eq!(server.stats().ignored_hints, 1);
     println!(
         "REMOTE_BOUNDS_OK max_active={} rejected_full={} cumulative_tls_deadline_ms=500 trickle_did_not_extend_deadline=true",
         server.stats().max_active,
@@ -373,4 +399,247 @@ fn remote_handshake_deadline_and_inflight_admission_are_bounded() {
     );
     drop(server);
     service.shutdown();
+}
+
+#[test]
+fn stored_query_transaction_program_preview_and_exact_remote_retry_survive_replacement() {
+    let Some(fixture) = fixture("remote_stored_program") else {
+        return;
+    };
+    let url = &fixture.connection;
+    let pg = PostgresConnectionConfig::plaintext(url);
+    let make_program = |output: i64| {
+        let mut query = Query::new(
+            FindSpec::Relation(vec![FindElement::Variable("entity".into())]),
+            vec![Clause::Pattern(Box::new(DataPattern::new(
+                Term::var("entity"),
+                Term::Constant(Value::Ref(1000)),
+                Term::var("selected"),
+            )))],
+        );
+        query.inputs = vec![InputSpec::Scalar("selected".into())];
+        Program {
+            kind: ProgramKind::Transaction,
+            arity: 1,
+            instructions: vec![
+                Instruction::Query(
+                    QueryTemplate::native(query, vec![0], vec![QueryTemplateSource::current("$")])
+                        .unwrap(),
+                ),
+                Instruction::ForEach {
+                    body: vec![
+                        Instruction::Unpack(1),
+                        Instruction::PushConstant(Value::Long(output)),
+                        Instruction::EmitAdd(1000),
+                    ],
+                },
+                Instruction::Return,
+            ],
+        }
+    };
+    let program = make_program(99);
+    let program_bytes = encode_program(&program).unwrap();
+    let mut store = PostgresStore::connect(url).unwrap();
+    let hash = store.deploy_program_blob(&program).unwrap();
+    assert_eq!(hash, sha256(&program_bytes));
+    assert_eq!(store.resolve_program(hash).unwrap(), program);
+    let writer = common::start_service(url, "source");
+    let peer = Connection::connect(url, "source", 128).unwrap();
+    let (identity, root) = credentials();
+    let token = RemoteAuthToken::from_bytes([0x52; 32]);
+    let client = RemoteClientConfig::new(token.clone())
+        .unwrap()
+        .with_root_certificate_pem(&root)
+        .unwrap();
+    let (server, endpoint) = bind(
+        identity,
+        "127.0.0.1:0".parse().unwrap(),
+        &writer,
+        RemoteTransportConfig::default(),
+        token.clone(),
+        &pg,
+    );
+    let ident = Keyword::new("remote", "select-stored");
+    let installed = peer
+        .transact_remote(
+            &endpoint,
+            &client,
+            TransactionRequest::new(
+                "program-install",
+                vec![
+                    TxOp::Add {
+                        entity: EntityRef::Temp("selector".into()),
+                        attribute: DB_IDENT as u32,
+                        value: Value::Keyword(ident.clone()).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("selector".into()),
+                        attribute: DB_FN as u32,
+                        value: Value::Function(hash).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("selected".into()),
+                        attribute: 1000,
+                        value: Value::Long(1).into(),
+                    },
+                    TxOp::Add {
+                        entity: EntityRef::Temp("untouched".into()),
+                        attribute: 1000,
+                        value: Value::Long(2).into(),
+                    },
+                ],
+            )
+            .with_tx_instant(1000),
+            WAIT,
+        )
+        .unwrap()
+        .report
+        .unwrap();
+    let captured = installed.db_after.clone();
+    let selected = installed.tempids["selected"];
+    let untouched = installed.tempids["untouched"];
+    let call = |value: i64| ProgramCall {
+        function: CallableRef::Database(EntityRef::Ident(ident.clone())),
+        arguments: vec![RuntimeValue::Scalar(Value::Long(value))],
+    };
+    let preview = captured
+        .with_forms(&[TxForm::ProgramCall(call(1))], 2000)
+        .unwrap();
+    assert_eq!(
+        preview.db_after.values(selected, 1000).unwrap(),
+        vec![Value::Long(99)]
+    );
+    assert_eq!(
+        preview.db_after.values(untouched, 1000).unwrap(),
+        vec![Value::Long(2)]
+    );
+    assert_eq!(
+        captured.values(selected, 1000).unwrap(),
+        vec![Value::Long(1)]
+    );
+    assert_eq!(
+        store.recover("source").unwrap().basis_t(),
+        installed.basis_t,
+        "preview committed durable data"
+    );
+    let request = TransactionRequest::new("program-execute", vec![])
+        .calling(call(1))
+        .comparing_basis(installed.basis_t)
+        .with_tx_instant(2000);
+    let request_hash = submission_request_digest(
+        &request.forms,
+        request.compare_basis_t,
+        request.tx_instant_override,
+    )
+    .unwrap();
+    server.inject_lost_next_committed_response();
+    assert_eq!(
+        peer.transact_remote(&endpoint, &client, request.clone(), WAIT)
+            .unwrap_err()
+            .category,
+        ErrorCategory::UnknownOutcome
+    );
+    let committed = peer
+        .transact_remote(&endpoint, &client, request.clone(), WAIT)
+        .unwrap();
+    assert!(committed.replayed);
+    let committed_hash = committed.tx_hash;
+    let report = committed.report.unwrap();
+    assert_eq!(report.tx_data, preview.tx_data);
+    assert_eq!(report.tempids, preview.tempids);
+    common::assert_same_information(&report.db_after, &preview.db_after);
+    let address = server.local_addr();
+    drop(server);
+    writer.shutdown();
+    let replacement = common::start_service(url, "source");
+    let (identity, root) = credentials();
+    let client = RemoteClientConfig::new(token.clone())
+        .unwrap()
+        .with_root_certificate_pem(&root)
+        .unwrap();
+    let (server, endpoint) = bind(
+        identity,
+        address,
+        &replacement,
+        RemoteTransportConfig::default(),
+        token,
+        &pg,
+    );
+    assert_eq!(peer.discover_remote_writer(&pg).unwrap(), endpoint);
+    let next_hash = store.deploy_program_blob(&make_program(101)).unwrap();
+    let rebound = peer
+        .transact_remote(
+            &endpoint,
+            &client,
+            TransactionRequest::new(
+                "program-rebind",
+                vec![TxOp::Add {
+                    entity: EntityRef::Ident(ident.clone()),
+                    attribute: DB_FN as u32,
+                    value: Value::Function(next_hash).into(),
+                }],
+            )
+            .with_tx_instant(3000),
+            WAIT,
+        )
+        .unwrap()
+        .report
+        .unwrap();
+    // This exact retry predates the new binding and its compare-basis is stale.
+    // It must return the old receipt, not re-run either stored program version.
+    let retried = peer
+        .transact_remote(&endpoint, &client, request.clone(), WAIT)
+        .unwrap();
+    assert!(retried.replayed);
+    assert_eq!(retried.tx_hash, committed_hash);
+    let replay = retried.report.unwrap();
+    assert_eq!(replay.tx_data, report.tx_data);
+    common::assert_same_information(&replay.db_before, &report.db_before);
+    common::assert_same_information(&replay.db_after, &report.db_after);
+    assert_eq!(
+        submission_request_digest(
+            &request.forms,
+            request.compare_basis_t,
+            request.tx_instant_override
+        )
+        .unwrap(),
+        request_hash
+    );
+    assert_eq!(
+        encode_program(&store.resolve_program(hash).unwrap()).unwrap(),
+        program_bytes
+    );
+    let fresh = peer
+        .transact_remote(
+            &endpoint,
+            &client,
+            TransactionRequest::new("program-execute-new", vec![])
+                .calling(call(99))
+                .comparing_basis(rebound.basis_t)
+                .with_tx_instant(4000),
+            WAIT,
+        )
+        .unwrap()
+        .report
+        .unwrap();
+    assert_eq!(
+        fresh.db_after.values(selected, 1000).unwrap(),
+        vec![Value::Long(101)]
+    );
+    assert_eq!(
+        fresh.db_after.values(untouched, 1000).unwrap(),
+        vec![Value::Long(2)]
+    );
+    assert_eq!(
+        captured
+            .with_forms(&[TxForm::ProgramCall(call(1))], 2000)
+            .unwrap()
+            .tx_data,
+        preview.tx_data
+    );
+    drop(server);
+    replacement.shutdown();
+    println!(
+        "REMOTE_STORED_PROGRAM_OK native_query_body=true preview_matches_commit=true preview_not_durable=true lost_response_same_key_retry=true replacement_rebind_retry_original_receipt=true fresh_call_uses_new_binding=true captured_value_keeps_original_program=true request_and_program_bytes_preserved=true"
+    );
 }

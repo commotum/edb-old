@@ -2,15 +2,16 @@
 
 This is the active operator guide. Archived goal runbooks are historical
 evidence. Archived G3 Goal5 records integrity/recovery checks; G3 Goal6 records
-the measured core deployment envelope. The fresh Goal0 plans the next product
-and capability phase. No deployment-independent throughput, recovery
+the historical core deployment envelope. Goal0 owns the active product phase;
+Goals1–6 are delivered and Goal7 is measuring integrated operating acceptance.
+No deployment-independent throughput, recovery
 time or network-outage bound is implied.
 
 The supported executable commands and explicit target/preview/apply controls
 are documented in [Administrative CLI](admin.md). The API-level guarantees and
 measured limits below still apply to those commands.
 
-## Measured integrated acceptance — 2026-09-09
+## Historical G3 integrated acceptance — 2026-09-09
 
 The 100,000-record/400,000-business-fact system-of-record workload uses two
 independent submitting peers, batches of 100 records, a 4MiB writer tree cache,
@@ -40,9 +41,12 @@ small operations workflow and27 focused live publication/inspection/backup cases
 also pass. [G3 Goal6](../goal-archive/G3/goal-6/0-plan.md) retains exact fixture/hash provenance and
 other live semantic/failure evidence.
 
-Data exceeds configured caches, not this host's physical RAM. Warm selective
-queries in the scale run still performed SQL; no zero-I/O warm-cache benefit is
-claimed. Broad restore/inspection remain expensive and eager. Source GC ran
+Data exceeded configured caches, not this host's physical RAM. Warm selective
+queries in that G3 scale run still performed SQL; it did not establish a zero-I/O
+warm-cache benefit. Goals2–6 subsequently verified zero-SQL resident native reads
+and secure remote applications on their declared fixtures; those are separate
+results, not a revision of the G3 measurement. Broad restore/inspection were
+expensive and eager. Source GC ran
 concurrently with part of target inspection; timings are not isolated benchmarks.
 GC conversion's total work follows retained receipt closures, and reachable
 payloads are deliberately retained. Provision administrative memory/time and
@@ -59,6 +63,8 @@ not perform DDL. Use the writer role for the service/indexer, the peer role
 for independent reads, and a separately controlled administrative account for
 restore, repair, inspection and GC. Native Unix submission is same-host,
 same-OS-user only (private directory and socket), not an internet service.
+For the separately supported authenticated TLS network listener and endpoint
+discovery, see [remote applications](application.md#remote-applications).
 
 Migration 24 versions program-dependency completeness. Quiesce legacy writers,
 indexers and GC before upgrading; preserve a recoverable backup. The migration

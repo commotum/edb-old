@@ -1268,7 +1268,7 @@ impl PortableBackup {
             build_pin,
             activation_probe,
         )?;
-        crate::change_notices::publish(&self.connection,target_database_id);
+        crate::change_notices::publish(&self.connection, target_database_id);
         if fault_at == RestoreFault::AfterCommitBeforeResponse {
             return Err(injected("backup/restore-after-activation"));
         }
@@ -3439,10 +3439,7 @@ fn restore_tree_backup(
         &reachable,
     )?;
     let publication = (|| {
-        for hash in &reachable {
-            let payload = read_object(directory, *hash)?;
-            store.insert_node(*hash, &payload)?;
-        }
+        upload_backup_tree_nodes(&mut store, directory, &reachable)?;
         let delta = TreePublicationDelta::Replace {
             live_nodes: reachable,
         };
@@ -3492,6 +3489,57 @@ fn finish_restored_publication_work(
         // between the two calls. Reselect the same hash, never the latest.
         store.advance_publication_work(manifest_hash)?;
     }
+}
+
+/// Reuse the normal bounded upload/byte-verification path during restoration.
+/// The source iterator never materializes the complete archive node payloads.
+/// A valid oversized node is still admitted alone, under the existing codec
+/// maximum; upload limits bound ordinary batch buffers, not datom semantics.
+fn upload_backup_tree_nodes(
+    store: &mut PostgresTreeStore,
+    directory: &Path,
+    hashes: &BTreeSet<Digest>,
+) -> Result<(), SemanticError> {
+    let limits = crate::NodeUploadLimits::default();
+    let mut batch = Vec::<(Digest, Vec<u8>)>::new();
+    let mut bytes = 0_usize;
+    for hash in hashes {
+        let payload = read_object(directory, *hash)?;
+        if !batch.is_empty()
+            && (batch.len() >= limits.max_nodes
+                || bytes.saturating_add(payload.len()) > limits.max_bytes)
+        {
+            store.insert_nodes(
+                batch
+                    .iter()
+                    .map(|(hash, payload)| (*hash, payload.as_slice())),
+                limits,
+            )?;
+            batch.clear();
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(payload.len());
+        batch.push((*hash, payload));
+        if batch.len() >= limits.max_nodes || bytes >= limits.max_bytes {
+            store.insert_nodes(
+                batch
+                    .iter()
+                    .map(|(hash, payload)| (*hash, payload.as_slice())),
+                limits,
+            )?;
+            batch.clear();
+            bytes = 0;
+        }
+    }
+    if !batch.is_empty() {
+        store.insert_nodes(
+            batch
+                .iter()
+                .map(|(hash, payload)| (*hash, payload.as_slice())),
+            limits,
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_stored_tree_graph(
@@ -3772,9 +3820,7 @@ fn restore_request_base_archive(
                 })?;
         }
         let mut store = PostgresTreeStore::connect_configured(connection)?;
-        for hash in &reachable {
-            store.insert_node(*hash, &read_object(directory, *hash)?)?;
-        }
+        upload_backup_tree_nodes(&mut store, directory, &reachable)?;
         for root in &roots {
             let order: i16 = match root.order {
                 crate::IndexOrder::Eavt => 0,

@@ -6,10 +6,12 @@ use crate::database::ExcisionCutoff;
 use crate::excision::{ExcisionTargetKind, PlannedExcisionPredicate};
 use crate::log_generation::LineageTransactionContent;
 use crate::peer::stage_full_generation_tree;
-use crate::persistent_tree::{TreeNode, TreeNodeSet, decode_tree_node, validate_tree};
+use crate::persistent_tree::{
+    TreeNode, TreeNodeSet, decode_tree_node, validate_tree, validate_tree_streaming,
+};
 use crate::postgres::{
     AuthenticatedLogTransaction, insert_program_generation_refs, read_authenticated_log_range,
-    recover_generation_to, verify_schema_compatibility,
+    recover_generation_to, recover_generation_to_with_visitor, verify_schema_compatibility,
 };
 use crate::sql_io::{GenericClient, SqlClient as Client};
 use crate::{
@@ -19,6 +21,7 @@ use crate::{
 };
 use postgres::IsolationLevel;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[path = "receipt_archive.rs"]
@@ -853,10 +856,15 @@ impl PostgresOperator {
             .start()
             .map_err(|error| operation_error("operations/gc-begin", error))?;
         let candidates = garbage_candidates(&mut transaction, millis)?;
-        let removed: i64 = transaction.query_one("SELECT atomic_collect_fulltext_garbage(4096)", &[])
-            .map_err(|error| operation_error("operations/gc-fulltext", error))?.get(0);
+        let removed: i64 = transaction
+            .query_one("SELECT atomic_collect_fulltext_garbage(4096)", &[])
+            .map_err(|error| operation_error("operations/gc-fulltext", error))?
+            .get(0);
         if positive_or_zero(removed, "collected fulltext blocks")? != candidates.fulltext_blocks {
-            return Err(SemanticError::conflict("operations/gc-fulltext-preview-diverged", "search garbage collection diverged from its same-snapshot preview"));
+            return Err(SemanticError::conflict(
+                "operations/gc-fulltext-preview-diverged",
+                "search garbage collection diverged from its same-snapshot preview",
+            ));
         }
         // A sealed build-intent ledger remains an exact liveness pin after its
         // publication delta has folded. Drain that bookkeeping before retiring
@@ -1696,7 +1704,7 @@ fn build_and_activate_excision(
         })();
         match activation {
             Ok(()) => {
-                crate::change_notices::publish(connection,database_id);
+                crate::change_notices::publish(connection, database_id);
                 let (manifest_hash, tree_store) = staged_tree
                     .take()
                     .map_or((None, None), |(hash, store)| (Some(hash), Some(store)));
@@ -2398,6 +2406,22 @@ struct AuthenticatedNativePublication {
     nodes: BTreeSet<Digest>,
 }
 
+struct InspectionNode {
+    payload: Vec<u8>,
+    children: Vec<Digest>,
+    leaf_identity: Option<(IndexOrder, bool)>,
+}
+type InspectionNodes = BTreeMap<Digest, Arc<InspectionNode>>;
+
+struct NativeSemanticCandidate {
+    revision: u64,
+    generation: u64,
+    basis_t: u64,
+    tx_hash: Digest,
+    pending_avet: Vec<crate::AvetProjectionWork>,
+    nodes: InspectionNodes,
+}
+
 fn inspect_native_trees<C: crate::sql_io::GenericClient>(
     client: &mut C,
     database_id: &str,
@@ -2429,7 +2453,8 @@ fn inspect_native_trees<C: crate::sql_io::GenericClient>(
         .map_err(|error| operation_error("operations/tree-publications", error))?;
     metrics.tree_publications = publications.len() as u64;
     let mut previous_revision = None;
-    let mut all_nodes = BTreeMap::<Digest, Vec<u8>>::new();
+    let mut all_nodes = InspectionNodes::new();
+    let mut semantic_candidates = BTreeMap::<u64, Vec<NativeSemanticCandidate>>::new();
     let mut newest_manifest_hash = None;
     let mut newest_authenticated = None;
     let mut predecessor_authenticated = None;
@@ -2569,13 +2594,24 @@ fn inspect_native_trees<C: crate::sql_io::GenericClient>(
         }
         let mut manifest_nodes = BTreeMap::new();
         for tree in &manifest.trees {
-            match add_reachable_tree_nodes(client, tree.descriptor.root_hash, &mut manifest_nodes) {
+            match add_inspection_tree_nodes(
+                client,
+                tree.descriptor.root_hash,
+                &mut all_nodes,
+                &mut manifest_nodes,
+            ) {
                 Ok(()) => {
                     if deep
-                        && let Err(error) = validate_tree(
-                            &tree.descriptor,
-                            &TreeNodeSet::from_nodes(manifest_nodes.clone()),
-                        )
+                        && let Err(error) = validate_tree_streaming(&tree.descriptor, |hash| {
+                            manifest_nodes
+                                .get(hash)
+                                .map(|node| node.payload.clone())
+                                .ok_or_else(|| {
+                                    integrity_fault(
+                                        "validated tree node is absent from its reachable closure",
+                                    )
+                                })
+                        })
                     {
                         publication_valid = false;
                         problem(
@@ -2609,21 +2645,27 @@ fn inspect_native_trees<C: crate::sql_io::GenericClient>(
             metrics.index_basis_t = metrics.index_basis_t.max(basis);
             metrics.pending_avet_projections = manifest.pending_avet.len() as u64;
             if deep {
-                inspect_native_semantic_projection(
-                    client,
-                    database_id,
-                    revision,
-                    stored_generation,
-                    basis,
-                    stored_tx,
-                    &manifest.pending_avet,
-                    &manifest_nodes,
-                    problems,
-                );
+                semantic_candidates
+                    .entry(basis)
+                    .or_default()
+                    .push(NativeSemanticCandidate {
+                        revision,
+                        generation: stored_generation,
+                        basis_t: basis,
+                        tx_hash: stored_tx,
+                        pending_avet: manifest.pending_avet,
+                        nodes: manifest_nodes,
+                    });
             }
         }
-        all_nodes.extend(manifest_nodes);
     }
+    inspect_native_semantic_candidates(
+        client,
+        database_id,
+        generation,
+        semantic_candidates,
+        problems,
+    );
     match native_live_membership_status(
         client,
         database_id,
@@ -2643,20 +2685,96 @@ fn inspect_native_trees<C: crate::sql_io::GenericClient>(
         ),
     }
     metrics.tree_nodes = all_nodes.len() as u64;
-    metrics.tree_node_bytes = all_nodes.values().map(|bytes| bytes.len() as u64).sum();
+    metrics.tree_node_bytes = all_nodes
+        .values()
+        .map(|node| node.payload.len() as u64)
+        .sum();
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn inspect_native_semantic_projection<C: crate::sql_io::GenericClient>(
+fn inspect_native_semantic_candidates<C: GenericClient>(
     client: &mut C,
     database_id: &str,
+    generation: u64,
+    mut candidates: BTreeMap<u64, Vec<NativeSemanticCandidate>>,
+    problems: &mut Vec<IntegrityProblem>,
+) {
+    let Some((&target_basis, targets)) = candidates.last_key_value() else {
+        return;
+    };
+    let target_hash = targets[0].tx_hash;
+    let result = recover_generation_to_with_visitor(
+        client,
+        database_id,
+        generation,
+        target_basis,
+        target_hash,
+        |database, tx_hash, state_hash| {
+            let Some(at_basis) = candidates.remove(&database.basis_t()) else {
+                return Ok(());
+            };
+            // Preserve the same invariant/state-commitment proof previously
+            // performed by independent replay at each candidate endpoint.
+            if let Err(error) = database.validate_invariants() {
+                problem(problems, error.code, error.message);
+                return Ok(());
+            }
+            if let Some(expected) = state_hash {
+                match crate::state_commitment::verify_checkpoint_state_hash(database, expected) {
+                    Ok(verification) if verification.matches() => {}
+                    Ok(_) => {
+                        problem(
+                            problems,
+                            "recovery/state-commitment-mismatch",
+                            "retained publication replay has an invalid state commitment",
+                        );
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        problem(problems, error.code, error.message);
+                        return Ok(());
+                    }
+                }
+            }
+            for candidate in at_basis {
+                if candidate.tx_hash != tx_hash {
+                    problem(
+                        problems,
+                        "recovery/head-mismatch",
+                        "retained publication replay does not reach its requested head",
+                    );
+                    continue;
+                }
+                inspect_native_semantic_projection(
+                    database,
+                    candidate.revision,
+                    candidate.generation,
+                    candidate.basis_t,
+                    &candidate.pending_avet,
+                    &candidate.nodes,
+                    problems,
+                );
+            }
+            Ok(())
+        },
+    );
+    if let Err(error) = result {
+        problem(
+            problems,
+            error.code,
+            format!("native publication authoritative replay: {}", error.message),
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inspect_native_semantic_projection(
+    database: &crate::Database,
     revision: u64,
     generation: u64,
     basis_t: u64,
-    tx_hash: Digest,
     pending_avet: &[crate::AvetProjectionWork],
-    nodes: &BTreeMap<Digest, Vec<u8>>,
+    nodes: &InspectionNodes,
     problems: &mut Vec<IntegrityProblem>,
 ) {
     // A peer may fall back to any retained, structurally valid publication in
@@ -2664,22 +2782,7 @@ fn inspect_native_semantic_projection<C: crate::sql_io::GenericClient>(
     // inspection must compare every such candidate with its named log value,
     // not just the newest root. Project one order at a time to avoid retaining
     // eight duplicate datom vectors during this already-broad operation.
-    let recovered = match recover_generation_to(client, database_id, generation, basis_t, tx_hash) {
-        Ok(recovered) => recovered,
-        Err(error) => {
-            problem(
-                problems,
-                error.code,
-                format!(
-                    "tree revision {revision} authoritative replay: {}",
-                    error.message
-                ),
-            );
-            return;
-        }
-    };
-    if let Err(error) =
-        crate::peer::validate_avet_work_directions(pending_avet, recovered.database.schema())
+    if let Err(error) = crate::peer::validate_avet_work_directions(pending_avet, database.schema())
     {
         problem(
             problems,
@@ -2691,12 +2794,8 @@ fn inspect_native_semantic_projection<C: crate::sql_io::GenericClient>(
         );
     }
 
-    let expected_current = recovered
-        .database
-        .datoms(crate::View::Current, IndexOrder::Eavt);
-    let replayed_history = recovered
-        .database
-        .datoms(crate::View::History, IndexOrder::Eavt);
+    let expected_current = database.datoms(crate::View::Current, IndexOrder::Eavt);
+    let replayed_history = database.datoms(crate::View::History, IndexOrder::Eavt);
     let physical_history = match native_tree_datoms(nodes, IndexOrder::Eavt, true) {
         Ok(datoms) => datoms,
         Err(error) => {
@@ -2711,7 +2810,7 @@ fn inspect_native_semantic_projection<C: crate::sql_io::GenericClient>(
     if let Err(error) = validate_physical_history_projection(
         &replayed_history,
         &physical_history,
-        recovered.database.basis_t(),
+        database.basis_t(),
     ) {
         problem(
             problems,
@@ -2775,7 +2874,7 @@ fn inspect_native_semantic_projection<C: crate::sql_io::GenericClient>(
             } else {
                 expected_current.as_slice()
             };
-            let mut expected = match derive_index_projection(&recovered.database, source, order) {
+            let mut expected = match derive_index_projection(database, source, order) {
                 Ok(expected) => expected,
                 Err(error) => {
                     problem(
@@ -2861,13 +2960,19 @@ fn avet_projection_is_pending(
 }
 
 fn native_tree_datoms(
-    nodes: &BTreeMap<Digest, Vec<u8>>,
+    nodes: &InspectionNodes,
     order: IndexOrder,
     history: bool,
 ) -> Result<Vec<Datom>, SemanticError> {
     let mut datoms = Vec::new();
-    for (hash, payload) in nodes {
-        let TreeNode::Leaf(leaf) = decode_tree_node(hash, payload)? else {
+    for (hash, node) in nodes {
+        // The cached identity was obtained only after canonical hash/grammar
+        // validation in this same PostgreSQL snapshot. Skip unrelated sorts
+        // before decoding their (potentially large) datom columns again.
+        if node.leaf_identity != Some((order, history)) {
+            continue;
+        }
+        let TreeNode::Leaf(leaf) = decode_tree_node(hash, &node.payload)? else {
             continue;
         };
         if leaf.order != order || leaf.history != history {
@@ -3433,6 +3538,59 @@ fn native_manifest_roots_match<C: crate::sql_io::GenericClient>(
             tree.root_bytes,
         ))
     }))
+}
+
+fn add_inspection_tree_nodes<C: GenericClient>(
+    client: &mut C,
+    root: Digest,
+    cache: &mut InspectionNodes,
+    output: &mut InspectionNodes,
+) -> Result<(), SemanticError> {
+    let mut pending = vec![root];
+    while let Some(hash) = pending.pop() {
+        if output.contains_key(&hash) {
+            continue;
+        }
+        let node = if let Some(node) = cache.get(&hash) {
+            Arc::clone(node)
+        } else {
+            let row = client
+                .query_opt(
+                    "SELECT payload FROM atomic_tree_nodes WHERE node_hash = $1",
+                    &[&&hash[..]],
+                )
+                .map_err(|error| operation_error("operations/tree-node", error))?
+                .ok_or_else(|| {
+                    SemanticError::new(
+                        crate::ErrorCategory::Fault,
+                        "integrity/missing-tree-node",
+                        format!("published tree references absent node {}", hex(&hash)),
+                    )
+                })?;
+            let payload: Vec<u8> = row.get(0);
+            let (children, leaf_identity) = match decode_tree_node(&hash, &payload)? {
+                TreeNode::Root(root) => (
+                    root.directories.iter().map(|child| child.hash).collect(),
+                    None,
+                ),
+                TreeNode::Directory(directory) => (
+                    directory.leaves.iter().map(|child| child.hash).collect(),
+                    None,
+                ),
+                TreeNode::Leaf(leaf) => (Vec::new(), Some((leaf.order, leaf.history))),
+            };
+            let node = Arc::new(InspectionNode {
+                payload,
+                children,
+                leaf_identity,
+            });
+            cache.insert(hash, Arc::clone(&node));
+            node
+        };
+        pending.extend(node.children.iter().copied());
+        output.insert(hash, node);
+    }
+    Ok(())
 }
 
 fn add_reachable_tree_nodes<C: crate::sql_io::GenericClient>(

@@ -7,11 +7,11 @@
 //! process, so Linux VmHWM describes that operation, not an earlier allocator.
 //! Backups are retained; this example never deletes an existing repository.
 use atomic_core::{
-    CallableRef, CapacityLimits, Clause, DataPattern, DatabaseValue, EntityRef, FindElement,
-    FindSpec, IndexOrder, IndexSegment, Keyword, Peer, PortableBackup, PostgresMigrator,
-    PostgresOperator, ProgramCall, Query, QueryControl, QueryResult, QueryValue, RuntimeValue,
-    Term, TransactionRequest, TransactionService, TransactionServiceConfig, TxForm, Value,
-    Variable, encode_index_segment,
+    Attribute, CallableRef, CapacityLimits, Cardinality, Clause, DataPattern, DatabaseValue,
+    EntityRef, FindElement, FindSpec, IndexOrder, IndexSegment, Keyword, Peer, PortableBackup,
+    PostgresMigrator, PostgresOperator, ProgramCall, Query, QueryControl, QueryResult, QueryValue,
+    RuntimeValue, Term, TransactionRequest, TransactionService, TransactionServiceConfig, TxForm,
+    TxOp, Value, ValueType, Variable, encode_index_segment,
 };
 use postgres::{Client, NoTls};
 use sha2::{Digest as _, Sha256};
@@ -28,12 +28,21 @@ const PREFIX: &str = "OP_RESULT ";
 fn main() -> Result<()> {
     if let Ok(phase) = std::env::var("ATOMIC_OPS_PHASE") {
         let baseline = memory();
+        let cpu_before = process_cpu_micros();
+        let context =
+            atomic_core::OperationContext::new(atomic_core::OperationKind::Administration);
+        let _scope = context.enter();
         let start = Instant::now();
         let result = run_phase(&phase);
+        let io = context.snapshot();
         println!(
-            "operations_phase={phase} outcome={} elapsed_ms={} baseline={baseline} final={}",
+            "operations_phase={phase} outcome={} elapsed_ms={} cpu_us={} sql_calls={} result_cell_bytes={} sql_elapsed_ns={} baseline={baseline} final={}",
             if result.is_ok() { "passed" } else { "failed" },
             start.elapsed().as_millis(),
+            process_cpu_micros().saturating_sub(cpu_before),
+            io.sql_calls,
+            io.result_cell_bytes,
+            io.elapsed_nanos,
             memory()
         );
         for (key, value) in result? {
@@ -185,6 +194,9 @@ fn run_phase(phase: &str) -> Result<Fields> {
     );
     let mut fields = Fields::new();
     match phase {
+        "fixture-seed" => {
+            seed_maintenance_fixture(&source, &database)?;
+        }
         "source-native" | "target-native" => {
             let connection = if phase == "source-native" {
                 &source
@@ -247,6 +259,94 @@ fn run_phase(phase: &str) -> Result<Fields> {
         _ => return Err(format!("unknown operations phase: {phase}").into()),
     }
     Ok(fields)
+}
+
+/// Opt-in repeatable maintenance fixture. It creates only the explicitly named
+/// logical database in an already selected source catalog; no GC or deletion.
+/// Use an empty disposable schema. Rows carry two attributes, 256-byte strings,
+/// and a retained publication after each eight 128-entity transactions.
+fn seed_maintenance_fixture(connection: &str, database: &str) -> Result<()> {
+    let records = std::env::var("ATOMIC_OPS_PROFILE_RECORDS")?.parse::<usize>()?;
+    if records == 0 || records > 100_000 || records % 128 != 0 {
+        return Err(
+            "maintenance profile records must be a positive multiple of128, at most100000".into(),
+        );
+    }
+    PostgresMigrator::connect(connection)?.migrate()?;
+    let mut schema = atomic_core::Schema::new();
+    let mut key = Attribute::new(
+        1000,
+        Keyword::new("maintenance", "key"),
+        ValueType::Long,
+        Cardinality::One,
+    );
+    key.indexed = true;
+    schema.install(key)?;
+    schema.install(Attribute::new(
+        1001,
+        Keyword::new("maintenance", "payload"),
+        ValueType::String,
+        Cardinality::One,
+    ))?;
+    let mut basis = atomic_core::PostgresStore::connect(connection)?
+        .create_database(database, schema)?
+        .basis_t();
+    for publication in (0..records).step_by(1024) {
+        let service = TransactionService::start(TransactionServiceConfig {
+            connection: connection.to_owned(),
+            database_id: database.to_owned(),
+            holder_id: format!("maintenance-profile-{}", std::process::id()),
+            lease_duration: Duration::from_secs(5),
+            renew_interval: Duration::from_millis(100),
+            queue_capacity: 16,
+            capacity_limits: CapacityLimits::default(),
+        })?;
+        for batch in (publication..records.min(publication + 1024)).step_by(128) {
+            let mut operations = Vec::new();
+            for n in batch..batch + 128 {
+                let entity = EntityRef::Temp(format!("entity-{n}"));
+                operations.push(TxOp::Add {
+                    entity: entity.clone(),
+                    attribute: 1000,
+                    value: Value::Long(n as i64).into(),
+                });
+                operations.push(TxOp::Add {
+                    entity,
+                    attribute: 1001,
+                    value: Value::String(format!("{n:016x}{}", "x".repeat(240))).into(),
+                });
+            }
+            let request = TransactionRequest::new(format!("maintenance-{batch}"), operations)
+                .comparing_basis(basis)
+                .with_tx_instant((basis as i64 + 1) * 1000);
+            let outcome = service
+                .client()
+                .transact(request, Duration::from_secs(120))?;
+            basis += 1;
+            if outcome.basis_t != basis {
+                return Err("maintenance seed basis diverged".into());
+            }
+        }
+        service.shutdown();
+        atomic_core::PostgresIndexer::connect(connection, database)?.consolidate()?;
+        println!(
+            "maintenance_seed records={} basis_t={basis}",
+            records.min(publication + 1024)
+        );
+    }
+    Ok(())
+}
+
+fn process_cpu_micros() -> u64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    if unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) } != 0 {
+        return 0;
+    }
+    let usage = unsafe { usage.assume_init() };
+    [usage.ru_utime, usage.ru_stime]
+        .iter()
+        .map(|t| t.tv_sec as u64 * 1_000_000 + t.tv_usec as u64)
+        .sum()
 }
 
 fn capture_native(connection: &str, database: &str) -> Result<Fields> {

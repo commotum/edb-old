@@ -2,8 +2,8 @@
 
 mod common;
 use common::product_support::*;
-use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 
 #[test]
 fn product_configuration_is_explicit_and_redacts_connection_values() {

@@ -1,11 +1,14 @@
 //! Seeded, replayable storage-fault schedules using the existing index fault
 //! hook and pure/native information oracle. No process crash is simulated:
 //! `AfterSegments` means an injected interruption after immutable upload and
-//! before root publication. A separately labeled controlled assertion proves
+//! before root publication. V2 also crosses graceful writer replacement, exact
+//! receipt retry and bounded consumer restart/acknowledgment. V1 traces retain
+//! their exact action meanings. A separately labeled controlled assertion proves
 //! reduction; it is not evidence of a production defect.
 use atomic_core::{
-    Attribute, Cardinality, Database, DatabaseValue, EntityRef, ErrorCategory, IndexBuildFault,
-    Keyword, Peer, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, SemanticError,
+    Attribute, Cardinality, ChangeConsumer, ChangeConsumerConfig, Database, DatabaseValue,
+    EntityRef, ErrorCategory, IndexBuildFault, Keyword, Peer, PostgresIndexer, PostgresMigrator,
+    PostgresStore, Schema, SemanticError, ServiceTransactionReport, TransactionRequest,
     TransactionService, TxOp, Value, ValueType,
 };
 use std::collections::BTreeMap;
@@ -13,10 +16,12 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 mod common;
 
-const VERSION: &str = "atomic-storage-fault-trace-v1";
+const VERSION: &str = "atomic-storage-fault-trace-v2";
+const LEGACY_VERSION: &str = "atomic-storage-fault-trace-v1";
 const DEFAULT_SEED: u64 = 0x39dc_55b0_63e7_a412;
 const DEFAULT_STEPS: usize = 12;
 const MAX_STEPS: usize = 128;
@@ -29,6 +34,9 @@ enum Step {
     InterruptUpload,
     PublishIndex,
     ReopenPeer { cache_entries: usize },
+    RestartWriter,
+    RetryLast,
+    ResumeConsumer,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,7 +67,11 @@ impl Trace {
                 0 => 0,
                 1 => 1,
                 2 => 3,
-                _ => (draw % 5) as usize,
+                3 => 5,
+                4 | 8 => 6,
+                5 | 7 => 7,
+                6 => 0,
+                _ => (draw % 8) as usize,
             };
             steps.push(match family {
                 0 | 4 => Step::Put {
@@ -68,6 +80,9 @@ impl Trace {
                 },
                 1 => Step::InterruptUpload,
                 2 => Step::PublishIndex,
+                5 => Step::RestartWriter,
+                6 => Step::RetryLast,
+                7 => Step::ResumeConsumer,
                 _ => Step::ReopenPeer {
                     cache_entries: if next() & 1 == 0 { 0 } else { 16 },
                 },
@@ -84,6 +99,9 @@ impl Trace {
                 Step::InterruptUpload => "interrupt-upload\n".into(),
                 Step::PublishIndex => "publish-index\n".into(),
                 Step::ReopenPeer { cache_entries } => format!("reopen-peer {cache_entries}\n"),
+                Step::RestartWriter => "restart-writer\n".into(),
+                Step::RetryLast => "retry-last\n".into(),
+                Step::ResumeConsumer => "resume-consumer\n".into(),
             };
             encoded.push_str(&line);
         }
@@ -95,7 +113,8 @@ impl Trace {
             return Err("trace exceeds its byte limit".into());
         }
         let mut lines = encoded.lines();
-        if lines.next() != Some(VERSION) {
+        let version = lines.next();
+        if ![Some(VERSION), Some(LEGACY_VERSION)].contains(&version) {
             return Err("unsupported storage fault trace version".into());
         }
         let seed = number(
@@ -127,6 +146,9 @@ impl Trace {
                 }
                 ["interrupt-upload"] => Step::InterruptUpload,
                 ["publish-index"] => Step::PublishIndex,
+                ["restart-writer"] if version == Some(VERSION) => Step::RestartWriter,
+                ["retry-last"] if version == Some(VERSION) => Step::RetryLast,
+                ["resume-consumer"] if version == Some(VERSION) => Step::ResumeConsumer,
                 ["reopen-peer", entries] => {
                     let entries = number(entries)?;
                     if ![0, 16].contains(&entries) {
@@ -288,6 +310,9 @@ enum Failure {
         sqlstate: Option<String>,
     },
     Information,
+    ConsumerData,
+    ConsumerReplay,
+    ConsumerCheckpoint,
     PublicationChanged,
     UnexpectedFault,
     UnexpectedPanic,
@@ -317,6 +342,10 @@ struct ReplayCounts {
     writes: usize,
     interrupted_uploads: usize,
     peer_reopens: usize,
+    writer_restarts: usize,
+    exact_retries: usize,
+    consumer_resumes: usize,
+    consumer_events: usize,
 }
 
 fn exact(value: &DatabaseValue, expected: &Database) -> Result<(), Failure> {
@@ -380,6 +409,21 @@ fn replay_inner(
     let mut control = postgres::Client::connect(connection, postgres::NoTls)
         .map_err(|error| Failure::postgres(PostgresContext::Connection, error))?;
     let mut counts = ReplayCounts::default();
+    let mut last_receipt: Option<(TransactionRequest, ServiceTransactionReport)> = None;
+    let mut expected_events = BTreeMap::new();
+    // Nonempty create_database(schema) records schema as ordinary t=1 data,
+    // not genesis. A log consumer must see it, including in reduced traces
+    // whose only action is opening that consumer.
+    if expected.basis_t() == 1 {
+        expected_events.insert(
+            1,
+            expected
+                .datoms(atomic_core::View::History, atomic_core::IndexOrder::Eavt)
+                .into_iter()
+                .filter(|datom| datom.tx == atomic_core::t_to_tx(1).unwrap())
+                .collect(),
+        );
+    }
     for (ordinal, step) in trace.steps.iter().enumerate() {
         match *step {
             Step::Put { slot, value } => {
@@ -399,14 +443,13 @@ fn replay_inner(
                     .map_err(Failure::storage)?;
                 let service =
                     writer.get_or_insert_with(|| common::start_service(connection, &database));
-                let report = common::try_transact(
-                    service,
-                    &format!("trace-write-{ordinal}"),
-                    expected.basis_t(),
-                    &operations,
-                    instant,
-                )
-                .map_err(Failure::storage)?;
+                let request = TransactionRequest::new(format!("trace-write-{ordinal}"), operations)
+                    .comparing_basis(expected.basis_t())
+                    .with_tx_instant(instant);
+                let report = service
+                    .client()
+                    .transact(request.clone(), Duration::from_secs(5))
+                    .map_err(Failure::storage)?;
                 if report.tempids != pure.tempids {
                     return Err(Failure::Information);
                 }
@@ -415,6 +458,8 @@ fn replay_inner(
                 }
                 exact(&report.db_before, &expected)?;
                 exact(&report.db_after, &pure.db_after)?;
+                expected_events.insert(report.basis_t, report.tx_data.clone());
+                last_receipt = Some((request, report));
                 expected = pure.db_after;
                 counts.writes += 1;
                 let value = peer.sync().map_err(Failure::storage)?;
@@ -468,6 +513,86 @@ fn replay_inner(
                     return Err(Failure::ControlledFixture);
                 }
             }
+            Step::RestartWriter => {
+                if let Some(service) = writer.take() {
+                    service.shutdown();
+                }
+                writer = Some(common::start_service(connection, &database));
+                exact(&peer.sync().map_err(Failure::storage)?, &expected)?;
+                counts.writer_restarts += 1;
+            }
+            Step::RetryLast => {
+                // Removing the preceding write during reduction makes retry
+                // a no-op, not a fabricated request with different meaning.
+                if let Some((request, original)) = &last_receipt {
+                    let service =
+                        writer.get_or_insert_with(|| common::start_service(connection, &database));
+                    let replay = service
+                        .client()
+                        .transact(request.clone(), Duration::from_secs(5))
+                        .map_err(Failure::storage)?;
+                    if !replay.replayed
+                        || replay.basis_t != original.basis_t
+                        || replay.tx_hash != original.tx_hash
+                        || replay.tx_data != original.tx_data
+                        || replay.tempids != original.tempids
+                    {
+                        return Err(Failure::Information);
+                    }
+                    // Exact old receipt, not merely equivalent current facts.
+                    catch_unwind(AssertUnwindSafe(|| {
+                        common::assert_same_information(&replay.db_before, &original.db_before);
+                        common::assert_same_information(&replay.db_after, &original.db_after);
+                    }))
+                    .map_err(|_| Failure::Information)?;
+                    exact(&peer.sync().map_err(Failure::storage)?, &expected)?;
+                    counts.exact_retries += 1;
+                }
+            }
+            Step::ResumeConsumer => {
+                let open = || {
+                    ChangeConsumer::connect(
+                        connection,
+                        &database,
+                        "trace-consumer",
+                        ChangeConsumerConfig::default(),
+                    )
+                    .map_err(Failure::storage)
+                };
+                let mut consumer = open()?;
+                let before = consumer.checkpoint().last_t();
+                let mut restarted_unacknowledged = false;
+                while let Some(mut event) =
+                    consumer.next(Duration::ZERO).map_err(Failure::storage)?
+                {
+                    if expected_events.get(&event.transaction.t) != Some(&event.transaction.data) {
+                        return Err(Failure::ConsumerData);
+                    }
+                    if !restarted_unacknowledged {
+                        drop(consumer);
+                        consumer = open()?;
+                        let replay = consumer
+                            .next(Duration::ZERO)
+                            .map_err(Failure::storage)?
+                            .ok_or(Failure::ConsumerReplay)?;
+                        if replay != event {
+                            return Err(Failure::ConsumerReplay);
+                        }
+                        event = replay;
+                        restarted_unacknowledged = true;
+                    }
+                    consumer
+                        .acknowledge(&event.checkpoint)
+                        .map_err(Failure::storage)?;
+                    counts.consumer_events += 1;
+                }
+                if consumer.checkpoint().last_t() != expected.basis_t()
+                    || before > expected.basis_t()
+                {
+                    return Err(Failure::ConsumerCheckpoint);
+                }
+                counts.consumer_resumes += 1;
+            }
         }
         if peer.load_stats().compatibility_materializations != 0 {
             return Err(Failure::Information);
@@ -511,6 +636,14 @@ fn generated_storage_fault_schedule_replays_real_postgres_and_exact_values() {
         Ok(counts) => {
             if replay_path.is_none() {
                 assert!(counts.interrupted_uploads > 0 && counts.peer_reopens > 0);
+                if trace.steps.len() >= 9 {
+                    assert!(
+                        counts.writer_restarts > 0
+                            && counts.exact_retries >= 2
+                            && counts.consumer_resumes >= 2
+                            && counts.consumer_events >= 2
+                    );
+                }
             }
             eprintln!(
                 "storage fault replay passed: {counts:?}; exact current/history and retained old values"
@@ -638,6 +771,16 @@ fn storage_fault_trace_roundtrips_and_rejects_unsafe_inputs_or_overwrite() {
         assert_eq!(Trace::decode(&trace.encode()).unwrap(), trace);
     }
     assert!(Trace::generate(0, 3).is_err());
+    let old = format!("{LEGACY_VERSION}\nseed 42\nput 0 1\ninterrupt-upload\nreopen-peer 16\n");
+    assert_eq!(
+        Trace::decode(&old).unwrap().steps,
+        vec![
+            Step::Put { slot: 0, value: 1 },
+            Step::InterruptUpload,
+            Step::ReopenPeer { cache_entries: 16 }
+        ]
+    );
+    assert!(Trace::decode(&format!("{LEGACY_VERSION}\nseed 42\nretry-last\n")).is_err());
     assert!(Trace::generate(1, MAX_STEPS + 1).is_err());
     assert!(Trace::decode(&format!("{VERSION}\nseed 1\nput 4 0\n")).is_err());
     let directory = tempfile::tempdir().unwrap();

@@ -245,14 +245,17 @@ impl PostgresConnectionConfig {
         &self,
         operation: &'static str,
         timeout: Option<Duration>,
-    ) -> Result<Config, SemanticError> {
-        let mut config = self.parameters.parse::<Config>().map_err(|_| {
-            SemanticError::incorrect(
-                "postgres/invalid-connection-config",
-                "invalid PostgreSQL connection configuration",
-            )
-            .detail("operation", operation)
-        })?;
+    ) -> Result<tokio_postgres::Config, SemanticError> {
+        let mut config = self
+            .parameters
+            .parse::<tokio_postgres::Config>()
+            .map_err(|_| {
+                SemanticError::incorrect(
+                    "postgres/invalid-connection-config",
+                    "invalid PostgreSQL connection configuration",
+                )
+                .detail("operation", operation)
+            })?;
         if timeout.is_some_and(|timeout| timeout.is_zero()) {
             return Err(SemanticError::new(
                 ErrorCategory::Unavailable,
@@ -345,11 +348,28 @@ impl PostgresConnectionConfig {
         operation: &'static str,
         timeout: Option<Duration>,
     ) -> Result<Client, SemanticError> {
+        let (config, tls) = self.listener_connection_parts(operation, timeout)?;
+        let config = Config::from(config);
+        match tls {
+            None => config
+                .connect(NoTls)
+                .map_err(|error| crate::postgres::postgres_error(operation, error)),
+            Some(connector) => config
+                .connect(connector)
+                .map_err(|_| Self::tls_connection_error(operation)),
+        }
+    }
+
+    /// The bounded notification driver uses the same parsed connection,
+    /// transport authentication, roots and I/O policy as synchronous clients.
+    pub(crate) fn listener_connection_parts(
+        &self,
+        operation: &'static str,
+        timeout: Option<Duration>,
+    ) -> Result<(tokio_postgres::Config, Option<MakeTlsConnector>), SemanticError> {
         let mut config = self.prepared_config(operation, timeout)?;
         let Some(root_certificates) = &self.root_certificates else {
-            return config
-                .connect(NoTls)
-                .map_err(|error| crate::postgres::postgres_error(operation, error));
+            return Ok((config, None));
         };
         if config
             .get_hosts()
@@ -379,17 +399,17 @@ impl PostgresConnectionConfig {
             )
             .detail("operation", operation)
         })?;
-        config
-            .connect(MakeTlsConnector::new(connector))
-            .map_err(|_| {
-                SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "postgres/tls-connect",
-                    "verified PostgreSQL TLS connection failed",
-                )
-                .detail("operation", operation)
-                .detail("postgres_transport", "true")
-            })
+        Ok((config, Some(MakeTlsConnector::new(connector))))
+    }
+
+    pub(crate) fn tls_connection_error(operation: &'static str) -> SemanticError {
+        SemanticError::new(
+            ErrorCategory::Unavailable,
+            "postgres/tls-connect",
+            "verified PostgreSQL TLS connection failed",
+        )
+        .detail("operation", operation)
+        .detail("postgres_transport", "true")
     }
 }
 

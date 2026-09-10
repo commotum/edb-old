@@ -1,163 +1,89 @@
-# Running the native acceptance deployment
+# Product acceptance and operating envelope
 
-The supported deployment demonstrated here is Linux, PostgreSQL, one Rust
-transaction service and independent same-user peer processes on the same host.
-PostgreSQL may be remote through the configured, verified-TLS API. The examples
-below use explicitly supplied development PostgreSQL connections; they are not
-a TCP transaction service or a PostgreSQL HA manager.
+Goal7 is in progress. The delivered application/security/lifecycle results below
+are established; final maintenance and independent-reader measurements are not
+yet complete. [Goal0](../goal-0/0-plan.md) owns completion, not this document or
+the historical G3 finish line.
 
-[Archived G3 Goal6](../goal-archive/G3/goal-6/0-plan.md) records completed core
-runs and workload-specific measurements. The fresh Goal0 extends that baseline;
-these existing drivers do not establish its unimplemented features or an
-unqualified production/scale claim. Read [operations.md](operations.md) for
-roles, transport policy, upgrade, unknown outcomes, retention and excision.
+## What has been exercised
 
-## Build and provision
+All results below used actual PostgreSQL15.11 and Rust1.90 on the development
+host. Test fixtures, crash targets and network namespaces were disposable. These
+are reproducible checks and workload-specific measurements, not a deployment
+certification, an uptime SLA or Datomic wire/storage parity.
 
-Use disposable, separately provisioned PostgreSQL catalogs and an object-owning
-test account. Normal applications use the restricted runtime roles described
-in the operations guide. Keep any configured passwords out of output/logs.
+| Boundary | Evidence |
+| --- | --- |
+| Supported application | Local CLI and separate application preserve fixed schema/data requests, history, safe preview/replanning, partitions/UUIDs, fulltext and exact receipts through restart. Two-process regression2/2 passed8.90s. |
+| Remote application | Two isolated network namespaces connected by veth, verified TLS, restricted roles, invalid-token rejection, writer SIGKILL/replacement/rediscovery, exact retry and cross-process snapshot reference/excision policy. Passed15.24s. |
+| Remote programs and hints | Stored query/transaction program preview agrees with commit; retry after replacement and program rebinding keeps the original receipt. Altered/stale/foreign/absent hints do not change request identity. Transport tests3/3 passed11.34s. |
+| Observation | Consumer replay/checkpoint/RLS/generation/reconnect tests6/6 passed12.68s;512-notice flood coalesced504, maximum batch64. Whole reader process0SQL over500ms idle; separate-writer observation75.474ms consumer/75.479ms peer in the final debug sample. |
+| PostgreSQL TLS | Both actual asynchronous LISTEN backends verified TLS1.3 through pg_stat_ssl; missing trust and plaintext rejected. Consumer checkpoint/peer advancement pass;120ms SQL timeout observed121.03ms. |
+| Administration | Real backup reuse, offline verification, guarded separate-target restore, SIGTERM during an observed restore node-write wait followed by identical retry, inspection, authorized GC and diagnosed missing-search-root repair.2/2 passed12.84s. |
+| Crash recovery | Separate PostgreSQL immediate shutdown/WAL recovery with fsync/synchronous_commit/full_page_writes on. Current product at basis11, acknowledged12, successor13; full current/history fingerprints, retained values/log, exact retry and independent reopen agree. |
+| Old data | Preserved pre-partition/pre-fulltext binaries created actual4588/4818-byte genesis databases. Explicit schema26→29 migration and vocabulary transactions retain genesis bytes/hash, old values and retry identity. |
+| Generated lifecycle | V2 stored traces combine transactions, interrupted index publication, exact retries, peer reopen, graceful writer replacement and bounded consumer restart/acknowledgment. Saved trace replays on a fresh fixture. Controlled failure reduces9actions→3 and passes without the injected assertion. V1 action meanings remain readable. |
 
-```sh
-cargo build --offline --release --examples
-```
+Source details and scoped measurements are retained in
+[Goal2](../goal-2/0-plan.md), [Goal3](../goal-3/0-plan.md),
+[Goal4](../goal-4/0-plan.md), [Goal5](../goal-5/0-plan.md),
+[Goal6](../goal-6/0-plan.md) and [Goal7](../goal-7/0-plan.md).
 
-Examples deliberately fail when their required connection environment is
-missing. The scale driver calls the migrator and creates a uniquely named
-logical database. It leaves that data in PostgreSQL for maintenance/recovery
-checks; it does not drop a previous database. Use distinct catalogs for source
-and restore. Never run crash/GC examples against shared or production systems.
+## Cost evidence to interpret separately
 
-## Independent writer and peers
+- Resident native reads avoid foreground SQL; new peers and cold misses still
+  authorize, authenticate and maintain retention through PostgreSQL. A serialized
+  snapshot reference is neither a credential nor a retention pin.
+- Four thousand ninety-six speculative extensions had height14 and a selective
+  read visited24 overlay nodes. This is structural sharing, not4096 whole-database
+  copies. The16k-row numeric hash-join fixture took109ms versus125s for its
+  reference nested-loop evaluator; this is not universal query throughput.
+- Transaction hints are implemented, bounded and advisory. The measured small
+  cold/warm fixture gained no speed and added16SQL calls; use evidence from the
+  actual workload before enabling them as an optimization.
+- Compression is a versioned optional physical projection. Canonical hashes and
+  rows remain authoritative, so transfer/cache savings can add PostgreSQL storage
+  and codec CPU. The batch-upload witness measured132→2driver calls (3with
+  compression) for66nodes; driver calls are not TCP round trips.
+- Fulltext is eventual and supplied-view validated, not a basis-stable ranking
+  service. A402-document native fixture read10167search bytes cold and0SQL warm;
+  its build wrote1543191cumulative spill bytes. Full source projection rebuilding
+  is not an incremental-build or arbitrary-scale claim.
+- The earlier100k-record G3 import/restore/inspection values remain
+  [historical baselines](operations.md#historical-g3-integrated-acceptance--2026-09-09),
+  not measurements of the newer reader/cache/maintenance paths.
 
-```sh
-ATOMIC_POSTGRES_URL='host=/private/socket port=55432 user=atomic_test dbname=atomic_goal6_scale' \
-ATOMIC_SCALE_RECORDS=100000 ATOMIC_SCALE_BATCH=100 \
-ATOMIC_SCALE_REQUIRE_CACHE_EXCEEDED=1 \
-  target/release/examples/scale_workflow
-```
+## Repeat the relevant checks
 
-The parent launches a writer and two long-lived submitting peers. Records have
-a unique integer key, indexed category, balance and 256-byte payload. Peers
-stream batches, retain earlier values and perform local query/Pull checks.
-The parent exercises a persisted balance-update function, pure speculative
-execution, time/history values, actual writer SIGKILL, fenced replacement,
-identical-key replay and writer-offline reopening. SIGKILL only targets the
-child process created by this run.
-
-The driver reports declared records/facts/payload bytes, canonical log bytes,
-batch latency percentiles, elapsed throughput, actual per-process RSS/high-water
-memory, cache/recent accounting, background jobs and physical node-read bytes.
-Its default settings are a 4MiB writer node cache, 1MiB peer caches, and 2MiB/8MiB
-recent scheduling/backpressure thresholds. A single admitted transaction can
-cross the pressure threshold before subsequent admission is parked. Application
-values, schema, resident roots, indexing jobs and allocator overhead are separate
-from node-cache byte limits. Report queues are opt-in/unbounded and are not used
-as an accumulating event archive by this workload.
-
-`cache_exceeded=true` requires measured canonical log bytes greater than all
-three configured cache/recent budgets. It does not assert the database exceeds
-physical machine RAM or establish a deployment-independent throughput SLA.
-Cold/warm query counters describe actual immutable-node reads, not PostgreSQL
-buffer-cache misses, disk IOPS or network protocol overhead. The final `PASS`
-line provides the logical database ID/basis needed below.
-
-For ordinary library applications, `Connection::connect_with_cache_limits` and
-`connect_configured_with_cache_limits` expose independent entry/byte policy;
-`cache_stats`, `recent_stats` and `load_stats` expose its effects. Opening a
-connection does not start or own a writer. Service capacity and background
-indexing settings belong to the independently managed transaction service.
-
-## Portable operations on the same workload
-
-Stop the source writer first (the scale driver does this). The restore endpoint
-must be a separate catalog/schema; to run the crash workflow afterward, put the
-restore catalog on a dedicated disposable PostgreSQL server.
+Use a dedicated disposable PostgreSQL database with an administrative test login,
+never production. Runtime-role tests require permission to create restricted
+test roles. Set `ATOMIC_POSTGRES_URL` and an explicit
+`ATOMIC_POSTGRES_TRANSPORT=plaintext` for a private local fixture, or use the
+configured TLS APIs. Build the executable/example before process tests, which
+intentionally invoke those prebuilt files:
 
 ```sh
-ATOMIC_POSTGRES_URL='host=/source/socket port=55432 user=atomic_test dbname=atomic_goal6_scale' \
-ATOMIC_RESTORE_POSTGRES_URL='host=/restore/socket port=55434 user=atomic_test dbname=atomic_goal6_restore' \
-ATOMIC_DATABASE_ID='ID_FROM_SCALE_PASS' \
-  target/release/examples/operations_workflow
+cargo build --offline --bin atomic --example application_workflow
+cargo test --offline --test product_cli --test remote_transport --test remote_product --test change_consumer --test admin_cli --test postgres_runtime_roles -- --nocapture --test-threads=1
+cargo test --offline --test storage_fault_replay -- --nocapture --test-threads=1
 ```
 
-Each phase runs in a fresh process for meaningful RSS/high-water attribution:
-bounded-cache native full scans/fingerprints, first and differential backup,
-deep semantic verification, restore, independent current/history/query checks,
-original controlled-request replay, and deep inspection. It also checks that
-the source did not change during the workflow. Repeated unchanged backup must
-reuse immutable objects; restored facts/history must match canonical fingerprints.
+The Linux remote-product test additionally requires `unshare`, `nsenter`, `ip`,
+OpenSSL and permission to create isolated user/network namespaces. It does not
+modify the host network. Admin tests create separate physical PostgreSQL
+databases for destructive/recovery checks. Missing required privileges are not
+evidence of a passing acceptance run.
 
-Portable backups and semantic verification are broad operations. Deep replay
-can retain current/history information; comparing retained request archives can
-add substantial work. Do not compare these memory/latency costs to a selective
-peer read or silently infer constant-memory administration. The driver reports
-repository bytes/objects and per-phase cost, and retains its private backup
-directory. `ATOMIC_BACKUP_DIRECTORY` selects an explicit repository if desired.
-Retained backups contain subject data; apply your independent retention policy.
+For another generated lifecycle schedule, set `ATOMIC_STORAGE_FAULT_SEED=42` and
+`ATOMIC_STORAGE_FAULT_STEPS=24`. The test prints a private saved trace path.
+Re-run it with `ATOMIC_STORAGE_FAULT_REPLAY=/absolute/saved.trace`, omitting seed/
+step overrides. Failure reduction retains a second trace and a stable failure
+signature. The controlled reducer witness is explicitly injected, not a claim
+that it discovered a production defect.
 
-## Crash PostgreSQL and recover acknowledged information
-
-This driver requires an existing restored workload and explicit destructive-
-availability opt-in. It verifies the connection's actual `data_directory`,
-requires a directory below the system temporary directory, and checks `fsync`,
-`synchronous_commit` and `full_page_writes` are on. Supply the exact startup
-options for that dedicated server, including any external configuration path.
-
-```sh
-ATOMIC_ALLOW_DISPOSABLE_PG_CRASH=1 \
-ATOMIC_RESTART_POSTGRES_URL='host=/restore/socket port=55434 user=atomic_test dbname=atomic_goal6_restore' \
-ATOMIC_DATABASE_ID='ID_FROM_SCALE_PASS' \
-ATOMIC_RESTART_POSTGRES_DATA='/tmp/DEDICATED_FIXTURE/data' \
-ATOMIC_RESTART_PG_CTL='/absolute/path/to/pg_ctl' \
-ATOMIC_RESTART_POSTGRES_LOG='/tmp/DEDICATED_FIXTURE/server.log' \
-ATOMIC_RESTART_POSTGRES_OPTIONS='-c config_file=/tmp/DEDICATED_FIXTURE/postgresql.conf' \
-  target/release/examples/restart_workflow
-```
-
-The test commits a marker with a live writer, immediately stops PostgreSQL
-without a clean checkpoint, restarts it, replaces the writer, replays the exact
-acknowledged request and commits a successor. Captured native values, a bounded
-sample of workload facts, old log data, history/Pull and cache-cold reopening
-must agree. `db()` stays local while storage is unavailable; uncached reads
-still require storage. The fixture attempts to restart its server even when a
-later check fails. This changes server availability and adds two marker
-transactions; it does not delete database files.
-
-Reported recovery latency is for the declared local server/workload, not a
-network partition bound. OS/TCP settings and SQL statement deadlines have the
-separate limits described in the operations guide. Fenced writer replacement
-does not implement PostgreSQL replication, quorum failover or off-site recovery.
-
-## Reclaim obsolete storage while retaining exact information
-
-Run this after the source consistency checks above, because it adds one marker
-transaction. Every writer in the selected installation must be stopped. The
-driver requires explicit zero-retention opt-in and checks that the actual
-PostgreSQL catalog name begins with `atomic_goal6_`. Global GC affects all logical
-databases in that installation schema; isolate it or report the other fixtures
-included in its costs. Never substitute production connection settings.
-
-```sh
-ATOMIC_ALLOW_DISPOSABLE_GC=1 \
-ATOMIC_POSTGRES_URL='host=/source/socket port=55432 user=atomic_test dbname=atomic_goal6_scale' \
-ATOMIC_DATABASE_ID='ID_FROM_SCALE_PASS' \
-ATOMIC_GC_MAX_BATCHES=4096 ATOMIC_GC_WALL_SECONDS=1800 \
-  target/release/examples/gc_workflow
-```
-
-The driver consolidates a successor, runs bounded GC first with an old snapshot
-held and then after releasing it, and validates cache-disabled old/current/history
-samples and an independent reopen. It reports actual installation row/payload
-counts, deletions, receipt-archive conversion work, I/O, per-batch time, elapsed
-time and RSS/high-water memory. Zero eligible work must also include completed
-publication folds; an empty physical-deletion list alone is not completion.
-
-Batch and wall budgets apply separately to the two windows. The wall budget is
-checked between calls, not as forced SQL/Rust preemption. A cap returns an
-incomplete result rather than claiming all reclamation finished. Native receipt
-archives retain required immutable nodes, and total conversion authenticates
-each distinct retained physical closure. Report those costs separately from
-ordinary transactions. Production normally uses the documented30-day horizon,
-not the zero age chosen for this disposable experiment. PostgreSQL space reuse
-and returning relation space to the OS are different from deleting Atomic rows.
+PostgreSQL TLS and server-crash tests require their separate configured fixtures;
+see [transport policy](operations.md#transport-and-failure-policy), comments in
+`tests/postgres_tls.rs`, and the guarded `examples/restart_workflow.rs` driver.
+Do not reuse the shared application server for an availability-destroying test.
+A default green test run with missing PostgreSQL/TLS/crash configuration is not
+evidence that those paths executed.

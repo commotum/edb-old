@@ -432,6 +432,12 @@ fn observed<T, E>(
 
 /// Owned PostgreSQL connection used internally. There is deliberately no
 /// Deref or raw-client accessor that could bypass instrumentation.
+pub(crate) fn observe_driver_call<T, E>(kind: SqlCallKind, call: impl FnOnce() -> Result<T, E>) -> Result<T, E> {
+    observed(Some(&io_context()), kind, call)
+}
+
+/// Instrumented synchronous client; asynchronous notice setup uses the same
+/// narrow accounting boundary above, but notice waiting itself sends no SQL.
 pub struct SqlClient {
     inner: postgres::Client,
 }
@@ -467,12 +473,6 @@ impl SqlClient {
 
     pub fn is_closed(&self) -> bool {
         self.inner.is_closed()
-    }
-
-    /// Wait for one advisory notification without issuing SQL. The dedicated
-    /// listener carries no transaction payloads; callers coalesce wakeups.
-    pub(crate) fn wait_notification(&mut self, timeout: std::time::Duration) -> Result<bool, Error> {
-        Ok(self.inner.notifications().timeout_iter(timeout).next()?.is_some())
     }
 
     pub fn close(self) -> Result<(), Error> {

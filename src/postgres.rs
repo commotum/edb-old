@@ -257,8 +257,14 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
         include_str!("../migrations/0026_optional_compressed_nodes.sql"),
     ),
     (27, include_str!("../migrations/0027_fulltext_sidecars.sql")),
-    (28, include_str!("../migrations/0028_remote_writer_endpoints.sql")),
-    (29, include_str!("../migrations/0029_change_checkpoints.sql")),
+    (
+        28,
+        include_str!("../migrations/0028_remote_writer_endpoints.sql"),
+    ),
+    (
+        29,
+        include_str!("../migrations/0029_change_checkpoints.sql"),
+    ),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
@@ -3965,8 +3971,8 @@ impl PostgresStore {
                 "PostgreSQL did not acknowledge the transaction commit",
             ));
         }
-        if let Some(connection)=&self.connection {
-            crate::change_notices::publish(connection,database_id);
+        if let Some(connection) = &self.connection {
+            crate::change_notices::publish(connection, database_id);
         }
         if fault_point == CommitFault::AfterCommitBeforeResponse {
             self.current.remove(database_id);
@@ -4275,6 +4281,29 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
     target_basis: u64,
     target_hash: Digest,
 ) -> Result<Recovered, SemanticError> {
+    recover_generation_to_with_visitor(
+        client,
+        database_id,
+        generation,
+        target_basis,
+        target_hash,
+        |_, _, _| Ok(()),
+    )
+}
+
+/// One authenticated replay shared by broad maintenance checks. The visitor
+/// borrows each immutable prefix; it must not retain a database clone per
+/// endpoint. Existing endpoint authentication/invariants remain mandatory.
+/// Intermediate state commitments are supplied for callers that independently
+/// authenticate retained publications at those prefixes.
+pub(crate) fn recover_generation_to_with_visitor<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    target_basis: u64,
+    target_hash: Digest,
+    mut visit: impl FnMut(&Database, Digest, Option<Digest>) -> Result<(), SemanticError>,
+) -> Result<Recovered, SemanticError> {
     let catalog = client
         .query_opt(
             "SELECT lineage_id, genesis, genesis_hash FROM atomic_databases \
@@ -4338,6 +4367,7 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
 
     let mut previous_hash = genesis_hash;
     let mut target_state_hash = [0; 32];
+    visit(&database, genesis_hash, None)?;
     for (offset, row) in rows.into_iter().enumerate() {
         let expected_basis = offset as u64 + 1;
         let basis = pg_basis(row.get::<_, i64>(0), "transaction")?;
@@ -4426,6 +4456,7 @@ pub(crate) fn recover_generation_to<C: GenericClient>(
         };
         target_state_hash = stored_state_hash;
         previous_hash = stored_hash;
+        visit(&database, stored_hash, Some(stored_state_hash))?;
     }
     if database.basis_t() != target_basis || previous_hash != target_hash {
         return Err(fault(

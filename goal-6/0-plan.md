@@ -5,7 +5,7 @@
 Deliver Stage6 of `/home/jake/Developer/atomic/goal-0/0-plan.md`: secure multi-host
 Rust applications, bounded restartable transaction observation and a complete
 administrative CLI. Goal0 owns all requirements/invariants and the remaining
-Stage7. This is the sole active child. Preserve working local APIs, existing
+Stage7. This child is complete; Goal7 is now active. Preserve working local APIs, existing
 data and request/program meaning, exact receipts, serialized fenced authority,
 schema/history and repairs. Local datomic_pro_docs governs semantics; recovered
 1.0.7705 source informs mechanisms. No JVM/wire compatibility, alternate store,
@@ -23,7 +23,7 @@ or silent narrowing of remote, lifecycle and security acceptance.
 
 ### 1. Secure remotely usable submission
 
-**Status:** Active.
+**Status:** Complete2026-09-09.
 
 **Outcome:** Applications discover/reconnect to the fenced writer and submit
 over authenticated, encrypted network transport with exact durable meaning.
@@ -40,7 +40,7 @@ program/planning/search results agree; hints cannot change request identity.
 
 ### 2. Restartable observation and value handoff
 
-**Status:** Pending; bounded observation can proceed alongside settled endpoints.
+**Status:** Complete2026-09-09, including actual PostgreSQL TLS listeners.
 
 **Outcome:** Applications react to other writers and resume after disconnect
 without unbounded buffering or assuming exactly-once external side effects.
@@ -58,7 +58,7 @@ excision cases obey policy. No indefinite pin or external-effect guarantee.
 
 ### 3. Complete the operator workflow and integrate
 
-**Status:** Pending; reuse existing operators while remote work proceeds.
+**Status:** Complete2026-09-09, including interrupted restore/retry.
 
 **Outcome:** Operators use supported commands for provisioning, backup/verify,
 separate-target restore, inspection/status, bounded GC and derived-index repair.
@@ -73,9 +73,73 @@ on acceptance-only provisioning. All stages compose on PostgreSQL and the real
 network boundary. Record evidence, then return to Goal0 and execute Goal7; this
 child alone is not product completion.
 
+## Verified delivery and decisions
+
+The TLS listener uses mandatory certificate/name verification plus a redacted
+32-byte bearer token. Discovery is PostgreSQL-authorized and bound to lineage,
+current lease epoch and listener instance. Admission/frames/deadlines are bounded;
+one deadline covers transport handshake through acknowledgment, not separate
+PostgreSQL discovery/report opening. Optional versioned hints are not request
+identity; valid excess hints can be ignored. Exact committed outcomes survive
+local report failure. CLI/private credential files and the evolving application
+support both existing local transport and remote discovery.
+
+Actual two-network-namespace application acceptance passed15.72s: verified TLS,
+restricted roles, separate writer/application, bad token rejection, real writer
+SIGKILL/replacement/rediscovery and identical-key replay. The unchanged planning,
+partition and fulltext workflow reaches basis11. Another process reopens the
+captured basis2 reference after newer schema/data and replacement; authorization
+is required. Excision rejects a new pre-excision reopening while an already held
+value remains exact. References grant neither authority nor retention. This is
+an integration fixture, not a throughput result. Dedicated remote tests cover
+wrong roots/names/lineage/stale endpoints, deadline/admission, altered/stale/foreign
+hints and lost committed responses. Stored native query/transaction program
+preview, commit, retry, replacement and program rebinding passed1/1(3.73s),
+preserving original encoded requests/programs and exact historical receipts.
+
+Post-commit wakeups use a nonblocking bounded/coalescing publisher. Notification
+SQL cannot decide commit success; queue saturation/failures are observable and
+durable-log catch-up repairs loss. Listener registration precedes initial catch-up,
+reconnect triggers repair, and quiet anti-entropy defaults to30s. The synchronous
+driver's unbounded notification VecDeque was replaced with direct async protocol
+polling: at most64 messages per batch and one retained wakeup bit. Same verified
+PostgreSQL configuration/I/O policy applies. Flood witness512 notices/504coalesced,
+peakbatch64, no fabricated transactions. Consumer suite6/6 and legacy connection/
+policy8/8 passed actual PostgreSQL. Separate writer sample: entire reader process
+0SQL over500ms idle; consumer76.617ms/peer76.620ms observation. These are debug
+samples, not latency guarantees or writer-process SQL totals.
+
+ChangeConsumer delivers one authenticated event, persists only an acknowledged
+contiguous checkpoint under CAS, and resumes after unacknowledged replay. A
+transaction byte limit is admission, not a semantic transaction limit. Checkpoints
+are login-isolated via RLS, bound to lineage/generation/T/hash, and are not pins
+or canonical backup data. Generation/history failures are explicit; no indefinite
+retention or exactly-once external effect. Existing lossless reports remain.
+
+Supported administrative commands now cover migrate/grants/create/status,
+backup/list/verify, guarded separate-target restore, inspect, bounded explicit-
+retention GC and diagnosed fulltext rebuild. Preview is default for destructive
+operations; exact physical database/catalog guards apply. PostgreSQL LOGIN roles
+are provisioned by normal PostgreSQL administration, not implicitly on startup.
+Actual disposable CLI suite passed2/2(15.14s), including locked-target restore
+SIGTERM and identical-command retry, backup reuse, deep offline verification,
+wrong targets/lineages/roles, history preservation, real GC and missing-search-
+root repair. No production fault hook or user-data target was used.
+
+Credential ownership/regular-file/size/redaction unit test passed. Local product
+regression2/2(8.90s) passed after the shared application/test-support refactor;
+20 warmed calculations use0SQL, restart SSD reuse18hits. Final rebuilt executable
+rerun follows the final observation changes before child closure.
+
+Final rebuilt suite: admin2/2(12.84s), consumers6/6(12.68s), roles1/1(3.18s),
+local product2/2(8.90s), isolated-network product1/1(15.24s), remoteTLS3/3(11.34s).
+Actual separate hostssl-only PostgreSQL TLS suite2/2(3.62s) passed with both async
+LISTEN backends verified TLS1.3 via pg_stat_ssl; consumer checkpoint resume and
+independent peer advancement passed,60.801ms observation sample. Missing private
+trust root and plaintext sslmode=disable both rejected. All-target check and
+optimized executable build pass. No self-skipped PostgreSQL test is counted.
+
 ## Continuation
 
-Started2026-09-09 after Goal5. Implement directly from current APIs. Disposable
-user/network namespaces are available for acceptance; keep network interfaces,
-credentials, process failures and destructive targets isolated from user data.
-
+Complete2026-09-09. Return to Goal0 and execute Goal7 integrated measurements,
+bottleneck repairs and final acceptance. Reopen this child for an integrated gap.

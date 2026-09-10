@@ -26,18 +26,21 @@ and dependency-aware implementation order. Goal1 starts with a supported local
 transactor, separate application and reusable test baseline; storage, functional
 features, distributed delivery and full administration follow. Goal1's runnable
 path, storage, functional APIs and partitions (Goals1–4) passed real PostgreSQL
-acceptance; Goal5 fulltext lifecycle acceptance also passes. Goal6 distributed
-application/operator delivery is active.
+acceptance; Goal5 fulltext and Goal6 secure distributed application/operator
+delivery also pass. Goal7 integrated operating acceptance is active.
 Shared speculative indexes, exact snapshot references, expanded native query
 programs and the application's safe planning flow are implemented; functional
 integration and hint/join cost checks pass. Named/implicit partitions and UUID
-helpers are implemented. Secure remote delivery and final integrated operating
-acceptance remain required; they are not covered by the older G3 finish line.
+helpers are implemented. Verified-TLS submission/discovery, bounded restartable
+consumers and the operator CLI are delivered. Final integrated operating
+acceptance is not covered by the older G3 finish line.
 
 ## Start here
 
-- [Run the supported local transactor and separate application](docs/application.md)
+- [Run the supported local or remote transactor and separate application](docs/application.md)
   using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
+- [React to transactions with bounded durable consumers](docs/change-consumers.md).
+- [Back up, verify, restore, inspect and maintain databases](docs/admin.md).
 - [Author persisted native query programs](docs/programs.md) with predicates,
   recursive rules, negation, historical sources and dynamic attributes.
 - [Compose native database, tuple and log queries](docs/queries.md), reuse query
@@ -218,7 +221,7 @@ search is not a complete-membership correctness constraint. Schema upgrades,
 stored ABI9 programs and the separate-process application are verified on real
 PostgreSQL; Goal5 records lifecycle and measured-cost acceptance.
 Native advisory read tracing/prefetch is implemented and verified in
-Goal3; versioned cross-host hint transport remains Stage6 work. Hints never become
+Goal3; Goal6 adds versioned authenticated cross-host hint transport. Hints never become
 transaction meaning or durable request identity. Cold submissions may still
 incur additional index reads. Neither search lag nor missing hint transport changes
 identity, transactions, history, or local Datalog/Pull semantics. See archived

@@ -115,7 +115,10 @@ const WRITER_FUNCTIONS: &[&str] = &[
     "atomic_request_base_archive_build_live(text,bigint)",
     "atomic_tree_database_build_pin_key(text)",
 ];
-const PEER_FUNCTIONS: &[&str] = &["atomic_log_generation_pin_key(text,bigint)","atomic_discover_remote_writer(text,text)"];
+const PEER_FUNCTIONS: &[&str] = &[
+    "atomic_log_generation_pin_key(text,bigint)",
+    "atomic_discover_remote_writer(text,text)",
+];
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
@@ -285,12 +288,12 @@ fn grant_matrix(
 }
 
 fn expected_peer_grants() -> BTreeSet<(String, String)> {
-    let mut grants:BTreeSet<_>=PEER_TABLES
+    let mut grants: BTreeSet<_> = PEER_TABLES
         .iter()
         .map(|table| ((*table).to_owned(), "SELECT".to_owned()))
         .collect();
-    grants.insert(("atomic_change_checkpoints".into(),"INSERT".into()));
-    grants.insert(("atomic_change_checkpoints".into(),"UPDATE".into()));
+    grants.insert(("atomic_change_checkpoints".into(), "INSERT".into()));
+    grants.insert(("atomic_change_checkpoints".into(), "UPDATE".into()));
     grants
 }
 
@@ -831,7 +834,7 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
     let mut indexer =
         atomic_core::PostgresIndexer::connect(&writer_connection, "fulltext_runtime").unwrap();
     indexer.consolidate().unwrap();
-    assert_eq!(indexer.fulltext_build_error(),None);
+    assert_eq!(indexer.fulltext_build_error(), None);
     let projection = indexer.rebuild_fulltext().unwrap().unwrap();
     let peer_connection = with_connection_parameter(
         &with_connection_parameter(&connection, "user", &peer),
@@ -857,5 +860,37 @@ fn runtime_grants_reject_ambient_authority_and_match_the_effective_acl() {
             .discard_projection(projection.source_manifest, 1)
             .unwrap_err(),
         "fulltext/operator-required",
+    );
+    let service = atomic_core::TransactionService::start(atomic_core::TransactionServiceConfig {
+        connection: writer_connection.clone(),
+        database_id: "fulltext_runtime".into(),
+        holder_id: "remote-acl-writer".into(),
+        lease_duration: std::time::Duration::from_secs(5),
+        renew_interval: std::time::Duration::from_millis(100),
+        queue_capacity: 4,
+        capacity_limits: Default::default(),
+    })
+    .unwrap();
+    let lease=roles.admin.query_one("SELECT holder_id,epoch FROM atomic_transactor_leases WHERE lease_scope='fulltext_runtime'",&[]).unwrap();
+    let holder: String = lease.get(0);
+    let epoch: i64 = lease.get(1);
+    let instance = vec![19u8; 32];
+    runtime_writer.execute("INSERT INTO atomic_remote_writer_endpoints(database_id,lineage_id,holder_id,lease_epoch,instance_id,network_address,tls_server_name,protocol_version) VALUES($1,$2,$3,$4,$5,'127.0.0.1:1','localhost',1)",&[&"fulltext_runtime",&reader.identity().lineage_id(),&holder,&epoch,&instance]).unwrap();
+    let discovered = reader
+        .discover_remote_writer(&atomic_core::PostgresConnectionConfig::plaintext(
+            &peer_connection,
+        ))
+        .unwrap();
+    assert_eq!(discovered.lease_epoch(), epoch as u64);
+    assert!(runtime_writer.execute("UPDATE atomic_remote_writer_endpoints SET lease_epoch=lease_epoch+1 WHERE database_id='fulltext_runtime'",&[]).is_err());
+    service.shutdown();
+    assert_eq!(
+        reader
+            .discover_remote_writer(&atomic_core::PostgresConnectionConfig::plaintext(
+                &peer_connection
+            ))
+            .unwrap_err()
+            .code,
+        "remote/no-writer"
     );
 }

@@ -100,8 +100,11 @@ impl RemoteClientConfig {
     pub fn with_root_certificate_pem(mut self, pem: &[u8]) -> Result<Self, SemanticError> {
         let mut builder = TlsConnector::builder();
         builder.min_protocol_version(Some(Protocol::Tlsv12));
-        self.roots.push(Certificate::from_pem(pem).map_err(tls_error)?);
-        for root in &self.roots {builder.add_root_certificate(root.clone());}
+        self.roots
+            .push(Certificate::from_pem(pem).map_err(tls_error)?);
+        for root in &self.roots {
+            builder.add_root_certificate(root.clone());
+        }
         self.connector = builder.build().map_err(tls_error)?;
         Ok(self)
     }
@@ -567,7 +570,9 @@ fn serve(
     }
     tls.write_all(&[1])?;
     let request = read_frame(&mut tls, config.max_frame_bytes)?;
-    let hint_bytes = read_frame(&mut tls, config.max_hint_bytes)?;
+    // Wire framing has one fixed hard bound; the deployment's smaller hint
+    // allowance controls advisory admission, not transaction rejection.
+    let hint_bytes = read_frame(&mut tls, hints::MAX_WIRE_BYTES)?;
     let result = decode_submission(&request).and_then(|(identity, request)| {
         if identity != client.identity() {
             return Err(SemanticError::conflict(
@@ -575,7 +580,10 @@ fn serve(
                 "endpoint and peer address different database lineages",
             ));
         }
-        let hints = if hint_bytes.is_empty() {
+        let hints = if hint_bytes.len() > config.max_hint_bytes {
+            stats.ignored_hints.fetch_add(1, Ordering::Relaxed);
+            None
+        } else if hint_bytes.is_empty() {
             None
         } else {
             match hints::decode(&hint_bytes) {

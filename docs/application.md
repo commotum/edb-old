@@ -2,7 +2,7 @@
 
 The supported `atomic` executable owns the transactor process. The
 `application_workflow` example is an ordinary separate client: it receives a
-logical database and local endpoint, submits application schema/data through
+logical database and local endpoint or authenticated remote discovery, submits application schema/data through
 public APIs, and never provisions PostgreSQL or starts a writer.
 
 Build both programs:
@@ -80,6 +80,61 @@ Rerun the application: its fixed request keys resolve the exact prior schema,
 seed and update receipts. The second run reports `seed_replayed=true` and
 `update_replayed=true`. It does not silently repeat changes under new keys.
 
+## Remote applications
+
+Remote transaction submission uses verified TLS (at least TLS1.2) and a shared
+32-byte bearer token. PostgreSQL credentials still authorize each peer's direct
+storage reads; possessing the transaction token does not grant storage access.
+Use your normal certificate provisioning and private secret distribution. The
+server needs `ATOMIC_REMOTE_TLS_CERT` (PEM certificate chain),
+`ATOMIC_REMOTE_TLS_KEY` (PKCS8 PEM private key), and `ATOMIC_REMOTE_TOKEN_FILE`
+(64 hexadecimal digits). Key/token files must be regular, owned by the process
+user and inaccessible to group/other users, typically mode0600. Secrets are not
+command-line arguments and are omitted from diagnostics.
+
+With writer PostgreSQL credentials and those environment variables configured:
+
+```sh
+target/debug/atomic transactor --database application-demo --listen 0.0.0.0:7443 --advertise 192.0.2.10:7443 --tls-server-name atomic.example.com --index-threshold-bytes 1
+```
+
+Replace the example address/name with a reachable numeric unicast address and
+the certificate's DNS name. The listen address may be wildcard; the advertised
+address may not. The small indexing threshold has the same fixture-only purpose
+as in the local example above. Do not supply `--endpoint` for a remote listener.
+The writer publishes its endpoint through PostgreSQL, bound to database lineage,
+the current fenced lease and a new listener instance. A peer does not accept a
+stale endpoint merely because its address is reused.
+
+In the application environment, set peer PostgreSQL credentials and the same
+`ATOMIC_REMOTE_TOKEN_FILE`. System certificate roots are used; optionally set
+`ATOMIC_REMOTE_TLS_ROOT` to a public PEM trust anchor. Hostname verification
+cannot be disabled. Then run:
+
+```sh
+target/debug/examples/application_workflow --database application-demo --remote
+```
+
+The application discovers the current writer before each explicit request.
+After writer replacement, restart the application with the same request keys;
+it rediscovers and resolves exact prior outcomes. This is not automatic replay
+of arbitrary application effects. An unknown transaction outcome must be retried
+with identical content and key, never a newly generated key. The SDK exposes
+`Connection::discover_remote_writer`, `transact_remote`, and
+`transact_remote_with_hints`. A confirmed commit remains confirmed if opening
+its local report subsequently fails.
+
+Transport admission, frame and timeout limits are configurable through
+`RemoteTransportConfig` (the executable exposes its common transaction limits in
+`--help`). Transport deadlines cover TLS handshake and response/acknowledgment;
+PostgreSQL discovery and local report construction have their separate configured
+I/O policies. Valid optional hints above the configured admission limit are
+ignored; malformed framing is rejected. Hints never form part of request identity.
+
+For transaction reactions and durable consumer checkpoints, see
+[change consumers](change-consumers.md). For provisioning, backup/verification,
+restore, inspection, GC and search repair, see [administration](admin.md).
+
 ## What the application demonstrates
 
 `calculation(&DatabaseValue)` queries projects and follows each project's owner
@@ -132,7 +187,8 @@ See [fulltext.md](fulltext.md) for search grammar, limits and consistency caveat
 The baseline calculation/statistics still use the exact update receipt at basis3,
 not a newer value returned by sync after a rerun. `PLANNING_OK` reports its own
 additional time and foreground SQL after the baseline counters. Its generated
-hints are not yet sent over the socket; Stage6 owns versioned hint transport.
+hints are generated locally; the sample does not transport them. The remote SDK
+provides the separate versioned hint channel described below.
 
 `APPLICATION_OK` reports the semantic checks. One explicit `QUERY_WARMUP`
 calculation reports its own time and SQL before the unchanged 20-calculation
@@ -186,6 +242,21 @@ Cache entry/byte arguments bound the node cache, not the memory or time needed
 to replay an exact retained transaction tail. Opening a reference can perform
 storage I/O and is not itself an untrusted-work admission budget.
 
+The executable example can save its captured seed reference at basis2 while
+running the normal local or remote workflow:
+
+```sh
+target/debug/examples/application_workflow --database application-demo --remote --reference-out /private/path/seed.reference
+target/debug/examples/application_workflow --database application-demo --reference-in /private/path/seed.reference
+```
+
+Output uses a new private file and refuses overwrite. The second command needs
+only authorized PostgreSQL access, not a running transactor or transaction token.
+It verifies the original key and seed calculation even after the normal workflow
+has advanced data and schema to basis11. The file neither grants authorization
+nor preserves retention. GC or excision can make a later reopening unavailable;
+the program fails explicitly instead of choosing the latest database.
+
 Speculative/in-memory values and opaque predicate filters explicitly reject
 portable committed keys/references rather than inventing equality for closures
 or uncommitted branches. They remain usable ordinary database values. The common
@@ -209,8 +280,10 @@ An attached in-process `TransactionClient` or `Connection` accepts
 ticket plus `HintExecution`. The canonical request hash does not include hints.
 Stale, absent, unrelated or failed prefetch never changes transaction meaning.
 The writer reads its own authenticated current value, not caller-supplied blocks.
-Stage6 owns the separate versioned remote hint channel; the local socket example
-currently generates hints without transporting them.
+`Connection::transact_remote_with_hints` carries hints in a separate versioned
+channel, retaining the same canonical request. The application example currently
+generates hints without transporting them; the remote transport tests exercise
+valid, altered, stale and foreign hints against identical receipts.
 
 Prefetch has its own driver, pin and cold-miss lanes and shares only bounded
 authenticated RAM index cache. It does not use the SSD path. At most one worker

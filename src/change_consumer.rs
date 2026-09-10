@@ -188,13 +188,25 @@ fn predecessor(
     hash(row.get(0))
 }
 
-fn admit_payload(client: &mut impl GenericClient, database: &str, generation: u64, t: u64, limit: usize) -> Result<(), SemanticError> {
+fn admit_payload(
+    client: &mut impl GenericClient,
+    database: &str,
+    generation: u64,
+    t: u64,
+    limit: usize,
+) -> Result<(), SemanticError> {
     let row = if generation == 0 {
         client.query_opt("SELECT octet_length(payload)::bigint FROM atomic_transactions WHERE database_id=$1 AND basis_t=$2", &[&database,&sql(t)?])
     } else {
         client.query_opt("SELECT octet_length(c.payload)::bigint FROM atomic_generation_transactions t JOIN atomic_transaction_contents c ON c.content_hash=t.content_hash WHERE t.database_id=$1 AND t.generation=$2 AND t.basis_t=$3", &[&database,&sql(generation)?,&sql(t)?])
     }.map_err(|e|postgres_error("consumer/event-size",e))?.ok_or_else(||unavailable("consumer/history-unavailable","transaction is not retained"))?;
-    if number(row.get(0))? > limit as u64 { return Err(SemanticError::new(ErrorCategory::Busy,"consumer/event-too-large","transaction exceeds configured event byte limit")); }
+    if number(row.get(0))? > limit as u64 {
+        return Err(SemanticError::new(
+            ErrorCategory::Busy,
+            "consumer/event-too-large",
+            "transaction exceeds configured event byte limit",
+        ));
+    }
     Ok(())
 }
 
@@ -270,7 +282,13 @@ impl ChangeConsumer {
                 ));
             }
         } else {
-            admit_payload(&mut tx, &database, checkpoint.generation, checkpoint.last_t, config.max_event_bytes)?;
+            admit_payload(
+                &mut tx,
+                &database,
+                checkpoint.generation,
+                checkpoint.last_t,
+                config.max_event_bytes,
+            )?;
             let previous = predecessor(
                 &mut tx,
                 &database,
@@ -428,18 +446,13 @@ impl ChangeConsumer {
             return Ok(None);
         }
         let next = self.checkpoint.last_t + 1;
-        let size_row=if self.checkpoint.generation==0 {
-            tx.query_opt("SELECT octet_length(payload)::bigint FROM atomic_transactions WHERE database_id=$1 AND basis_t=$2", &[&self.database,&sql(next)?])
-        } else {
-            tx.query_opt("SELECT octet_length(c.payload)::bigint FROM atomic_generation_transactions t JOIN atomic_transaction_contents c ON c.content_hash=t.content_hash WHERE t.database_id=$1 AND t.generation=$2 AND t.basis_t=$3", &[&self.database,&sql(self.checkpoint.generation)?,&sql(next)?])
-        }.map_err(|e|postgres_error("consumer/event-size",e))?.ok_or_else(|| unavailable("consumer/history-unavailable","next transaction is not retained"))?;
-        if number(size_row.get(0))? > self.config.max_event_bytes as u64 {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "consumer/event-too-large",
-                "next transaction exceeds configured event byte limit",
-            ));
-        }
+        admit_payload(
+            &mut tx,
+            &self.database,
+            self.checkpoint.generation,
+            next,
+            self.config.max_event_bytes,
+        )?;
         let mut rows = read_authenticated_log_range(
             &mut tx,
             &self.database,
@@ -514,12 +527,13 @@ impl ChangeConsumer {
             ));
         }
         verify_head(&head(&mut self.client, &self.database)?, &self.checkpoint)?;
-        let updated=self.client.execute("UPDATE atomic_change_checkpoints SET last_t=$3,commit_hash=$4,revision=$5 WHERE database_id=$1 AND consumer_name=$2 AND checkpoint_owner=current_user AND lineage_id=$6 AND generation=$7 AND last_t=$8 AND commit_hash=$9 AND revision=$10", &[&self.database,&self.name,&sql(checkpoint.last_t)?,&&checkpoint.commit_hash[..],&sql(checkpoint.revision)?,&self.checkpoint.lineage_id,&sql(self.checkpoint.generation)?,&sql(self.checkpoint.last_t)?,&&self.checkpoint.commit_hash[..],&sql(self.checkpoint.revision)?]);
+        let updated=self.client.execute("UPDATE atomic_change_checkpoints SET last_t=$3,commit_hash=$4,revision=$5 WHERE database_id=$1 AND consumer_name=$2 AND checkpoint_owner=current_user AND lineage_id=$6 AND generation=$7 AND last_t=$8 AND commit_hash=$9 AND revision=$10 AND EXISTS (SELECT 1 FROM atomic_heads h JOIN atomic_databases d USING(database_id) WHERE h.database_id=$1 AND h.log_generation=$7 AND d.lineage_id=$6)", &[&self.database,&self.name,&sql(checkpoint.last_t)?,&&checkpoint.commit_hash[..],&sql(checkpoint.revision)?,&self.checkpoint.lineage_id,&sql(self.checkpoint.generation)?,&sql(self.checkpoint.last_t)?,&&self.checkpoint.commit_hash[..],&sql(self.checkpoint.revision)?]);
         let updated=updated.map_err(|e| {
             let error=postgres_error("consumer/checkpoint-update",e);
             if is_postgres_connection_error(&error) { SemanticError::new(ErrorCategory::UnknownOutcome,"consumer/checkpoint-unknown-outcome","checkpoint acknowledgment may have committed; reopen to resolve durable progress") } else { error }
         })?;
         if updated != 1 {
+            verify_head(&head(&mut self.client, &self.database)?, &self.checkpoint)?;
             return Err(SemanticError::new(
                 ErrorCategory::Conflict,
                 "consumer/checkpoint-conflict",

@@ -1,7 +1,6 @@
 //! Shared scoped roles and executable lifecycle for local/remote product checks.
 use postgres::{Client, NoTls};
 use std::io::{BufRead, BufReader};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;

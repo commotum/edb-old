@@ -1,10 +1,11 @@
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, ErrorCategory, Keyword, Peer, PostgresConnectionConfig,
-    PostgresMigrator, PostgresStore, Schema, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxOp, TxValue, Value, ValueType,
+    Attribute, Cardinality, ChangeConsumer, ChangeConsumerConfig, Connection, EntityRef,
+    ErrorCategory, Keyword, Peer, PostgresConnectionConfig, PostgresMigrator, PostgresStore,
+    Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue, Value,
+    ValueType,
 };
 use std::fs;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ITEM_VALUE: u32 = 1_000;
 
@@ -85,11 +86,12 @@ fn tls_configuration_fails_closed_and_redacts_connection_secrets() {
 ///
 /// With either environment variable absent this is a skip, not TLS evidence.
 #[test]
-fn required_tls_covers_migrator_writer_background_indexer_and_peer() {
+fn required_tls_covers_migrator_writer_indexer_peer_listener_and_consumer() {
     let (Ok(connection), Ok(root_path)) = (
         std::env::var("ATOMIC_POSTGRES_TLS_URL"),
         std::env::var("ATOMIC_POSTGRES_TLS_ROOT_CERT"),
     ) else {
+        eprintln!("SKIP: ATOMIC_POSTGRES_TLS_URL and ATOMIC_POSTGRES_TLS_ROOT_CERT required");
         return;
     };
     let root_pem = fs::read(root_path).unwrap();
@@ -152,6 +154,71 @@ fn required_tls_covers_migrator_writer_background_indexer_and_peer() {
         tls.clone(),
     )
     .unwrap();
+    let observer = Connection::connect_configured(tls.clone(), &database_id, 8).unwrap();
+    let mut consumer = ChangeConsumer::connect_configured(
+        tls.clone(),
+        &database_id,
+        "tls-observer",
+        ChangeConsumerConfig::default(),
+    )
+    .unwrap();
+    // Consume creation's ordinary schema transaction before blocking for the
+    // next commit. Checkpoint reads/writes use the same verified configuration.
+    while consumer.checkpoint().last_t() < created.basis_t() {
+        let event = consumer.next(Duration::ZERO).unwrap().unwrap();
+        consumer.acknowledge(&event.checkpoint).unwrap();
+    }
+    let channel:String=probe.query_one("SELECT 'atomic_n_' || md5(n.nspname || ':' || $1::text) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid='atomic_heads'::regclass", &[&database_id]).unwrap().get(0);
+    let listen = format!("LISTEN {channel}");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let listener_versions = loop {
+        let rows=probe.query("SELECT s.ssl,s.version FROM pg_stat_activity a JOIN pg_stat_ssl s USING(pid) WHERE a.datname=current_database() AND a.query=$1", &[&listen]).unwrap();
+        if rows.len() >= 2 {
+            let versions = rows
+                .iter()
+                .map(|row| {
+                    assert!(
+                        row.get::<_, bool>(0),
+                        "asynchronous listener connected without TLS"
+                    );
+                    let version: String = row.get(1);
+                    assert!(matches!(version.as_str(), "TLSv1.2" | "TLSv1.3"));
+                    version
+                })
+                .collect::<Vec<_>>();
+            break versions;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "connection and consumer TLS listeners did not register"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    for error in [
+        Connection::connect_configured(untrusted.clone(), &database_id, 8)
+            .err()
+            .unwrap(),
+        ChangeConsumer::connect_configured(
+            untrusted.clone(),
+            &database_id,
+            "untrusted",
+            ChangeConsumerConfig::default(),
+        )
+        .err()
+        .unwrap(),
+    ] {
+        assert_eq!(error.category, ErrorCategory::Unavailable);
+        assert_eq!(error.code, "postgres/tls-connect");
+    }
+    let waiter = std::thread::spawn(move || {
+        let event = consumer
+            .next(Duration::from_secs(5))
+            .unwrap()
+            .expect("verified TLS listener did not wake the consumer");
+        (consumer, event)
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    let began = Instant::now();
     let report = service
         .client()
         .transact(
@@ -163,9 +230,38 @@ fn required_tls_covers_migrator_writer_background_indexer_and_peer() {
                     value: TxValue::Scalar(Value::Long(42)),
                 }],
             ),
-            Duration::from_secs(2),
+            Duration::from_secs(5),
         )
         .unwrap();
+    let (mut consumer, event) = waiter.join().unwrap();
+    assert_eq!(event.transaction.t, report.basis_t);
+    assert_eq!(event.transaction.data, report.tx_data);
+    assert!(consumer.stats().notices > 0);
+    consumer.acknowledge(&event.checkpoint).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while observer.db().basis_t() < report.basis_t {
+        assert!(
+            Instant::now() < deadline,
+            "verified TLS peer listener did not observe commit"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let elapsed = began.elapsed();
+    drop(consumer);
+    let resumed = ChangeConsumer::connect_configured(
+        tls.clone(),
+        &database_id,
+        "tls-observer",
+        ChangeConsumerConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(resumed.checkpoint().last_t(), report.basis_t);
+    eprintln!(
+        "postgres_tls async_listeners={} versions={listener_versions:?} consumer_basis={} commit_to_observation_us={} untrusted_root=rejected plaintext=rejected",
+        listener_versions.len(),
+        resumed.checkpoint().last_t(),
+        elapsed.as_micros()
+    );
     service.shutdown();
 
     let peer = Peer::connect_configured(&tls, &database_id, 8).unwrap();

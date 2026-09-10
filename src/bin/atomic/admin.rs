@@ -1,9 +1,9 @@
 //! Explicit operator commands. Runtime startup never routes through this module.
 use atomic_core::sql_io::SqlClient;
 use atomic_core::{
-    BackupPoint, ErrorCategory, FulltextStore, GarbageInventory, PortableBackup,
-    PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresOperator, PostgresStore,
-    Schema, SemanticError, postgres_config_from_env,
+    postgres_config_from_env, BackupPoint, ErrorCategory, FulltextStore, GarbageInventory,
+    PortableBackup, PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresOperator,
+    PostgresStore, Schema, SemanticError,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -532,9 +532,12 @@ fn rebuild(config: &PostgresConnectionConfig, args: &Arguments) -> Result<(), Se
     let database = args.required("--database")?;
     // Validate catalog/runtime compatibility before considering a destructive repair.
     let mut indexer = PostgresIndexer::connect_configured(config, database)?;
+    // Missing publication is a diagnosis, not a successful no-op (and includes
+    // misspelled/absent logical database names). Never consolidate implicitly.
+    let current_manifest = latest_manifest(config, database)?;
     if let Some(hash) = args.values.get("--discard-manifest") {
         let selected = parse_digest(hash)?;
-        if latest_manifest(config, database)? != selected {
+        if current_manifest != selected {
             return Err(SemanticError::new(
                 ErrorCategory::Conflict,
                 "cli/repair-target-mismatch",

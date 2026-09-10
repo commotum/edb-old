@@ -371,6 +371,24 @@ fn deep_integrity_rejects_coherent_native_tree_not_derived_from_log() {
     assert!(deep.problems.iter().any(|problem| {
         problem.code == "integrity/tree-derived-index-mismatch" && problem.message.contains("Aevt")
     }));
+
+    // A correct later publication at the same basis must not conceal this
+    // retained fallback candidate. Single-pass replay may share the exact
+    // immutable database prefix, but must check every physical publication.
+    PostgresIndexer::connect(&connection, &database_id)
+        .unwrap()
+        .consolidate()
+        .unwrap();
+    let later = operator.inspect_database(&database_id, true).unwrap();
+    assert!(!later.healthy());
+    assert!(later.metrics.tree_publication_revision > forged_manifest.publication_revision);
+    assert!(later.problems.iter().any(|problem| {
+        problem.code == "integrity/tree-derived-index-mismatch"
+            && problem.message.contains(&format!(
+                "tree revision {} ",
+                forged_manifest.publication_revision
+            ))
+    }));
 }
 
 #[test]
