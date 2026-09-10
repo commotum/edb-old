@@ -2009,6 +2009,35 @@ fn verify_lease<C: GenericClient>(
     }
 }
 
+/// Refresh an epoch only while continuously holding the row lock acquired by
+/// `verify_lease`. Work under that lock may outlast the heartbeat interval, but
+/// no other holder can take over. Unlike ordinary heartbeat renewal, expiry is
+/// not rechecked: the validated, still-locked ownership is the authority here.
+fn renew_locked_lease<C: GenericClient>(
+    client: &mut C,
+    lease: &TransactorLease,
+    lease_millis: u64,
+    operation: &'static str,
+) -> Result<(), SemanticError> {
+    validate_lease_args(&lease.database_id, &lease.holder_id, lease_millis)?;
+    let epoch = sql_basis(lease.epoch)?;
+    let lease_millis = sql_basis(lease_millis)?;
+    let renewed = client
+        .execute(
+            "UPDATE atomic_transactor_leases \
+             SET expires_at = clock_timestamp() + \
+                              $4::bigint * interval '1 millisecond' \
+             WHERE lease_scope = $1 AND holder_id = $2 AND epoch = $3",
+            &[&lease.database_id, &lease.holder_id, &epoch, &lease_millis],
+        )
+        .map_err(|error| postgres_error(operation, error))?;
+    if renewed == 1 {
+        Ok(())
+    } else {
+        Err(leadership_lost(lease))
+    }
+}
+
 pub(crate) fn resolve_program_in<C: GenericClient>(
     client: &mut C,
     cache: &SharedProgramCache,
@@ -2555,20 +2584,12 @@ impl PostgresStore {
         // Recovery may be longer than the normal heartbeat interval. The row
         // lock prevents takeover during recovery; extend this exact epoch
         // before releasing it and admitting requests.
-        let epoch = sql_basis(lease.epoch)?;
-        let lease_millis = sql_basis(lease_millis)?;
-        let renewed = transaction
-            .execute(
-                "UPDATE atomic_transactor_leases \
-                 SET expires_at = clock_timestamp() + \
-                                  $4::bigint * interval '1 millisecond' \
-                 WHERE lease_scope = $1 AND holder_id = $2 AND epoch = $3",
-                &[&database_id, &lease.holder_id, &epoch, &lease_millis],
-            )
-            .map_err(|error| postgres_error("postgres/activation-renew", error))?;
-        if renewed != 1 {
-            return Err(leadership_lost(lease));
-        }
+        renew_locked_lease(
+            &mut transaction,
+            lease,
+            lease_millis,
+            "postgres/activation-renew",
+        )?;
         transaction
             .commit()
             .map_err(|error| postgres_error("postgres/activation-commit", error))?;
@@ -3253,6 +3274,7 @@ impl PostgresStore {
     pub(crate) fn transact_authoritative_fenced(
         &mut self,
         lease: &TransactorLease,
+        lease_millis: u64,
         database_id: &str,
         request_key: &str,
         compare_basis_t: Option<u64>,
@@ -3262,6 +3284,7 @@ impl PostgresStore {
     ) -> Result<CommitReceipt, SemanticError> {
         self.transact_authoritative_fenced_at(
             lease,
+            lease_millis,
             database_id,
             request_key,
             compare_basis_t,
@@ -3281,6 +3304,7 @@ impl PostgresStore {
     pub(crate) fn transact_authoritative_fenced_with_fault(
         &mut self,
         lease: &TransactorLease,
+        lease_millis: u64,
         database_id: &str,
         request_key: &str,
         compare_basis_t: Option<u64>,
@@ -3291,6 +3315,7 @@ impl PostgresStore {
     ) -> Result<CommitReceipt, SemanticError> {
         self.transact_authoritative_fenced_at(
             lease,
+            lease_millis,
             database_id,
             request_key,
             compare_basis_t,
@@ -3305,6 +3330,7 @@ impl PostgresStore {
     fn transact_authoritative_fenced_at(
         &mut self,
         lease: &TransactorLease,
+        lease_millis: u64,
         database_id: &str,
         request_key: &str,
         compare_basis_t: Option<u64>,
@@ -3321,7 +3347,7 @@ impl PostgresStore {
             tx_instant_override,
             request_hash,
             fault_point,
-            Some(lease),
+            Some((lease, lease_millis)),
             None,
             |transaction, db_before, shared_budget, program_cache| {
                 let mut budget = shared_budget.lock().map_err(|_| {
@@ -3377,7 +3403,7 @@ impl PostgresStore {
         tx_instant_override: Option<i64>,
         request_hash: Digest,
         fault_point: CommitFault,
-        lease: Option<&TransactorLease>,
+        lease: Option<(&TransactorLease, u64)>,
         functions: Option<&TxFunctions>,
         generate: F,
     ) -> Result<CommitReceipt, SemanticError>
@@ -3409,7 +3435,7 @@ impl PostgresStore {
             .client
             .transaction()
             .map_err(|error| postgres_error("postgres/transact-begin", error))?;
-        if let Some(lease) = lease {
+        if let Some((lease, _)) = lease {
             verify_lease(&mut transaction, lease, database_id)?;
         }
         // Program GC takes SHARE on the authoritative log before deriving
@@ -3519,6 +3545,14 @@ impl PostgresStore {
             drop(report_phase);
             let commit_result = {
                 let _phase = operation.phase(OperationKind::TransactionCommit);
+                if let Some((lease, lease_millis)) = lease {
+                    renew_locked_lease(
+                        &mut transaction,
+                        lease,
+                        lease_millis,
+                        "postgres/transaction-renew",
+                    )?;
+                }
                 transaction.commit()
             };
             if commit_result.is_err() {
@@ -3961,6 +3995,14 @@ impl PostgresStore {
         drop(report_phase);
         let commit_result = {
             let _phase = operation.phase(OperationKind::TransactionCommit);
+            if let Some((lease, lease_millis)) = lease {
+                renew_locked_lease(
+                    &mut transaction,
+                    lease,
+                    lease_millis,
+                    "postgres/transaction-renew",
+                )?;
+            }
             transaction.commit()
         };
         if commit_result.is_err() {

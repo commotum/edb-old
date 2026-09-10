@@ -9,8 +9,8 @@ correct, ownership stack-safe, and routine work proportional to the information
 actually consumed or changed. Finish with integrated application and PostgreSQL
 evidence, not merely a collection of completed child goals.
 
-Status: **executing Stage 2**. Active child: **Goal 2**.
-Stages 1–7 map directly to `goal-1` through `goal-7`; Goals1–2 are scaffolded.
+Status: **executing Stage 3**. Active child: **Goal 3**.
+Stages 1–7 map directly to `goal-1` through `goal-7`; Goals1–3 are scaffolded.
 
 ## Authority and constraints
 
@@ -104,8 +104,14 @@ into ordinary repository regression tests during implementation; do not depend o
   retained values, shared predecessors and bounded failure paths remain correct;
   real PG retraction/restart works. No arbitrary graph-depth cap substitutes for
   stack-safe traversal. Reproduction need not crash the main test runner.
-- **Status:** In progress: Goal2 active; permanent small-stack traversal/release
-  regressions, shared repairs and real PostgreSQL retraction/restart.
+- **Status:** Complete (2026-09-10). Iterative component traversal passes eager
+  1024/2048 and exact1024/8192-node isolated256KiB-stack tests; iterative final-owner
+  log release passes32768chunks plus sharing/racing owners. Live CLI/PG128/2048-node
+  retraction,65transaction shared-tail consolidation and restart/exact retry pass.
+  Integrated long-request lease self-expiry is repaired by renewing only the
+  continuously validated/locked epoch before fresh/replay commits. Forced-expiry,
+  failed-request non-revival and takeover tests pass; default duration unchanged.
+  Adjacent live writer/oracle, metadata/recent and Goal1 combined checks pass.
 
 ### 3. Complete and bound numeric behavior — Goal 3
 
@@ -121,7 +127,9 @@ into ordinary repository regression tests during implementation; do not depend o
   cast decimals to f64 or change persisted index ordering to gain speed.
   Re-run earlier joins/rules after comparator changes; arithmetic promotion does
   not by itself authorize changing equality, index order or canonical commitments.
-- **Status:** Not started.
+- **Status:** In progress: Goal3 active. Reconcile arithmetic promotion and bounded
+  comparison/hash representation against docs, existing contracts and source before
+  changing shared numeric behavior. Preserve durable bytes and exact old receipts.
 
 ### 4. Restore delta-sized transaction bookkeeping — Goal 4
 
@@ -217,9 +225,9 @@ decisions and any outstanding uncertainty. A scaffold, green lint count or compl
 child is not Goal0's finish line. Parent completion requires Stage7 plus reconciled
 completion signals for all earlier stages.
 
-Continuation (2026-09-10): Goal1 complete, Goal2 active. Real PostgreSQL15.11 fixture
+Continuation (2026-09-10): Goals1–2 complete, Goal3 active. Real PostgreSQL15.11 fixture
 is `/tmp/atomic-repair-pg.vA037i/data`, port55471, with normal durability enabled;
-connection/upgrade witness details are in Goal1. Next: stack-safe component closure
-in both assessors and ownership-aware recent-log release, then verify/reconcile
-Stage2 and continue to Stage3. Parent completion still requires all remaining repairs
+connection/upgrade witness details are in Goal1. Next: R4/R11 exact query arithmetic
+and aggregates, scale-safe comparison/hash with current equality/index contracts,
+then real PG/joins/retry evidence. Parent completion still requires all remaining repairs
 and Stage7 integrated acceptance.

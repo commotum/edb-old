@@ -3081,42 +3081,35 @@ mod tests {
     #[test]
     fn component_worklist_visits_each_entity_once_and_charges_every_prefix() {
         const DEPTH: usize = 257;
-        let node = |index| make_eid(USER_PARTITION, 10_000 + index as u64).unwrap();
+        let name = |index| format!("node-{index:020}");
         let mut operations = Vec::new();
         for index in 0..DEPTH {
             operations.push(TxOp::Add {
-                entity: EntityRef::Id(node(index)),
+                entity: EntityRef::Temp(name(index)),
                 attribute: NAME,
                 value: Value::String(format!("node-{index}")).into(),
             });
             if index + 1 < DEPTH {
                 operations.push(TxOp::Add {
-                    entity: EntityRef::Id(node(index)),
+                    entity: EntityRef::Temp(name(index)),
                     attribute: PARENT,
-                    value: Value::Ref(node(index + 1)).into(),
+                    value: TxValue::Entity(EntityRef::Temp(name(index + 1))),
                 });
             }
         }
-        let before = Database::new(schema())
+        let seeded = Database::new(schema())
             .unwrap()
             .with(&operations, 10)
-            .unwrap()
-            .db_after
-            .database_value();
+            .unwrap();
+        let root = seeded.tempids[&name(0)];
+        let before = seeded.db_after.database_value();
         let original = before.datoms(IndexOrder::Eavt).unwrap();
         let mut reader = Reader::new(&before, AssessmentLimits::unbounded());
         let mut logical = Vec::new();
         let mut touched = BTreeSet::new();
         let mut visited = BTreeSet::new();
         let started = std::time::Instant::now();
-        expand_retract_entity(
-            &mut reader,
-            node(0),
-            &mut logical,
-            &mut touched,
-            &mut visited,
-        )
-        .unwrap();
+        expand_retract_entity(&mut reader, root, &mut logical, &mut touched, &mut visited).unwrap();
         assert_eq!(visited.len(), DEPTH);
         assert_eq!(reader.work.prefixes, 2 * DEPTH as u64);
         assert_eq!(reader.work.datoms, (3 * DEPTH - 2) as u64);
@@ -3141,7 +3134,7 @@ mod tests {
         let mut visited = BTreeSet::new();
         let error = expand_retract_entity(
             &mut reader,
-            node(0),
+            root,
             &mut Vec::new(),
             &mut BTreeSet::new(),
             &mut visited,

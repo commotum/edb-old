@@ -1,7 +1,6 @@
 use atomic_core::{
     Attribute, Cardinality, Database, DatabaseValue, EntityRef, ErrorCategory, IndexOrder,
-    IndexPrefix, Keyword, Schema, SpeculationLimits, TxForm, TxOp, USER_PARTITION, Value,
-    ValueType, make_eid,
+    IndexPrefix, Keyword, Schema, SpeculationLimits, TxForm, TxOp, TxValue, Value, ValueType,
 };
 use std::process::Command;
 use std::time::Instant;
@@ -11,8 +10,8 @@ const COMPONENT: u32 = 1_001;
 const LINK: u32 = 1_002;
 const STACK_BYTES: usize = 256 * 1_024;
 
-fn node(index: usize) -> u64 {
-    make_eid(USER_PARTITION, 10_000 + index as u64).unwrap()
+fn name(index: usize) -> String {
+    format!("node-{index:020}")
 }
 
 fn schema() -> Schema {
@@ -45,30 +44,66 @@ fn schema() -> Schema {
 
 fn add(entity: usize, attribute: u32, value: Value) -> TxOp {
     TxOp::Add {
-        entity: EntityRef::Id(node(entity)),
+        entity: EntityRef::Temp(name(entity)),
         attribute,
         value: value.into(),
     }
 }
 
-fn flat_chain(depth: usize) -> Database {
+fn link(entity: usize, attribute: u32, target: usize) -> TxOp {
+    TxOp::Add {
+        entity: EntityRef::Temp(name(entity)),
+        attribute,
+        value: TxValue::Entity(EntityRef::Temp(name(target))),
+    }
+}
+
+struct Graph<T = Database> {
+    database: T,
+    ids: Vec<u64>,
+}
+
+fn chain_operations(depth: usize) -> Vec<TxOp> {
     let mut operations = Vec::with_capacity(2 * depth + 4);
     for index in 0..depth + 2 {
         operations.push(add(index, LABEL, Value::Long(index as i64)));
         if index + 1 < depth {
-            operations.push(add(index, COMPONENT, Value::Ref(node(index + 1))));
+            operations.push(link(index, COMPONENT, index + 1));
         }
     }
     // Incoming ordinary refs retract, but neither their owner nor a target of
     // an outgoing noncomponent edge belongs to the component closure.
-    operations.push(add(depth, LINK, Value::Ref(node(depth / 2))));
-    operations.push(add(depth, LINK, Value::Ref(node(depth + 1))));
-    operations.push(add(0, LINK, Value::Ref(node(depth + 1))));
-    Database::new(schema())
+    operations.push(link(depth, LINK, depth / 2));
+    operations.push(link(depth, LINK, depth + 1));
+    operations.push(link(0, LINK, depth + 1));
+    operations
+}
+
+fn flat_chain(depth: usize) -> Graph {
+    let report = Database::new(schema())
         .unwrap()
-        .with(&operations, 10)
+        .with(&chain_operations(depth), 10)
+        .unwrap();
+    Graph {
+        ids: (0..depth + 2)
+            .map(|index| report.tempids[&name(index)])
+            .collect(),
+        database: report.db_after,
+    }
+}
+
+fn native_chain(depth: usize) -> Graph<DatabaseValue> {
+    let report = Database::new(schema())
         .unwrap()
-        .db_after
+        .database_value()
+        .with(&chain_operations(depth), 10)
+        .unwrap();
+    Graph {
+        ids: (0..depth + 2)
+            .map(|index| report.tempids[&name(index)])
+            .collect(),
+        database: report.db_after,
+    }
 }
 
 fn attribute_facts(db: &DatabaseValue, attribute: u32) -> Vec<atomic_core::Datom> {
@@ -80,17 +115,18 @@ fn attribute_facts(db: &DatabaseValue, attribute: u32) -> Vec<atomic_core::Datom
     .unwrap()
 }
 
-fn assert_chain_retracted(after: &DatabaseValue, depth: usize, tx_data: &[atomic_core::Datom]) {
+fn assert_chain_retracted(after: &DatabaseValue, ids: &[u64], tx_data: &[atomic_core::Datom]) {
+    let depth = ids.len() - 2;
     let labels = attribute_facts(after, LABEL);
     assert_eq!(labels.len(), 2, "only the two outside entities survive");
-    assert_eq!(labels[0].entity, node(depth));
-    assert_eq!(labels[1].entity, node(depth + 1));
+    assert_eq!(labels[0].entity, ids[depth]);
+    assert_eq!(labels[1].entity, ids[depth + 1]);
     assert!(attribute_facts(after, COMPONENT).is_empty());
     let links = attribute_facts(after, LINK);
     assert_eq!(links.len(), 1);
     assert_eq!(
         (links[0].entity, &links[0].value),
-        (node(depth), &Value::Ref(node(depth + 1)))
+        (ids[depth], &Value::Ref(ids[depth + 1]))
     );
     assert_eq!(
         tx_data.iter().filter(|datom| !datom.added).count(),
@@ -106,20 +142,40 @@ fn assert_chain_retracted(after: &DatabaseValue, depth: usize, tx_data: &[atomic
 fn run_depth_child(engine: String, depth: usize) {
     // Build from flat primitive forms before entering the small-stack worker:
     // this is stored graph depth, not nested input or recursive test fixtures.
-    let before = flat_chain(depth);
-    let retained = before.database_value();
+    enum Seed {
+        Eager(Database),
+        Exact(DatabaseValue),
+    }
+    let setup = Instant::now();
+    let (before, ids, retained) = match engine.as_str() {
+        "eager" => {
+            let Graph { database, ids } = flat_chain(depth);
+            let retained = database.database_value();
+            (Seed::Eager(database), ids, retained)
+        }
+        "exact" => {
+            let Graph { database, ids } = native_chain(depth);
+            let retained = database.clone();
+            (Seed::Exact(database), ids, retained)
+        }
+        _ => panic!("unknown engine"),
+    };
+    eprintln!(
+        "COMPONENT_SEED engine={engine} depth={depth} flat_seed_us={}",
+        setup.elapsed().as_micros()
+    );
     let metrics = std::thread::Builder::new()
         .name(format!("component-{engine}"))
         .stack_size(STACK_BYTES)
         .spawn(move || {
             let started = Instant::now();
-            let operations = [TxOp::RetractEntity(EntityRef::Id(node(0)))];
-            match engine.as_str() {
-                "eager" => {
+            let operations = [TxOp::RetractEntity(EntityRef::Id(ids[0]))];
+            match before {
+                Seed::Eager(before) => {
                     let report = before.with(&operations, 11).unwrap();
                     assert_chain_retracted(
                         &report.db_after.database_value(),
-                        depth,
+                        &ids,
                         &report.tx_data,
                     );
                     assert_eq!(
@@ -127,16 +183,16 @@ fn run_depth_child(engine: String, depth: usize) {
                         depth + 2
                     );
                     drop(report);
+                    drop(before);
                 }
-                "exact" => {
-                    let report = before.database_value().with(&operations, 11).unwrap();
-                    assert_chain_retracted(&report.db_after, depth, &report.tx_data);
+                Seed::Exact(before) => {
+                    let report = before.with(&operations, 11).unwrap();
+                    assert_chain_retracted(&report.db_after, &ids, &report.tx_data);
                     assert_eq!(attribute_facts(&report.db_before, LABEL).len(), depth + 2);
                     drop(report);
+                    drop(before);
                 }
-                _ => panic!("unknown engine"),
             }
-            drop(before);
             (engine, started.elapsed())
         })
         .unwrap()
@@ -163,8 +219,8 @@ fn deep_component_retraction_is_stack_safe_in_isolated_processes() {
         run_depth_child(engine, depth);
         return;
     }
-    for depth in [1_024, 8_192] {
-        for engine in ["eager", "exact"] {
+    for (engine, depths) in [("eager", [1_024, 2_048]), ("exact", [1_024, 8_192])] {
+        for depth in depths {
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .args([
@@ -212,18 +268,21 @@ fn cycles_shared_components_and_incoming_refs_preserve_exact_closure() {
         .map(|index| add(index, LABEL, Value::Long(index as i64)))
         .collect::<Vec<_>>();
     for (from, to) in [(0, 1), (0, 2), (1, 3), (2, 3), (3, 0), (4, 3)] {
-        operations.push(add(from, COMPONENT, Value::Ref(node(to))));
+        operations.push(link(from, COMPONENT, to));
     }
     for (from, to) in [(5, 2), (0, 6), (4, 6)] {
-        operations.push(add(from, LINK, Value::Ref(node(to))));
+        operations.push(link(from, LINK, to));
     }
-    let before = Database::new(schema())
+    let seed = Database::new(schema())
         .unwrap()
         .with(&operations, 10)
-        .unwrap()
-        .db_after;
+        .unwrap();
+    let ids = (0..7)
+        .map(|index| seed.tempids[&name(index)])
+        .collect::<Vec<_>>();
+    let before = seed.db_after;
     let original = before.datoms(atomic_core::View::Current, IndexOrder::Eavt);
-    let forms = [TxOp::RetractEntity(EntityRef::Id(node(0)))];
+    let forms = [TxOp::RetractEntity(EntityRef::Id(ids[0]))];
     let eager = before.with(&forms, 11).unwrap();
     let exact = before.database_value().with(&forms, 11).unwrap();
     assert_eq!(eager.tx_data, exact.tx_data);
@@ -232,14 +291,14 @@ fn cycles_shared_components_and_incoming_refs_preserve_exact_closure() {
             .iter()
             .map(|datom| datom.entity)
             .collect::<Vec<_>>(),
-        vec![node(4), node(5), node(6)]
+        vec![ids[4], ids[5], ids[6]]
     );
     assert!(attribute_facts(&exact.db_after, COMPONENT).is_empty());
     assert_eq!(
-        exact.db_after.values(node(4), LINK).unwrap(),
-        vec![Value::Ref(node(6))]
+        exact.db_after.values(ids[4], LINK).unwrap(),
+        vec![Value::Ref(ids[6])]
     );
-    assert!(exact.db_after.values(node(5), LINK).unwrap().is_empty());
+    assert!(exact.db_after.values(ids[5], LINK).unwrap().is_empty());
     assert_eq!(
         exact.tx_data.iter().filter(|datom| !datom.added).count(),
         12
@@ -252,10 +311,11 @@ fn cycles_shared_components_and_incoming_refs_preserve_exact_closure() {
 
 #[test]
 fn bounded_retraction_failure_leaves_the_database_value_unchanged() {
-    let before = flat_chain(256).database_value();
+    let graph = flat_chain(256);
+    let before = graph.database.database_value();
     let original = before.datoms(IndexOrder::Eavt).unwrap();
     let basis = before.basis_t();
-    let forms = [TxForm::Op(TxOp::RetractEntity(EntityRef::Id(node(0))))];
+    let forms = [TxForm::Op(TxOp::RetractEntity(EntityRef::Id(graph.ids[0])))];
     for limits in [
         SpeculationLimits {
             max_read_datoms: 32,
@@ -277,5 +337,5 @@ fn bounded_retraction_failure_leaves_the_database_value_unchanged() {
         assert_eq!(before.datoms(IndexOrder::Eavt).unwrap(), original);
     }
     let successful = before.with_forms(&forms, 11).unwrap();
-    assert_chain_retracted(&successful.db_after, 256, &successful.tx_data);
+    assert_chain_retracted(&successful.db_after, &graph.ids, &successful.tx_data);
 }

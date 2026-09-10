@@ -106,6 +106,13 @@ The writer publishes its endpoint through PostgreSQL, bound to database lineage,
 the current fenced lease and a new listener instance. A peer does not accept a
 stale endpoint merely because its address is reused.
 
+The lease duration governs heartbeat/failover, not a transaction's maximum runtime.
+A request that validated and continuously holds its PostgreSQL lease-row lock
+renews that same holder/epoch immediately before a successful fresh commit or
+exact-receipt replay releases the lock. A contender must wait and recheck ownership.
+Ordinary renewal still rejects an expired, unlocked or replaced epoch; failed
+transactions do not revive it.
+
 In the application environment, set peer PostgreSQL credentials and the same
 `ATOMIC_REMOTE_TOKEN_FILE`. System certificate roots are used; optionally set
 `ATOMIC_REMOTE_TLS_ROOT` to a public PEM trust anchor. Hostname verification

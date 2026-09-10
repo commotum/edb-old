@@ -12,16 +12,36 @@ const CASE_ENV: &str = "ATOMIC_RECENT_LOG_DROP_CASE";
 const SMALL_STACK: usize = 128 * 1024;
 
 fn run_isolated(case: &str) {
-    let output = Command::new(std::env::current_exe().unwrap())
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
         .args([
             "--exact",
             "recent::log_drop_tests::isolated_release_case",
             "--nocapture",
             "--test-threads=1",
         ])
-        .env(CASE_ENV, case)
-        .output()
-        .unwrap();
+        .env(CASE_ENV, case);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the child-only hook changes a resource limit without using
+        // captured locks or allocating. A regressed child must not write a core
+        // file; the parent harness's resource limits are left unchanged.
+        unsafe {
+            command.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::setrlimit(libc::RLIMIT_CORE, &limit) == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            });
+        }
+    }
+    let output = command.output().unwrap();
     assert!(
         output.status.success(),
         "case={case}, status={}\nstdout={}\nstderr={}",

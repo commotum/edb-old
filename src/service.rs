@@ -2036,6 +2036,7 @@ fn run_worker(
                             process_work(
                                 store,
                                 lease,
+                                lease_millis,
                                 database_id,
                                 &work.request,
                                 work.request_hash,
@@ -2047,9 +2048,14 @@ fn run_worker(
                     // the head and either reconstructs the durable receipt or
                     // opens that exact head before doing new work, so absence
                     // of a process-local value is not an adoption failure.
-                    Err(error) if error.code == "postgres/writer-not-activated" => {
-                        process_work(store, lease, database_id, &work.request, work.request_hash)
-                    }
+                    Err(error) if error.code == "postgres/writer-not-activated" => process_work(
+                        store,
+                        lease,
+                        lease_millis,
+                        database_id,
+                        &work.request,
+                        work.request_hash,
+                    ),
                     Err(error) => Err(error),
                 }
             }
@@ -2317,6 +2323,7 @@ fn retry_index_job<T>(
 fn process_work(
     store: &mut PostgresStore,
     lease: &TransactorLease,
+    lease_millis: u64,
     database_id: &str,
     request: &TransactionRequest,
     request_hash: Digest,
@@ -2327,6 +2334,7 @@ fn process_work(
     #[cfg(not(test))]
     let commit = store.transact_authoritative_fenced(
         lease,
+        lease_millis,
         database_id,
         &request.request_key,
         request.compare_basis_t,
@@ -2358,6 +2366,7 @@ fn process_work(
         };
         store.transact_authoritative_fenced_with_fault(
             lease,
+            lease_millis,
             database_id,
             &request.request_key,
             request.compare_basis_t,
