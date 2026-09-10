@@ -122,14 +122,22 @@ cannot be disabled. Then run:
 target/debug/examples/application_workflow --database application-demo --remote
 ```
 
-The application discovers the current writer before each explicit request.
-After writer replacement, restart the application with the same request keys;
-it rediscovers and resolves exact prior outcomes. This is not automatic replay
-of arbitrary application effects. An unknown transaction outcome must be retried
-with identical content and key, never a newly generated key. The SDK exposes
-`Connection::discover_remote_writer`, `transact_remote`, and
-`transact_remote_with_hints`. A confirmed commit remains confirmed if opening
-its local report subsequently fails.
+The application keeps a `Connection::remote_writer(postgres, tls)` handle. It
+captures the connection's stable database identity and caches a verified route;
+renaming or reusing a public name cannot redirect it. When a cached endpoint is
+unavailable or stale **before request transmission**, it rediscovers and tries
+the successor once. Construction and `cached_endpoint()` do no I/O; `refresh`
+explicitly discovers. Cloned handles share the route, without holding its lock
+during network work.
+
+An unknown transaction outcome is returned unchanged, not automatically replayed.
+Retry explicitly with identical content and key, never a newly generated key.
+The lower-level `Connection::discover_remote_writer`, `transact_remote`, and
+`transact_remote_with_hints` remain supported. A confirmed commit remains confirmed
+if opening its local report subsequently fails (`CommittedTransaction::report`).
+Discovery consumes the submission time budget and tightens configured driver
+limits to its remainder; this is not a preemptive bound on DNS, authentication,
+SQL or report construction. Use the async facade on executor threads.
 
 Transport admission, frame and timeout limits are configurable through
 `RemoteTransportConfig` (the executable exposes its common transaction limits in
@@ -141,6 +149,49 @@ ignored; malformed framing is rejected. Hints never form part of request identit
 For transaction reactions and durable consumer checkpoints, see
 [change consumers](change-consumers.md). For provisioning, backup/verification,
 restore, inspection, GC and search repair, see [administration](admin.md).
+
+## Persistent standby and health
+
+Add `--mode auto` to each transactor's normal command to wait for authority and
+take over when the active lease is released or expires. Each process needs its
+own local socket or TCP listen address; do not bind two contenders to the same
+address. Configure the same database, deployment defaults and verified TLS policy
+on contenders. Indexing, excision admission, transaction defaults and transport
+settings survive the handoff. The default `--mode active` retains fail-fast
+startup when another writer owns authority.
+
+`STANDBY` is not write readiness. Only `READY` means writer authority and its
+configured transaction listener are active. `--standby-poll-ms` defaults to250;
+SIGTERM interrupts the wait rather than sleeping out a long poll interval.
+In-flight PostgreSQL startup/cleanup still obeys its synchronous I/O policy.
+Once active, loss of service/listener availability exits unsuccessfully for the
+supervisor to restart; automatic election does not conceal an unhealthy writer.
+Keep the same stable configuration when supervising its restart.
+
+Optionally add `--health-listen 127.0.0.1:8081` (numeric `IP:PORT`). This is a
+plaintext, status-only listener, not a query or administration gateway. Restrict
+it to a trusted probe network; use your ingress for TLS if externally exposed.
+`GET /health` returns200 while starting, waiting or active; `GET /ready` returns200
+only while active and503 otherwise. Both return small JSON with `live`, `ready`
+and `state`; `HEAD` is supported. Availability is sampled by the lifecycle loop,
+not a linearizable promise that the next transaction succeeds. No database calls,
+names, credentials or transaction data are exposed by probes. Two workers, eight
+queued sockets,1KiB request buffers and short cumulative read deadlines bound
+listener resources; overload closes connections.
+
+Run foreground processes under your OS/container supervisor: its process identity,
+signal handling and restart policy replace hand-maintained PID files. The stock
+binary intentionally serves one logical database per process, giving independent
+failure, configuration and capacity boundaries. Applications can compose multiple
+`Connection`s, or embed multiple `TransactionService`s when they deliberately want
+shared process fate; they must own separate listeners and resource budgets.
+This is native process composition, not a missing multi-database storage engine.
+
+For Rust Future/Stream methods, bounded worker admission, exact read capture and
+drop/cancellation semantics, see [async clients](async-client.md). The evolving
+application runs a current-value query and a one-row-at-a-time old-value stream
+on a single-thread Tokio runtime, reporting `ASYNC_READ_OK`; native database and
+connection lifecycle remain outside its executor task.
 
 ## What the application demonstrates
 
@@ -213,6 +264,13 @@ not process-wide deltas or measurements of the separate transactor process.
 Driver calls and returned binary cell bytes are not SQL-statement counts,
 network round trips, disk I/O or total memory; cursor counters remain a narrower
 node-read subset. No timing threshold determines success or proves scale.
+
+`DIAGNOSTICS_OK` checks named per-operation index attribution without changing
+the captured database value. See [observability](observability.md),
+[query diagnostics](query-diagnostics.md), and
+[transaction diagnostics](transaction-diagnostics.md) for optional typed/EDN
+reports and their cost/interpretation. Normal API and CLI results remain unchanged
+when detailed diagnostics are disabled.
 
 For an attached writer, a caller's `OperationContext` follows submitted work
 across the service queue. Its `phases` include transaction expansion, assessment,

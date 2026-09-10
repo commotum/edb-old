@@ -173,6 +173,23 @@ pub(crate) fn load_node_block<C: GenericClient>(
     client: &mut C,
     expected_hash: Digest,
 ) -> Result<Option<LoadedNodeBlock>, SemanticError> {
+    let observed = crate::io_diagnostics::CacheObservation::start(crate::CacheTier::PostgresBlock);
+    let mut stats = NodeBlockReadStats::default();
+    let result = load_node_block_inner(client, expected_hash, &mut stats);
+    observed.finish(
+        result.as_ref().is_ok_and(Option::is_some),
+        result.is_err() || stats.corrupt_projections != 0,
+        stats.physical_read_bytes,
+        stats.canonical_bytes,
+    );
+    result
+}
+
+fn load_node_block_inner<C: GenericClient>(
+    client: &mut C,
+    expected_hash: Digest,
+    stats: &mut NodeBlockReadStats,
+) -> Result<Option<LoadedNodeBlock>, SemanticError> {
     let row = client
         .query_opt(
             "SELECT octet_length(n.payload)::bigint, \
@@ -188,7 +205,6 @@ pub(crate) fn load_node_block<C: GenericClient>(
     let canonical_length: i64 = row.get(0);
     let canonical_hash: Option<Vec<u8>> = row.get(1);
     let physical: Option<Vec<u8>> = row.get(4);
-    let mut stats = NodeBlockReadStats::default();
     if let Some(physical) = physical {
         crate::OperationContext::current_or_process().record_payload_read(physical.len() as u64);
         stats.physical_read_bytes = physical.len() as u64;
@@ -215,12 +231,13 @@ pub(crate) fn load_node_block<C: GenericClient>(
                 canonical,
                 #[cfg(test)]
                 source: NodeBlockSource::Compressed,
-                stats,
+                stats: *stats,
             }));
         }
         stats.corrupt_projections = 1;
     } else if let Some(canonical) = row.get::<_, Option<Vec<u8>>>(5) {
         crate::OperationContext::current_or_process().record_payload_read(canonical.len() as u64);
+        stats.physical_read_bytes = canonical.len() as u64;
         validate_canonical(&expected_hash, &canonical)?;
         stats.canonical_reads = 1;
         stats.canonical_bytes = canonical.len() as u64;
@@ -229,7 +246,7 @@ pub(crate) fn load_node_block<C: GenericClient>(
             canonical,
             #[cfg(test)]
             source: NodeBlockSource::Canonical,
-            stats,
+            stats: *stats,
         }));
     }
     let row = client
@@ -241,12 +258,12 @@ pub(crate) fn load_node_block<C: GenericClient>(
     let Some(row) = row else { return Ok(None) };
     let canonical: Vec<u8> = row.get(0);
     crate::OperationContext::current_or_process().record_payload_read(canonical.len() as u64);
-    validate_canonical(&expected_hash, &canonical)?;
-    stats.canonical_reads = 1;
-    stats.canonical_bytes = canonical.len() as u64;
     stats.physical_read_bytes = stats
         .physical_read_bytes
         .saturating_add(canonical.len() as u64);
+    validate_canonical(&expected_hash, &canonical)?;
+    stats.canonical_reads = 1;
+    stats.canonical_bytes = canonical.len() as u64;
     #[cfg(test)]
     let source = if stats.corrupt_projections == 0 {
         NodeBlockSource::Canonical
@@ -257,7 +274,7 @@ pub(crate) fn load_node_block<C: GenericClient>(
         canonical,
         #[cfg(test)]
         source,
-        stats,
+        stats: *stats,
     }))
 }
 

@@ -25,6 +25,7 @@ version = "0.1.0"
 dependencies = [
  "bigdecimal",
  "flate2",
+ "futures-core",
  "libc",
  "native-tls",
  "num-bigint",

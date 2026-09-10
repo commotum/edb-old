@@ -21,6 +21,73 @@ fn failed_connect() {
 }
 
 #[test]
+fn named_nested_contexts_group_inclusively_without_repeated_name_double_count() {
+    use atomic_core::Keyword;
+    let outer =
+        OperationContext::named(OperationKind::Application, Keyword::new("app", "report")).unwrap();
+    let a = outer
+        .child_named(OperationKind::Query, Keyword::new("app", "lookup"))
+        .unwrap();
+    let repeated = a
+        .child_named(OperationKind::Query, Keyword::new("app", "lookup"))
+        .unwrap();
+    let b = outer
+        .child_named(OperationKind::Query, Keyword::new("app", "other"))
+        .unwrap();
+    let handles = [repeated, b]
+        .into_iter()
+        .map(|child| {
+            std::thread::spawn(move || {
+                let _scope = child.enter();
+                for _ in 0..5 {
+                    failed_connect();
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    let report = outer.report();
+    assert_eq!(report.stats.calls, 10);
+    assert_eq!(report.nested[&Keyword::new("app", "lookup")].calls, 5);
+    assert_eq!(report.nested[&Keyword::new("app", "other")].calls, 5);
+    assert_eq!(a.report().stats.calls, 5);
+    assert!(!report.nested_truncated);
+    let (result, measured) = outer.measure(|| Err::<(), _>("unchanged error"));
+    assert_eq!(result, Err("unchanged error"));
+    assert_eq!(measured.stats, report.stats);
+    assert!(
+        OperationContext::named(
+            OperationKind::Query,
+            Keyword {
+                namespace: None,
+                name: "unqualified".into()
+            }
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn diagnostic_detail_cap_never_changes_total_or_result() {
+    let parent = OperationContext::diagnostic(OperationKind::Application);
+    for index in 0..140 {
+        let child = parent
+            .child_named(
+                OperationKind::Query,
+                atomic_core::Keyword::new("app", format!("phase-{index}")),
+            )
+            .unwrap();
+        child.record_payload_read(1);
+    }
+    let report = parent.report();
+    assert_eq!(report.nested.len(), 128);
+    assert!(report.nested_truncated);
+    assert_eq!(report.stats.known_payload_read_bytes, 140);
+}
+
+#[test]
 fn nested_scopes_restore_attribution_without_sibling_leakage() {
     let parent = OperationContext::new(OperationKind::Application);
     let child = parent.child(OperationKind::Query);

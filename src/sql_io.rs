@@ -71,6 +71,10 @@ pub struct OperationPhaseStats {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SqlIoStats {
+    /// Opt-in operation-local cache/index observations; empty when disabled.
+    pub reads: crate::ReadIoStats,
+    /// Actual semantic work, not replayed receipt contents or durable I/O.
+    pub transaction: crate::TransactionWorkStats,
     /// All started driver calls, including connection and control calls.
     pub calls: u64,
     pub completed_calls: u64,
@@ -103,19 +107,29 @@ pub struct SqlIoStats {
 #[derive(Clone, Debug)]
 pub struct SqlIoReport {
     pub kind: OperationKind,
+    pub context: Option<crate::Keyword>,
     /// Inclusive statistics: each physical call contributes once to its
     /// operation and once to each ancestor, never to a sibling.
     pub stats: SqlIoStats,
     pub operation_elapsed_nanos: u64,
+    /// Inclusive contributions grouped by each distinct named descendant.
+    /// Groups may nest/overlap; do not sum them to reconstruct the total.
+    pub nested: BTreeMap<crate::Keyword, SqlIoStats>,
+    /// At most128 distinct nested business labels are retained per context.
+    /// Overflow drops detail only; total I/O and results are unaffected.
+    pub nested_truncated: bool,
 }
 
 pub type SqlMetricCallback = Arc<dyn Fn(SqlIoReport) + Send + Sync>;
 
 struct OperationInner {
     kind: OperationKind,
+    name: Option<crate::Keyword>,
+    diagnostics: bool,
     started: Instant,
     parent: Option<OperationContext>,
     stats: Mutex<SqlIoStats>,
+    nested: Mutex<(BTreeMap<crate::Keyword, SqlIoStats>, bool)>,
     callback: Option<SqlMetricCallback>,
 }
 
@@ -205,17 +219,118 @@ impl OperationContext {
         parent: Option<Self>,
         callback: Option<SqlMetricCallback>,
     ) -> Self {
+        let diagnostics = parent.as_ref().is_some_and(Self::diagnostics_enabled);
+        Self::create_observed(kind, parent, callback, None, diagnostics)
+    }
+
+    fn create_observed(
+        kind: OperationKind,
+        parent: Option<Self>,
+        callback: Option<SqlMetricCallback>,
+        name: Option<crate::Keyword>,
+        diagnostics: bool,
+    ) -> Self {
         Self(Arc::new(OperationInner {
             kind,
+            name,
+            diagnostics,
             started: Instant::now(),
             parent,
             stats: Mutex::new(SqlIoStats::default()),
+            nested: Mutex::new((BTreeMap::new(), false)),
             callback,
         }))
     }
 
     pub fn child(&self, kind: OperationKind) -> Self {
         Self::create(kind, Some(self.clone()), self.0.callback.clone())
+    }
+
+    pub fn child_diagnostic(&self, kind: OperationKind) -> Self {
+        Self::create_observed(
+            kind,
+            Some(self.clone()),
+            self.0.callback.clone(),
+            None,
+            true,
+        )
+    }
+
+    /// Enable detailed native read/semantic counters for this operation.
+    /// Existing `new` contexts retain their inexpensive SQL-only behavior.
+    pub fn diagnostic(kind: OperationKind) -> Self {
+        Self::create_observed(kind, None, None, None, true)
+    }
+
+    /// Business names are intentional diagnostic labels, not subject data.
+    pub fn named(kind: OperationKind, name: crate::Keyword) -> Result<Self, crate::SemanticError> {
+        validate_context_name(&name)?;
+        Ok(Self::create_observed(kind, None, None, Some(name), true))
+    }
+
+    pub fn child_named(
+        &self,
+        kind: OperationKind,
+        name: crate::Keyword,
+    ) -> Result<Self, crate::SemanticError> {
+        validate_context_name(&name)?;
+        Ok(Self::create_observed(
+            kind,
+            Some(self.clone()),
+            self.0.callback.clone(),
+            Some(name),
+            true,
+        ))
+    }
+
+    pub fn diagnostics_enabled(&self) -> bool {
+        self.0.diagnostics
+    }
+
+    pub fn report(&self) -> SqlIoReport {
+        // Phases and queued submissions are unnamed children of their caller.
+        // Preserve the effective business label without changing aggregation.
+        let mut effective = Some(self);
+        let mut name = None;
+        while let Some(context) = effective {
+            if context.0.name.is_some() {
+                name = context.0.name.clone();
+                break;
+            }
+            effective = context.0.parent.as_ref();
+        }
+        let (nested, truncated) = &*self
+            .0
+            .nested
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        SqlIoReport {
+            kind: self.0.kind,
+            context: name,
+            stats: self.snapshot(),
+            operation_elapsed_nanos: nanos(self.0.started.elapsed()),
+            nested: nested.clone(),
+            nested_truncated: *truncated,
+        }
+    }
+
+    /// Run any native API against one explicitly scoped context. The result
+    /// (including errors) is unchanged; take `report()` after lazy consumption.
+    pub fn measure<T>(&self, operation: impl FnOnce() -> T) -> (T, SqlIoReport) {
+        let result = {
+            let _scope = self.enter();
+            operation()
+        };
+        (result, self.report())
+    }
+
+    pub(crate) fn record_transaction_work(
+        &self,
+        mut record: impl FnMut(&mut crate::TransactionWorkStats),
+    ) {
+        if self.diagnostics_enabled() {
+            self.update(|stats| record(&mut stats.transaction));
+        }
     }
 
     pub fn current() -> Option<Self> {
@@ -276,11 +391,7 @@ impl OperationContext {
         let Some(callback) = &self.0.callback else {
             return true;
         };
-        let report = SqlIoReport {
-            kind: self.0.kind,
-            stats: self.snapshot(),
-            operation_elapsed_nanos: nanos(self.0.started.elapsed()),
-        };
+        let report = self.report();
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(report))).is_ok()
     }
 
@@ -296,10 +407,11 @@ impl OperationContext {
         });
     }
 
-    fn update(&self, mut update: impl FnMut(&mut SqlIoStats)) {
+    pub(crate) fn update(&self, mut update: impl FnMut(&mut SqlIoStats)) {
         let process = process_context();
         let mut counted_process = false;
         let mut current = Some(self.clone());
+        let mut labels: Vec<crate::Keyword> = Vec::new();
         while let Some(context) = current {
             counted_process |= Arc::ptr_eq(&context.0, &process.0);
             {
@@ -309,6 +421,25 @@ impl OperationContext {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 update(&mut stats);
+            }
+            if !labels.is_empty() {
+                let mut grouped = context
+                    .0
+                    .nested
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                for name in &labels {
+                    if grouped.0.len() < 128 || grouped.0.contains_key(name) {
+                        update(grouped.0.entry(name.clone()).or_default());
+                    } else {
+                        grouped.1 = true;
+                    }
+                }
+            }
+            if let Some(name) = &context.0.name
+                && !labels.contains(name)
+            {
+                labels.push(name.clone());
             }
             current = context.0.parent.clone();
         }
@@ -380,6 +511,32 @@ impl OperationContext {
             stats.rows = stats.rows.saturating_add(count);
             stats.result_cell_bytes = stats.result_cell_bytes.saturating_add(bytes);
         });
+    }
+}
+
+fn validate_context_name(name: &crate::Keyword) -> Result<(), crate::SemanticError> {
+    if name.namespace.as_ref().is_none_or(String::is_empty)
+        || name.name.is_empty()
+        || name
+            .namespace
+            .as_ref()
+            .map_or(0, String::len)
+            .saturating_add(name.name.len())
+            > 256
+    {
+        return Err(crate::SemanticError::incorrect(
+            "diagnostics/context-name",
+            "I/O context requires a qualified nonempty keyword of at most 256 bytes",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn record_current_transaction_work(
+    record: impl FnMut(&mut crate::TransactionWorkStats),
+) {
+    if let Some(context) = OperationContext::current() {
+        context.record_transaction_work(record);
     }
 }
 

@@ -22,8 +22,10 @@ EDN data commands (file path '-' reads stdin; results are EDN on stdout):
   atomic query [--database ID] --file PATH [--inputs PATH] [--sources PATH]
     [--as-of N] [--since N] [--history] [--timeout-ms N] [--max-work N]
     [--max-results N] [--max-join-bytes N] [--max-value-bytes N]
+    [--query-stats] [--io-context :app/operation]
   atomic pull --database ID --file PATH --entity EDN
     [--as-of N] [--since N] [--max-depth N] [--max-entities N]
+    [--io-context :app/operation]
 
 transact requires a stable caller-supplied request key; reuse it AND the original
 intent/options after an unknown outcome. --basis is an optional optimistic guard.
@@ -92,8 +94,9 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
                 "--max-results",
                 "--max-join-bytes",
                 "--max-value-bytes",
+                "--io-context",
             ],
-            &["--history"],
+            &["--history", "--query-stats"],
         ),
         "pull" => (
             &[
@@ -104,6 +107,7 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
                 "--since",
                 "--max-depth",
                 "--max-entities",
+                "--io-context",
             ],
             &[],
         ),
@@ -136,6 +140,7 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
         args.required("--database")?;
     }
     args.required("--file")?;
+    diagnostic_context(&args)?;
     super::transaction_defaults(args.values.get("--default-partition").map(String::as_str))?;
     if command == "transact" {
         args.required("--request-key")?;
@@ -253,6 +258,10 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
     if args.command == "query" {
         return run_query(&args, &text);
     }
+    let diagnostic = diagnostic_context(&args)?;
+    let _scope = diagnostic
+        .as_ref()
+        .map(atomic_core::OperationContext::enter);
     let config = postgres_config_from_env()?;
     let connection =
         Connection::connect_configured(config.clone(), args.required("--database")?, 128)?;
@@ -349,9 +358,8 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                 max_entities: args.size("--max-entities", usize::MAX)?,
                 ..PullControl::default()
             };
-            output(&query_value_to_edn(
-                &db.pull_with_control(&pattern, identifier, &control)?,
-            )?)?;
+            let value = query_value_to_edn(&db.pull_with_control(&pattern, identifier, &control)?)?;
+            output(&with_io_report(value, diagnostic.as_ref()))?;
         }
         _ => unreachable!(),
     }
@@ -359,6 +367,10 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
 }
 
 fn run_query(args: &Arguments, text: &str) -> Result<(), SemanticError> {
+    let diagnostic = diagnostic_context(args)?;
+    let _scope = diagnostic
+        .as_ref()
+        .map(atomic_core::OperationContext::enter);
     let query = parse_query_edn(text)?;
     let inputs = args
         .values
@@ -442,6 +454,10 @@ fn run_query(args: &Arguments, text: &str) -> Result<(), SemanticError> {
     }
     let bound = query.bind(&arguments)?;
     let control = QueryControl {
+        diagnostics: args
+            .switches
+            .contains("--query-stats")
+            .then(atomic_core::QueryDiagnosticOptions::default),
         timeout: Some(Duration::from_millis(args.number("--timeout-ms", 30_000)?)),
         max_work: args.size("--max-work", usize::MAX)?,
         max_result_rows: args.size("--max-results", usize::MAX)?,
@@ -450,7 +466,52 @@ fn run_query(args: &Arguments, text: &str) -> Result<(), SemanticError> {
         ..QueryControl::default()
     };
     let result = bound.execute(&control, None)?;
-    output(&bound.result_to_edn(&result.result)?)
+    let mut value = bound.result_to_edn(&result.result)?;
+    if let Some(stats) = &result.diagnostics {
+        value = EdnValue::Map(vec![
+            (key("ret"), value),
+            (
+                key("query-stats"),
+                atomic_core::query_diagnostics_to_edn(stats),
+            ),
+        ]);
+        if let (Some(context), EdnValue::Map(fields)) = (&diagnostic, &mut value) {
+            fields.push((
+                key("io-stats"),
+                atomic_core::io_report_to_edn(&context.report()),
+            ));
+        }
+    } else {
+        value = with_io_report(value, diagnostic.as_ref());
+    }
+    output(&value)
+}
+
+fn diagnostic_context(
+    args: &Arguments,
+) -> Result<Option<atomic_core::OperationContext>, SemanticError> {
+    args.values
+        .get("--io-context")
+        .map(|text| {
+            let EdnValue::Keyword(name) = read_edn(text)? else {
+                return Err(usage("--io-context requires a qualified keyword"));
+            };
+            atomic_core::OperationContext::named(atomic_core::OperationKind::Application, name)
+        })
+        .transpose()
+}
+
+fn with_io_report(value: EdnValue, context: Option<&atomic_core::OperationContext>) -> EdnValue {
+    match context {
+        None => value,
+        Some(context) => EdnValue::Map(vec![
+            (key("ret"), value),
+            (
+                key("io-stats"),
+                atomic_core::io_report_to_edn(&context.report()),
+            ),
+        ]),
+    }
 }
 fn key(name: &str) -> EdnValue {
     edn_keyword("atomic", name)

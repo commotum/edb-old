@@ -2032,6 +2032,30 @@ pub(crate) fn stage_full_generation_tree(
     state_hash: Digest,
     database: &Database,
 ) -> Result<Digest, SemanticError> {
+    stage_full_generation_tree_with_control(
+        store,
+        database_id,
+        log_generation,
+        tx_hash,
+        state_hash,
+        database,
+        &mut |_| Ok(()),
+    )
+}
+
+/// The caller admits the whole eager candidate/build before entering. This
+/// preserves the full-tree algorithm, adding cooperative upload boundaries.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn stage_full_generation_tree_with_control(
+    store: &mut PostgresTreeStore,
+    database_id: &str,
+    log_generation: u64,
+    tx_hash: Digest,
+    state_hash: Digest,
+    database: &Database,
+    check: &mut dyn FnMut(&'static str) -> Result<(), SemanticError>,
+) -> Result<Digest, SemanticError> {
+    check("tree-build")?;
     let expected_revision = store.current_publication_revision(database_id)?;
     let publication_revision = expected_revision.checked_add(1).ok_or_else(|| {
         SemanticError::new(
@@ -2083,10 +2107,19 @@ pub(crate) fn stage_full_generation_tree(
         &upload_hashes,
     )?;
     let staged = (|| {
-        store.insert_nodes(
-            build.nodes.iter().map(|(hash, bytes)| (*hash, bytes)),
-            store.node_upload_limits(),
-        )?;
+        let mut remaining_nodes = build.nodes.iter();
+        loop {
+            let nodes: Vec<_> = remaining_nodes.by_ref().take(128).collect();
+            if nodes.is_empty() {
+                break;
+            }
+            check("tree-upload")?;
+            store.insert_nodes(
+                nodes.into_iter().map(|(hash, bytes)| (*hash, bytes)),
+                store.node_upload_limits(),
+            )?;
+        }
+        check("tree-manifest")?;
         store.stage_manifest_with_delta(
             &record,
             expected_revision,
@@ -5629,6 +5662,7 @@ impl Peer {
             tx_data: wire.tx_data,
             tempids: wire.tempids,
             replayed: wire.replayed,
+            diagnostics: None,
         })
     }
 
@@ -6548,6 +6582,7 @@ impl Peer {
                 tx_data: transaction.tx_data.clone(),
                 tempids,
                 replayed: false,
+                diagnostics: None,
             });
             before.tiered = after;
         }
@@ -8429,6 +8464,7 @@ impl TieredSnapshot {
         let (_, root) = self.exact_tree(history, order)?;
         let range = RecentRange::new(start.cloned(), end.cloned());
         let recent = self.state.recent.cursor(history, order, &range)?;
+        crate::io_diagnostics::record_index_cursor(order);
         let durable = DurableTreeCursor::new(
             self.clone(),
             root,
@@ -8468,6 +8504,7 @@ impl TieredSnapshot {
         let order = prefix.order();
         let (_, root) = self.exact_tree(history, order)?;
         let recent = self.state.recent.prefix_cursor(history, prefix)?;
+        crate::io_diagnostics::record_index_cursor(order);
         let durable = DurableTreeCursor::new_prefix(self.clone(), root, history, prefix.clone());
         Ok(PeerIndexCursor {
             operation: crate::sql_io::OperationContext::current(),
@@ -8535,6 +8572,7 @@ impl TieredSnapshot {
         reverse: bool,
     ) -> Result<PeerIndexCursor, SemanticError> {
         let order = normalized.order();
+        crate::io_diagnostics::record_index_cursor(order);
         let (_, root) = self.exact_tree(history, order)?;
         let recent = if reverse {
             self.state
@@ -8739,7 +8777,10 @@ impl TieredSnapshot {
         history: bool,
         stats: &mut TreeReadStats,
     ) -> Result<LoadedDirectory, SemanticError> {
-        let node = self.load_node(reference.hash, stats)?;
+        let misses = stats.cache_misses;
+        let node = self.load_node(reference.hash, stats);
+        crate::io_diagnostics::record_index_node(order, stats.cache_misses != misses);
+        let node = node?;
         let TreeNode::Directory(directory) = node.as_ref() else {
             return Err(fault(
                 "peer/tree-child-kind",
@@ -8765,7 +8806,10 @@ impl TieredSnapshot {
         history: bool,
         stats: &mut TreeReadStats,
     ) -> Result<LoadedLeaf, SemanticError> {
-        let node = self.load_node(reference.hash, stats)?;
+        let misses = stats.cache_misses;
+        let node = self.load_node(reference.hash, stats);
+        crate::io_diagnostics::record_index_node(order, stats.cache_misses != misses);
+        let node = node?;
         let TreeNode::Leaf(leaf) = node.as_ref() else {
             return Err(fault(
                 "peer/tree-child-kind",
@@ -8790,16 +8834,23 @@ impl TieredSnapshot {
         hash: Digest,
         stats: &mut TreeReadStats,
     ) -> Result<Arc<TreeNode>, SemanticError> {
+        let observed = crate::io_diagnostics::CacheObservation::start(crate::CacheTier::DecodedNode);
         if let Some(node) = self.core.tree_cache.get(&hash) {
             stats.cache_hits = stats.cache_hits.saturating_add(1);
+            observed.finish(true, false, 0, 0);
             return Ok(node);
         }
         stats.cache_misses = stats.cache_misses.saturating_add(1);
+        observed.finish(false, false, 0, 0);
         loop {
             let mut slot = lock(&self.core.tree_node_miss);
             if let Some(miss) = slot.as_ref().cloned() {
                 drop(slot);
+                let waiting = crate::io_diagnostics::CacheObservation::start(crate::CacheTier::Inflight);
                 let result = miss.wait();
+                // Another node can own the serialized miss slot. Its success
+                // or failure is not this caller's hit/error; only its wait is.
+                waiting.finish(miss.hash == hash && result.is_ok(), miss.hash == hash && result.is_err(), 0, 0);
                 if miss.hash == hash {
                     return result;
                 }
@@ -9678,7 +9729,8 @@ fn scan_latest_tree_base<C: GenericClient>(
                 cache,
             ) {
                 Ok(base) => Ok(TreeBaseScan::Selected(Box::new(base), stats)),
-                Err(error) if is_postgres_connection_error(&error) => Err(error),
+                Err(error) if is_postgres_connection_error(&error)
+                    || error.details.contains_key("postgres_sqlstate") => Err(error),
                 Err(_) => {
                     stats.rejected_candidates = 1;
                     Ok(TreeBaseScan::AllInvalid(stats))
@@ -9777,7 +9829,8 @@ fn scan_latest_tree_base<C: GenericClient>(
                 cache,
             ) {
                 Ok(base) => return Ok(TreeBaseScan::Selected(Box::new(base), stats)),
-                Err(error) if is_postgres_connection_error(&error) => return Err(error),
+                Err(error) if is_postgres_connection_error(&error)
+                    || error.details.contains_key("postgres_sqlstate") => return Err(error),
                 Err(error) if error.code == "peer/tree-publication-collecting" => {
                     stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
                     if required_manifest.is_some() {
@@ -11345,6 +11398,39 @@ mod tests {
         );
         assert_eq!(snapshot.tree_cache_stats().current_entries, 0);
         assert!(lock(&core.tree_node_miss).is_none());
+    }
+
+    #[test]
+    fn native_cache_isolation_unrelated_miss_error_is_not_this_query_error() {
+        let Some((_connection, snapshot)) = cache_isolation_fixture(0, 0) else { return; };
+        let (_, root) = snapshot.exact_tree(false, IndexOrder::Eavt).unwrap();
+        let hash = root.directories[0].hash;
+        let mut other_hash = hash;
+        other_hash[0] ^= 1;
+        let miss = Arc::new(TreeNodeMiss { hash: other_hash, result: Mutex::new(None), ready: Condvar::new() });
+        *lock(&snapshot.core.tree_node_miss) = Some(miss.clone());
+        let reader = snapshot.clone();
+        let worker = std::thread::spawn(move || {
+            let context = crate::OperationContext::diagnostic(crate::OperationKind::Query);
+            let _scope = context.enter();
+            let result = reader.load_node(hash, &mut TreeReadStats::default());
+            (result, context.snapshot())
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Arc::strong_count(&miss) < 3 && Instant::now() < deadline { std::thread::yield_now(); }
+        let joined = Arc::strong_count(&miss) >= 3;
+        // Remove the unrelated slot before releasing its waiter. The requested
+        // node then follows its ordinary authenticated load path.
+        lock(&snapshot.core.tree_node_miss).take();
+        *lock(&miss.result) = Some(Err(fault("test/unrelated-miss", "another query's failure")));
+        miss.ready.notify_all();
+        let (result, stats) = worker.join().unwrap();
+        assert!(joined);
+        assert!(result.is_ok());
+        let waits = &stats.reads.cache[&crate::CacheTier::Inflight];
+        assert_eq!((waits.accesses, waits.hits, waits.misses, waits.errors), (1, 0, 1, 0));
+        assert_eq!(stats.errors, 0);
+        assert_eq!(stats.reads.cache[&crate::CacheTier::PostgresBlock].hits, 1);
     }
 
     #[test]

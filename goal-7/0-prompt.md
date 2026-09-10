@@ -8,8 +8,20 @@ This is Stage 6 of /home/jake/Developer/atomic/goal-0/0-plan.md, owning AO04, AO
 
 Use local Datomic Pro docs for semantics and 1.0.7705 for architectural evidence.
 Deliver useful idiomatic Rust equivalents in spirit, not literal JVM/Clojure
-machinery. Preserve existing code, immutable values, exact identity/schema,
-durable bytes/programs and receipt-first retries; PostgreSQL remains storage.
+machinery. Follow Goal 0's fresh-database policy: schema/format changes may require
+a newly created database; cross-version migration, old-binary fixtures and
+mixed-version rolling upgrades are not acceptance gates. Reject unsupported
+formats clearly without silent reinterpretation or automatic resets.
+Preserve current-version data integrity, immutable history, exact identity/schema,
+restart/crash recovery, same-version failover, current-version backup/restore and
+receipt-first exact retries, including after rebinding in a supported database.
+Keep cancellation, isolation and complete-path performance requirements. Existing
+Rust/EDN API scope remains; do not turn this into compatibility-code cleanup.
+PostgreSQL remains storage; exercise new-format behavior in fresh databases.
+Apply Goal0's proportionate-implementation policy: reuse unaffected evidence,
+focused regressions and representative integration; no duplicate matrices,
+invented hard bounds or completion ceremonies. Optional unapproved work is
+deferred, not a blocker. Required capabilities and current-version safety remain.
 Sync actual code/tests, execute the first unfinished internal stage, verify public
 application/PostgreSQL paths and measured complete costs, and fold results into
 child/parent plans. Do not create recursive goals or silently change scope.

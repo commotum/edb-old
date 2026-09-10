@@ -148,8 +148,33 @@ impl FulltextRetry {
         }
     }
 
+    #[cfg(test)]
     fn snapshot(&self, now: Instant) -> BackgroundFulltextStats {
-        let mut stats = self.stats.clone();
+        self.snapshot_with_messages(now, true)
+    }
+
+    fn snapshot_with_messages(&self, now: Instant, messages: bool) -> BackgroundFulltextStats {
+        let mut stats =
+            BackgroundFulltextStats {
+                checked_basis_t: self.stats.checked_basis_t,
+                attempted_basis_t: self.stats.attempted_basis_t,
+                attempts: self.stats.attempts,
+                failures: self.stats.failures,
+                idle_retries: self.stats.idle_retries,
+                retry_in: self.stats.retry_in,
+                retry_exhausted: self.stats.retry_exhausted,
+                last_failure: self.stats.last_failure.as_ref().map(|error| {
+                    BackgroundIndexingFailure {
+                        category: error.category,
+                        code: error.code,
+                        message: if messages {
+                            error.message.clone()
+                        } else {
+                            String::new()
+                        },
+                    }
+                }),
+            };
         stats.retry_in = self.retry_at.map(|at| at.saturating_duration_since(now));
         stats
     }
@@ -195,6 +220,9 @@ pub struct BackgroundIndexingStats {
     pub job_in_flight: bool,
     pub last_failure: Option<BackgroundIndexingFailure>,
     pub fulltext: BackgroundFulltextStats,
+    /// Accounted excision work is maintenance, not recent-tier residency.
+    pub excision: crate::ExcisionProgress,
+    pub excision_failure: Option<BackgroundIndexingFailure>,
 }
 
 #[derive(Clone, Debug)]
@@ -280,6 +308,9 @@ pub struct ServiceTransactionReport {
     pub tx_data: Vec<crate::Datom>,
     pub tempids: BTreeMap<String, u64>,
     pub replayed: bool,
+    /// Present only for a diagnostic submission or configured telemetry.
+    /// Not encoded in durable receipts or reconstructed remote reports.
+    pub diagnostics: Option<Arc<crate::TransactionDiagnostics>>,
 }
 
 impl ServiceTransactionReport {
@@ -292,6 +323,7 @@ impl ServiceTransactionReport {
             tx_data: commit.tx_data,
             tempids: commit.tempids,
             replayed: commit.replayed,
+            diagnostics: None,
         }
     }
 }
@@ -439,6 +471,7 @@ struct BackgroundIndexing {
     backpressure_rejections: AtomicU64,
     last_failure: Mutex<Option<SemanticError>>,
     fulltext: Mutex<FulltextRetry>,
+    excision: Mutex<(crate::ExcisionProgress, Option<SemanticError>)>,
 }
 
 impl BackgroundIndexing {
@@ -481,6 +514,7 @@ impl BackgroundIndexing {
             backpressure_rejections: AtomicU64::new(0),
             last_failure: Mutex::new(None),
             fulltext: Mutex::new(FulltextRetry::default()),
+            excision: Mutex::new(Default::default()),
         }
     }
 
@@ -629,6 +663,22 @@ impl BackgroundIndexing {
         pending_avet_projections: usize,
         index_work_remaining: bool,
     ) {
+        self.publish_completed(
+            published_revision,
+            published_basis_t,
+            pending_avet_projections,
+            index_work_remaining,
+        );
+        self.jobs_completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn publish_completed(
+        &self,
+        published_revision: u64,
+        published_basis_t: u64,
+        pending_avet_projections: usize,
+        index_work_remaining: bool,
+    ) {
         let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
         backlog.published_revision = backlog.published_revision.max(published_revision);
         backlog.newest_observed_revision = backlog.newest_observed_revision.max(published_revision);
@@ -652,7 +702,6 @@ impl BackgroundIndexing {
             || pending_avet_projections != 0
             || backlog.published_revision < backlog.newest_observed_revision
             || backlog.published_basis_t < backlog.required_publication_t;
-        self.jobs_completed.fetch_add(1, Ordering::Relaxed);
     }
 
     fn fail_job(&self, error: SemanticError) {
@@ -743,6 +792,10 @@ impl BackgroundIndexing {
     }
 
     fn stats(&self) -> BackgroundIndexingStats {
+        self.stats_with_messages(true)
+    }
+
+    fn stats_with_messages(&self, messages: bool) -> BackgroundIndexingStats {
         let backlog = self.backlog.lock().expect("index backlog mutex poisoned");
         // Status sampling must not make fixed-size commits proportional to the
         // accumulated tail. Only startup and retiring a published prefix walk
@@ -757,9 +810,27 @@ impl BackgroundIndexing {
             .map(|error| BackgroundIndexingFailure {
                 category: error.category,
                 code: error.code,
-                message: error.message.clone(),
+                message: if messages {
+                    error.message.clone()
+                } else {
+                    String::new()
+                },
             });
+        let excision = self
+            .excision
+            .lock()
+            .expect("excision status mutex poisoned");
         BackgroundIndexingStats {
+            excision: excision.0.clone(),
+            excision_failure: excision.1.as_ref().map(|e| BackgroundIndexingFailure {
+                category: e.category,
+                code: e.code,
+                message: if messages {
+                    e.message.clone()
+                } else {
+                    String::new()
+                },
+            }),
             published_revision: backlog.published_revision,
             published_basis_t: backlog.published_basis_t,
             pending_avet_projections: backlog.pending_avet_projections,
@@ -785,7 +856,7 @@ impl BackgroundIndexing {
                 .fulltext
                 .lock()
                 .expect("fulltext retry mutex poisoned")
-                .snapshot(Instant::now()),
+                .snapshot_with_messages(Instant::now(), messages),
         }
     }
 }
@@ -887,6 +958,7 @@ struct Shared {
     database_id: String,
     lineage_id: String,
     transport_lease: TransactorLease,
+    telemetry: Option<crate::TelemetryEmitter>,
 }
 
 impl Shared {
@@ -921,6 +993,7 @@ impl Shared {
             database_id,
             lineage_id,
             transport_lease,
+            telemetry: None,
         }
     }
 
@@ -1137,10 +1210,17 @@ impl TransactionClient {
     ) -> Result<TransactionTicket, SemanticError> {
         // Attribution crosses the queue explicitly. Contexts contain counters,
         // not storage authority; no worker automatically invokes their callback.
-        let operation = OperationContext::current().map_or_else(
-            || OperationContext::new(OperationKind::Transaction),
-            |parent| parent.child(OperationKind::Transaction),
-        );
+        let detailed = self
+            .shared
+            .telemetry
+            .as_ref()
+            .is_some_and(crate::TelemetryEmitter::is_enabled);
+        let operation = match (OperationContext::current(), detailed) {
+            (Some(parent), true) => parent.child_diagnostic(OperationKind::Transaction),
+            (Some(parent), false) => parent.child(OperationKind::Transaction),
+            (None, true) => OperationContext::diagnostic(OperationKind::Transaction),
+            (None, false) => OperationContext::new(OperationKind::Transaction),
+        };
         let _operation_scope = operation.enter();
         if !self.shared.accepting.load(Ordering::Acquire) {
             return Err(self.shared.unavailable());
@@ -1235,6 +1315,22 @@ impl TransactionClient {
             retention,
             shared: Arc::downgrade(&self.shared),
         }
+    }
+
+    /// Fixed-size local counters; unlike `stats`, this never walks retained
+    /// subscriber reports or takes their queue locks.
+    pub fn operational_stats(&self) -> OperationalServiceStats {
+        OperationalServiceStats {
+            accepting: self.shared.accepting.load(Ordering::Acquire),
+            queued: self.shared.queued.load(Ordering::Relaxed),
+            max_queued: self.shared.max_queued.load(Ordering::Relaxed),
+            processed: self.shared.processed.load(Ordering::Relaxed),
+            rejected_full: self.shared.rejected_full.load(Ordering::Relaxed),
+        }
+    }
+
+    pub(crate) fn operational_indexing_stats(&self) -> BackgroundIndexingStats {
+        self.shared.indexing.stats_with_messages(false)
     }
 
     pub fn stats(&self) -> ServiceStats {
@@ -1468,6 +1564,15 @@ impl Drop for ReportSubscription {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationalServiceStats {
+    pub accepting: bool,
+    pub queued: usize,
+    pub max_queued: usize,
+    pub processed: u64,
+    pub rejected_full: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ServiceStats {
     pub queued: usize,
     pub max_queued: usize,
@@ -1501,9 +1606,41 @@ pub struct TransactionService {
     index_worker: Option<JoinHandle<()>>,
 }
 
+/// Deployment/resource settings shared by direct activation and standby
+/// takeover. None of these settings alter the identity of an admitted request.
+#[derive(Clone, Debug, Default)]
+pub struct ServiceOptions {
+    pub indexing: BackgroundIndexingConfig,
+    pub execution: crate::TransactionExecutionOptions,
+    pub excision: crate::ExcisionConfig,
+    /// Optional bounded nonblocking diagnostics publication. The emitter owns
+    /// its sink worker; transaction execution never invokes sink callbacks.
+    pub telemetry: Option<crate::TelemetryEmitter>,
+}
+
+/// A local observation of a one-shot leadership contender. This is not a lease
+/// check: after taking the service, use `TransactionClient::is_available` and
+/// the application's listener state to decide whether it is write-ready.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandbyStatus {
+    Waiting,
+    Activating,
+    /// Activation completed and its service is waiting to be taken.
+    Ready,
+    Failed,
+    /// Cancellation was requested; shutdown still owns joining and cleanup.
+    Stopping,
+    Stopped,
+    /// Ownership was transferred to the caller; stopping this contender does
+    /// not stop that independently owned service.
+    Transferred,
+}
+
 pub struct TransactionStandby {
     receiver: mpsc::Receiver<Result<TransactionService, SemanticError>>,
     stop: Arc<AtomicBool>,
+    status: Arc<Mutex<StandbyStatus>>,
+    failure: Option<SemanticError>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -1526,10 +1663,54 @@ impl TransactionStandby {
     }
 
     pub fn start_configured(
-        mut config: TransactionServiceConfig,
+        config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
         poll_interval: Duration,
     ) -> Result<Self, SemanticError> {
+        Self::start_configured_with_indexing_and_execution_options(
+            config,
+            connection,
+            BackgroundIndexingConfig::default(),
+            crate::TransactionExecutionOptions::default(),
+            poll_interval,
+        )
+    }
+
+    /// Contend for leadership using the same deployment and resource settings
+    /// on every attempt. The public name is resolved once before spawning;
+    /// rename or name reuse never redirects an already waiting contender.
+    ///
+    /// Polling is interruptible. Synchronous PostgreSQL activation and final
+    /// service cleanup are not preempted; their configured I/O limits still
+    /// apply when `shutdown`, `await_active`, or Drop joins the worker.
+    pub fn start_configured_with_indexing_and_execution_options(
+        config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        indexing_config: BackgroundIndexingConfig,
+        options: crate::TransactionExecutionOptions,
+        poll_interval: Duration,
+    ) -> Result<Self, SemanticError> {
+        Self::start_configured_with_options(
+            config,
+            connection,
+            ServiceOptions {
+                indexing: indexing_config,
+                execution: options,
+                ..Default::default()
+            },
+            poll_interval,
+        )
+    }
+
+    pub fn start_configured_with_options(
+        mut config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        options: ServiceOptions,
+        poll_interval: Duration,
+    ) -> Result<Self, SemanticError> {
+        TransactionService::validate_config(&config)?;
+        options.indexing.validate()?;
+        options.excision.validate()?;
         if poll_interval.is_zero() {
             return Err(SemanticError::incorrect(
                 "service/standby-poll",
@@ -1541,30 +1722,68 @@ impl TransactionStandby {
         config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
+        let status = Arc::new(Mutex::new(StandbyStatus::Activating));
+        let worker_status = Arc::clone(&status);
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = thread::Builder::new()
             .name(format!("atomic-standby-{}", config.holder_id))
             .spawn(move || {
-                while !worker_stop.load(Ordering::Acquire) {
-                    match TransactionService::start_identity_configured_with_execution_options(
-                        config.clone(),
-                        connection.clone(),
-                        BackgroundIndexingConfig::default(),
-                        crate::TransactionExecutionOptions::default(),
-                    ) {
-                        Ok(service) => {
-                            let _ = sender.send(Ok(service));
+                loop {
+                    {
+                        let mut status = worker_status.lock().expect("standby status poisoned");
+                        if worker_stop.load(Ordering::Acquire) {
+                            *status = StandbyStatus::Stopped;
                             return;
                         }
+                        *status = StandbyStatus::Activating;
+                    }
+                    let result = TransactionService::start_identity_configured_with_options(
+                        config.clone(),
+                        connection.clone(),
+                        options.clone(),
+                    );
+                    match result {
                         Err(error)
                             if (error.category == ErrorCategory::Unavailable
                                 && error.code == "postgres/lease-held")
                                 || is_postgres_connection_error(&error) =>
                         {
-                            thread::sleep(poll_interval);
+                            {
+                                let mut status =
+                                    worker_status.lock().expect("standby status poisoned");
+                                if worker_stop.load(Ordering::Acquire) {
+                                    *status = StandbyStatus::Stopped;
+                                    return;
+                                }
+                                *status = StandbyStatus::Waiting;
+                            }
+                            // unpark carries a token, so cancellation between
+                            // the stop check and parking cannot be lost.
+                            thread::park_timeout(poll_interval);
                         }
-                        Err(error) => {
-                            let _ = sender.send(Err(error));
+                        result => {
+                            let mut status = worker_status.lock().expect("standby status poisoned");
+                            if worker_stop.load(Ordering::Acquire) {
+                                drop(status);
+                                // A successful activation raced cancellation.
+                                // Release its lease/workers before reporting
+                                // stopped, never leaving an unclaimed writer.
+                                drop(result);
+                                *worker_status.lock().expect("standby status poisoned") =
+                                    StandbyStatus::Stopped;
+                                return;
+                            }
+                            *status = if result.is_ok() {
+                                StandbyStatus::Ready
+                            } else {
+                                StandbyStatus::Failed
+                            };
+                            // This one-shot, capacity-one channel cannot fill.
+                            // Hold only the status lock across publication so
+                            // try_active cannot race a later Ready update.
+                            let sent = sender.send(result);
+                            drop(status);
+                            drop(sent);
                             return;
                         }
                     }
@@ -1580,11 +1799,97 @@ impl TransactionStandby {
         Ok(Self {
             receiver,
             stop,
+            status,
+            failure: None,
             worker: Some(worker),
         })
     }
 
+    /// Observe the contender without consuming its result or performing I/O.
+    pub fn status(&self) -> StandbyStatus {
+        let mut status = self.status.lock().expect("standby status poisoned");
+        if matches!(*status, StandbyStatus::Waiting | StandbyStatus::Activating)
+            && self
+                .worker
+                .as_ref()
+                .is_some_and(|worker| worker.is_finished())
+        {
+            // A panicking worker has disconnected its result channel. Do not
+            // advertise an indefinitely healthy contender in that case.
+            *status = StandbyStatus::Failed;
+        }
+        *status
+    }
+
+    /// Take a completed activation, or return None immediately while waiting.
+    /// Does not wait for PostgreSQL, sleep, or join a worker. A terminal error
+    /// remains observable on subsequent polls; a successful service transfers
+    /// exactly once. Stopping this object never stops a transferred service.
+    pub fn try_active(&mut self) -> Result<Option<TransactionService>, SemanticError> {
+        let mut status = self.status.lock().expect("standby status poisoned");
+        if *status == StandbyStatus::Transferred {
+            return Err(SemanticError::incorrect(
+                "service/standby-consumed",
+                "standby activation was already transferred",
+            ));
+        }
+        if self.stop.load(Ordering::Acquire) {
+            return Err(standby_stopped());
+        }
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        match self.receiver.try_recv() {
+            Ok(Ok(service)) => {
+                *status = StandbyStatus::Transferred;
+                Ok(Some(service))
+            }
+            Ok(Err(error)) => {
+                *status = StandbyStatus::Failed;
+                self.failure = Some(error.clone());
+                Err(error)
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let error = standby_stopped();
+                *status = StandbyStatus::Failed;
+                self.failure = Some(error.clone());
+                Err(error)
+            }
+        }
+    }
+
+    /// Request cancellation and wake idle polling. This does not wait for an
+    /// in-flight activation or release a service already buffered for handoff;
+    /// call `shutdown` (or drop this object) to join and complete cleanup.
+    pub fn request_stop(&self) {
+        let mut status = self.status.lock().expect("standby status poisoned");
+        self.stop.store(true, Ordering::Release);
+        if !matches!(*status, StandbyStatus::Transferred | StandbyStatus::Stopped) {
+            *status = StandbyStatus::Stopping;
+        }
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+    }
+
+    pub fn shutdown(mut self) {
+        self.stop_and_join();
+    }
+
     pub fn await_active(mut self, timeout: Duration) -> Result<TransactionService, SemanticError> {
+        if *self.status.lock().expect("standby status poisoned") == StandbyStatus::Transferred {
+            return Err(SemanticError::incorrect(
+                "service/standby-consumed",
+                "standby activation was already transferred",
+            ));
+        }
+        if self.stop.load(Ordering::Acquire) {
+            return Err(standby_stopped());
+        }
+        if let Some(error) = self.failure.take() {
+            return Err(error);
+        }
         let result = match self.receiver.recv_timeout(timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => Err(SemanticError::new(
@@ -1592,26 +1897,41 @@ impl TransactionStandby {
                 "service/standby-timeout",
                 "standby did not acquire leadership before the deadline",
             )),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(SemanticError::new(
-                ErrorCategory::Unavailable,
-                "service/standby-stopped",
-                "standby stopped before acquiring leadership",
-            )),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(standby_stopped()),
         };
-        self.stop.store(true, Ordering::Release);
+        if result.is_ok() {
+            *self.status.lock().expect("standby status poisoned") = StandbyStatus::Transferred;
+        }
+        self.stop_and_join();
+        result
+    }
+
+    fn stop_and_join(&mut self) {
+        self.request_stop();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        result
+        // Dropping an unclaimed activation runs ordinary service shutdown,
+        // including lease release. There is at most one buffered result.
+        drop(self.receiver.try_recv());
+        let mut status = self.status.lock().expect("standby status poisoned");
+        if *status != StandbyStatus::Transferred {
+            *status = StandbyStatus::Stopped;
+        }
     }
+}
+
+fn standby_stopped() -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Unavailable,
+        "service/standby-stopped",
+        "standby stopped before acquiring leadership",
+    )
 }
 
 impl Drop for TransactionStandby {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+        self.stop_and_join();
     }
 }
 
@@ -1705,19 +2025,32 @@ impl TransactionService {
     }
 
     pub fn start_configured_with_indexing_and_execution_options(
-        mut config: TransactionServiceConfig,
+        config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
         indexing_config: BackgroundIndexingConfig,
         options: crate::TransactionExecutionOptions,
     ) -> Result<Self, SemanticError> {
-        Self::validate_config(&config)?;
-        config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
-        Self::start_identity_configured_with_execution_options(
+        Self::start_configured_with_options(
             config,
             connection,
-            indexing_config,
-            options,
+            ServiceOptions {
+                indexing: indexing_config,
+                execution: options,
+                ..Default::default()
+            },
         )
+    }
+
+    pub fn start_configured_with_options(
+        mut config: TransactionServiceConfig,
+        connection: PostgresConnectionConfig,
+        options: ServiceOptions,
+    ) -> Result<Self, SemanticError> {
+        Self::validate_config(&config)?;
+        options.indexing.validate()?;
+        options.excision.validate()?;
+        config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
+        Self::start_identity_configured_with_options(config, connection, options)
     }
 
     fn validate_config(config: &TransactionServiceConfig) -> Result<(), SemanticError> {
@@ -1737,18 +2070,18 @@ impl TransactionService {
 
     // Only callers that already captured a stable ID may enter this path.
     // Lease acquisition independently fences retired identities in PostgreSQL.
-    fn start_identity_configured_with_execution_options(
+    fn start_identity_configured_with_options(
         config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
-        indexing_config: BackgroundIndexingConfig,
-        options: crate::TransactionExecutionOptions,
+        options: ServiceOptions,
     ) -> Result<Self, SemanticError> {
         Self::validate_config(&config)?;
-        let indexing_config = indexing_config.validate()?;
+        let indexing_config = options.indexing.validate()?;
+        let excision_config = options.excision.validate()?;
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
-        store.set_transaction_defaults(options.defaults);
-        store.set_native_registry(options.native);
+        store.set_transaction_defaults(options.execution.defaults);
+        store.set_native_registry(options.execution.native);
         store.set_capacity_limits(config.capacity_limits)?;
         let writer_recent_limits = crate::recent::RecentLimits {
             soft_datoms: u64::MAX,
@@ -1766,6 +2099,19 @@ impl TransactionService {
         };
         store.set_writer_recent_limits(writer_recent_limits)?;
         let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
+        let startup_excision = match resume_excision_before_activation(
+            &mut store,
+            &connection,
+            &lease,
+            lease_millis,
+            excision_config,
+        ) {
+            Ok(progress) => progress,
+            Err(error) => {
+                let _ = store.release_lease(&lease);
+                return Err(error);
+            }
+        };
         let mut indexer =
             match PostgresIndexer::connect_identity_configured(&connection, &config.database_id) {
                 Ok(indexer) => indexer,
@@ -1859,8 +2205,15 @@ impl TransactionService {
         let (index_sender, index_receiver) = mpsc::sync_channel(1);
         let lineage_id = seed.lineage_id.clone();
         let indexing = Arc::new(BackgroundIndexing::new(indexing_config, seed, index_sender));
+        if let Some(progress) = startup_excision {
+            indexing
+                .excision
+                .lock()
+                .expect("excision progress poisoned")
+                .0 = progress;
+        }
         let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
-        let shared = Arc::new(Shared::new(
+        let mut shared = Shared::new(
             config.capacity_limits.max_transaction_bytes,
             initial_writer_residency,
             Arc::clone(&indexing),
@@ -1868,12 +2221,14 @@ impl TransactionService {
             config.database_id.clone(),
             lineage_id,
             lease.clone(),
-        ));
+        );
+        shared.telemetry = options.telemetry;
+        let shared = Arc::new(shared);
         let index_shared = Arc::clone(&shared);
         let index_worker = match thread::Builder::new()
             .name(format!("atomic-indexer-{}", config.holder_id))
             .spawn(move || {
-                run_index_worker(indexer, index_receiver, &index_shared);
+                run_index_worker(indexer, index_receiver, &index_shared, excision_config);
             }) {
             Ok(worker) => worker,
             Err(error) => {
@@ -2050,6 +2405,7 @@ fn run_worker(
             }
             match store.resolve_request_outcome(database_id, &ambiguous.request_key) {
                 Ok(Some(commit)) => {
+                    drop(_phase);
                     if ambiguous.notify_if_durable {
                         let mut report = ServiceTransactionReport::from_commit(commit);
                         debug_assert!(report.replayed);
@@ -2057,6 +2413,7 @@ fn run_worker(
                         // first and only live notification for the original
                         // durable transaction.
                         report.replayed = false;
+                        record_transaction_diagnostics(shared, &mut report, &ambiguous.operation);
                         if let Err(error) = note_report_commit(shared, database_id, &report) {
                             shared.indexing.fail_job(error);
                             shared.accepting.store(false, Ordering::Release);
@@ -2153,7 +2510,7 @@ fn run_worker(
         decrement_queued(shared);
         pending_was_stalled = false;
         let request_key = work.request.request_key.clone();
-        let result = match gate {
+        let mut result = match gate {
             Ok(()) => {
                 let published_revision = shared.indexing.published_revision();
                 match store.adopt_published_tree(database_id, published_revision) {
@@ -2190,6 +2547,9 @@ fn run_worker(
             }
             Err(error) => Err(error),
         };
+        if let Ok(report) = &mut result {
+            record_transaction_diagnostics(shared, report, &work.operation);
+        }
         if result
             .as_ref()
             .is_err_and(|error| error.code == "recent/hard-capacity")
@@ -2265,11 +2625,40 @@ fn run_index_worker(
     mut indexer: PostgresIndexer,
     receiver: mpsc::Receiver<IndexCommand>,
     shared: &Shared,
+    excision_config: crate::ExcisionConfig,
 ) {
     let indexing = OperationContext::new(OperationKind::Indexing);
     let _indexing_scope = indexing.enter();
     let mut requested = shared.indexing.should_continue();
     let mut startup_search_check = true;
+    if excision_config.enabled {
+        match run_automatic_excision(shared, excision_config) {
+            Ok(Some(receipt)) => {
+                match excision_publication(shared, &receipt).and_then(|revision| {
+                    indexer.reconnect()?;
+                    Ok(revision)
+                }) {
+                    Ok(revision) => {
+                        shared
+                            .indexing
+                            .publish_completed(revision, receipt.basis_t, 0, false)
+                    }
+                    Err(error) => {
+                        shared.indexing.fail_job(error);
+                        shared.accepting.store(false, Ordering::Release);
+                        return;
+                    }
+                }
+                requested = shared.indexing.should_continue();
+            }
+            Ok(None) => {}
+            Err(error) => {
+                shared.indexing.fail_job(error);
+                shared.accepting.store(false, Ordering::Release);
+                return;
+            }
+        }
+    }
     loop {
         if requested
             && shared.accepting.load(Ordering::Acquire)
@@ -2290,6 +2679,49 @@ fn run_index_worker(
                     || shared.accepting.load(Ordering::Acquire),
                 ) {
                     Ok(Some(receipt)) => {
+                        if excision_config.enabled {
+                            match run_automatic_excision(shared, excision_config) {
+                                Ok(Some(excised)) => {
+                                    if let Err(error) = indexer.reconnect() {
+                                        shared.indexing.fail_job(error);
+                                        shared.accepting.store(false, Ordering::Release);
+                                        return;
+                                    }
+                                    let latest = (|| {
+                                        let mut client = shared
+                                            .connection
+                                            .connect_for("service/excision-publication")?;
+                                        let row=client.query_one("SELECT publication_revision FROM atomic_tree_publications WHERE database_id=$1 AND log_generation=$2 ORDER BY publication_revision DESC LIMIT 1",&[&shared.database_id,&sql_basis(excised.generation,"generation")?]).map_err(|e|postgres_error("service/excision-publication",e))?;
+                                        nonnegative_basis(row.get(0), "excision publication")
+                                    })();
+                                    match latest {
+                                        Ok(revision) => shared.indexing.complete_job(
+                                            revision,
+                                            excised.basis_t,
+                                            0,
+                                            false,
+                                        ),
+                                        Err(error) => {
+                                            shared.indexing.fail_job(error);
+                                            shared.accepting.store(false, Ordering::Release);
+                                            return;
+                                        }
+                                    }
+                                    startup_search_check = true;
+                                    break;
+                                }
+                                Ok(None) => {}
+                                Err(error) if !shared.accepting.load(Ordering::Acquire) => {
+                                    let _ = error;
+                                    return;
+                                }
+                                Err(error) => {
+                                    shared.indexing.fail_job(error);
+                                    shared.accepting.store(false, Ordering::Release);
+                                    return;
+                                }
+                            }
+                        }
                         // Incomplete AVET publications deliberately skip the
                         // optional build; its getter still names a prior
                         // attempt and must not certify this new basis.
@@ -2412,6 +2844,139 @@ fn run_index_worker(
     }
 }
 
+fn run_automatic_excision(
+    shared: &Shared,
+    config: crate::ExcisionConfig,
+) -> Result<Option<crate::ExcisionReceipt>, SemanticError> {
+    use crate::operations::excision_worker::{ExcisionJob, ExcisionStep};
+    if shared
+        .indexing
+        .excision
+        .lock()
+        .expect("excision status mutex poisoned")
+        .1
+        .as_ref()
+        .is_some_and(|e| e.code == "excision/admission-capacity")
+    {
+        return Ok(None);
+    }
+    let mut retries = 0_u32;
+    loop {
+        let mut job = ExcisionJob::start(
+            shared.connection.clone(),
+            shared.transport_lease.clone(),
+            config,
+        )?;
+        loop {
+            if !shared.accepting.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            match job.advance() {
+                Ok(ExcisionStep::Progress(progress)) => {
+                    if progress.phase != "discover" {
+                        shared
+                            .indexing
+                            .excision
+                            .lock()
+                            .expect("excision status mutex poisoned")
+                            .0 = progress;
+                    }
+                    thread::yield_now();
+                }
+                Ok(ExcisionStep::Complete(receipt)) => {
+                    let mut stats = shared
+                        .indexing
+                        .excision
+                        .lock()
+                        .expect("excision status mutex poisoned");
+                    if receipt.is_some() {
+                        stats.0 = job.progress();
+                    }
+                    stats.1 = None;
+                    return Ok(receipt);
+                }
+                Err(error) => {
+                    {
+                        let mut stats = shared
+                            .indexing
+                            .excision
+                            .lock()
+                            .expect("excision status mutex poisoned");
+                        stats.0 = job.progress();
+                        stats.1 = Some(error.clone());
+                    }
+                    if error.code == "excision/admission-capacity" {
+                        return Ok(None);
+                    }
+                    if retries < 8
+                        && matches!(
+                            error.category,
+                            ErrorCategory::Busy | ErrorCategory::Conflict
+                        )
+                        && shared.accepting.load(Ordering::Acquire)
+                    {
+                        retries += 1;
+                        drop(job);
+                        thread::park_timeout(Duration::from_millis(50u64 << retries.min(5)));
+                        break;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+/// Only finish an already-authoritative excision before strict native writer
+/// activation. This is not permission to rebuild an ordinary missing root.
+fn resume_excision_before_activation(
+    store: &mut PostgresStore,
+    connection: &PostgresConnectionConfig,
+    lease: &TransactorLease,
+    lease_millis: u64,
+    config: crate::ExcisionConfig,
+) -> Result<Option<crate::ExcisionProgress>, SemanticError> {
+    let mut client = connection.connect_for("service/excision-startup")?;
+    let pending:bool=client.query_one("SELECT EXISTS(SELECT 1 FROM atomic_heads h JOIN atomic_log_generations g ON g.database_id=h.database_id AND g.generation=h.log_generation JOIN atomic_log_generation_activations a ON a.database_id=g.database_id AND a.generation=g.generation WHERE h.database_id=$1 AND g.build_kind=1 AND NOT EXISTS(SELECT 1 FROM atomic_log_generation_completions c WHERE c.database_id=g.database_id AND c.generation=g.generation))",&[&lease.database_id]).map_err(|e|postgres_error("service/excision-startup",e))?.get(0);
+    if !pending {
+        return Ok(None);
+    }
+    if !config.enabled {
+        return Err(SemanticError::new(
+            ErrorCategory::Unavailable,
+            "service/excision-completion-required",
+            "an activated excision needs completion before native writer startup",
+        ));
+    }
+    let mut job = crate::operations::excision_worker::ExcisionJob::start(
+        connection.clone(),
+        lease.clone(),
+        config,
+    )?;
+    loop {
+        match job.advance()? {
+            crate::operations::excision_worker::ExcisionStep::Progress(_) => {
+                store.renew_lease(lease, lease_millis)?;
+            }
+            crate::operations::excision_worker::ExcisionStep::Complete(_) => {
+                store.renew_lease(lease, lease_millis)?;
+                return Ok(Some(job.progress()));
+            }
+        }
+    }
+}
+
+fn excision_publication(
+    shared: &Shared,
+    receipt: &crate::ExcisionReceipt,
+) -> Result<u64, SemanticError> {
+    let mut client = shared
+        .connection
+        .connect_for("service/excision-publication")?;
+    let row=client.query_one("SELECT publication_revision FROM atomic_tree_publications WHERE database_id=$1 AND log_generation=$2 ORDER BY publication_revision DESC LIMIT 1",&[&shared.database_id,&sql_basis(receipt.generation,"generation")?]).map_err(|e|postgres_error("service/excision-publication",e))?;
+    nonnegative_basis(row.get(0), "excision publication")
+}
+
 /// Retry a complete immutable index selection/build/publication attempt.
 /// Recovered `process-request-index` retries the whole job twice after its
 /// initial attempt, regardless of the failure, and stops retrying during
@@ -2447,6 +3012,26 @@ fn retry_index_job<T>(
             result => return result,
         }
     }
+}
+
+fn record_transaction_diagnostics(
+    shared: &Shared,
+    report: &mut ServiceTransactionReport,
+    context: &OperationContext,
+) {
+    if !context.diagnostics_enabled() {
+        return;
+    }
+    let diagnostics = Arc::new(crate::TransactionDiagnostics {
+        basis_t: report.basis_t,
+        replayed: report.replayed,
+        report: context.report(),
+    });
+    if let Some(emitter) = &shared.telemetry {
+        let identity = DatabaseIdentity::new(shared.database_id.clone(), shared.lineage_id.clone());
+        emitter.publish_transaction(&identity, &diagnostics);
+    }
+    report.diagnostics = Some(diagnostics);
 }
 
 fn process_work(

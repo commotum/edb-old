@@ -31,10 +31,7 @@ const WAIT: Duration = Duration::from_secs(20);
 
 enum AppEndpoint {
     Local(PathBuf),
-    Remote {
-        postgres: atomic_core::PostgresConnectionConfig,
-        client: atomic_core::RemoteClientConfig,
-    },
+    Remote(atomic_core::RemoteWriter),
 }
 trait AppSubmit {
     fn transact_application(
@@ -53,13 +50,7 @@ impl AppSubmit for Connection {
     ) -> std::result::Result<atomic_core::CommittedTransaction, SemanticError> {
         match endpoint {
             AppEndpoint::Local(path) => self.transact_socket(path, request, timeout),
-            AppEndpoint::Remote { postgres, client } => {
-                // Discover from authorized durable metadata on each explicit
-                // submission. A restart can replace the endpoint; no new key
-                // is invented for an unknown outcome or semantic rejection.
-                let endpoint = self.discover_remote_writer(postgres)?;
-                self.transact_remote(&endpoint, client, request, timeout)
-            }
+            AppEndpoint::Remote(writer) => writer.transact(request, timeout),
         }
     }
 }
@@ -119,6 +110,86 @@ fn string(entity: &Entity, attribute: u32) -> Result<String> {
         Some(EntityValue::Scalar(Value::String(value))) => Ok(value),
         _ => Err("application entity has no expected string".into()),
     }
+}
+
+/// Run ordinary application reads on a single-thread async executor. Only pure
+/// result rows cross into the task; native connection/value cleanup stays here.
+fn async_read_workflow(connection: &Connection, captured: &DatabaseValue) -> Result<()> {
+    use atomic_core::{AsyncClient, AsyncConfig, AsyncExecutor, AsyncStreamOptions};
+    let started = Instant::now();
+    let workers = AsyncExecutor::new(AsyncConfig {
+        workers: 2,
+        max_operations: 4,
+        max_resources: 4,
+    })?;
+    let client = AsyncClient::new(connection, &workers)?;
+    let query = Query::new(
+        FindSpec::Relation(vec![FindElement::Variable("hours".into())]),
+        vec![Clause::Pattern(Box::new(DataPattern::new(
+            Term::Blank,
+            Term::Constant(Value::Ref(u64::from(HOURS))),
+            Term::var("hours"),
+        )))],
+    );
+    let current_expected = connection
+        .db()
+        .query(&query, &[], &QueryControl::default())?
+        .result;
+    let captured_expected = captured
+        .query(&query, &[], &QueryControl::default())?
+        .result;
+    let sources = [QueryDataSource::database("$", captured.clone())];
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let current = client
+            .query(query.clone(), vec![], QueryControl::default())?
+            .await?;
+        require(
+            current.result == current_expected,
+            "async captured current query changed",
+        )?;
+        let mut stream = workers.query_sequence_sources(
+            query,
+            &sources,
+            vec![],
+            QueryControl::default(),
+            None,
+            AsyncStreamOptions {
+                chunk_rows: 1,
+                timeout: Some(WAIT),
+            },
+        )?;
+        let mut rows = Vec::new();
+        while let Some(row) = stream.next().await {
+            rows.push(row?);
+        }
+        require(
+            QueryResult::Relation(rows) == captured_expected,
+            "async old-value stream changed",
+        )?;
+        drop(stream);
+        Ok::<(), Box<dyn std::error::Error>>(())
+    })?;
+    drop(client);
+    let deadline = Instant::now() + WAIT;
+    while workers.stats().operations != 0
+        || workers.stats().resources != 0
+        || workers.stats().running != 0
+    {
+        require(
+            Instant::now() < deadline,
+            "async worker cleanup did not finish",
+        )?;
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    println!(
+        "ASYNC_READ_OK single_thread=true old_basis=true chunk_rows=1 complete_us={} stats={:?}",
+        started.elapsed().as_micros(),
+        workers.stats()
+    );
+    Ok(())
 }
 
 fn schema() -> Result<Schema> {
@@ -1035,15 +1106,20 @@ fn run() -> Result<()> {
         );
         return Ok(());
     }
-    let endpoint = match (endpoint, remote) {
-        (Some(path), false) => AppEndpoint::Local(path),
-        (None, true) => AppEndpoint::Remote {
-            postgres: config.clone(),
-            client: atomic_core::remote_client_config_from_env()?,
-        },
+    if endpoint.is_some() == remote {
+        return Err("choose exactly one of --endpoint PATH or --remote".into());
+    }
+    let remote_client = remote
+        .then(atomic_core::remote_client_config_from_env)
+        .transpose()?;
+    let connection = Connection::connect_configured(config.clone(), &database_id, 8)?;
+    let endpoint = match (endpoint, remote_client) {
+        (Some(path), None) => AppEndpoint::Local(path),
+        (None, Some(client)) => {
+            AppEndpoint::Remote(connection.remote_writer(config.clone(), client))
+        }
         _ => return Err("choose exactly one of --endpoint PATH or --remote".into()),
     };
-    let connection = Connection::connect_configured(config.clone(), &database_id, 8)?;
 
     // Database provisioning belongs to the operator. These are ordinary application facts.
     let schema = schema()?;
@@ -1153,6 +1229,7 @@ fn run() -> Result<()> {
         calculation(&reopened.db())? == calculation(&current)?,
         "reopen changed application facts",
     )?;
+    async_read_workflow(&connection, &captured)?;
 
     // Other workflow reads can evict this old value's selected nodes. Record
     // one explicit rewarm separately; neither enlarge the cache nor hide its I/O.
@@ -1165,7 +1242,10 @@ fn run() -> Result<()> {
     let warmup_us = warmup_started.elapsed().as_micros();
     let warmup_sql = warmup_context.snapshot();
     let loop_started = Instant::now();
-    let query_context = application_context.child(OperationKind::Query);
+    let query_context = application_context.child_named(
+        OperationKind::Query,
+        Keyword::new("app", "captured-calculation"),
+    )?;
     {
         let _query_scope = query_context.enter();
         for _ in 0..20 {
@@ -1177,6 +1257,11 @@ fn run() -> Result<()> {
     }
     let calculation_loop_us = loop_started.elapsed().as_micros();
     let query_sql = query_context.snapshot();
+    require(
+        !query_sql.reads.indexes.is_empty(),
+        "named diagnostics omitted index work",
+    )?;
+    println!("DIAGNOSTICS_OK named=true reads=true immutable_basis=true");
     require(
         query_sql.sql_calls == 0 && query_sql.errors == 0 && query_sql.result_cell_bytes == 0,
         "warmed fixture calculation performed PostgreSQL I/O",

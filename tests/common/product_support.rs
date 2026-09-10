@@ -257,7 +257,23 @@ impl Server {
         );
         server
     }
-    pub fn spawn(mut command: Command) -> Self {
+    pub fn spawn(command: Command) -> Self {
+        let (server, receiver) = Self::spawn_observed(command);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let line = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("transactor did not announce READY");
+            if line.starts_with("READY ") {
+                break;
+            }
+        }
+        server
+    }
+
+    /// Observe startup/standby/health and later READY without blocking spawn.
+    /// Dropping the observer discards later lines; the owned reader keeps pipes drained.
+    pub fn spawn_observed(mut command: Command) -> (Self, mpsc::Receiver<String>) {
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -268,19 +284,14 @@ impl Server {
         let output = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
-                if line.starts_with("READY ") {
-                    let _ = sender.send(line);
-                }
+                let _ = sender.send(line);
             }
         });
         let server = Self {
             child,
             output: Some(output),
         };
-        receiver
-            .recv_timeout(Duration::from_secs(30))
-            .expect("transactor did not announce READY");
-        server
+        (server, receiver)
     }
 
     pub fn stop(&mut self) {

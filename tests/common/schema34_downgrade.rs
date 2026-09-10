@@ -100,10 +100,30 @@ fn assert_legacy_names(client: &mut impl GenericClient) {
 }
 
 pub fn remove_migration_34(transaction: &mut Transaction<'_>) {
-    let version: i64 = transaction
+    let mut version: i64 = transaction
         .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
         .unwrap()
         .get(0);
+    if version == 35 {
+        // SQL35 adds only two wrappers. Remove any exact new runtime grants
+        // provisioned through those wrappers before erasing their ACLs; the
+        // previous writer/peer policy and all canonical data stay untouched.
+        transaction.batch_execute(
+            "DO $$ DECLARE runtime_role TEXT; BEGIN \
+             FOR runtime_role IN SELECT DISTINCT r.rolname FROM pg_proc p \
+                 CROSS JOIN LATERAL aclexplode(p.proacl) a \
+                 JOIN pg_roles r ON r.oid=a.grantee \
+                 WHERE p.oid='atomic_runtime_excision_step(text,bigint,text,bigint,text,bigint,bigint,bytea,bytea,bytea)'::regprocedure \
+                   AND a.grantee<>p.proowner LOOP \
+                 EXECUTE format('REVOKE SELECT ON atomic_log_generation_builds,atomic_generation_excision_predicates,atomic_log_generation_completion_stages FROM %I',runtime_role); \
+                 EXECUTE format('REVOKE INSERT ON atomic_log_generations,atomic_log_generation_builds,atomic_generation_excision_predicates,atomic_log_generation_checkpoints FROM %I',runtime_role); \
+             END LOOP; END $$; \
+             DROP FUNCTION atomic_runtime_excision_step(TEXT,BIGINT,TEXT,BIGINT,TEXT,BIGINT,BIGINT,BYTEA,BYTEA,BYTEA); \
+             DROP FUNCTION atomic_assert_excision_worker(TEXT,TEXT,BIGINT); \
+             DELETE FROM atomic_schema_migrations WHERE version=35;"
+        ).unwrap();
+        version = 34;
+    }
     if version < 34 {
         return;
     }
@@ -172,7 +192,7 @@ pub fn assert_restored(client: &mut impl GenericClient) {
             .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
             .unwrap()
             .get::<_, i64>(0),
-        34
+        35
     );
     for (name, _) in REPLACED_FUNCTIONS {
         let body: String = client
@@ -201,4 +221,8 @@ pub fn assert_restored(client: &mut impl GenericClient) {
             .unwrap()
             .get::<_, bool>(0)
     );
+    assert!(client.query_one(
+        "SELECT to_regprocedure('atomic_assert_excision_worker(text,text,bigint)') IS NOT NULL \
+         AND to_regprocedure('atomic_runtime_excision_step(text,bigint,text,bigint,text,bigint,bigint,bytea,bytea,bytea)') IS NOT NULL", &[]
+    ).unwrap().get::<_,bool>(0));
 }

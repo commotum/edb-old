@@ -68,17 +68,44 @@ fn add(entity: u64, attribute: u32, value: Value) -> TxOp {
     }
 }
 
+// This target deliberately owns each operator fault boundary. Automatic
+// service execution has its separate public regression in automatic_excision.
+fn manual_service(connection: &str, database_id: &str) -> atomic_core::TransactionService {
+    atomic_core::TransactionService::start_configured_with_options(
+        atomic_core::TransactionServiceConfig {
+            connection: String::new(),
+            database_id: database_id.into(),
+            holder_id: unique("manual-excision"),
+            lease_duration: std::time::Duration::from_secs(5),
+            renew_interval: std::time::Duration::from_millis(100),
+            queue_capacity: 32,
+            capacity_limits: Default::default(),
+        },
+        atomic_core::PostgresConnectionConfig::plaintext(connection),
+        atomic_core::ServiceOptions {
+            excision: atomic_core::ExcisionConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
 #[test]
 fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
     let Some(connection) = connection() else {
         return;
     };
+    let fixture = common::PostgresFixture::new(&connection, "operator_excision");
+    let connection = fixture.connection.clone();
     let database_id = unique("a15_cow");
     let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
     migrator.migrate().unwrap();
     let mut store = PostgresStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
-    let service = common::start_service(&connection, &database_id);
+    let service = manual_service(&connection, &database_id);
     let seeded = common::transact(
         &service,
         "seed-private-person",
@@ -137,7 +164,7 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
     assert!(consolidated_secret[0].added);
     drop(consolidated);
 
-    let request_service = common::start_service(&connection, &database_id);
+    let request_service = manual_service(&connection, &database_id);
     let requested = common::transact(
         &request_service,
         "ordinary-a15-request",
@@ -172,7 +199,7 @@ fn transactional_a15_cow_activation_resumes_and_preserves_old_peer_value() {
         (captured.category, captured.code),
         (ErrorCategory::Interrupted, "excision/injected-fault")
     );
-    let catchup_service = common::start_service(&connection, &database_id);
+    let catchup_service = manual_service(&connection, &database_id);
     let catchup = common::transact(
         &catchup_service,
         "transaction-during-excision-build",

@@ -16,6 +16,9 @@ pub(super) fn execute(
         sources.remove("$");
     }
     validate_consumed_sources(query, &sources, parent.extensions)?;
+    if let Some(trace) = &mut parent.diagnostics {
+        trace.nested(query);
+    }
     let mut child = State {
         sources,
         control: parent.control,
@@ -33,6 +36,7 @@ pub(super) fn execute(
         max_value_bytes: parent
             .max_value_bytes
             .saturating_sub(parent.stats.allocated_value_bytes),
+        diagnostics: parent.diagnostics.take(),
     };
     let result = (|| {
         dependencies::validate_negation(query, &mut child)?;
@@ -64,6 +68,7 @@ pub(super) fn execute(
         result
     })();
     parent.work = child.work;
+    parent.diagnostics = child.diagnostics.take();
     // q returns one value in its find-selected shape. The enclosing function
     // binding decides whether to keep that value or destructure it once.
     let bytes_charge = parent.charge_value_bytes(child.stats.allocated_value_bytes);

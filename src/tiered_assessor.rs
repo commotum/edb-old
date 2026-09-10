@@ -11,6 +11,7 @@ use crate::database::{UpsertIdentityValue, normalize_excision_before_t, validate
 use crate::database_value::TransactionReadContext;
 use crate::identity::{validate_frontier, validate_supported_eid};
 use crate::idents::IdentIndex;
+use crate::transaction_stats::count as count_work;
 use crate::vocabulary::{supported_system_attributes, supported_system_idents};
 use crate::{
     Cardinality, DB_ALTER_ATTRIBUTE, DB_ATTR_PREDS, DB_CARDINALITY, DB_ENSURE, DB_ENTITY_ATTRS,
@@ -382,6 +383,7 @@ impl<'a> Reader<'a> {
             ));
         }
         self.base.schema().validate_value(descriptor, value)?;
+        count_work(|work| &mut work.identity_lookups, 1);
         Ok(self
             .prefix(&IndexPrefix::Avet {
                 attribute,
@@ -447,6 +449,8 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
     limits: AssessmentLimits,
     defaults: &crate::TransactionDefaults,
 ) -> Result<TieredAssessment, SemanticError> {
+    count_work(|work| &mut work.assessments, 1);
+    count_work(|work| &mut work.input_operations, ops.len());
     // PostgreSQL supplies one context before persisted generation begins. The
     // standalone semantic-oracle entry still needs the same cross-phase
     // behavior, so give it a private unbounded observer while Reader enforces
@@ -567,6 +571,7 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
     validate_delta_successor(&mut reader, &successor_schema, &logical)?;
     validate_ensure_attributes(&mut reader, &logical, &ensures)?;
     let mut tx_data = material_changes(&mut reader, &logical, tx)?;
+    count_work(|work| &mut work.produced_datoms, tx_data.len());
     tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
 
     let db_after = DatabaseValue::transaction_overlay_with_allocation(
@@ -1389,6 +1394,7 @@ fn validate_unique_successor(
     // adjacent in AVET.  Retaining one value and owner is therefore enough.
     let mut prior: Option<(Value, u64)> = None;
     let mut validate = |entity: u64, value: &Value| {
+        count_work(|work| &mut work.uniqueness_checks, 1);
         if value.is_nan() {
             return Err(SemanticError::incorrect(
                 "transaction/nan-cannot-identify",
@@ -1526,6 +1532,9 @@ fn resolve_tempids(
         let Some(unique) = descriptor.unique else {
             continue;
         };
+        if unique == Unique::Identity {
+            count_work(|work| &mut work.identity_claims, 1);
+        }
         let value = resolve_upsert_identity_value(reader, *attribute, value, tx)?;
         if value.is_nan() {
             return Err(SemanticError::incorrect(
@@ -1549,6 +1558,7 @@ fn resolve_tempids(
                     format!("unique value is already held by entity {existing}"),
                 ));
             }
+            count_work(|work| &mut work.upsert_resolutions, 1);
             let root = union.root(*temp);
             if let Some(previous) = existing_by_root.insert(root, existing)
                 && previous != existing
@@ -2218,6 +2228,8 @@ fn derive_composites(
             .map(|(entity, _)| *entity)
             .collect::<BTreeSet<_>>();
         for entity in entities {
+            count_work(|work| &mut work.composite_candidates, 1);
+            let before_count = logical.len();
             let old = reader.values(entity, composite.id)?.into_iter().next();
             let mut slots = Vec::with_capacity(constituents.len());
             for constituent in constituents {
@@ -2249,6 +2261,10 @@ fn derive_composites(
                     added: true,
                 });
             }
+            count_work(
+                |work| &mut work.composite_datoms,
+                logical.len() - before_count,
+            );
         }
     }
     Ok(())
@@ -2290,6 +2306,7 @@ fn validate_delta_successor(
     }
     let (unique_groups, _) = group_unique_deltas(logical, unique_indices);
     for group in unique_groups {
+        count_work(|work| &mut work.uniqueness_checks, 1);
         if group.value.is_nan() {
             return Err(SemanticError::incorrect(
                 "transaction/nan-cannot-identify",
@@ -2542,6 +2559,7 @@ fn material_changes(
 ) -> Result<Vec<Datom>, SemanticError> {
     let mut result = Vec::new();
     for datom in logical {
+        count_work(|work| &mut work.redundancy_checks, 1);
         let existed = reader.contains(datom.entity, datom.attribute, &datom.value)?;
         if existed != datom.added
             || (datom.added && u64::from(datom.attribute) == DB_ALTER_ATTRIBUTE)
@@ -2553,6 +2571,8 @@ fn material_changes(
                 tx,
                 added: datom.added,
             });
+        } else {
+            count_work(|work| &mut work.redundant_datoms, 1);
         }
     }
     Ok(result)
@@ -2634,7 +2654,9 @@ fn is_derived_composite(schema: &Schema, attribute: u32) -> Result<bool, Semanti
 }
 
 fn dedupe(datoms: &mut Vec<LogicalDatom>) {
+    let before = datoms.len();
     let _ = dedupe_with_work(datoms);
+    count_work(|work| &mut work.duplicate_datoms, before - datoms.len());
 }
 
 fn dedupe_with_work(datoms: &mut Vec<LogicalDatom>) -> usize {

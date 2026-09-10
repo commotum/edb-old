@@ -156,6 +156,10 @@ immutable database handles during writer unavailability, while cache misses
 still require available storage. PostgreSQL HA/WAL shipping is a separate
 deployment responsibility, not implemented by the Rust transaction lease.
 
+Opt-in `atomic transactor --telemetry-ms 10000` publishes bounded JSON events to
+stdout from the stock lifecycle loop. See [observability](observability.md) for
+metrics, warning configuration, privacy and slow-sink/shutdown limits.
+
 ## Backup, verify and restore
 
 `PortableBackup::backup_database` captures a live, repeatable-read information
@@ -414,8 +418,11 @@ does delete eligible database storage, so its zero-age opt-in is test-only.
 Excision is rare privacy/retention work, not correction; ordinary retraction
 preserves the history needed to explain past decisions. Submit an ordinary
 `:db/excise` request with optional selected attributes and one strict cutoff,
-then run `process_excision_requests` and establish completion with `sync_excise`
-or the connection's corresponding synchronization. Request facts are protected
+then establish completion with `sync_excise` or the connection's corresponding
+synchronization. The stock service automatically schedules committed requests
+with indexing and resumes interrupted jobs; a committed request is not itself
+proof of completed removal. `PostgresOperator::process_excision_requests` remains
+an explicit administrative driver for the same rewrite algorithm. Request facts are protected
 audit information. Atomic freezes the complete predicate at its A=15 assertion;
 later ordinary edits do not rewrite an already queued request.
 
@@ -425,6 +432,33 @@ proportional to the whole database and reduce write availability. An old held
 database/log value remains an immutable copy: discard it and sync controlled
 clients before claiming they observe removal. Reclaim retired generations only
 after the appropriate horizon.
+
+`ServiceOptions::excision` sets the automatic worker's admission policy. The stock
+flags are `--excision-max-bytes` (default512MiB accounted bytes) and
+`--excision-log-batch` (default256, range1–4096 transactions). One resumable job
+holds its state between cooperative steps; it does not rerun the whole rewrite
+for each scheduling tick. Replay checks each transaction and tree uploads yield
+in bounded batches. The eager source/candidate phases are admitted against a
+deterministic account of1MiB plus64 times distinct source payload bytes, updated
+before a newly observed suffix is fetched. This is a conservative **policy
+account**, not measured RSS or a proven allocator/time ceiling. Source-size SQL,
+planning and tree construction can still require whole-database work; configured
+driver timeouts apply to I/O and cancellation is checked at safe boundaries.
+
+Admission failure leaves the committed request pending and ordinary writes
+available. The service exposes `background_indexing_stats().excision` and
+`excision_failure`; the stock process emits a redacted
+`TRANSACTOR_EXCISION_FAILURE` category/code rather than silently claiming success.
+Increase the allowance deliberately and restart to resume, or run authorized
+administrative maintenance with an appropriate operational budget. Activated
+but incomplete generations must finish before write readiness; startup diagnoses
+failure rather than writing against an incomplete authoritative generation.
+
+Runtime grants permit only the lease/epoch-fenced excision rewrite path, not
+general restore, arbitrary generation activation or garbage collection. As with
+normal transactions, the Rust writer is trusted to decode the committed A15
+request and construct its frozen predicate; SQL checks authority, build kind and
+immutable source coordinates, not arbitrary encoded semantic equivalence.
 
 Excision does not erase application exports, logs, old process memory, replicas,
 PostgreSQL WAL or portable/physical backups. Apply the same retention decision

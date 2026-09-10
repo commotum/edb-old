@@ -12,6 +12,7 @@ pub struct QuerySequence {
     budget: QueryPullBudget<'static>,
     stats: QueryStats,
     plan: Vec<PlanStep>,
+    diagnostics: Option<QueryDiagnostics>,
     failed: bool,
 }
 
@@ -35,6 +36,11 @@ impl QuerySequence {
     }
     pub fn plan(&self) -> &[PlanStep] {
         &self.plan
+    }
+    /// Relational preparation diagnostics. Lazy Pull work is reflected in
+    /// `stats()` as consumed, not misrepresented as a scheduled where clause.
+    pub fn diagnostics(&self) -> Option<&QueryDiagnostics> {
+        self.diagnostics.as_ref()
     }
 }
 
@@ -203,6 +209,7 @@ impl QueryEngine {
             budget,
             stats: outcome.stats,
             plan: outcome.plan,
+            diagnostics: outcome.diagnostics,
             failed: false,
         })
     }

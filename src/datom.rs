@@ -11,7 +11,7 @@ pub struct Datom {
     pub added: bool,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum IndexOrder {
     Eavt,
     Aevt,

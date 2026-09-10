@@ -828,6 +828,7 @@ impl TxFunctions {
     }
 
     fn invoke(&self, db_before: &Database, call: &TxCall) -> Result<Vec<TxForm>, SemanticError> {
+        crate::transaction_stats::count(|work| &mut work.function_calls, 1);
         let function = self.functions.get(&call.function).ok_or_else(|| {
             SemanticError::incorrect(
                 "transaction/unknown-function",

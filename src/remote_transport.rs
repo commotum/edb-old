@@ -440,6 +440,28 @@ impl Connection {
         hints: Option<TransactionHints>,
         timeout: Duration,
     ) -> Result<CommittedTransaction, SemanticError> {
+        self.transact_remote_attempt(
+            endpoint,
+            config,
+            &request,
+            hints.as_ref(),
+            timeout,
+            &mut false,
+        )
+    }
+
+    /// The routing facade may refresh/retry only before any request write.
+    /// Keep that provenance out of server-controlled error codes.
+    pub(crate) fn transact_remote_attempt(
+        &self,
+        endpoint: &RemoteWriterEndpoint,
+        config: &RemoteClientConfig,
+        request: &TransactionRequest,
+        hints: Option<&TransactionHints>,
+        timeout: Duration,
+        attempted: &mut bool,
+    ) -> Result<CommittedTransaction, SemanticError> {
+        *attempted = false;
         let deadline = Instant::now()
             .checked_add(timeout)
             .filter(|_| !timeout.is_zero())
@@ -455,7 +477,7 @@ impl Connection {
                 "endpoint and peer address different database lineages",
             ));
         }
-        let request = encode_submission(self.identity(), &request)?;
+        let request = encode_submission(self.identity(), request)?;
         if request.len() > MAX_FRAME {
             return Err(invalid(
                 "remote/frame-limit",
@@ -463,7 +485,6 @@ impl Connection {
             ));
         }
         let hints = hints
-            .as_ref()
             .and_then(|hints| hints::encode(hints).ok())
             .unwrap_or_default();
         let socket = TcpStream::connect_timeout(
@@ -500,6 +521,7 @@ impl Connection {
                 "remote database authentication failed",
             ));
         }
+        *attempted = true;
         write_frame(&mut tls, &request).map_err(unknown)?;
         write_frame(&mut tls, &hints).map_err(unknown)?;
         let outcome = read_frame(&mut tls, MAX_FRAME).map_err(unknown)?;

@@ -19,6 +19,7 @@ does not turn the historical audit into a test report.
 
 | Findings | Current disposition |
 | --- | --- |
+| AO04, AO05, AO-C01, P04, AO07, AO-C03 | Verified/native disposition in Goal7: stock persistent standby, automatic runtime-role excision, safe cached-route recovery, bounded async operations/streams, health/readiness and supervisor-native packaging. Relevant actual PostgreSQL and separate application/crash/retry workflows pass; see the owning plan for evidence and limits. |
 | P02 | Verified in Goal 6: idempotent catalog, identity-preserving rename, fenced retirement, bounded resumable reclamation, backup/pin protection and fresh identity on name reuse. Final29 active checks pass (26 actual isolated PostgreSQL), including concurrent writers, genuine schema33 upgrade, exact retries, historical programs and stock CLI/application; see its measured costs and retention boundaries. |
 | Q01, Q05, ST-02 | Verified in Goal 5: grouped native aggregates, seven portable data functions, versioned Rust transaction/predicate deployments, stock EDN clients and exact speculation/retries. Final configured release acceptance 36/36 including genuine old-binary upgrade, durable ABI11 invocation, backup/restore and application/restart; see its measured costs and trusted callback contract. |
 | Q02, Q04 | Verified in Goal 4: arbitrary-width relations, general typed/EDN values, pure callbacks, source-free CLI and persisted query bridge. Actual PostgreSQL/application, old ABI/receipt and reference-retention compatibility pass; see complete-path costs and explicit native semantics in its plan. |
@@ -26,7 +27,7 @@ does not turn the historical audit into a test report.
 | ST-03, ST-01 | Verified in Goal 3: independent reserved allocation, native/retained-old million-ID histories, explicit defaults, application and old receipt/backup/upgrade compatibility. See its recorded artifact boundaries and complete-path costs. |
 | SC-01 | Verified/documented in Goal 3: recovered 1.0.7705 ordering supports the existing explicit composite-upsert hint contract; no invented constituent-only upsert. |
 | SC-02 | Verified in Goal 3: sound native NaN replacement retained, with permanent eager/native PostgreSQL regressions and documented JVM difference. |
-| Remaining IDs | Explicitly assigned to Goals 7–10 or the parent's optional/platform decision table; none silently disappears. |
+| Remaining IDs | Explicitly assigned to Goals 8–10 or the parent's optional/platform decision table. Unapproved optional work is deferred, not a required-completion blocker. |
 
 ## Where to start
 
@@ -62,10 +63,10 @@ implementation order or a performance claim.
 | [P02](#p02) | Logical database list/rename/delete/reclamation and idempotent create | Gap/partial; high |
 | [AO04](#ao04) | Automatically process excision requests during indexing; supported operator entry point | Integration gap; high |
 | [AO05](#ao05) | Launch stock executables as a persistent active/standby pair | Tooling gap; high; library standby exists |
-| [D01](#d01) | Named per-operation cache/index/SQL I/O attribution | Partial; high |
-| [D02](#d02) | Identifiable query clauses, binding sets, nested phases and warnings | Partial; high |
-| [D03](#d03) | Transaction-correlated semantic counts and timings | Partial; high |
-| [AO06](#ao06) | Operational logging, automatic metric publication and alarms | Partial; high; existing counters remain useful |
+| [D01](#d01) | Named per-operation cache/index/SQL I/O attribution | Implemented/verified2026-09-10; [Goal8](../goal-8/0-plan.md), typed/EDN contexts and actual cache/index reads |
+| [D02](#d02) | Identifiable query clauses, binding sets, nested phases and warnings | Implemented/verified2026-09-10; [Goal8](../goal-8/0-plan.md), opt-in bounded capture and native scheduling |
+| [D03](#d03) | Transaction-correlated semantic counts and timings | Implemented/verified2026-09-10; [Goal8](../goal-8/0-plan.md), ephemeral receipt/basis correlation and exact replay |
+| [AO06](#ao06) | Operational logging, automatic metric publication and alarms | Implemented/verified2026-09-10; [Goal8](../goal-8/0-plan.md), bounded stock JSON/callbacks/warnings; no vendor backend or fabricated latency distributions |
 | [P01](#p01) | Public per-attribute physical AVET readiness introspection | Exposure gap; medium |
 | [ST-01](#st-01) | Configurable default partition | Missing setting; medium |
 | [ST-02](#st-02) | Production registration of ordinary native Rust transaction functions/predicates | Partial; product extension-model decision |
@@ -83,7 +84,7 @@ implementation order or a performance claim.
 | [AO13](#ao13) | Graphical schema/entity/history/index/query console | Missing optional tool; separate from EDN CLI |
 | [TU-01](#tu-01) | Named memory-backed Connection/transact workflow without PostgreSQL | Optional workflow gap; in-memory semantic engine exists |
 | [Q05](#q05) | Portable standard-function library vs all Clojure/Java functions | Explicit library/runtime scope choice |
-| [Q06](#q06) | User clause-order tuning vs Atomic automatic scheduling | Behavior/performance difference; not a wrong-result claim |
+| [Q06](#q06) | User clause-order tuning vs Atomic automatic scheduling | Intentional native equivalent; verified2026-09-10 in [Goal8](../goal-8/0-plan.md); actual schedule explained, optimizer preserved |
 | [TU-02](#tu-02) | Standalone disk-backed development store | Unsupported optional backend; PostgreSQL-only scope choice |
 | [ST-03](#st-03) | Automatic schema/partition IDs reaching range limits after ordinary data growth | High-priority candidate for boundary reproduction |
 | [SC-01](#sc-01) | Constituent-only composite-identity upsert semantics | Unresolved docs/target-version candidate |

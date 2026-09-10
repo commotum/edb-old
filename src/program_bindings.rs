@@ -300,6 +300,7 @@ fn expand_program_call(
             "persisted transaction-function expansion exceeded 32 nested calls",
         ));
     }
+    crate::transaction_stats::count(|work| &mut work.function_calls, 1);
     let forms = if let CallableRef::Local(name) = &call.function {
         native.transaction(name, db_before, &call.arguments, budget)?
     } else {

@@ -311,6 +311,13 @@ mod value;
 pub use value::QueryValue;
 pub(crate) use value::{QueryValueRef, QueryValueSize};
 
+#[path = "query_diagnostics.rs"]
+mod diagnostics;
+pub use diagnostics::{
+    QueryClauseStep, QueryDiagnosticOptions, QueryDiagnostics, QueryPhase, QueryPhaseKind,
+    QueryStepStatus, QueryStepWork, QueryWarning, query_diagnostics_to_edn,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryResult {
     Relation(Vec<Vec<QueryValue>>),
@@ -351,6 +358,8 @@ pub struct PlanStep {
     pub access: String,
     pub rows_before: usize,
     pub rows_after: usize,
+    /// Correlation with the opt-in start-ordered diagnostic timeline.
+    pub diagnostic_step: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -358,6 +367,7 @@ pub struct QueryOutcome {
     pub result: QueryResult,
     pub stats: QueryStats,
     pub plan: Vec<PlanStep>,
+    pub diagnostics: Option<QueryDiagnostics>,
 }
 
 #[derive(Clone, Debug)]
@@ -383,6 +393,8 @@ pub struct QueryControl {
     /// Inputs/sources remain borrowed until selected; nested/program queries
     /// share the remaining allowance rather than resetting it.
     pub max_value_bytes: usize,
+    /// Independent bounded metadata capture. Does not affect semantic budgets.
+    pub diagnostics: Option<QueryDiagnosticOptions>,
 }
 
 impl Default for QueryControl {
@@ -397,6 +409,7 @@ impl Default for QueryControl {
             max_join_bytes: 4 * 1024 * 1024,
             max_numeric_bytes: 16 * 1024 * 1024,
             max_value_bytes: usize::MAX,
+            diagnostics: None,
         }
     }
 }
@@ -824,6 +837,7 @@ struct State<'a> {
     defer_rules: bool,
     borrowed_cancel: Option<&'a AtomicBool>,
     max_value_bytes: usize,
+    diagnostics: Option<diagnostics::Trace>,
 }
 
 impl QueryEngine {
@@ -920,12 +934,16 @@ impl QueryEngine {
             defer_rules: false,
             borrowed_cancel: None,
             max_value_bytes: control.max_value_bytes,
+            diagnostics: control
+                .diagnostics
+                .map(|options| diagnostics::Trace::new(options, query, control, deadline)),
         };
         let result = run_query(query, inputs, &mut state)?;
         Ok(QueryOutcome {
             result,
             stats: state.stats,
             plan: state.plan,
+            diagnostics: state.diagnostics.map(diagnostics::Trace::finish),
         })
     }
 
@@ -973,6 +991,7 @@ impl QueryEngine {
                 max_value_bytes: budget
                     .query_remaining_value_bytes()
                     .min(control.max_value_bytes),
+                diagnostics: None,
             };
             let result = (|| {
                 state.check(1)?;
@@ -987,6 +1006,7 @@ impl QueryEngine {
                     result,
                     stats: state.stats.clone(),
                     plan: std::mem::take(&mut state.plan),
+                    diagnostics: state.diagnostics.take().map(diagnostics::Trace::finish),
                 })
             })();
             (result, state.work as u64, state.stats.allocated_value_bytes)
@@ -1794,6 +1814,24 @@ fn general_input_relation<'a>(
 
 fn evaluate_clauses(
     clauses: &[Clause],
+    rows: Vec<Row>,
+    rules: &[Rule],
+    inherited_source: Option<&str>,
+    state: &mut State<'_>,
+) -> EvaluationResult<Vec<Row>> {
+    let phase = state
+        .diagnostics
+        .as_mut()
+        .and_then(|trace| trace.enter_phase(clauses));
+    let result = evaluate_clauses_in_phase(clauses, rows, rules, inherited_source, state);
+    if let Some(trace) = &mut state.diagnostics {
+        trace.leave_phase(phase);
+    }
+    result
+}
+
+fn evaluate_clauses_in_phase(
+    clauses: &[Clause],
     mut rows: Vec<Row>,
     rules: &[Rule],
     inherited_source: Option<&str>,
@@ -1820,8 +1858,27 @@ fn evaluate_clauses(
         })?;
         let clause = remaining.remove(selected);
         let before = rows.len();
-        let (next, access) =
-            evaluate_clause(clause, rows, rules, inherited_source, clauses, state)?;
+        let diagnostic = state.diagnostics.as_mut().map(|trace| {
+            trace.begin_step(clause, &rows, inherited_source, state.work, &state.stats)
+        });
+        let diagnostic_step = diagnostic.as_ref().and_then(|token| token.id);
+        let evaluated = evaluate_clause(clause, rows, rules, inherited_source, clauses, state);
+        let (next, access) = match evaluated {
+            Ok(value) => value,
+            Err(error) => {
+                if let (Some(trace), Some(token)) = (&mut state.diagnostics, diagnostic) {
+                    let status = match &error {
+                        dependencies::EvaluationError::AwaitNegative(_) => {
+                            QueryStepStatus::AwaitNegative
+                        }
+                        dependencies::EvaluationError::AwaitRules => QueryStepStatus::AwaitRules,
+                        dependencies::EvaluationError::Semantic(_) => QueryStepStatus::Failed,
+                    };
+                    trace.end_step(token, None, "", status, state.work, &state.stats);
+                }
+                return Err(error);
+            }
+        };
         rows = dedupe_rows(next, state)?;
         if rows.len() > state.control.max_intermediate_rows {
             return Err(resource(
@@ -1831,11 +1888,22 @@ fn evaluate_clauses(
             .into());
         }
         state.stats.clauses_executed += 1;
+        if let (Some(trace), Some(token)) = (&mut state.diagnostics, diagnostic) {
+            trace.end_step(
+                token,
+                Some(&rows),
+                &access,
+                QueryStepStatus::Complete,
+                state.work,
+                &state.stats,
+            );
+        }
         state.plan.push(PlanStep {
             clause: clause_name(clause).into(),
             access,
             rows_before: before,
             rows_after: rows.len(),
+            diagnostic_step,
         });
         if rows.is_empty() {
             break;

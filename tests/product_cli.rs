@@ -6,6 +6,40 @@ use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 #[test]
+fn data_only_cli_diagnostics_are_opt_in_and_preserve_readable_results() {
+    use atomic_core::edn::{EdnValue, read_edn};
+    let dir = tempfile::tempdir().unwrap();
+    let query = dir.path().join("query.edn");
+    let sources = dir.path().join("sources.edn");
+    std::fs::write(&query, "[:find ?x :in $ :where [?x :item/value ?v]]").unwrap();
+    std::fs::write(&sources, "{$ [[1 :item/value 2] [3 :item/value 4]]}").unwrap();
+    let run = |flags: &[&str]| {
+        let mut cmd = atomic();
+        cmd.env_remove("ATOMIC_POSTGRES_URL")
+            .args(["query", "--file"])
+            .arg(&query)
+            .arg("--sources")
+            .arg(&sources)
+            .args(flags);
+        read_edn(&success(cmd.output().unwrap())).unwrap()
+    };
+    let plain = run(&[]);
+    let EdnValue::Map(fields) = run(&["--query-stats", "--io-context", ":app/list-items"]) else {
+        panic!("diagnostics require wrapper");
+    };
+    let field = |name| {
+        fields
+            .iter()
+            .find(|(key, _)| *key == EdnValue::Keyword(atomic_core::Keyword::new("atomic", name)))
+            .map(|(_, value)| value)
+            .unwrap()
+    };
+    assert_eq!(field("ret"), &plain);
+    assert!(matches!(field("query-stats"), EdnValue::Map(_)));
+    assert!(matches!(field("io-stats"), EdnValue::Map(_)));
+}
+
+#[test]
 fn product_configuration_is_explicit_and_redacts_connection_values() {
     const SECRET: &str = "product-private-password-marker";
     let parameters = format!("host=127.0.0.1 password={SECRET} invalid_setting={SECRET}");
@@ -79,7 +113,21 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
         println!("PEER_RUNTIME_REJECTED no_ready=true no_publication=true");
     }
     for round in 0..2 {
-        let mut server = Server::start(&fixture.writer_url, DATABASE, &endpoint);
+        let mut command = atomic();
+        configured(&mut command, &fixture.writer_url);
+        command
+            .args(["transactor", "--database", DATABASE, "--endpoint"])
+            .arg(&endpoint)
+            .args(["--telemetry-ms", "25", "--index-threshold-bytes", "1"]);
+        let (mut server, events) = Server::spawn_observed(command);
+        loop {
+            let line = events
+                .recv_timeout(std::time::Duration::from_secs(20))
+                .unwrap();
+            if line.starts_with("READY ") {
+                break;
+            }
+        }
         let mut command = Command::new(&application);
         configured(&mut command, &fixture.peer_url);
         command
@@ -94,6 +142,21 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
                 .unwrap(),
         );
         assert!(output.contains("APPLICATION_OK"));
+        assert!(output.contains("DIAGNOSTICS_OK named=true reads=true immutable_basis=true"));
+        let events = events.try_iter().collect::<Vec<_>>();
+        assert!(
+            events
+                .iter()
+                .any(|line| line.contains("\"event\":\"atomic.transaction\"")),
+            "missing transaction telemetry: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|line| line.contains("\"event\":\"atomic.metrics\"")),
+            "missing service telemetry: {events:?}"
+        );
+        assert!(output.contains("ASYNC_READ_OK single_thread=true old_basis=true chunk_rows=1"));
         assert!(output.contains("COMPUTATION_OK weighted=true native_helpers=true old_basis=true"));
         assert!(output.contains("READ_VALUES_OK mixed_sources=true entity_identity=true"));
         assert!(output.contains(

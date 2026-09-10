@@ -6,6 +6,11 @@
 //! immutable snapshots. The pure kernel remains available as an explicit oracle.
 
 mod allocation_storage;
+pub mod async_client;
+pub use async_client::{
+    AsyncClient, AsyncConfig, AsyncExecutor, AsyncOperation, AsyncStats, AsyncStream,
+    AsyncStreamOptions, AsyncTransaction,
+};
 mod backup;
 mod block_codec;
 mod change_consumer;
@@ -62,20 +67,25 @@ mod recent_btset;
 #[cfg(unix)]
 mod remote_config;
 #[cfg(unix)]
+mod remote_routing;
+#[cfg(unix)]
 mod remote_transport;
 mod runtime_config;
 #[cfg(unix)]
 pub use remote_config::{remote_client_config_from_env, remote_server_credentials_from_env};
+mod io_diagnostics;
 mod schema;
 mod service;
 mod shared_map;
 pub mod sql_io;
 mod ssd_cache;
 mod state_commitment;
+mod telemetry;
 mod tiered_assessor;
 mod time_point;
 mod transaction;
 mod transaction_hints;
+mod transaction_stats;
 mod tree_manifest;
 mod tree_store;
 mod uuid;
@@ -122,6 +132,7 @@ pub use identity::{
 };
 pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
 pub use index_pull::{IndexPullCursor, IndexPullOptions};
+pub use io_diagnostics::{CacheIoStats, CacheTier, IndexIoStats, ReadIoStats};
 #[cfg(unix)]
 pub use local_transport::{
     CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
@@ -131,16 +142,16 @@ pub use native_registry::{
     native_deployment_attribute, native_deployment_ident,
 };
 pub use operations::{
-    ExcisionFault, ExcisionReceipt, GarbageInventory, IntegrityProblem, IntegrityReport,
-    LogGenerationGarbage, MAX_DATABASE_RECLAMATION_ROWS, MAX_LOG_GENERATION_ROWS_PER_GC,
-    MAX_LOG_GENERATIONS_PER_GC, MAX_PROGRAMS_PER_GC, MAX_RECEIPT_ARCHIVE_WORK_PER_GC,
-    MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC, MAX_SEMANTIC_COMMITMENT_NODES_PER_GC,
-    MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC, MAX_TREE_BUILD_INTENT_NODES_PER_GC,
-    MAX_TREE_BUILD_INTENTS_PER_GC, MAX_TREE_NODES_PER_GC, MAX_TREE_RETIREMENT_NODES_PER_GC,
-    MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics, PostgresOperator,
-    RECOMMENDED_GARBAGE_COLLECTION_AGE, ReceiptArchiveConversion, RequestBaseArchiveGarbage,
-    RetiredDatabaseReclamation, SemanticCommitmentRootGarbage, TreeBuildIntentGarbage,
-    TreePublicationGarbage,
+    ExcisionConfig, ExcisionFault, ExcisionProgress, ExcisionReceipt, GarbageInventory,
+    IntegrityProblem, IntegrityReport, LogGenerationGarbage, MAX_DATABASE_RECLAMATION_ROWS,
+    MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC, MAX_PROGRAMS_PER_GC,
+    MAX_RECEIPT_ARCHIVE_WORK_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
+    MAX_SEMANTIC_COMMITMENT_NODES_PER_GC, MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
+    MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC, MAX_TREE_NODES_PER_GC,
+    MAX_TREE_RETIREMENT_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics,
+    PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, ReceiptArchiveConversion,
+    RequestBaseArchiveGarbage, RetiredDatabaseReclamation, SemanticCommitmentRootGarbage,
+    TreeBuildIntentGarbage, TreePublicationGarbage,
 };
 pub use peer::NativeFulltextReader;
 pub use peer::native_log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
@@ -169,12 +180,15 @@ pub use pull::{
 pub use query::{
     Aggregate, AggregateArg, AggregateCall, AggregateGroup, AggregateSource, AggregateValue,
     Binding, Clause, DataPattern, FindElement, FindSpec, Function, InputSpec, PlanStep, Predicate,
-    PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats, Query, QueryControl,
-    QueryDataSource, QueryEngine, QueryExtensions, QueryInput, QueryOutcome, QueryResult,
-    QuerySequence, QuerySource, QuerySourceValue, QueryStats, QueryValue, RelationPattern, Rule,
-    Term, Variable,
+    PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats, Query, QueryClauseStep,
+    QueryControl, QueryDataSource, QueryDiagnosticOptions, QueryDiagnostics, QueryEngine,
+    QueryExtensions, QueryInput, QueryOutcome, QueryPhase, QueryPhaseKind, QueryResult,
+    QuerySequence, QuerySource, QuerySourceValue, QueryStats, QueryStepStatus, QueryStepWork,
+    QueryValue, QueryWarning, RelationPattern, Rule, Term, Variable, query_diagnostics_to_edn,
 };
 pub use query_return_maps::{ReturnMap, ReturnMapShape, ReturnMaps};
+#[cfg(unix)]
+pub use remote_routing::RemoteWriter;
 #[cfg(unix)]
 pub use remote_transport::{
     RemoteAuthToken, RemoteClientConfig, RemoteTransactionEndpoint, RemoteTransactionServer,
@@ -184,15 +198,20 @@ pub use runtime_config::postgres_config_from_env;
 pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use service::{
     BackgroundFulltextStats, BackgroundIndexingConfig, BackgroundIndexingFailure,
-    BackgroundIndexingStats, IndexRequest, ReportSubscription, ServiceStats,
-    ServiceTransactionReport, TransactionClient, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TransactionStandby, TransactionTicket,
+    BackgroundIndexingStats, IndexRequest, OperationalServiceStats, ReportSubscription,
+    ServiceOptions, ServiceStats, ServiceTransactionReport, StandbyStatus, TransactionClient,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TransactionStandby,
+    TransactionTicket,
 };
 pub use sql_io::{
     OperationContext, OperationKind, SqlCallKind, SqlCallStats, SqlIoReport, SqlIoStats,
     SqlMetricCallback, process_sql_stats,
 };
 pub use ssd_cache::{SsdCache, SsdCacheConfig, SsdCacheLimits, SsdCacheStats};
+pub use telemetry::{
+    TelemetryConfig, TelemetryEmitter, TelemetryPhase, TelemetryPublisher, TelemetrySnapshot,
+    TelemetryStats, TelemetryWarnings, io_report_to_edn,
+};
 pub use time_point::TimePoint;
 pub use transaction::SpeculationLimits;
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
@@ -200,6 +219,7 @@ pub use transaction_hints::{
     HintExecution, HintLimits, HintPrefetchOptions, HintPrefetchStats, HintTraceStats,
     HintedSpeculation, ReadHint, TransactionHints,
 };
+pub use transaction_stats::{TransactionDiagnostics, TransactionWorkStats};
 pub use tree_manifest::{AvetProjectionWork, ManifestTree, PersistentTreeManifest};
 pub use tree_store::{
     NodeUploadLimits, PostgresTreeStore, TreeManifestRecord, TreePublicationDelta,

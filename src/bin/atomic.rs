@@ -3,18 +3,18 @@
 mod admin;
 #[path = "atomic/data.rs"]
 mod data;
+#[path = "atomic/health.rs"]
+mod health;
+#[path = "atomic/runtime.rs"]
+mod runtime;
 use atomic_core::{
-    BackgroundIndexingConfig, CapacityLimits, DatabaseCatalog, ErrorCategory,
-    LocalTransactionEndpoint, LocalTransportConfig, PostgresIndexer, PostgresMigrator,
-    PostgresStore, Schema, SemanticError, TransactionDefaults, TransactionService,
-    TransactionServiceConfig, postgres_config_from_env,
+    DatabaseCatalog, ErrorCategory, PostgresIndexer, PostgresMigrator, PostgresStore, Schema,
+    SemanticError, TransactionDefaults, postgres_config_from_env,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
-use std::path::Path;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 extern "C" fn stop_signal(_: libc::c_int) {
@@ -48,6 +48,10 @@ Clients use the same token file and optional ATOMIC_REMOTE_TLS_ROOT PEM trust
   anchor; certificate/name verification is mandatory. No plaintext TCP mode.
 
 Transactor options (numeric limits are positive integers):
+  --mode active|auto           active fails on contention (default); auto waits as standby
+  --standby-poll-ms N          contender interval, default250; stop wakes idle polling
+  --health-listen IP:PORT      opt-in plaintext status only: /health and /ready
+  --telemetry-ms N             opt-in bounded JSON operational events on stdout
   --holder ID                  lease holder label (default: process-specific)
   --default-partition KEYWORD   default placement for new ordinary entities
                                (default: :db.part/user; install named partitions first)
@@ -61,6 +65,8 @@ Transactor options (numeric limits are positive integers):
   --index-max-bytes N          default library recent-memory maximum
   --tree-cache-entries N       default library writer cache entries
   --tree-cache-bytes N         default library writer cache bytes
+  --excision-max-bytes N       eager maintenance allocation account, default512MiB (not RSS)
+  --excision-log-batch N       1..4096 replay transactions per step, default256
 
 Use a pre-existing private owner-only endpoint directory (mkdir -m 700).
 SIGINT/SIGTERM stop admission, drain bounded local requests, then stop the writer.
@@ -85,6 +91,10 @@ impl Arguments {
             "migrate" => &["--writer-role", "--peer-role"],
             "create" | "status" | "consolidate" => &["--database"],
             "transactor" => &[
+                "--mode",
+                "--standby-poll-ms",
+                "--health-listen",
+                "--telemetry-ms",
                 "--database",
                 "--endpoint",
                 "--listen",
@@ -102,6 +112,8 @@ impl Arguments {
                 "--index-max-bytes",
                 "--tree-cache-entries",
                 "--tree-cache-bytes",
+                "--excision-max-bytes",
+                "--excision-log-batch",
             ],
             _ => return Err(usage("unknown command; run atomic --help")),
         };
@@ -140,6 +152,21 @@ impl Arguments {
             _ => {}
         }
         if parsed.command == "transactor" {
+            if parsed
+                .options
+                .get("--mode")
+                .is_some_and(|mode| !matches!(mode.as_str(), "active" | "auto"))
+            {
+                return Err(usage("--mode must be active or auto"));
+            }
+            if let Some(address) = parsed.options.get("--health-listen") {
+                address
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|_| usage("--health-listen requires a numeric IP:port"))?;
+            }
+            if parsed.number("--excision-log-batch", 256)? > 4096 {
+                return Err(usage("--excision-log-batch must be 1..4096"));
+            }
             transaction_defaults(
                 parsed
                     .options
@@ -171,6 +198,8 @@ impl Arguments {
                 !matches!(
                     key.as_str(),
                     "--database"
+                        | "--mode"
+                        | "--health-listen"
                         | "--endpoint"
                         | "--holder"
                         | "--default-partition"
@@ -301,159 +330,7 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                 println!("SEARCH basis_t={} status=checked", receipt.basis_t);
             }
         }
-        "transactor" => {
-            let mut capacity = CapacityLimits::default();
-            capacity.writer_tree_cache_entries =
-                args.size("--tree-cache-entries", capacity.writer_tree_cache_entries)?;
-            capacity.writer_tree_cache_bytes =
-                args.size("--tree-cache-bytes", capacity.writer_tree_cache_bytes)?;
-            let config = TransactionServiceConfig {
-                // The configured constructor ignores this compatibility field.
-                connection: String::new(),
-                database_id: args.required("--database")?.to_owned(),
-                holder_id: args
-                    .options
-                    .get("--holder")
-                    .cloned()
-                    .unwrap_or_else(|| format!("atomic-{}", std::process::id())),
-                lease_duration: Duration::from_millis(args.number("--lease-ms", 5_000)?),
-                renew_interval: Duration::from_millis(args.number("--renew-ms", 1_000)?),
-                queue_capacity: args.size("--queue-capacity", 64)?,
-                capacity_limits: capacity,
-            };
-            let default_index = BackgroundIndexingConfig::default();
-            let index = BackgroundIndexingConfig {
-                memory_index_threshold_bytes: args.number(
-                    "--index-threshold-bytes",
-                    default_index.memory_index_threshold_bytes,
-                )?,
-                memory_index_max_bytes: args
-                    .number("--index-max-bytes", default_index.memory_index_max_bytes)?,
-            };
-            let default_transport = LocalTransportConfig::default();
-            let transport = LocalTransportConfig {
-                max_in_flight: args.size("--max-in-flight", default_transport.max_in_flight)?,
-                request_timeout: Duration::from_millis(
-                    args.number("--request-timeout-ms", 30_000)?,
-                ),
-                max_frame_bytes: args
-                    .size("--max-frame-bytes", default_transport.max_frame_bytes)?,
-            };
-            transport.validate()?;
-            let local_endpoint = args
-                .options
-                .get("--endpoint")
-                .map(|path| LocalTransactionEndpoint::bind_at(Path::new(path)))
-                .transpose()?;
-            let remote_endpoint = if let Some(listen) = args.options.get("--listen") {
-                let (identity, token) = atomic_core::remote_server_credentials_from_env()?;
-                let endpoint = atomic_core::RemoteTransactionEndpoint::bind(
-                    listen
-                        .parse()
-                        .map_err(|_| usage("invalid listen address"))?,
-                    identity,
-                )?;
-                let mut advertised: std::net::SocketAddr = args
-                    .required("--advertise")?
-                    .parse()
-                    .map_err(|_| usage("invalid advertised address"))?;
-                if advertised.port() == 0 {
-                    advertised.set_port(endpoint.local_addr()?.port());
-                }
-                Some((
-                    endpoint,
-                    token,
-                    advertised,
-                    args.required("--tls-server-name")?.to_owned(),
-                ))
-            } else {
-                None
-            };
-            install_signals()?;
-            let defaults =
-                transaction_defaults(args.options.get("--default-partition").map(String::as_str))?;
-            let service = TransactionService::start_configured_with_indexing_and_defaults(
-                config,
-                connection.clone(),
-                index,
-                defaults,
-            )?;
-            let started = (|| -> Result<_, SemanticError> {
-                let local = local_endpoint
-                    .map(|endpoint| endpoint.start(service.client(), transport.clone()))
-                    .transpose()?;
-                let remote = if let Some((endpoint, token, advertised, name)) = remote_endpoint {
-                    let config = atomic_core::RemoteTransportConfig {
-                        max_in_flight: transport.max_in_flight,
-                        request_timeout: transport.request_timeout,
-                        max_frame_bytes: transport.max_frame_bytes,
-                        ..Default::default()
-                    };
-                    let server = endpoint.start(service.client(), config, token)?;
-                    server.publish(&connection, advertised, &name)?;
-                    Some(server)
-                } else {
-                    None
-                };
-                Ok((local, remote))
-            })();
-            let (local_server, remote_server) = match started {
-                Ok(servers) => servers,
-                Err(error) => {
-                    service.shutdown();
-                    return Err(error);
-                }
-            };
-            if let Some(server) = &local_server {
-                println!(
-                    "READY database={:?} endpoint={:?} lineage={}",
-                    service.identity().database_id(),
-                    server.endpoint(),
-                    service.identity().lineage_id()
-                );
-            } else {
-                println!(
-                    "READY database={:?} transport=tls authenticated_discovery=true lineage={}",
-                    service.identity().database_id(),
-                    service.identity().lineage_id()
-                );
-            }
-            std::io::stdout().flush().map_err(|_| io_error())?;
-            let mut lost_authority = false;
-            while !STOP.load(Ordering::Relaxed) {
-                if !service.client().is_available()
-                    || local_server
-                        .as_ref()
-                        .is_some_and(|server| !server.is_available())
-                    || remote_server
-                        .as_ref()
-                        .is_some_and(|server| !server.is_available())
-                {
-                    // Keep the safe diagnostic code before shutdown consumes
-                    // the service. Messages/details can contain user data.
-                    if let Some(failure) = service.background_indexing_stats().last_failure {
-                        eprintln!(
-                            "TRANSACTOR_INDEX_FAILURE category={:?} code={}",
-                            failure.category, failure.code
-                        );
-                    }
-                    lost_authority = true;
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            drop(local_server);
-            drop(remote_server);
-            service.shutdown();
-            if lost_authority {
-                return Err(SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "cli/transactor-unavailable",
-                    "transactor lost availability; supervisor restart required",
-                ));
-            }
-            println!("STOPPED");
-        }
+        "transactor" => runtime::run(&args, connection)?,
         _ => unreachable!("validated command"),
     }
     Ok(())
@@ -577,6 +454,36 @@ mod tests {
             let mut input = args.to_vec();
             input.push(invalid);
             let error = parse(&input).err().expect("non-keyword default accepted");
+            assert_eq!(error.code, "cli/usage");
+            assert!(!format!("{error:?}").contains("private-marker"));
+        }
+    }
+
+    #[test]
+    fn service_mode_health_and_excision_limits_validate_before_io() {
+        let base = ["transactor", "--database", "d", "--endpoint", "/private"];
+        for (flag, value) in [
+            ("--mode", "auto"),
+            ("--mode", "active"),
+            ("--health-listen", "[::1]:0"),
+            ("--standby-poll-ms", "20000"),
+            ("--excision-max-bytes", "1"),
+            ("--excision-log-batch", "4096"),
+        ] {
+            let mut args = base.to_vec();
+            args.extend([flag, value]);
+            assert!(parse(&args).is_ok());
+        }
+        for (flag, value) in [
+            ("--mode", "private-marker"),
+            ("--health-listen", "private-marker:80"),
+            ("--standby-poll-ms", "0"),
+            ("--excision-max-bytes", "0"),
+            ("--excision-log-batch", "4097"),
+        ] {
+            let mut args = base.to_vec();
+            args.extend([flag, value]);
+            let error = parse(&args).err().expect("invalid settings accepted");
             assert_eq!(error.code, "cli/usage");
             assert!(!format!("{error:?}").contains("private-marker"));
         }

@@ -402,6 +402,158 @@ fn remote_handshake_deadline_and_inflight_admission_are_bounded() {
 }
 
 #[test]
+fn connection_owned_route_refreshes_before_submission_without_replaying_unknown_outcomes() {
+    let Some(fixture) = fixture("remote_owned_route") else {
+        return;
+    };
+    let url = &fixture.connection;
+    let pg = PostgresConnectionConfig::plaintext(url);
+    let service = common::start_service(url, "source");
+    let peer = Connection::connect(url, "source", 32).unwrap();
+    let captured = peer.db();
+    let (identity, root) = credentials();
+    let token = RemoteAuthToken::from_bytes([0x24; 32]);
+    let tls = RemoteClientConfig::new(token.clone())
+        .unwrap()
+        .with_root_certificate_pem(&root)
+        .unwrap();
+    let writer = peer.remote_writer(pg.clone(), tls);
+    assert_eq!(writer.identity(), peer.identity());
+    assert!(
+        writer.cached_endpoint().is_none(),
+        "construction must not discover"
+    );
+    assert_eq!(
+        writer.refresh(Duration::ZERO).unwrap_err().code,
+        "remote/timeout"
+    );
+    let (server, endpoint) = bind(
+        identity.clone(),
+        "127.0.0.1:0".parse().unwrap(),
+        &service,
+        RemoteTransportConfig::default(),
+        token.clone(),
+        &pg,
+    );
+    let started = Instant::now();
+    let initial = writer.transact(request("owned-first", 1), WAIT).unwrap();
+    assert_eq!(writer.cached_endpoint(), Some(endpoint.clone()));
+    let first = initial.report.unwrap();
+    assert_eq!(captured.basis_t() + 1, first.basis_t);
+    server.inject_lost_next_committed_response();
+    let unknown = writer.transact(request("owned-lost", 2), WAIT).unwrap_err();
+    assert_eq!(
+        unknown.category,
+        ErrorCategory::UnknownOutcome,
+        "the facade must not conceal ambiguity with an automatic exact retry"
+    );
+    assert!(writer.cached_endpoint().is_none());
+    let exact = writer.transact(request("owned-lost", 2), WAIT).unwrap();
+    assert!(exact.replayed);
+    assert_eq!(exact.basis_t, first.basis_t + 1);
+    let exact_hash = exact.tx_hash;
+
+    // The same trusted certificate and socket now serve a new lease/instance.
+    // The cached TLS hello is rejected before any request bytes are written;
+    // the facade discovers the successor and submits the same owned data once.
+    let address = server.local_addr();
+    drop(server);
+    service.shutdown();
+    let replacement = common::start_service(url, "source");
+    let (server, replacement_endpoint) = bind(
+        identity,
+        address,
+        &replacement,
+        RemoteTransportConfig::default(),
+        token,
+        &pg,
+    );
+    assert!(replacement_endpoint.lease_epoch() > endpoint.lease_epoch());
+    let fresh = writer
+        .transact(request("owned-after-takeover", 3), WAIT)
+        .unwrap();
+    assert!(!fresh.replayed);
+    assert_eq!(fresh.basis_t, first.basis_t + 2);
+    assert_eq!(writer.cached_endpoint(), Some(replacement_endpoint));
+    let exact = writer.transact(request("owned-lost", 2), WAIT).unwrap();
+    assert!(exact.replayed);
+    assert_eq!(exact.tx_hash, exact_hash);
+
+    let executor = AsyncExecutor::new(AsyncConfig {
+        workers: 2,
+        ..Default::default()
+    })
+    .unwrap();
+    let async_client = AsyncClient::new(&peer, &executor).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let endpoint = async_client
+            .refresh_route(&writer, WAIT)
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(Some(endpoint), writer.cached_endpoint());
+        let retried = async_client
+            .transact_routed(&writer, request("owned-lost", 2), WAIT)
+            .unwrap()
+            .await
+            .unwrap();
+        assert!(retried.replayed);
+        assert_eq!(retried.tx_hash, exact_hash);
+        assert_eq!(retried.report.unwrap().basis_t, first.basis_t + 1);
+    });
+
+    let mut catalog = DatabaseCatalog::connect(url).unwrap();
+    catalog.rename("source", "renamed").unwrap();
+    let reused = catalog.create_if_absent("source", Schema::new()).unwrap();
+    assert_ne!(reused.database.lineage_id, writer.identity().lineage_id());
+    let after_rename = writer
+        .transact(request("owned-after-rename", 4), WAIT)
+        .unwrap();
+    assert_eq!(after_rename.basis_t, first.basis_t + 3);
+    assert_eq!(
+        after_rename
+            .report
+            .unwrap()
+            .db_after
+            .snapshot_reference()
+            .unwrap()
+            .key()
+            .lineage_id(),
+        writer.identity().lineage_id()
+    );
+    assert_eq!(captured.basis_t(), first.basis_t - 1);
+    let retired = catalog.retire("renamed").unwrap().unwrap();
+    assert_eq!(retired.lineage_id, writer.identity().lineage_id());
+    assert_eq!(
+        writer.refresh(WAIT).unwrap_err().code,
+        "catalog/database-retired"
+    );
+    assert!(
+        writer
+            .transact(request("owned-after-retire", 5), WAIT)
+            .is_err()
+    );
+    assert_eq!(
+        PostgresStore::connect(url)
+            .unwrap()
+            .database_status(&reused.database.database_id)
+            .unwrap()
+            .basis_t,
+        0
+    );
+    drop(server);
+    replacement.shutdown();
+    eprintln!(
+        "REMOTE_OWNED_ROUTE_OK cached=true takeover=true unknown_not_replayed=true exact_retry=true async_routed=true rename_identity=true complete_ms={}",
+        started.elapsed().as_millis()
+    );
+}
+
+#[test]
 fn stored_query_transaction_program_preview_and_exact_remote_retry_survive_replacement() {
     let Some(fixture) = fixture("remote_stored_program") else {
         return;

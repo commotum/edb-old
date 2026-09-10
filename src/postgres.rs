@@ -286,12 +286,13 @@ pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
             include_str!("../migrations/0034_retired_database_reclamation.sql")
         ),
     ),
+    (35, include_str!("../migrations/0035_runtime_excision.sql")),
 ];
 
 /// Latest PostgreSQL schema understood by this binary.
 ///
 /// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 34;
+pub const POSTGRES_SCHEMA_VERSION: i64 = 35;
 
 /// Version of the authenticated fixed-dependency walker whose result GC may
 /// trust. Any future traversal change that adds roots must bump this version
@@ -354,6 +355,9 @@ const PEER_RUNTIME_TABLES: &[&str] = &[
 ];
 
 const WRITER_RUNTIME_TABLES: &[&str] = &[
+    "atomic_log_generation_builds",
+    "atomic_generation_excision_predicates",
+    "atomic_log_generation_completion_stages",
     "atomic_fulltext_page_edges",
     "atomic_fulltext_page_builds",
     "atomic_remote_writer_endpoints",
@@ -377,6 +381,10 @@ const WRITER_RUNTIME_TABLES: &[&str] = &[
 ];
 
 const WRITER_INSERT_TABLES: &[&str] = &[
+    "atomic_log_generations",
+    "atomic_log_generation_builds",
+    "atomic_generation_excision_predicates",
+    "atomic_log_generation_checkpoints",
     "atomic_fulltext_pages",
     "atomic_fulltext_page_edges",
     "atomic_fulltext_page_roots",
@@ -1794,6 +1802,8 @@ fn grant_runtime_privileges(
                                        {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_fulltext_gc_pin_key(), \
                                        {schema_ident}.atomic_finish_fulltext_build(bytea) TO {writer_ident}; \
+             GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_assert_excision_worker(text,text,bigint), \
+                                       {schema_ident}.atomic_runtime_excision_step(text,bigint,text,bigint,text,bigint,bigint,bytea,bytea,bytea) TO {writer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_discover_remote_writer(text,text) TO {writer_ident}, {peer_ident}; \
              GRANT EXECUTE ON FUNCTION {schema_ident}.atomic_log_generation_pin_key(text, bigint) TO {peer_ident}",
             relation_list(&schema_ident, WRITER_RUNTIME_TABLES),
@@ -2738,14 +2748,28 @@ impl PostgresStore {
                     AND log_generation = $3",
                 &[&database_id, &revision, &generation],
             )
-            .map_err(|error| postgres_error("postgres/writer-rebase-publication", error))?
-            .ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::NotFound,
-                    "postgres/writer-publication-not-found",
-                    "the requested native publication does not exist in the writer generation",
+            .map_err(|error| postgres_error("postgres/writer-rebase-publication", error))?;
+        let Some(row) = row else {
+            // A generation replacement is not a same-value tree rebase. The
+            // transaction path will lock the actual head, resolve receipts
+            // first, and open its exact new-generation endpoint if necessary.
+            let replacement: bool = self
+                .client
+                .query_one(
+                    "SELECT log_generation<>$2 FROM atomic_heads WHERE database_id=$1",
+                    &[&database_id, &generation],
                 )
-            })?;
+                .map_err(|error| postgres_error("postgres/writer-rebase-generation", error))?
+                .get(0);
+            if replacement {
+                return Ok(());
+            }
+            return Err(SemanticError::new(
+                ErrorCategory::NotFound,
+                "postgres/writer-publication-not-found",
+                "the requested native publication does not exist in the writer generation",
+            ));
+        };
         let manifest = digest(row.get::<_, Vec<u8>>(0), "writer publication manifest")?;
         let (database, opened) = current.database.rebase_exact(Some(manifest))?;
         if database.endpoint() != exact_endpoint(&current.commitment) {

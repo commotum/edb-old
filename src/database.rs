@@ -1915,6 +1915,8 @@ impl Database {
         tx_instant: i64,
         defaults: &crate::TransactionDefaults,
     ) -> Result<AssessedTransaction, SemanticError> {
+        crate::transaction_stats::count(|work| &mut work.assessments, 1);
+        crate::transaction_stats::count(|work| &mut work.input_operations, ops.len());
         crate::transaction::validate_ops_input(ops)?;
         let default_partition = defaults.resolve(&self.schema, |name| self.entid(name))?;
         if let Some(previous) = self.last_tx_instant
@@ -2033,6 +2035,7 @@ impl Database {
         let mut final_current = apply_logical(&self.current, &logical, tx);
         validate_excision_requests(&final_current)?;
         let mut tx_data = material_changes(&self.current, &final_current, &logical, tx);
+        crate::transaction_stats::count(|work| &mut work.produced_datoms, tx_data.len());
         tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
         let proposed_history: Vec<_> = self
             .history_datoms()
@@ -2057,7 +2060,7 @@ impl Database {
         // attribute was unavailable during expansion, while its validated
         // descriptor is immediately operative on db-after.
         validate_cardinality(&successor_schema, &final_current)?;
-        validate_uniqueness(&successor_schema, &final_current)?;
+        validate_uniqueness_inner(&successor_schema, &final_current, true)?;
         final_current.sort_by(compare_current);
 
         let mut db_after = self.clone();
@@ -2619,6 +2622,9 @@ impl Database {
             let Some(unique) = schema.unique else {
                 continue;
             };
+            if unique == Unique::Identity {
+                crate::transaction_stats::count(|work| &mut work.identity_claims, 1);
+            }
             let value = self.resolve_upsert_identity_value(*attribute, value, tx)?;
             if value.is_nan() {
                 return Err(SemanticError::incorrect(
@@ -2648,6 +2654,7 @@ impl Database {
             let Some(value) = value.resolved() else {
                 continue;
             };
+            crate::transaction_stats::count(|work| &mut work.identity_lookups, 1);
             if let Some(existing) = self.lookup(*attribute, value)? {
                 if *unique == Unique::Value {
                     return Err(SemanticError::conflict(
@@ -2655,6 +2662,7 @@ impl Database {
                         format!("unique value is already held by entity {existing}"),
                     ));
                 }
+                crate::transaction_stats::count(|work| &mut work.upsert_resolutions, 1);
                 let root = union.root(*temp);
                 if let Some(previous) = existing_by_root.insert(root, existing)
                     && previous != existing
@@ -3141,6 +3149,7 @@ impl Database {
                 )
             }),
             EntityRef::Lookup { attribute, value } => {
+                crate::transaction_stats::count(|work| &mut work.identity_lookups, 1);
                 self.lookup(*attribute, value)?.ok_or_else(|| {
                     SemanticError::incorrect(
                         "transaction/lookup-not-found",
@@ -3148,15 +3157,17 @@ impl Database {
                     )
                 })
             }
-            EntityRef::LookupInput { attribute, value } => self
-                .database_value()
-                .resolve_lookup_input(*attribute, value)?
-                .ok_or_else(|| {
-                    SemanticError::incorrect(
-                        "transaction/lookup-not-found",
-                        "lookup ref did not resolve in db-before",
-                    )
-                }),
+            EntityRef::LookupInput { attribute, value } => {
+                crate::transaction_stats::count(|work| &mut work.identity_lookups, 1);
+                self.database_value()
+                    .resolve_lookup_input(*attribute, value)?
+                    .ok_or_else(|| {
+                        SemanticError::incorrect(
+                            "transaction/lookup-not-found",
+                            "lookup ref did not resolve in db-before",
+                        )
+                    })
+            }
             EntityRef::Tx => Ok(tx),
         }
     }
@@ -3340,6 +3351,7 @@ fn collect_tempids_entity(entity: &EntityRef, output: &mut BTreeSet<String>) {
 }
 
 fn dedupe(datoms: &mut Vec<LogicalDatom>) {
+    let before = datoms.len();
     let mut result: Vec<LogicalDatom> = Vec::new();
     for datom in datoms.drain(..) {
         if !result.iter().any(|existing| same_logical(existing, &datom)) {
@@ -3348,6 +3360,7 @@ fn dedupe(datoms: &mut Vec<LogicalDatom>) {
     }
     result.sort_by(compare_logical);
     *datoms = result;
+    crate::transaction_stats::count(|work| &mut work.duplicate_datoms, before - datoms.len());
 }
 
 fn is_attribute_hook_property(attribute: u32) -> bool {
@@ -3498,6 +3511,8 @@ fn derive_composites(
             .map(|(entity, _)| *entity)
             .collect();
         for entity in entities {
+            crate::transaction_stats::count(|work| &mut work.composite_candidates, 1);
+            let before_count = result.len();
             let old = find_fact(before, entity, composite.id).map(|fact| fact.value.clone());
             let slots: Vec<_> = constituents
                 .iter()
@@ -3531,6 +3546,10 @@ fn derive_composites(
                     added: true,
                 });
             }
+            crate::transaction_stats::count(
+                |work| &mut work.composite_datoms,
+                result.len() - before_count,
+            );
         }
     }
     Ok(result)
@@ -3594,6 +3613,14 @@ fn validate_cardinality(schema: &Schema, facts: &[CurrentFact]) -> Result<(), Se
 }
 
 fn validate_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), SemanticError> {
+    validate_uniqueness_inner(schema, facts, false)
+}
+
+fn validate_uniqueness_inner(
+    schema: &Schema,
+    facts: &[CurrentFact],
+    account_work: bool,
+) -> Result<(), SemanticError> {
     let unique_attributes: BTreeSet<_> = schema
         .attributes()
         .filter(|attribute| attribute.unique.is_some())
@@ -3613,6 +3640,9 @@ fn validate_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), Sem
         let attribute = schema.attribute(left.attribute)?;
         if attribute.unique.is_none() {
             continue;
+        }
+        if account_work {
+            crate::transaction_stats::count(|work| &mut work.uniqueness_checks, 1);
         }
         if left.value.is_nan() {
             return Err(SemanticError::incorrect(
@@ -3811,14 +3841,19 @@ fn material_changes(
     logical
         .iter()
         .filter(|datom| {
+            crate::transaction_stats::count(|work| &mut work.redundancy_checks, 1);
             let existed_before = before_index.contains(datom.entity, datom.attribute, &datom.value);
             let exists_after = after_index.contains(datom.entity, datom.attribute, &datom.value);
-            if datom.added {
+            let material = if datom.added {
                 (datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32 || !existed_before)
                     && exists_after
             } else {
                 existed_before && !exists_after
+            };
+            if !material {
+                crate::transaction_stats::count(|work| &mut work.redundant_datoms, 1);
             }
+            material
         })
         .map(|datom| Datom {
             entity: datom.entity,

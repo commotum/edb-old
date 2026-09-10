@@ -14,9 +14,76 @@ It supersedes this folder's former audit-only loop. Preserve the completed
 observed API gaps, not automatic commands to copy every named component.
 [Goal 1](../goal-1/0-plan.md) completed EDN and remains intact.
 
+## Fresh-database policy — user decision 2026-09-10
+
+The user clarified that Atomic is not deployed and databases can be recreated.
+Ongoing development therefore targets freshly created databases on the current
+version. Database schema, persisted formats and program encodings may change
+without an upgrade path from earlier development versions.
+
+- Cross-version database migrations, old-binary fixtures, legacy receipt/program/
+  snapshot/backup readability, preservation of prior-release canonical bytes, and
+  mixed-version rolling upgrades are no longer required acceptance work. Existing
+  implementations may remain; do not start a compatibility-removal cleanup project.
+- Keep correct behavior within a supported current-version database: immutable
+  history and stable identities, deterministic authenticated data, durable commits,
+  receipt-first exact retries (including schema/function rebinding), restart/crash
+  recovery, same-version failover, and current-version backup/restore. Creating a
+  fresh fixture must not replace testing its persistence across these operations.
+- Make incompatible format boundaries explicit. Reject unsupported state with a
+  clear fresh-database requirement; do not silently reinterpret it or automatically
+  erase it. Fresh initialization and supported-version checks still need to work.
+- Use isolated, newly created current-version fixtures for subsequent acceptance.
+  Do not rerun historical upgrade matrices solely to satisfy superseded criteria.
+  Retain current-behavior regressions and adapt tests whose only requirement was
+  historical compatibility; report their revised scope honestly.
+- This policy supersedes conflicting compatibility instructions throughout the
+  goal scaffolds, including completed Goals 1–6 if reopened. Their recorded results
+  remain historical evidence. This changes database-version requirements, not the
+  scope of Rust/EDN APIs or the required product capabilities. Preserve concurrent
+  source changes; no existing database needs to be reset as part of this plan edit.
+
+## Proportionate implementation — user decision 2026-09-10
+
+Spend effort on useful capabilities and credible correctness evidence, not on
+maximizing tests, documentation or similarity to Datomic's implementation.
+This policy overrides stricter generic wording in any child, including reopened
+completed children; it does not waive required features or data safety.
+
+- Reuse working mechanisms, fixtures, examples and verified evidence. Consult
+  relevant docs/source for an actual semantic decision, not a fresh corpus audit
+  or component-by-component equivalence exercise. An obviously absent API does
+  not need a throwaway failing reproduction before implementation.
+- Run focused regressions while editing, then relevant integration checks once
+  behavior settles. Rerun passed coverage only when subsequent changes plausibly
+  affect it. Do not repeat every child's entire acceptance at every stage, or
+  manufacture a Cartesian matrix of transports, sizes, failure points and builds.
+  Goal10 checks cross-feature interaction; it is not a second copy of all tests.
+- Measure performance where it informs a design/operating choice or supports a
+  claim. Small representative samples and directly attributable counters are
+  sufficient for that purpose; no mandatory release/debug duplication, million-row
+  fixture, universal throughput target or benchmark ladder for every helper.
+  Retain the specific large boundary regressions that found real defects.
+- Bound resources at the meaningful admission/queue/chunk boundary. Do not
+  require constant-memory joins/excision, exact RSS ceilings, preemptive cancellation
+  of arbitrary trusted callbacks, or absolute I/O deadlines unless the actual
+  capability requires them. Document real limits; do not rename eager work lazy.
+  Safety, cooperative cancellation and required selective reads still matter.
+- Choose coherent idiomatic Rust implementations. Do not mandate Clojure's exact
+  tree layout, scheduling, component count, library, tuning knobs, metric names or
+  packaging. Add effective controls and explain native behavior, not decorative
+  options or a general plugin/framework solely for future hypothetical use.
+- Keep one evolving example and brief decision/result/continuation notes. Add
+  another fixture, document or abstraction only when it answers a distinct user
+  need or risk. No new audit reports, corrective parents or completion ceremonies.
+  Fix new warnings in touched code; unrelated cosmetic cleanup is not a gate.
+- Optional unapproved integrations remain explicitly deferred, not implemented.
+  They do not block completion of the required native stages or require another
+  approval exchange solely to close an audit row. Ask if actually taking one on.
+
 ## Current state
 
-Stages 1–5 / Goals 2–6 are verified; Stage 6 / Goal 7 is now active.
+Stages 1–7 / Goals 2–8 are verified; Stage 8 / Goal 9 is the active continuation.
 The worktree was clean at the start of this request. No audit-stage reread,
 replacement engine, recursive hierarchy or corrective parent is required.
 Only one child is active; bounded parallel tasks within it are welcome.
@@ -46,9 +113,10 @@ Reconciled evidence:
   decisions. Prefer idiomatic Rust enums/traits, iterators, immutable sharing and
   explicit error/result types over copying Clojure's implementation machinery.
 - Preserve existing typed APIs where possible with additive interfaces. Preserve
-  immutable values, schema/identity, historical facts, canonical durable bytes,
-  old program encodings, exact receipt-first retries and prior repairs. New
-  persistent representations need explicit versioning, compatibility and recovery.
+  immutable values, schema/identity, historical facts, exact receipt-first retries
+  and prior semantic repairs within the supported database version. Persistent
+  representation changes follow the fresh-database policy above; cross-version
+  byte/encoding compatibility and migration paths are not required.
 - PostgreSQL remains durable storage. No JVM/code evaluator, alternate durable
   backend or universal wire parity. Named functions do not serialize arbitrary
   native closures; deployment and trusted callback limits must be explicit.
@@ -56,8 +124,8 @@ Reconciled evidence:
   counts; naming differences and performance knobs alone do not establish defects.
   Conversely, do not hide a core gap as an unsupported convenience or call it done
   because a private helper exists.
-- Every required stage has public regressions, an evolving end-user example,
-  relevant real PostgreSQL/application checks, and measured complete-path costs.
+- Required stages use public regressions and the evolving end-user example,
+  relevant real PostgreSQL/application checks, and proportionate measured costs.
   Skips are not passes; work accounting is not RSS; single samples are not
   throughput certification.
 - Preserve user/concurrent changes. Destructive lifecycle/excision tests use
@@ -132,7 +200,10 @@ verified with final concurrency, genuine old-binary and application acceptance.
 
 ### 6. Reliable stock services and clients — Goal 7
 
-**Status:** Active; source-backed contract reconciled, native implementation next.
+**Status:** Complete. Stock TLS crash/takeover, cached-route exact retry, held
+reads, automatic excision/post-excision writes, bounded health and async facade
+pass relevant restricted PostgreSQL/application checks. See Goal7 for focused
+results, measured costs and native cancellation/admission boundaries.
 **Audit ownership:** AO04, AO05, AO-C01, P04, AO07; AO-C03 disposition.
 
 **Outcome:** Stock executables support persistent active/standby operation, bounded automatic excision, recoverable routing, usable asynchronous clients and clear health/readiness.
@@ -143,7 +214,9 @@ verified with final concurrency, genuine old-binary and application acceptance.
 
 ### 7. Actionable diagnostics and operational signals — Goal 8
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Complete; native named I/O, query/transaction diagnostics and bounded
+stock events verified. See [Goal8](../goal-8/0-plan.md) for focused PostgreSQL,
+application, takeover, exact-retry and cost evidence.
 **Audit ownership:** D01, D02, D03, AO06, Q06.
 
 **Outcome:** Users can explain expensive queries/transactions and operate the product using correlated, named metrics and structured events.
@@ -154,7 +227,8 @@ verified with final concurrency, genuine old-binary and application acceptance.
 
 ### 8. Bounded large-data reads and maintenance — Goal 9
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Active continuation; internal Stage1 reconciliation is next. No Goal9
+implementation or acceptance is claimed yet.
 **Audit ownership:** P05, AO09, ST-04, AO10, AO11.
 
 **Outcome:** Selective offline backup reads, repeated log reads and maintenance use bounded resources with useful, measured operating controls.
@@ -163,16 +237,16 @@ verified with final concurrency, genuine old-binary and application acceptance.
 
 **Completion signal:** Increasing datasets show selective backup reads and restart-hot log reads with measured I/O/memory attribution; corruption/unavailability fail safely. Concurrency/pacing checks demonstrate bounded admission, cancellation and interference under real workloads. No speedup is asserted merely because a setting exists.
 
-### 9. Integrated product acceptance and compatibility — Goal 10
+### 9. Integrated product acceptance and recovery — Goal 10
 
 **Status:** Planned; scaffolded, not active.
 **Audit ownership:** All required stages; AO-C02.
 
-**Outcome:** The accepted capabilities form one usable native product with preserved data and credible upgrade/operational guidance.
+**Outcome:** The accepted capabilities form one usable native product with reliable current-version persistence, recovery and clear fresh-database setup guidance.
 
-**Focus:** Exercise an evolving end-user scenario through public Rust and EDN interfaces, real PostgreSQL and stock services. Revalidate old receipts/programs/snapshots, restart/failover, deletion/excision safety and measured complete paths. Establish the supported rolling-upgrade envelope from actual version fixtures; do not claim universal mixed-version support.
+**Focus:** Start with a fresh current-version database and exercise an evolving end-user scenario through public Rust and EDN interfaces, real PostgreSQL and stock services. Verify receipts/programs/snapshots created in that database, restart/crash recovery, same-version failover, backup/restore, deletion/excision safety and measured complete paths. Verify fresh initialization and clear rejection of unsupported formats. Historical upgrades and mixed-version operation are outside acceptance.
 
-**Completion signal:** All required child signals and integrated workflows pass without skipped PostgreSQL claims or hidden gaps. Every audit ID has a verified implementation, supported native-equivalent disposition or explicit user decision. Reopen owning children for gaps; never mark this parent complete solely because scaffolds or one child exist.
+**Completion signal:** Required child capabilities and representative integrated workflows pass without skipped PostgreSQL claims or hidden gaps. Reuse still-applicable child evidence; do not rerun it all. Audit IDs have a verified implementation, supported native equivalent, or explicit deferred/out-of-scope disposition. Reopen owning children for real gaps; optional unapproved work does not block required-product completion.
 
 ## Explicit optional and platform dispositions
 
@@ -186,13 +260,14 @@ No audit item disappears merely because it is optional.
 | OC-C1 | SQL/BI connector is a research/scope candidate from release history; the corpus lacks its complete contract. Validate user workflow/spec before implementation. |
 | TU-02, ENV01 | Alternate durable stores and vendor topologies are outside the retained native Rust/PostgreSQL objective. Local PostgreSQL development remains supported. |
 | ENV03 | JVM/runtime/distribution specifics are not implementation goals. Portable intents belong to the relevant native stages. |
+| AO-C02 | Cross-version rolling upgrades are outside scope under the user's fresh-database policy. Same-version restart, takeover and recovery remain required in Goals 7 and 10. |
 | AO-C03 | Assess supervisor-native process identity and multi-database packaging in Goal 7; do not add PID files merely to copy scripts. |
 | Q06, SC-01, SC-02 | Preserve sound native optimizer/numeric/identity behavior unless evidence establishes a semantic defect; provide transparent guidance and regressions. |
 
-A nonblocking question asks whether the optional gateway/console/cache/AWS work
-belongs in this phase. Until answered, execute the required native stages above;
-do not silently count pending choices as implemented or expand into unrelated
-services. If authorized, add ordinary subsequent indexed children here—never a
+A nonblocking question asked whether optional gateway/console/cache/AWS work
+belongs in this phase. Without approval it stays deferred outside required
+acceptance, not a completion blocker and not a claimed implementation. If later
+authorized, add ordinary subsequent indexed children here—never a
 new corrective parent. Changes to this disposition require explicit evidence or
 user direction, not silent scope reduction.
 
@@ -204,8 +279,8 @@ return here and activate the next unfinished child. Reopen the owning child when
 integration exposes a gap. A scaffold or one completed child is not the finish line.
 
 Parent completion requires all required native capabilities and integrated
-acceptance plus an explicit disposition for every audit ID. Unknowns remain
-unknown; optional decisions are not fake passes. No universal Datomic/JVM parity
+acceptance plus a concise disposition for every audit ID. Unknowns remain
+unknown; deferred optional work is not a fake pass or a blocker. No universal Datomic/JVM parity
 claim is implied.
 
 Verified Goal 2: mixed-source sequences (also bound EDN), physical AVET readiness,
@@ -250,9 +325,19 @@ is intentionally ignored. Concurrency found and repaired a publication lock-orde
 deadlock;16 live commits/index convergence now pass during exclusive-page collection.
 Genuine schema33 upgrade, old receipts/programs, shared content, backups/pins and
 application handoff pass. See its plan for batch/work boundaries and measured costs.
-The accepted schema34 binary is retained for Goal7's genuine upgrade checks.
+The accepted schema34 binary remains historical evidence; new genuine upgrade
+checks are not required under the fresh-database policy.
 
-Continuation: execute Goal7's reliable stock services and clients. Goals1–6 are complete;
-the parent and later stages are not. Preserve Goal3's retained fixture identities
-and compatibility evidence rather than reseeding them for later checks.
+Verified Goal8: named operation-local cache/index/SQL reports, original-clause
+query diagnostics, receipt-correlated semantic transaction work, optional bounded
+JSON/callback publication and useful operational warnings. The native optimizer
+and durable receipts are unchanged. Relevant isolated PostgreSQL, stock
+application/restart and process-takeover checks pass; its plan owns detailed
+results. Fixed misleading report-permission errors and unrelated-wait attribution.
+
+Continuation: reconcile Goal9's selective backup/log reads and effective
+maintenance controls. Goals1–8 are complete; Goal9 has not been implemented,
+Goal10 and the parent are not complete. Apply the fresh-database policy to ongoing
+work and use current-version fixtures; completed compatibility evidence remains
+historical and does not impose further upgrade testing.
 Optional deployment/UI scope is awaiting user preference, not blocking native work.

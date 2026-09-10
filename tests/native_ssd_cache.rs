@@ -62,7 +62,7 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     // authenticates the native root through PostgreSQL before any SSD access.
     let peer = Peer::connect_configured_with_cache_limits(&config, "ssd", 0, 0).unwrap();
     let generation = peer.excision_generation();
-    let cold = OperationContext::new(OperationKind::Query);
+    let cold = OperationContext::named(OperationKind::Query, Keyword::new("app", "cold")).unwrap();
     {
         let _scope = cold.enter();
         assert_eq!(
@@ -77,13 +77,18 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     let cold_blocks = peer.node_block_read_stats();
     let initial = peer.ssd_cache_stats();
     assert!(initial.puts > 0);
+    use atomic_core::CacheTier;
+    assert!(cold_sql.reads.cache[&CacheTier::DecodedNode].misses > 0);
+    assert!(cold_sql.reads.cache[&CacheTier::LocalDisk].misses > 0);
+    assert!(cold_sql.reads.cache[&CacheTier::PostgresBlock].hits > 0);
+    assert!(cold_sql.reads.indexes[&IndexOrder::Eavt].node_accesses > 0);
     assert!(cold_blocks.compressed_hits > 0);
     assert!(cold_blocks.physical_read_bytes < cold_blocks.canonical_bytes);
     assert!(initial.current_entries <= 128 && initial.current_bytes <= 16 * 1024 * 1024);
     drop(peer);
 
     let peer = Peer::connect_configured_with_cache_limits(&config, "ssd", 0, 0).unwrap();
-    let restart = OperationContext::new(OperationKind::Query);
+    let restart = OperationContext::diagnostic(OperationKind::Query);
     {
         let _scope = restart.enter();
         assert_eq!(
@@ -97,6 +102,13 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     let restart_sql = restart.snapshot();
     let restart_cache = peer.ssd_cache_stats();
     assert!(restart_cache.hits > 0);
+    assert!(restart_sql.reads.cache[&CacheTier::LocalDisk].hits > 0);
+    assert!(
+        !restart_sql
+            .reads
+            .cache
+            .contains_key(&CacheTier::PostgresBlock)
+    );
     assert_eq!(peer.node_block_read_stats().canonical_bytes, 0);
     assert_eq!(peer.load_stats().cursor_sql_read_bytes, 0);
     assert_eq!(peer.load_stats().cursor_sql_reads, 0);
@@ -105,6 +117,42 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
         restart_sql.sql_calls > 0,
         "cold SSD still establishes retention health"
     );
+    let warm_peer =
+        Peer::connect_configured_with_cache_limits(&config, "ssd", 128, 16 * 1024 * 1024).unwrap();
+    let warm_db = warm_peer.snapshot().database_value();
+    assert_eq!(warm_db.datoms(IndexOrder::Eavt).unwrap(), expected);
+    let warm = OperationContext::diagnostic(OperationKind::Query);
+    let (result, warm_stats) = warm.measure(|| warm_db.datoms(IndexOrder::Eavt));
+    assert_eq!(result.unwrap(), expected);
+    assert!(warm_stats.stats.reads.cache[&CacheTier::DecodedNode].hits > 0);
+    assert!(
+        !warm_stats
+            .stats
+            .reads
+            .cache
+            .contains_key(&CacheTier::LocalDisk)
+    );
+    assert!(
+        !warm_stats
+            .stats
+            .reads
+            .cache
+            .contains_key(&CacheTier::PostgresBlock)
+    );
+    let plain = OperationContext::new(OperationKind::Query);
+    let started = std::time::Instant::now();
+    let (result, plain_stats) = plain.measure(|| warm_db.datoms(IndexOrder::Eavt));
+    let disabled_us = started.elapsed().as_micros();
+    assert_eq!(result.unwrap(), expected);
+    assert_eq!(plain_stats.stats.reads, Default::default());
+    eprintln!(
+        "diagnostics warm complete read enabled={}us disabled={}us cold_payload={} disk_payload={}",
+        warm_stats.operation_elapsed_nanos / 1000,
+        disabled_us,
+        cold_sql.reads.cache[&CacheTier::PostgresBlock].physical_bytes,
+        restart_sql.reads.cache[&CacheTier::LocalDisk].physical_bytes
+    );
+    drop(warm_peer);
 
     // Damage only owned cache entries, preserving framing and permissions.
     // Authentication rejects them and refetches canonical facts from storage.

@@ -5,7 +5,7 @@ use crate::cow_generation::{
 use crate::database::ExcisionCutoff;
 use crate::excision::{ExcisionTargetKind, PlannedExcisionPredicate};
 use crate::log_generation::LineageTransactionContent;
-use crate::peer::stage_full_generation_tree;
+use crate::peer::{stage_full_generation_tree, stage_full_generation_tree_with_control};
 use crate::persistent_tree::{
     TreeNode, TreeNodeSet, decode_tree_node, validate_tree, validate_tree_streaming,
 };
@@ -33,6 +33,11 @@ pub use receipt_archive::{MAX_RECEIPT_ARCHIVE_WORK_PER_GC, ReceiptArchiveConvers
 #[path = "database_reclamation.rs"]
 mod database_reclamation;
 pub use database_reclamation::{MAX_DATABASE_RECLAMATION_ROWS, RetiredDatabaseReclamation};
+
+#[path = "excision_worker.rs"]
+pub(crate) mod excision_worker;
+use excision_worker::ExcisionWork;
+pub use excision_worker::{ExcisionConfig, ExcisionProgress};
 
 /// Recommended grace period for routine garbage collection.
 ///
@@ -1162,6 +1167,7 @@ impl PostgresOperator {
             &self._connection,
             database_id,
             fault_point,
+            &mut ExcisionWork::operator(),
         )
     }
 
@@ -1176,7 +1182,6 @@ impl PostgresOperator {
     }
 }
 
-const EXCISION_LOG_BATCH: u64 = 256;
 const EXCISION_COMPLETION_BATCH: i64 = 512;
 
 fn process_excision_with_session_fences(
@@ -1184,6 +1189,7 @@ fn process_excision_with_session_fences(
     connection: &PostgresConnectionConfig,
     database_id: &str,
     fault_point: ExcisionFault,
+    work: &mut ExcisionWork,
 ) -> Result<ExcisionReceipt, SemanticError> {
     let lock_row = client
         .query_opt(
@@ -1233,7 +1239,7 @@ fn process_excision_with_session_fences(
         ));
     }
 
-    let result = process_excision_fenced(client, connection, database_id, fault_point);
+    let result = process_excision_fenced(client, connection, database_id, fault_point, work);
     let worker_released = client
         .query_one("SELECT pg_advisory_unlock($1)", &[&worker_key])
         .is_ok_and(|row| row.get::<_, bool>(0));
@@ -1266,8 +1272,9 @@ fn process_excision_fenced(
     connection: &PostgresConnectionConfig,
     database_id: &str,
     fault_point: ExcisionFault,
+    work: &mut ExcisionWork,
 ) -> Result<ExcisionReceipt, SemanticError> {
-    if let Some(receipt) = resume_activated_excision(client, connection, database_id)? {
+    if let Some(receipt) = resume_activated_excision(client, connection, database_id, work)? {
         return Ok(receipt);
     }
 
@@ -1323,6 +1330,7 @@ fn process_excision_fenced(
         captured_basis,
         captured_hash,
         fault_point,
+        work,
     );
     let release = client
         .query_one("SELECT pg_advisory_unlock_shared($1)", &[&source_pin_key])
@@ -1353,7 +1361,10 @@ fn build_and_activate_excision(
     captured_basis: u64,
     captured_hash: Digest,
     fault_point: ExcisionFault,
+    work: &mut ExcisionWork,
 ) -> Result<ExcisionReceipt, SemanticError> {
+    work.checkpoint("capture")?;
+    work.authorize(client, database_id)?;
     let mut snapshot = client
         .transaction()
         .map_err(|error| operation_error("excision/snapshot-begin", error))?;
@@ -1441,15 +1452,21 @@ fn build_and_activate_excision(
                 false,
             )
         };
-    let source_database = recover_generation_to(
-        &mut snapshot,
+    // Eager, explicitly admitted recovery must not retain the allocation-row
+    // lock while an ordinary writer is trying to publish. Session source and
+    // builder pins preserve this exact immutable prefix across the handoff.
+    snapshot
+        .commit()
+        .map_err(|error| operation_error("excision/capture-unlock", error))?;
+    let source_database = recover_excision_source(
+        client,
         database_id,
         source_generation,
         plan_basis,
         plan_source_hash,
-    )?
-    .database;
-    let completed = completed_excision_identities(&mut snapshot, database_id, source_generation)?;
+        work,
+    )?;
+    let completed = completed_excision_identities(client, database_id, source_generation)?;
     let mut rewriter = GenerationRewriter::for_excision(
         lineage_id,
         generation,
@@ -1460,6 +1477,17 @@ fn build_and_activate_excision(
     let predicates = rewriter.frozen_predicates();
     let request_count = predicates.len() as u64;
     let request_set_hash = rewriter.request_set_hash();
+    drop(source_database);
+    work.authorize(client, database_id)?;
+    let mut snapshot = client
+        .transaction()
+        .map_err(|error| operation_error("excision/stage-capture", error))?;
+    snapshot
+        .query_one(
+            "SELECT database_id FROM atomic_databases WHERE database_id=$1 FOR UPDATE",
+            &[&database_id],
+        )
+        .map_err(|error| operation_error("excision/stage-capture-lock", error))?;
     let resume_checkpoint = if let Some(stored_plan_hash) = stored_plan_hash {
         if stored_plan_hash != request_set_hash || stored_request_count != Some(request_count) {
             return Err(SemanticError::new(
@@ -1573,6 +1601,7 @@ fn build_and_activate_excision(
             source_generation,
             checkpoint.0,
             &mut rewriter,
+            work,
         )?;
         if rewriter.current_head_hash() != checkpoint.1
             || rewriter.current_state_hash()? != checkpoint.2
@@ -1594,8 +1623,26 @@ fn build_and_activate_excision(
         generation,
         plan_basis,
         &mut rewriter,
+        work,
     )?;
     loop {
+        work.checkpoint("stage-completions")?;
+        if let Some((rows, complete)) = work.action(
+            client,
+            database_id,
+            generation,
+            "stage",
+            0,
+            None,
+            None,
+            None,
+        )? {
+            work.staged(rows);
+            if complete {
+                break;
+            }
+            continue;
+        }
         let row = client
             .query_one(
                 "SELECT rows_advanced, is_sealed \
@@ -1655,22 +1702,36 @@ fn build_and_activate_excision(
                 generation,
                 active_basis,
                 &mut rewriter,
+                work,
             )?;
             continue;
         }
         rewriter.expect_through(active_basis);
+        work.checkpoint("stage-tree")?;
         rewriter.validate_complete()?;
         let candidate_state_hash = rewriter.current_state_hash()?;
         let mut staged_tree = if source_had_tree {
             let mut store = PostgresTreeStore::connect_configured(connection)?;
-            let manifest_hash = stage_full_generation_tree(
-                &mut store,
-                database_id,
-                generation,
-                rewriter.current_head_hash(),
-                candidate_state_hash,
-                rewriter.current_database(),
-            )?;
+            let manifest_hash = if work.lease.is_none() {
+                stage_full_generation_tree(
+                    &mut store,
+                    database_id,
+                    generation,
+                    rewriter.current_head_hash(),
+                    candidate_state_hash,
+                    rewriter.current_database(),
+                )?
+            } else {
+                stage_full_generation_tree_with_control(
+                    &mut store,
+                    database_id,
+                    generation,
+                    rewriter.current_head_hash(),
+                    candidate_state_hash,
+                    rewriter.current_database(),
+                    &mut |phase| work.checkpoint(phase),
+                )?
+            };
             Some((manifest_hash, store))
         } else {
             None
@@ -1694,19 +1755,33 @@ fn build_and_activate_excision(
                 candidate_state_hash,
                 rewriter.current_database(),
             )?;
-            transaction
-                .query_one(
-                    "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, $6)",
-                    &[
-                        &database_id,
-                        &sql_u64(generation, "generation")?,
-                        &sql_u64(active_basis, "activation basis")?,
-                        &&rewriter.current_head_hash()[..],
-                        &&candidate_state_hash[..],
-                        &manifest_parameter,
-                    ],
-                )
-                .map_err(|error| operation_error("excision/activate", error))?;
+            if work
+                .action(
+                    &mut transaction,
+                    database_id,
+                    generation,
+                    "activate",
+                    active_basis,
+                    Some(rewriter.current_head_hash()),
+                    Some(candidate_state_hash),
+                    staged_tree.as_ref().map(|(hash, _)| *hash),
+                )?
+                .is_none()
+            {
+                transaction
+                    .query_one(
+                        "SELECT atomic_activate_log_generation($1, $2, $3, $4, $5, $6)",
+                        &[
+                            &database_id,
+                            &sql_u64(generation, "generation")?,
+                            &sql_u64(active_basis, "activation basis")?,
+                            &&rewriter.current_head_hash()[..],
+                            &&candidate_state_hash[..],
+                            &manifest_parameter,
+                        ],
+                    )
+                    .map_err(|error| operation_error("excision/activate", error))?;
+            }
             transaction
                 .commit()
                 .map_err(|error| operation_error("excision/activation-commit", error))
@@ -1738,21 +1813,36 @@ fn build_and_activate_excision(
         ));
     }
     let manifest_parameter = manifest_hash.as_ref().map(|hash| hash.as_slice());
-    client
-        .query_one(
-            "SELECT atomic_complete_excision_generation($1, $2, $3)",
-            &[
-                &database_id,
-                &sql_u64(generation, "generation")?,
-                &manifest_parameter,
-            ],
-        )
-        .map_err(|error| operation_error("excision/complete", error))?;
+    work.checkpoint("complete")?;
+    if work
+        .action(
+            client,
+            database_id,
+            generation,
+            "complete",
+            0,
+            None,
+            None,
+            manifest_hash,
+        )?
+        .is_none()
+    {
+        client
+            .query_one(
+                "SELECT atomic_complete_excision_generation($1, $2, $3)",
+                &[
+                    &database_id,
+                    &sql_u64(generation, "generation")?,
+                    &manifest_parameter,
+                ],
+            )
+            .map_err(|error| operation_error("excision/complete", error))?;
+    }
     if let (Some(manifest_hash), Some(store)) = (manifest_hash, tree_store.as_mut()) {
-        drain_excision_tree_publication(client, store, manifest_hash)?;
+        drain_excision_tree_publication(client, store, manifest_hash, work)?;
         store.release_build_intent()?;
     }
-    cleanup_completed_generation_build(client, database_id, generation)?;
+    cleanup_completed_generation_build(client, database_id, generation, work)?;
     let outcome = rewriter.finish()?;
     Ok(ExcisionReceipt {
         database_id: database_id.to_owned(),
@@ -1774,10 +1864,25 @@ fn rewrite_source_through(
     candidate_generation: u64,
     through_basis: u64,
     rewriter: &mut GenerationRewriter,
+    work: &mut ExcisionWork,
 ) -> Result<(), SemanticError> {
     while rewriter.current_basis() < through_basis {
+        work.checkpoint("rewrite")?;
         let after = rewriter.current_basis();
-        let through = through_basis.min(after.saturating_add(EXCISION_LOG_BATCH));
+        let through =
+            through_basis.min(after.saturating_add(work.config.log_batch_transactions as u64));
+        if through > work.admitted_basis() {
+            let bytes = excision_source_size(
+                client,
+                database_id,
+                source_generation,
+                work.admitted_basis(),
+                through,
+            )?
+            .1;
+            work.admit_source(through, bytes)?;
+        }
+        work.authorize(client, database_id)?;
         let mut transaction = client
             .build_transaction()
             .isolation_level(IsolationLevel::RepeatableRead)
@@ -1791,7 +1896,13 @@ fn rewrite_source_through(
             through,
             rewriter.current_source_hash(),
         )?;
+        work.source_rows(
+            source_rows.len(),
+            source_rows.iter().map(|r| r.payload.len() as u64).sum(),
+            true,
+        );
         for source in source_rows {
+            work.check()?;
             let source = source_log_row(source, source_generation)?;
             let row = rewriter.rewrite_row(source)?;
             insert_generation_log_row(&mut transaction, database_id, candidate_generation, &row)?;
@@ -1822,6 +1933,51 @@ fn rewrite_source_through(
     Ok(())
 }
 
+/// Maintenance may materialize a whole database, unlike the normal writer.
+/// Admit its input and conservative native/index/scratch allowance before the
+/// existing authenticated eager replay allocates it. The SQL aggregate and
+/// admitted replay are whole-source phases, not advertised constant-cost work.
+fn recover_excision_source<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    basis: u64,
+    hash: Digest,
+    work: &mut ExcisionWork,
+) -> Result<crate::Database, SemanticError> {
+    let (count, bytes) = excision_source_size(client, database_id, generation, 0, basis)?;
+    work.admit_source(basis, bytes)?;
+    work.source_rows(usize::try_from(count).unwrap_or(usize::MAX), bytes, false);
+    let database = recover_generation_to_with_visitor(
+        client,
+        database_id,
+        generation,
+        basis,
+        hash,
+        |_, _, _| work.check(),
+    )?
+    .database;
+    work.check()?;
+    Ok(database)
+}
+
+fn excision_source_size<C: GenericClient>(
+    client: &mut C,
+    database_id: &str,
+    generation: u64,
+    after: u64,
+    basis: u64,
+) -> Result<(u64, u64), SemanticError> {
+    let row = if generation == 0 {
+        client.query_one("SELECT count(*)::bigint,COALESCE(sum(octet_length(payload)),0)::bigint FROM atomic_transactions WHERE database_id=$1 AND basis_t>$2 AND basis_t<=$3",&[&database_id,&sql_u64(after,"after basis")?,&sql_u64(basis,"basis")?])
+    } else {
+        client.query_one("SELECT count(*)::bigint,COALESCE(sum(octet_length(c.payload)),0)::bigint FROM atomic_generation_transactions t JOIN atomic_transaction_contents c USING(content_hash) WHERE t.database_id=$1 AND t.generation=$2 AND t.basis_t>$3 AND t.basis_t<=$4",&[&database_id,&sql_u64(generation,"generation")?,&sql_u64(after,"after basis")?,&sql_u64(basis,"basis")?])
+    }.map_err(|error|operation_error("excision/admit-source",error))?;
+    let count = positive_or_zero(row.get(0), "source transactions")?;
+    let bytes = positive_or_zero(row.get(1), "source bytes")?;
+    Ok((count, bytes))
+}
+
 /// Reconstruct deterministic in-memory rewrite state through the newest
 /// durable checkpoint. No candidate row is rewritten: the checkpoint is
 /// compared to this replay before new suffix rows may be appended.
@@ -1831,10 +1987,13 @@ fn replay_source_through(
     source_generation: u64,
     through_basis: u64,
     rewriter: &mut GenerationRewriter,
+    work: &mut ExcisionWork,
 ) -> Result<(), SemanticError> {
     while rewriter.current_basis() < through_basis {
+        work.checkpoint("resume-replay")?;
         let after = rewriter.current_basis();
-        let through = through_basis.min(after.saturating_add(EXCISION_LOG_BATCH));
+        let through =
+            through_basis.min(after.saturating_add(work.config.log_batch_transactions as u64));
         let rows = read_authenticated_log_range(
             client,
             database_id,
@@ -1843,7 +2002,13 @@ fn replay_source_through(
             through,
             rewriter.current_source_hash(),
         )?;
+        work.source_rows(
+            rows.len(),
+            rows.iter().map(|r| r.payload.len() as u64).sum(),
+            false,
+        );
         for row in rows {
+            work.check()?;
             rewriter.rewrite_row(source_log_row(row, source_generation)?)?;
         }
     }
@@ -2121,8 +2286,26 @@ fn cleanup_completed_generation_build(
     client: &mut Client,
     database_id: &str,
     generation: u64,
+    work: &mut ExcisionWork,
 ) -> Result<(), SemanticError> {
     loop {
+        work.checkpoint("cleanup")?;
+        if let Some((rows, complete)) = work.action(
+            client,
+            database_id,
+            generation,
+            "cleanup",
+            0,
+            None,
+            None,
+            None,
+        )? {
+            work.staged(rows);
+            if complete {
+                return Ok(());
+            }
+            continue;
+        }
         let row = client
             .query_one(
                 "SELECT rows_removed, is_complete \
@@ -2144,6 +2327,7 @@ fn resume_activated_excision(
     client: &mut Client,
     connection: &PostgresConnectionConfig,
     database_id: &str,
+    work: &mut ExcisionWork,
 ) -> Result<Option<ExcisionReceipt>, SemanticError> {
     let row = client
         .query_opt(
@@ -2235,22 +2419,39 @@ fn resume_activated_excision(
             "activation predecessor disagrees with the frozen capture endpoint",
         ));
     }
-    client
-        .query_one(
-            "SELECT atomic_complete_excision_generation($1,$2,$3)",
-            &[
-                &database_id,
-                &sql_u64(generation, "generation")?,
-                &manifest.as_deref(),
-            ],
-        )
-        .map_err(|error| operation_error("excision/resume-completion", error))?;
+    if work
+        .action(
+            client,
+            database_id,
+            generation,
+            "complete",
+            0,
+            None,
+            None,
+            manifest
+                .as_ref()
+                .map(|v| digest(v.clone(), "activation manifest"))
+                .transpose()?,
+        )?
+        .is_none()
+    {
+        client
+            .query_one(
+                "SELECT atomic_complete_excision_generation($1,$2,$3)",
+                &[
+                    &database_id,
+                    &sql_u64(generation, "generation")?,
+                    &manifest.as_deref(),
+                ],
+            )
+            .map_err(|error| operation_error("excision/resume-completion", error))?;
+    }
     if let Some(manifest) = manifest.as_deref() {
         let manifest_hash = digest(manifest.to_vec(), "activation manifest")?;
         let mut tree_store = PostgresTreeStore::connect_configured(connection)?;
-        drain_excision_tree_publication(client, &mut tree_store, manifest_hash)?;
+        drain_excision_tree_publication(client, &mut tree_store, manifest_hash, work)?;
     }
-    cleanup_completed_generation_build(client, database_id, generation)?;
+    cleanup_completed_generation_build(client, database_id, generation, work)?;
     Ok(Some(ExcisionReceipt {
         database_id: database_id.to_owned(),
         source_generation,
@@ -2268,8 +2469,10 @@ fn drain_excision_tree_publication(
     client: &mut Client,
     tree_store: &mut PostgresTreeStore,
     manifest_hash: Digest,
+    work: &mut ExcisionWork,
 ) -> Result<(), SemanticError> {
     loop {
+        work.checkpoint("publication")?;
         // The boolean result names whether this manifest is the complete live
         // root. A later same-generation root can legitimately supersede it,
         // so header disappearance—not a permanently true return value—is the

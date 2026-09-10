@@ -253,8 +253,9 @@ fn isolated_network_application_retry_replacement_and_reference_handoff() {
     .report
     .unwrap();
     replacement.stop();
-    // Snapshot opening and calculation are independent of transactor uptime.
-    assert!(reference(&lab, &fixture, &credentials, &reference_path).contains("hours=8"));
+    // Held values remain independent of transactor uptime. Automatic excision
+    // may already have activated; do not assume a new reference can still open.
+    assert_eq!(held.basis_t(), held_reference.key().basis_t());
     atomic_core::PostgresOperator::connect(&fixture.admin_url)
         .unwrap()
         .process_excision_requests("remote-application")
@@ -273,6 +274,281 @@ fn isolated_network_application_retry_replacement_and_reference_handoff() {
     );
     println!(
         "REMOTE_PRODUCT_OK isolated_networks=2 veth=true separate_application=true verified_tls=true restricted_roles=true invalid_token_rejected=true reference_authorized=true original_basis=2 later_basis=11 writer_crash_replacement=true exact_retry=true pre_excision_reference_rejected=true old_held_value_exact=true total_ms={}",
+        started.elapsed().as_millis()
+    );
+}
+
+#[test]
+fn stock_auto_contender_health_and_cached_route_survive_process_crash() {
+    use atomic_core::*;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::sync::mpsc::Receiver;
+
+    fn observe(receiver: &Receiver<String>, prefix: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let line = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("stock service did not reach expected state");
+            if line.starts_with(prefix) {
+                return line;
+            }
+        }
+    }
+    fn health(receiver: &Receiver<String>) -> SocketAddr {
+        observe(receiver, "HEALTH ")
+            .split_whitespace()
+            .find_map(|part| part.strip_prefix("address="))
+            .unwrap()
+            .parse()
+            .unwrap()
+    }
+    fn metric(receiver: &Receiver<String>, phase: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let line = receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+            if line.contains("\"event\":\"atomic.metrics\"")
+                && line.contains(&format!("\"phase\":\"{phase}\""))
+            {
+                return line;
+            }
+            assert!(
+                !line.starts_with("READY "),
+                "waiting contender unexpectedly activated"
+            );
+        }
+    }
+    fn probe(address: SocketAddr, path: &str, code: u16, phase: &str) {
+        let mut socket = TcpStream::connect_timeout(&address, Duration::from_secs(2)).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        write!(socket, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {code} ")),
+            "{response}"
+        );
+        assert!(
+            response.contains(&format!("\"state\":\"{phase}\"")),
+            "{response}"
+        );
+        assert!(!response.contains("password") && !response.contains("token"));
+    }
+    let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
+        eprintln!("SKIPPED stock standby product: ATOMIC_POSTGRES_URL unset");
+        return;
+    };
+    let started = Instant::now();
+    let fixture = Fixture::new(&connection);
+    let (writer, peer_role) = fixture
+        .roles
+        .as_ref()
+        .expect("acceptance needs restricted roles");
+    cli(
+        &fixture.admin_url,
+        &["migrate", "--writer-role", writer, "--peer-role", peer_role],
+    );
+    cli(&fixture.admin_url, &["create", "--database", "automatic"]);
+    let credentials = Credentials::new();
+    let spawn = |poll: &str| {
+        let mut command = atomic();
+        configured(&mut command, &fixture.writer_url);
+        credentials.server(&mut command);
+        command.args([
+            "transactor",
+            "--database",
+            "automatic",
+            "--mode",
+            "auto",
+            "--standby-poll-ms",
+            poll,
+            "--telemetry-ms",
+            "25",
+            "--lease-ms",
+            "1000",
+            "--renew-ms",
+            "100",
+            "--listen",
+            "127.0.0.1:0",
+            "--advertise",
+            "127.0.0.1:0",
+            "--tls-server-name",
+            "atomic.test",
+            "--health-listen",
+            "127.0.0.1:0",
+            "--index-threshold-bytes",
+            "1",
+            "--default-partition",
+            ":db.part/user",
+        ]);
+        Server::spawn_observed(command)
+    };
+    let (mut first, first_lines) = spawn("25");
+    let first_health = health(&first_lines);
+    observe(&first_lines, "READY ");
+    probe(first_health, "/health", 200, "active");
+    probe(first_health, "/ready", 200, "active");
+
+    let pg = PostgresConnectionConfig::plaintext(&fixture.peer_url);
+    let peer = Connection::connect_configured(pg.clone(), "automatic", 128).unwrap();
+    let empty = peer.db();
+    let token =
+        RemoteAuthToken::from_hex(std::fs::read_to_string(&credentials.token).unwrap().trim())
+            .unwrap();
+    let tls = RemoteClientConfig::new(token)
+        .unwrap()
+        .with_root_certificate_pem(&std::fs::read(&credentials.certificate).unwrap())
+        .unwrap();
+    let route = peer.remote_writer(pg, tls);
+    route
+        .transact(
+            TransactionRequest::from_edn(
+                "install-value",
+                r#"[
+      {:db/ident :item/value :db/valueType :db.type/long :db/cardinality :db.cardinality/one}
+    ]"#,
+            )
+            .unwrap(),
+            Duration::from_secs(20),
+        )
+        .unwrap()
+        .report
+        .unwrap();
+    let request =
+        TransactionRequest::from_edn("stable-request", r#"[{:db/id "item" :item/value 42}]"#)
+            .unwrap();
+    let original = route
+        .transact(request.clone(), Duration::from_secs(20))
+        .unwrap();
+    let original = original.report.unwrap();
+    let original_route = route.cached_endpoint().unwrap();
+    let active_event = metric(&first_lines, "active");
+    assert!(active_event.contains(&format!("\"lease_epoch\":{}", original_route.lease_epoch())));
+    assert!(active_event.contains("\"writer_available\":true"));
+    assert!(active_event.contains("\"listener_ready\":true"));
+    let attribute = original
+        .db_after
+        .entid(&Keyword::new("item", "value"))
+        .unwrap() as u32;
+    let entity = original.tempids["item"];
+    assert_eq!(
+        original.db_after.values(entity, attribute).unwrap(),
+        [Value::Long(42)]
+    );
+    let (mut second, second_lines) = spawn("25");
+    let second_health = health(&second_lines);
+    observe(&second_lines, "STANDBY ");
+    probe(second_health, "/health", 200, "standby");
+    probe(second_health, "/ready", 503, "standby");
+    metric(&second_lines, "waiting");
+
+    // Cancellation must wake a persistent contender, not wait out its poll.
+    let (mut cancelled, cancelled_lines) = spawn("20000");
+    let cancelled_health = health(&cancelled_lines);
+    observe(&cancelled_lines, "STANDBY ");
+    probe(cancelled_health, "/ready", 503, "standby");
+    let cancel_started = Instant::now();
+    cancelled.stop();
+    let cancel_elapsed = cancel_started.elapsed();
+    assert!(cancel_elapsed < Duration::from_secs(3));
+
+    // Actual SIGKILL: no graceful lease release or automatic client replay.
+    let takeover = Instant::now();
+    first.child.kill().unwrap();
+    first.child.wait().unwrap();
+    assert_eq!(
+        original.db_after.values(entity, attribute).unwrap(),
+        [Value::Long(42)]
+    );
+    assert_eq!(empty.basis_t(), 0);
+    observe(&second_lines, "READY ");
+    probe(second_health, "/ready", 200, "active");
+    // One explicit exact retry through the cached dead route, recovered before
+    // any request bytes are sent to its replacement.
+    let retry = route.transact(request, Duration::from_secs(20)).unwrap();
+    assert!(retry.replayed);
+    assert_eq!(retry.basis_t, original.basis_t);
+    assert_eq!(retry.tx_hash, original.tx_hash);
+    assert_eq!(retry.report.unwrap().tempids, original.tempids);
+    assert_ne!(route.cached_endpoint().unwrap(), original_route);
+    let active_event = metric(&second_lines, "active");
+    assert!(active_event.contains(&format!("\"lease_epoch\":{}", route.cached_endpoint().unwrap().lease_epoch())));
+    assert!(active_event.contains("\"writer_available\":true"));
+    assert!(active_event.contains("\"listener_ready\":true"));
+    let fresh = route
+        .transact(
+            TransactionRequest::from_edn(
+                "after-takeover",
+                r#"[{:db/id "another" :item/value 99}]"#,
+            )
+            .unwrap(),
+            Duration::from_secs(20),
+        )
+        .unwrap()
+        .report
+        .unwrap();
+    assert_eq!(fresh.basis_t, original.basis_t + 1);
+    assert_eq!(
+        original.db_after.values(entity, attribute).unwrap(),
+        [Value::Long(42)]
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let basis: i64 = postgres::Client::connect(&fixture.admin_url, postgres::NoTls)
+            .unwrap()
+            .query_one("SELECT max(basis_t) FROM atomic_tree_publications", &[])
+            .unwrap()
+            .get(0);
+        if basis as u64 >= fresh.basis_t {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "takeover lost automatic indexing options"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Committed excision is stock background work, not an owner-only command.
+    let excision = route
+        .transact(
+            TransactionRequest::new(
+                "automatic-excision",
+                vec![TxOp::Add {
+                    entity: EntityRef::Temp("redaction".into()),
+                    attribute: DB_EXCISE as u32,
+                    value: Value::Ref(entity).into(),
+                }],
+            ),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+    let excised = peer
+        .sync_excise(excision.basis_t, Duration::from_secs(30))
+        .unwrap();
+    assert!(excised.values(entity, attribute).unwrap().is_empty());
+    let post_excision = route
+        .transact(
+            TransactionRequest::from_edn("healthy-after-excision", r#"[{:item/value 123}]"#)
+                .unwrap(),
+            Duration::from_secs(20),
+        )
+        .unwrap();
+    assert!(!post_excision.replayed);
+    probe(second_health, "/ready", 200, "active");
+    second.stop();
+    assert_eq!(
+        fresh.db_after.values(entity, attribute).unwrap(),
+        [Value::Long(42)]
+    );
+    println!(
+        "STOCK_STANDBY_OK tls=true restricted_roles=true crash=true exact_retry=true cached_route=true automatic_excision=true held_reads=true health=true cancel_ms={} takeover_ms={} complete_ms={}",
+        cancel_elapsed.as_millis(),
+        takeover.elapsed().as_millis(),
         started.elapsed().as_millis()
     );
 }

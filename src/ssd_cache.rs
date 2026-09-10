@@ -173,17 +173,21 @@ impl SsdCache {
     /// Return only bounded, hash-authenticated canonical bytes. The caller's
     /// native decoder remains responsible for canonical grammar validation.
     pub fn get(&self, hash: &Digest) -> Option<Vec<u8>> {
+        let observed = crate::io_diagnostics::CacheObservation::start(crate::CacheTier::LocalDisk);
         let mut state = lock(&self.state);
         let State { directory, stats } = &mut *state;
         let Some(directory) = directory else {
             stats.disabled_bypasses += 1;
             return None;
         };
+        let mut physical_bytes = 0;
+        let mut corrupt = false;
         let _guard = match DiskLock::acquire(&directory.lock) {
             Ok(guard) => guard,
             Err(error) => {
                 record_disk_error(stats, &error);
                 stats.misses += 1;
+                observed.finish(false, true, 0, 0);
                 return None;
             }
         };
@@ -209,6 +213,7 @@ impl SsdCache {
             }
             stats.physical_read_bytes =
                 stats.physical_read_bytes.saturating_add(bytes.len() as u64);
+            physical_bytes = bytes.len() as u64;
             let canonical = parse_header(bytes[..ENTRY_HEADER].try_into().unwrap()).and_then(
                 |(namespace, actual_hash, physical_bytes)| {
                     if namespace != self.namespace
@@ -231,6 +236,7 @@ impl SsdCache {
                     Ok(Some(canonical))
                 }
                 Err(_) => {
+                    corrupt = true;
                     stats.corruptions += 1;
                     directory.remove(&entry)?;
                     stats.current_entries = stats.current_entries.saturating_sub(1);
@@ -242,15 +248,18 @@ impl SsdCache {
         match loaded {
             Ok(Some(bytes)) => {
                 stats.hits += 1;
+                observed.finish(true, false, physical_bytes, bytes.len() as u64);
                 Some(bytes)
             }
             Ok(None) => {
                 stats.misses += 1;
+                observed.finish(false, corrupt, physical_bytes, 0);
                 None
             }
             Err(error) => {
                 record_disk_error(stats, &error);
                 stats.misses += 1;
+                observed.finish(false, true, physical_bytes, 0);
                 None
             }
         }
