@@ -31,6 +31,7 @@ pub(super) fn execute(
             .saturating_sub(parent.stats.allocated_value_bytes),
     };
     let result = (|| {
+        dependencies::validate_negation(query, &mut child)?;
         let initial = bind_arguments(&query.inputs, args, &mut child)?;
         let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, &mut child)?;
         let mut budget = QueryPullBudget::new(

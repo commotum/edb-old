@@ -25,6 +25,8 @@ pub use sources::{QueryDataSource, QuerySourceValue};
 #[path = "query_prepare.rs"]
 mod prepare;
 pub use prepare::{PreparedQuery, PreparedQueryCache, PreparedQueryCacheStats};
+#[path = "query_dependencies.rs"]
+mod dependencies;
 #[path = "query_fulltext.rs"]
 mod fulltext;
 #[path = "query_join.rs"]
@@ -1193,6 +1195,7 @@ fn run_query(
     }
     // These checks depend on the invocation's sources, never cached preparation.
     validate_consumed_sources(query, &state.sources)?;
+    dependencies::validate_negation(query, state)?;
     let initial = bind_inputs(&query.inputs, inputs, state)?;
     let rows = evaluate_clauses(&query.clauses, initial, &query.rules, None, state)?;
     let mut pull_budget = QueryPullBudget::new(
@@ -1716,18 +1719,21 @@ fn evaluate_clauses(
     while !remaining.is_empty() {
         state.check(1)?;
         let sample = rows.first().cloned().unwrap_or_default();
-        let selected = remaining
-            .iter()
-            .enumerate()
-            .filter(|(_, clause)| clause_ready(clause, &sample, rules))
-            .max_by_key(|(_, clause)| clause_score(clause, &sample))
-            .map(|(index, _)| index)
-            .ok_or_else(|| {
-                SemanticError::incorrect(
-                    "query/insufficient-binding",
-                    "no remaining clause has its required variables bound",
-                )
-            })?;
+        let mut selected = None;
+        for (index, clause) in remaining.iter().enumerate() {
+            if clause_ready(clause, &sample, rules, state)? {
+                let score = clause_score(clause, &sample);
+                if selected.is_none_or(|(_, best)| score >= best) {
+                    selected = Some((index, score));
+                }
+            }
+        }
+        let selected = selected.map(|(index, _)| index).ok_or_else(|| {
+            SemanticError::incorrect(
+                "query/insufficient-binding",
+                "no remaining clause has its required variables bound",
+            )
+        })?;
         let clause = remaining.remove(selected);
         let before = rows.len();
         let (next, access) = evaluate_clause(clause, rows, rules, inherited_source, state)?;
@@ -1829,7 +1835,8 @@ fn evaluate_clause(
                 } else {
                     row.clone()
                 };
-                if evaluate_clauses(clauses, vec![seed], rules, inherited_source, state)?.is_empty()
+                if dependencies::evaluate_negative(clauses, seed, rules, inherited_source, state)?
+                    .is_empty()
                 {
                     state.push_row(&mut next, row)?;
                 }
@@ -2093,9 +2100,15 @@ fn select_datoms<'a>(
     ))
 }
 
-fn clause_ready(clause: &Clause, row: &Row, rules: &[Rule]) -> bool {
-    match clause {
-        Clause::Pattern(_) | Clause::Or { .. } => true,
+fn clause_ready(
+    clause: &Clause,
+    row: &Row,
+    rules: &[Rule],
+    state: &mut State<'_>,
+) -> Result<bool, SemanticError> {
+    Ok(match clause {
+        Clause::Pattern(_) => true,
+        Clause::Or { .. } => dependencies::ready(clause, row, rules, state)?,
         Clause::Predicate { args, .. } | Clause::Function { args, .. } => args
             .iter()
             .all(|term| !matches!(term, Term::Variable(variable) if !row.contains_key(variable))),
@@ -2116,7 +2129,7 @@ fn clause_ready(clause: &Clause, row: &Row, rules: &[Rule]) -> bool {
                 Err(_) => true,
             }
         }
-    }
+    })
 }
 
 fn clause_score(clause: &Clause, row: &Row) -> usize {
@@ -3042,12 +3055,24 @@ fn collect_clause_variables(clause: &Clause, output: &mut BTreeSet<Variable>) {
         Clause::Predicate { args, .. }
         | Clause::Function { args, .. }
         | Clause::Rule { args, .. } => terms.extend(args),
-        Clause::Not { clauses, .. } => {
-            for variable in variables_in_clauses(clauses) {
-                output.insert(variable);
-            }
+        Clause::Not {
+            join: Some(join), ..
         }
-        Clause::Or { branches, .. } => {
+        | Clause::Or {
+            join: Some(join), ..
+        } => {
+            output.extend(join.iter().cloned());
+        }
+        Clause::Not {
+            join: None,
+            clauses,
+        } => {
+            output.extend(variables_in_clauses(clauses));
+        }
+        Clause::Or {
+            join: None,
+            branches,
+        } => {
             for branch in branches {
                 for variable in variables_in_clauses(branch) {
                     output.insert(variable);

@@ -10,7 +10,7 @@ pub(crate) use input::{
     validate_value_input,
 };
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -1107,37 +1107,38 @@ fn normalize_forms_against(
     max_primitive_ops: usize,
 ) -> Result<Vec<TxOp>, SemanticError> {
     validate_forms_input(forms)?;
+    let mut forms = forms.to_vec();
+    forms.sort_by(compare_tx_form);
+    let mut expanded = Vec::new();
+    expand_local_calls(db_before, functions, forms, 0, &mut expanded)?;
     let mut normalizer = Normalizer {
         db_before,
-        functions,
+        explicit_tempids: explicit_tempids(&expanded),
         next_anonymous: 0,
         primitive_count: 0,
         max_primitive_ops,
     };
-    let mut forms = forms.to_vec();
-    forms.sort_by(compare_tx_form);
     let mut ops = Vec::new();
-    for form in &forms {
-        normalizer.expand_form(form, 0, &mut ops)?;
+    for form in &expanded {
+        normalizer.expand_form(form, &mut ops)?;
     }
     Ok(ops)
 }
 
-struct Normalizer<'a> {
-    db_before: NormalizerRead<'a>,
-    functions: Option<&'a TxFunctions>,
-    next_anonymous: u64,
-    primitive_count: usize,
-    max_primitive_ops: usize,
-}
-
-impl Normalizer<'_> {
-    fn expand_form(
-        &mut self,
-        form: &TxForm,
-        depth: usize,
-        output: &mut Vec<TxOp>,
-    ) -> Result<(), SemanticError> {
+/// Discover the complete author-supplied identity namespace before allocating
+/// anonymous maps. A callback can emit an explicit tempid after an earlier
+/// anonymous map, including through another callback. Every call still sees
+/// the same db-before and executes exactly once. Keep the previous canonical
+/// depth-first form order so noncolliding requests retain their allocations.
+/// Persisted calls have already expanded at the authoritative boundary.
+fn expand_local_calls(
+    db_before: NormalizerRead<'_>,
+    functions: Option<&TxFunctions>,
+    forms: Vec<TxForm>,
+    depth: usize,
+    output: &mut Vec<TxForm>,
+) -> Result<(), SemanticError> {
+    for form in forms {
         if depth > 32 {
             return Err(SemanticError::incorrect(
                 "transaction/function-depth",
@@ -1145,31 +1146,166 @@ impl Normalizer<'_> {
             ));
         }
         match form {
-            TxForm::Op(op) => self.push(op.clone(), output),
-            TxForm::EntityMap(map) => {
-                self.expand_map(map, None, 0, output)?;
-                Ok(())
-            }
-            TxForm::ProgramCall(_) => Err(SemanticError::incorrect(
-                "transaction/unresolved-database-function",
-                "persisted database-function calls must be resolved against db-before by the transactor",
-            )),
             TxForm::Call(call) => {
-                // Every call receives the original database value. Generated
-                // calls recurse with that same value, never an intermediate DB.
-                let (Some(database), Some(functions)) = (self.db_before.eager(), self.functions)
-                else {
+                let (Some(database), Some(functions)) = (db_before.eager(), functions) else {
                     return Err(SemanticError::incorrect(
                         "transaction/process-local-function-requires-eager-db",
                         "process-local Rust transaction callbacks require the eager speculative Database API",
                     ));
                 };
-                let mut generated = functions.invoke(database, call)?;
+                let mut generated = functions.invoke(database, &call)?;
+                validate_forms_input(&generated)?;
                 generated.sort_by(compare_tx_form);
-                for generated in &generated {
-                    self.expand_form(generated, depth + 1, output)?;
+                expand_local_calls(db_before, Some(functions), generated, depth + 1, output)?;
+            }
+            TxForm::ProgramCall(_) => {
+                return Err(SemanticError::incorrect(
+                    "transaction/unresolved-database-function",
+                    "persisted database-function calls must be resolved against db-before by the transactor",
+                ));
+            }
+            form => output.push(form),
+        }
+    }
+    Ok(())
+}
+
+fn explicit_tempids(forms: &[TxForm]) -> BTreeSet<String> {
+    fn entity(reference: &EntityRef, names: &mut BTreeSet<String>) {
+        match reference {
+            EntityRef::Temp(name) => {
+                names.insert(name.clone());
+            }
+            EntityRef::LookupInput { value: input, .. } => value(input, names),
+            _ => {}
+        }
+    }
+    fn value(input: &TxValue, names: &mut BTreeSet<String>) {
+        match input {
+            TxValue::Entity(reference) => entity(reference, names),
+            TxValue::Tuple(slots) => {
+                for slot in slots.iter().flatten() {
+                    value(slot, names);
                 }
+            }
+            TxValue::Scalar(_) => {}
+        }
+    }
+    fn map(input: &EntityMap, names: &mut BTreeSet<String>) {
+        if let Some(reference) = &input.id {
+            entity(reference, names);
+        }
+        for (_, input) in &input.attributes {
+            map_value(input, names);
+        }
+    }
+    fn map_value(input: &MapValue, names: &mut BTreeSet<String>) {
+        match input {
+            MapValue::Value(input) => value(input, names),
+            MapValue::Nested(input) => map(input, names),
+            MapValue::Many(inputs) => {
+                for input in inputs {
+                    map_value(input, names);
+                }
+            }
+        }
+    }
+    let mut names = BTreeSet::new();
+    for form in forms {
+        match form {
+            TxForm::EntityMap(input) => map(input, &mut names),
+            TxForm::Op(op) => match op {
+                TxOp::Add {
+                    entity: id,
+                    value: input,
+                    ..
+                } => {
+                    entity(id, &mut names);
+                    value(input, &mut names);
+                }
+                TxOp::Retract {
+                    entity: id,
+                    value: input,
+                    ..
+                } => {
+                    entity(id, &mut names);
+                    if let Some(input) = input {
+                        value(input, &mut names);
+                    }
+                }
+                TxOp::Cas {
+                    entity: id,
+                    old,
+                    new,
+                    ..
+                } => {
+                    entity(id, &mut names);
+                    if let Some(old) = old {
+                        value(old, &mut names);
+                    }
+                    value(new, &mut names);
+                }
+                TxOp::RetractEntity(id) => entity(id, &mut names),
+                TxOp::Ensure { entity: id, spec } => {
+                    entity(id, &mut names);
+                    entity(spec, &mut names);
+                }
+                TxOp::ForcePartition { tempid, partition } => {
+                    names.insert(tempid.clone());
+                    entity(partition, &mut names);
+                }
+                TxOp::MatchPartition { tempid, entity: id } => {
+                    names.insert(tempid.clone());
+                    entity(id, &mut names);
+                }
+                TxOp::InstallAttribute(_) | TxOp::AlterAttribute(_) => {}
+            },
+            TxForm::Call(_) | TxForm::ProgramCall(_) => {
+                unreachable!("all calls were expanded before anonymous allocation")
+            }
+        }
+    }
+    names
+}
+
+struct Normalizer<'a> {
+    db_before: NormalizerRead<'a>,
+    explicit_tempids: BTreeSet<String>,
+    next_anonymous: u64,
+    primitive_count: usize,
+    max_primitive_ops: usize,
+}
+
+impl Normalizer<'_> {
+    fn expand_form(&mut self, form: &TxForm, output: &mut Vec<TxOp>) -> Result<(), SemanticError> {
+        match form {
+            TxForm::Op(op) => self.push(op.clone(), output),
+            TxForm::EntityMap(map) => {
+                self.expand_map(map, None, 0, output)?;
                 Ok(())
+            }
+            TxForm::Call(_) | TxForm::ProgramCall(_) => {
+                unreachable!("all calls were expanded before anonymous allocation")
+            }
+        }
+    }
+
+    fn anonymous_tempid(&mut self) -> Result<EntityRef, SemanticError> {
+        // Retain the existing deterministic receipt names where they do not
+        // collide. Submitted forms (not these normalized names) determine the
+        // request digest; already-committed retries return their stored receipt
+        // before reaching normalization, including historical collisions.
+        loop {
+            let name = format!("__map/{:020}", self.next_anonymous);
+            self.next_anonymous = self.next_anonymous.checked_add(1).ok_or_else(|| {
+                SemanticError::new(
+                    crate::ErrorCategory::Busy,
+                    "transaction/anonymous-id-overflow",
+                    "anonymous transaction identities exhausted their allocation range",
+                )
+            })?;
+            if !self.explicit_tempids.contains(&name) {
+                return Ok(EntityRef::Temp(name));
             }
         }
     }
@@ -1209,11 +1345,10 @@ impl Normalizer<'_> {
                 "transaction entity maps may contain at most 32 nested maps",
             ));
         }
-        let entity = forced_id.or_else(|| map.id.clone()).unwrap_or_else(|| {
-            let id = EntityRef::Temp(format!("__map/{:020}", self.next_anonymous));
-            self.next_anonymous += 1;
-            id
-        });
+        let entity = match forced_id.or_else(|| map.id.clone()) {
+            Some(entity) => entity,
+            None => self.anonymous_tempid()?,
+        };
         let mut attributes = map.attributes.clone();
         attributes.sort_by(compare_map_entry);
         for (attribute_ref, value) in &attributes {

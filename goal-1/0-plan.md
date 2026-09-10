@@ -6,7 +6,7 @@ Complete Stage1 of `/home/jake/Developer/atomic/goal-0/0-plan.md`: repair negati
 rule evaluation (R1), disjunction readiness (R3) and anonymous identity collisions
 (R2) in the existing product, preserving valid behavior and durable retries.
 
-Status: **scaffolded; implementation not started**. This is Goal0's first active
+Status: **in progress: regression setup and shared repairs**. This is Goal0's first active
 child. Its internal steps do not create additional goal folders. After its
 completion, return to Goal0; the other parent stages remain required.
 
@@ -149,7 +149,8 @@ with evidence the tests executed. Missing privileges/configuration are blockers
 to the affected completion check, not successful tests. Source changes, not this
 scaffold, must add permanent regressions.
 
-Continuation: no repair execution yet. Start at step1, inspect the current shared
-query/normalization contracts, and establish small reproducible regression tests
-and a usable PG fixture. Keep only concise material progress notes here and in
-Goal0. Final child signal is step4, followed by returning to the parent loop.
+Continuation (2026-09-10): query and normalization repairs are underway from
+`c0bc499`. Establish the disposable PG fixture and preserve the old executable/
+acknowledged receipt before rebuilding; then run permanent counterexamples and
+shared/application regression checks. No step is marked complete yet. Final
+child signal remains step4, followed by returning to the parent loop.

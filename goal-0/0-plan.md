@@ -9,7 +9,7 @@ correct, ownership stack-safe, and routine work proportional to the information
 actually consumed or changed. Finish with integrated application and PostgreSQL
 evidence, not merely a collection of completed child goals.
 
-Status: **scaffolded; no repair stage executed**. First active child: **Goal 1**.
+Status: **executing Stage 1**. Active child: **Goal 1**.
 Stages 1–7 map directly to `goal-1` through `goal-7`; only Goal 1 is scaffolded now.
 
 ## Authority and constraints
@@ -87,7 +87,8 @@ into ordinary repository regression tests during implementation; do not depend o
   variations; eager, exact and configured PostgreSQL/application paths agree where
   applicable; existing valid recursive/disjunctive queries remain supported.
   Persisted old requests still retry to their original receipts after restart.
-- **Status:** Not started; `goal-1` is the first active child.
+- **Status:** In progress: permanent R1/R2/R3 regressions and shared repairs;
+  establishing a disposable PostgreSQL 15.11 fixture and pre-repair receipt.
 
 ### 2. Make graph traversal and ownership stack-safe — Goal 2
 
@@ -212,6 +213,7 @@ decisions and any outstanding uncertainty. A scaffold, green lint count or compl
 child is not Goal0's finish line. Parent completion requires Stage7 plus reconciled
 completion signals for all earlier stages.
 
-Continuation: scaffolds only. Read `goal-1/0-plan.md` and `goal-1/0-loop.md`, sync
-the actual tree, and begin R1/R2/R3 regression-and-repair work. Do not rearchive
-goals, recreate the review, or start another parent.
+Continuation (2026-09-10): Goal1 is active on baseline `c0bc499`. Query and identity
+repairs are underway; PostgreSQL 15.11 binaries were found in the local MATLAB
+installation. Preserve a pre-repair executable/receipt before testing changed
+normalization. No child completion or new integrated acceptance is claimed yet.
