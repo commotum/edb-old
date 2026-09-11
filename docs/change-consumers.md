@@ -70,8 +70,10 @@ consumer name deliberately to process the current retained generation; old
 events already copied by an application are not erased. Missing retained history
 and lineage replacement also fail explicitly, not by silently skipping ahead.
 
-Migration 29 adds only application checkpoint state. Runtime provisioning gives
-peer/writer roles SELECT/INSERT/UPDATE on that table, not canonical write powers.
+The current schema baseline includes application checkpoint state. Initialize a
+fresh PostgreSQL catalog with `atomic migrate`; historical catalog schema upgrades
+are unsupported. Runtime provisioning gives peer/writer roles SELECT/INSERT/UPDATE
+on the checkpoint table, not canonical write powers.
 Row-level security restricts checkpoint rows to `current_user`; a name is shared
 only within one SQL login and logical database. Existing PostgreSQL schema/role
 scoping still governs database access; consumer names are not a tenant ACL.

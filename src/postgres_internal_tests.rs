@@ -2,7 +2,7 @@ use crate::postgres::{CapacityLimits, CommitFault, MIGRATIONS, PostgresStore};
 use crate::{
     Attribute, Cardinality, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_FN, DB_IDENT, Database, EntityRef,
     ErrorCategory, IndexOrder, IndexPrefix, Instruction, Keyword, Program, ProgramKind, Schema,
-    Symbol, TxOp, TxValue, Unique, Value, ValueType, View,
+    Symbol, TxOp, TxValue, Unique, Value, ValueType, View, sha256,
 };
 use postgres::{Client, NoTls};
 use std::process::Command;
@@ -69,22 +69,6 @@ fn migrated_store(connection: &str) -> PostgresStore {
     let mut migrator = crate::PostgresMigrator::connect(connection).unwrap();
     migrator.migrate().unwrap();
     PostgresStore::connect(connection).unwrap()
-}
-
-fn assert_database_eq(left: &Database, right: &Database) {
-    assert_eq!(left.basis_t(), right.basis_t());
-    assert_eq!(left.eidx_frontier(), right.eidx_frontier());
-    assert_eq!(left.schema(), right.schema());
-    for view in [View::Current, View::History] {
-        for order in [
-            IndexOrder::Eavt,
-            IndexOrder::Aevt,
-            IndexOrder::Avet,
-            IndexOrder::Vaet,
-        ] {
-            assert_eq!(left.datoms(view, order), right.datoms(view, order));
-        }
-    }
 }
 
 fn assert_value_eq_database(left: &crate::DatabaseValue, right: &Database) {
@@ -992,11 +976,15 @@ fn retained_receipt_cores_survive_reconnect_without_retaining_writer_state() {
 
     let mut observer = Client::connect(&connection, NoTls).unwrap();
     let backend_count = |observer: &mut Client| -> i64 {
+        // The process-global notice publisher keeps its last configured
+        // session independently of receipt ownership. Exclude its specific
+        // pg_notify statement while counting the store, read lane, and pins.
         observer
             .query_one(
                 "SELECT count(*) FROM pg_stat_activity \
                  WHERE datname = current_database() AND application_name IN ($1, $2) \
-                   AND backend_type = 'client backend'",
+                   AND backend_type = 'client backend' \
+                   AND query NOT LIKE 'SELECT pg_catalog.pg_notify(%'",
                 &[&application, &pin_application],
             )
             .unwrap()

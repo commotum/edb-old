@@ -104,10 +104,9 @@ reclamation first, or choosing another catalog. After reclamation, restore alloc
 a fresh storage route while retaining the backup's lineage; old exact-reference
 routes remain retired. See the restore checks in [admin.md](admin.md).
 
-## Upgrade boundary
+## Catalog initialization
 
-Migration 34 seeds the name catalog from existing databases one-to-one. It does not
-rename their storage IDs or rewrite canonical facts, programs, receipts or manifests.
-Quiesce old writers and maintenance processes before migrating, then restart all
-processes on the new release. Old startups are fenced by the schema version; this
-does not claim that already-running older binaries are safe during migration.
+Run `atomic migrate` on a fresh PostgreSQL catalog to install the single current
+schema baseline, including the database name catalog. Historical schema upgrades
+are unsupported; catalogs initialized by earlier releases require a fresh catalog.
+Runtime processes require the current schema version before opening a database.

@@ -72,10 +72,9 @@ or renumber existing entities. Receipt-only allocations and typed references als
 reserve system identities; a scan of current schema alone cannot establish which
 IDs are safe to issue.
 
-Run the explicit catalog migration with the upgraded binary (`atomic migrate`)
-before starting writers. Migration 31 admits ATLC v2 allocation checkpoints and
-fences older binaries through the catalog-version check; it does not rewrite old
-transaction payloads or genesis. For an existing native generation containing
+Run `atomic migrate` on a fresh PostgreSQL catalog before starting writers. The
+single current schema baseline admits ATLC v2 allocation checkpoints; historical
+catalog schema upgrades are unsupported. For an existing native generation containing
 ATLC v1, the first fresh transaction obtains allocation proof from the complete
 authenticated log, including numeric allocation witnesses and any required legacy
 excision bounds. An immutable loaded value caches that proof. The next commit

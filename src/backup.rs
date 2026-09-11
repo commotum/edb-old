@@ -8362,7 +8362,7 @@ fn io_error(code: &'static str) -> impl FnOnce(std::io::Error) -> SemanticError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temporary_directory(label: &str) -> PathBuf {
         let unique = SystemTime::now()

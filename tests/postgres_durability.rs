@@ -440,17 +440,107 @@ fn sql_constraints_immutability_and_corruption_checks_fail_closed() {
         .unwrap()
         .get(0);
     assert!(constraint_count >= 15);
-    let trigger_count: i64 = client
-        .query_one(
-            "SELECT count(*) FROM pg_trigger \
-             WHERE NOT tgisinternal AND tgrelid IN \
-             ('atomic_databases'::regclass, 'atomic_transactions'::regclass, \
-              'atomic_requests'::regclass, 'atomic_heads'::regclass)",
+    let triggers = client
+        .query(
+            "SELECT c.relname::text, t.tgname::text, p.proname::text, t.tgenabled::text, \
+                    t.tgdeferrable, t.tginitdeferred \
+               FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid \
+               JOIN pg_proc p ON p.oid=t.tgfoid \
+              WHERE NOT t.tgisinternal AND t.tgrelid IN \
+               ('atomic_databases'::regclass, 'atomic_transactions'::regclass, \
+                'atomic_requests'::regclass, 'atomic_heads'::regclass)",
             &[],
         )
-        .unwrap()
-        .get(0);
-    assert_eq!(trigger_count, 8);
+        .unwrap();
+    // The original eight guards gained an active-identity check, four
+    // terminal-collection barriers, and retired-identity cleanup before the
+    // baseline collapse. Require all current protections by name and target,
+    // while allowing additional independent guards without a stale count.
+    for (table, trigger, function) in [
+        (
+            "atomic_databases",
+            "atomic_databases_immutable",
+            "atomic_reject_database_mutation",
+        ),
+        (
+            "atomic_databases",
+            "atomic_removed_database_identity",
+            "atomic_finish_removed_database_identity",
+        ),
+        (
+            "atomic_databases",
+            "atomic_terminal_collection_barrier",
+            "atomic_protect_reclaiming_database",
+        ),
+        (
+            "atomic_heads",
+            "atomic_heads_active",
+            "atomic_require_active_publication",
+        ),
+        (
+            "atomic_heads",
+            "atomic_heads_validate_advance",
+            "atomic_validate_head_advance",
+        ),
+        (
+            "atomic_heads",
+            "atomic_heads_validate_insert",
+            "atomic_validate_head_insert",
+        ),
+        (
+            "atomic_heads",
+            "atomic_terminal_collection_barrier",
+            "atomic_protect_reclaiming_database",
+        ),
+        (
+            "atomic_requests",
+            "atomic_requests_immutable",
+            "atomic_reject_log_generation_gc_mutation",
+        ),
+        (
+            "atomic_requests",
+            "atomic_requests_validate_insert",
+            "atomic_validate_request_insert",
+        ),
+        (
+            "atomic_requests",
+            "atomic_terminal_collection_barrier",
+            "atomic_protect_reclaiming_database",
+        ),
+        (
+            "atomic_transactions",
+            "atomic_transactions_immutable",
+            "atomic_reject_log_generation_gc_mutation",
+        ),
+        (
+            "atomic_transactions",
+            "atomic_transactions_validate_insert",
+            "atomic_validate_transaction_insert",
+        ),
+        (
+            "atomic_transactions",
+            "atomic_transactions_require_publication",
+            "atomic_require_published_transaction",
+        ),
+        (
+            "atomic_transactions",
+            "atomic_terminal_collection_barrier",
+            "atomic_protect_reclaiming_database",
+        ),
+    ] {
+        let row = triggers
+            .iter()
+            .find(|row| row.get::<_, String>(0) == table && row.get::<_, String>(1) == trigger)
+            .unwrap_or_else(|| panic!("required guard {table}.{trigger} is missing"));
+        assert_eq!(row.get::<_, String>(2), function, "{table}.{trigger}");
+        assert!(
+            matches!(row.get::<_, String>(3).as_str(), "O" | "A"),
+            "required guard {table}.{trigger} is disabled for ordinary writes"
+        );
+        if trigger == "atomic_transactions_require_publication" {
+            assert!(row.get::<_, bool>(4) && row.get::<_, bool>(5));
+        }
+    }
     let mut malformed = client.transaction().unwrap();
     let bytes = [0_u8; 48];
     let hash = [1_u8; 32];

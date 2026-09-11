@@ -403,6 +403,18 @@ fn granted_runtime_roles_start_and_operate_without_ddl_or_history_mutation() {
         )
         .unwrap_err();
     assert_eq!(mutation_error.as_db_error().unwrap().code().code(), "42501");
+    // Writers retain the UPDATE capability needed for catalog row locks, but
+    // cannot enter the owner-only terminal-reclamation predicate called by
+    // the mutation guard. Assert that denial independently of table grants.
+    let privileges = writer
+        .query_one(
+            "SELECT has_table_privilege(current_user, 'atomic_databases', 'UPDATE'), \
+                    has_function_privilege(current_user, 'atomic_database_reclamation_authorized()', 'EXECUTE')",
+            &[],
+        )
+        .unwrap();
+    assert!(privileges.get::<_, bool>(0));
+    assert!(!privileges.get::<_, bool>(1));
     let catalog_mutation_error = writer
         .execute(
             "UPDATE atomic_databases SET database_id = database_id WHERE database_id = $1",
@@ -411,6 +423,25 @@ fn granted_runtime_roles_start_and_operate_without_ddl_or_history_mutation() {
         .unwrap_err();
     assert_eq!(
         catalog_mutation_error.as_db_error().unwrap().code().code(),
+        "42501"
+    );
+    assert!(
+        catalog_mutation_error
+            .as_db_error()
+            .unwrap()
+            .message()
+            .contains("atomic_database_reclamation_authorized")
+    );
+    // The owner can call that predicate, but an ordinary UPDATE must still
+    // reach the independent immutable-catalog rejection, not change data.
+    let owner_mutation_error = admin
+        .execute(
+            "UPDATE atomic_databases SET database_id = database_id WHERE database_id = $1",
+            &[&database_id],
+        )
+        .unwrap_err();
+    assert_eq!(
+        owner_mutation_error.as_db_error().unwrap().code().code(),
         "55000"
     );
     let mut peer_client = Client::connect(&peer_connection, NoTls).unwrap();
