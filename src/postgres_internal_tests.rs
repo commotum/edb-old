@@ -1,13 +1,10 @@
 use crate::postgres::{CapacityLimits, CommitFault, MIGRATIONS, PostgresStore};
-use crate::state_commitment::checkpoint_state_hash;
 use crate::{
-    Attribute, Cardinality, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_FN, DB_IDENT, Database,
-    DurableTransaction, EntityRef, ErrorCategory, IndexOrder, IndexPrefix, Instruction, Keyword,
-    Program, ProgramKind, Schema, Symbol, TxOp, TxValue, Unique, Value, ValueType, View,
-    encode_genesis, encode_transaction, request_digest, sha256, transaction_hash,
+    Attribute, Cardinality, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_FN, DB_IDENT, Database, EntityRef,
+    ErrorCategory, IndexOrder, IndexPrefix, Instruction, Keyword, Program, ProgramKind, Schema,
+    Symbol, TxOp, TxValue, Unique, Value, ValueType, View,
 };
 use postgres::{Client, NoTls};
-use std::collections::BTreeMap;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -548,129 +545,6 @@ pub(crate) fn drop_isolated_schema(connection: &str, schema: &str) {
         .unwrap();
 }
 
-pub(crate) fn install_migration_prefix(client: &mut Client, through: i64) {
-    for (version, sql) in MIGRATIONS.iter().filter(|(version, _)| *version <= through) {
-        client.batch_execute(sql).unwrap();
-        let checksum = crate::sha256(sql.as_bytes());
-        client
-            .execute(
-                "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
-                &[version, &&checksum[..]],
-            )
-            .unwrap();
-    }
-}
-
-/// Provision the alias-bound generation-zero representation implemented by
-/// the v9-v11 catalog. Upgrade fixtures must write that historical shape
-/// directly; routing them through the current store would test v14 creation
-/// SQL against columns and generation tables that intentionally do not exist.
-pub(crate) fn provision_legacy_generation_zero_database(
-    client: &mut Client,
-    database_id: &str,
-    schema: Schema,
-) -> Database {
-    let schema_ops = schema
-        .attributes()
-        .cloned()
-        .map(TxOp::InstallAttribute)
-        .collect::<Vec<_>>();
-    let database = Database::new(schema).unwrap();
-    let bootstrap = Database::bootstrap().unwrap();
-    let genesis = encode_genesis(bootstrap.genesis_datoms()).unwrap();
-    let genesis_hash = sha256(&genesis);
-    let initial = if schema_ops.is_empty() {
-        None
-    } else {
-        assert_eq!(database.basis_t(), 1);
-        let tx = crate::t_to_tx(1).unwrap();
-        let envelope = DurableTransaction {
-            database_id: database_id.to_owned(),
-            basis_t: 1,
-            previous_hash: genesis_hash,
-            eidx_frontier: database.eidx_frontier(),
-            tempids: BTreeMap::new(),
-            tx_data: database
-                .datoms(View::History, IndexOrder::Eavt)
-                .into_iter()
-                .filter(|datom| datom.tx == tx)
-                .collect(),
-        };
-        let payload = encode_transaction(&envelope).unwrap();
-        let tx_hash = transaction_hash(&payload);
-        let state_hash = checkpoint_state_hash(&database).unwrap();
-        let request_hash = request_digest(&schema_ops, 0, 0).unwrap();
-        Some((payload, tx_hash, state_hash, request_hash))
-    };
-
-    let mut transaction = client.transaction().unwrap();
-    transaction
-        .execute(
-            "INSERT INTO atomic_databases (database_id, genesis, genesis_hash) \
-             VALUES ($1, $2, $3)",
-            &[&database_id, &&genesis[..], &&genesis_hash[..]],
-        )
-        .unwrap();
-    transaction
-        .execute(
-            "INSERT INTO atomic_heads (database_id, basis_t, tx_hash) VALUES ($1, 0, $2)",
-            &[&database_id, &&genesis_hash[..]],
-        )
-        .unwrap();
-    transaction
-        .execute(
-            "INSERT INTO atomic_database_generations (database_id, excision_generation) \
-             VALUES ($1, 0)",
-            &[&database_id],
-        )
-        .unwrap();
-    if let Some((payload, tx_hash, state_hash, request_hash)) = initial {
-        transaction
-            .execute(
-                "INSERT INTO atomic_transactions \
-                     (database_id, basis_t, previous_hash, tx_hash, payload, state_hash) \
-                 VALUES ($1, 1, $2, $3, $4, $5)",
-                &[
-                    &database_id,
-                    &&genesis_hash[..],
-                    &&tx_hash[..],
-                    &payload,
-                    &&state_hash[..],
-                ],
-            )
-            .unwrap();
-        transaction
-            .execute(
-                "INSERT INTO atomic_requests \
-                     (database_id, request_key, request_digest, basis_t, tx_hash) \
-                 VALUES ($1, '__atomic/create-schema/v1', $2, 1, $3)",
-                &[&database_id, &&request_hash[..], &&tx_hash[..]],
-            )
-            .unwrap();
-        transaction
-            .execute(
-                "UPDATE atomic_heads SET basis_t = 1, tx_hash = $2 WHERE database_id = $1",
-                &[&database_id, &&tx_hash[..]],
-            )
-            .unwrap();
-    }
-    transaction.commit().unwrap();
-    database
-}
-
-fn authoritative_rows(client: &mut Client, database_id: &str) -> Vec<(i64, Vec<u8>, Vec<u8>)> {
-    client
-        .query(
-            "SELECT basis_t, tx_hash, payload FROM atomic_transactions \
-             WHERE database_id = $1 ORDER BY basis_t",
-            &[&database_id],
-        )
-        .unwrap()
-        .into_iter()
-        .map(|row| (row.get(0), row.get(1), row.get(2)))
-        .collect()
-}
-
 #[test]
 fn fresh_administrative_install_is_complete_and_idempotent() {
     let Some(connection) = connection() else {
@@ -687,20 +561,34 @@ fn fresh_administrative_install_is_complete_and_idempotent() {
         .query_one("SELECT count(*) FROM atomic_schema_migrations", &[])
         .unwrap()
         .get(0);
-    assert_eq!(versions, crate::POSTGRES_SCHEMA_VERSION);
+    assert_eq!(versions, MIGRATIONS.len() as i64);
+    assert_eq!(versions, 1, "fresh installations have one baseline record");
+    let row = client
+        .query_one(
+            "SELECT version, checksum FROM atomic_schema_migrations",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), crate::POSTGRES_SCHEMA_VERSION);
+    assert_eq!(
+        row.get::<_, Vec<u8>>(1),
+        crate::sha256(MIGRATIONS[0].1.as_bytes())
+    );
     drop(client);
     drop(migrator);
     drop_isolated_schema(&connection, &isolated);
 }
 
 #[test]
-fn v25_canonical_nodes_upgrade_without_reencoding_or_checksum_changes() {
+fn current_install_recheck_preserves_canonical_nodes_and_optional_compression() {
     let Some(connection) = connection() else {
         return;
     };
     let isolated = create_isolated_schema(&connection, "migration_blocks");
+    crate::PostgresMigrator::from_client(client_in_schema(&connection, &isolated))
+        .migrate()
+        .unwrap();
     let mut client = client_in_schema(&connection, &isolated);
-    install_migration_prefix(&mut client, 25);
     let checksums = client
         .query(
             "SELECT version,checksum FROM atomic_schema_migrations ORDER BY version",
@@ -714,9 +602,9 @@ fn v25_canonical_nodes_upgrade_without_reencoding_or_checksum_changes() {
         .unwrap()
         .with(
             &[TxOp::Add {
-                entity: EntityRef::Temp("legacy".into()),
+                entity: EntityRef::Temp("current".into()),
                 attribute: ITEM_NAME,
-                value: Value::String("legacy-preserved-".repeat(100)).into(),
+                value: Value::String("canonical-preserved-".repeat(100)).into(),
             }],
             1000,
         )
@@ -740,8 +628,15 @@ fn v25_canonical_nodes_upgrade_without_reencoding_or_checksum_changes() {
     let mut migrator = crate::PostgresMigrator::from_client(client);
     migrator.migrate().unwrap();
     let mut client = client_in_schema(&connection, &isolated);
-    let after = client.query("SELECT version,checksum FROM atomic_schema_migrations WHERE version <= 25 ORDER BY version", &[])
-        .unwrap().into_iter().map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1))).collect::<Vec<_>>();
+    let after = client
+        .query(
+            "SELECT version,checksum FROM atomic_schema_migrations ORDER BY version",
+            &[],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)))
+        .collect::<Vec<_>>();
     assert_eq!(checksums, after);
     assert_eq!(
         client
@@ -825,354 +720,6 @@ fn already_current_migrate_does_not_lock_live_log_tables_for_repair() {
     concurrent_migrator.migrate().unwrap();
     drop(concurrent_migrator);
     writer_transaction.rollback().unwrap();
-    drop_isolated_schema(&connection, &isolated);
-}
-
-#[test]
-fn populated_pre_v6_catalog_is_rejected_before_any_schema_mutation() {
-    let Some(connection) = connection() else {
-        return;
-    };
-    let isolated = create_isolated_schema(&connection, "migration_pre_v6");
-    let mut client = client_in_schema(&connection, &isolated);
-    install_migration_prefix(&mut client, 5);
-    client
-        .execute(
-            "INSERT INTO atomic_databases \
-             (database_id, bootstrap_schema, bootstrap_hash) VALUES ($1, $2, $3)",
-            &[&"old", &vec![1_u8, 0, 0, 0], &&[0_u8; 32][..]],
-        )
-        .unwrap();
-    client
-        .execute(
-            "INSERT INTO atomic_heads (database_id, basis_t, tx_hash) VALUES ($1, 0, $2)",
-            &[&"old", &&[0_u8; 32][..]],
-        )
-        .unwrap();
-    let mut migrator = crate::PostgresMigrator::from_client(client);
-    let error = migrator.migrate().unwrap_err();
-    assert_eq!(error.category, ErrorCategory::Unsupported);
-    assert_eq!(error.code, "postgres/upgrade-rebuild-required");
-
-    let mut client = client_in_schema(&connection, &isolated);
-    let latest: i64 = client
-        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-        .unwrap()
-        .get(0);
-    let old_column_remains: bool = client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM information_schema.columns \
-             WHERE table_schema = current_schema() AND table_name = 'atomic_databases' \
-               AND column_name = 'bootstrap_schema')",
-            &[],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(latest, 5);
-    assert!(old_column_remains);
-    drop(client);
-    drop(migrator);
-    drop_isolated_schema(&connection, &isolated);
-}
-
-#[test]
-fn populated_v6_log_is_replayed_for_commitments_and_upgrades_without_loss() {
-    let Some(connection) = connection() else {
-        return;
-    };
-    let isolated = create_isolated_schema(&connection, "migration_v6");
-    let database_id = "canonical-v6";
-    let mut client = client_in_schema(&connection, &isolated);
-    // Construct canonical v3 logical content using the first schema that has
-    // the commitment column, then faithfully remove migrations 7--9. This is
-    // the exact v6 authoritative catalog; migrations 7/8 add no log fields.
-    install_migration_prefix(&mut client, 9);
-    let before = provision_legacy_generation_zero_database(&mut client, database_id, schema());
-
-    let mut client = client_in_schema(&connection, &isolated);
-    let rows_before = authoritative_rows(&mut client, database_id);
-    client
-        .batch_execute(
-            "CREATE OR REPLACE FUNCTION atomic_validate_transaction_insert() \
-             RETURNS trigger LANGUAGE plpgsql AS $$ \
-             DECLARE current_basis bigint; current_hash bytea; BEGIN \
-               SELECT basis_t, tx_hash INTO current_basis, current_hash \
-                 FROM atomic_heads WHERE database_id = NEW.database_id; \
-               IF NOT FOUND THEN RAISE EXCEPTION 'Atomic database head does not exist' \
-                 USING ERRCODE = '23503'; END IF; \
-               IF NEW.basis_t <> current_basis + 1 OR NEW.previous_hash <> current_hash THEN \
-                 RAISE EXCEPTION 'Atomic transaction does not extend the current head' \
-                 USING ERRCODE = '40001'; END IF; RETURN NEW; END; $$; \
-             DROP TRIGGER IF EXISTS atomic_index_publications_validate_insert \
-               ON atomic_index_publications; \
-             DROP FUNCTION IF EXISTS atomic_validate_index_publication(); \
-             DROP TABLE atomic_index_publications; \
-             ALTER TABLE atomic_transactions DROP COLUMN state_hash; \
-             ALTER TABLE atomic_programs DROP CONSTRAINT atomic_programs_kind_check; \
-             ALTER TABLE atomic_programs ADD CONSTRAINT atomic_programs_kind_check \
-               CHECK (kind BETWEEN 0 AND 2); \
-             DELETE FROM atomic_schema_migrations WHERE version >= 7",
-        )
-        .unwrap();
-    let mut migrator = crate::PostgresMigrator::from_client(client);
-    migrator.migrate().unwrap();
-    drop(migrator);
-
-    let mut client = client_in_schema(&connection, &isolated);
-    assert_eq!(authoritative_rows(&mut client, database_id), rows_before);
-    let committed: i64 = client
-        .query_one(
-            "SELECT count(*) FROM atomic_transactions WHERE database_id = $1",
-            &[&database_id],
-        )
-        .unwrap()
-        .get(0);
-    let authenticated: i64 = client
-        .query_one(
-            "SELECT count(*) FROM atomic_transactions WHERE database_id = $1 \
-             AND state_hash <> decode(repeat('00', 32), 'hex')",
-            &[&database_id],
-        )
-        .unwrap()
-        .get(0);
-    assert!(committed > 0);
-    assert_eq!(authenticated, committed);
-    let mut store = PostgresStore::from_client(client);
-    assert_database_eq(&store.recover(database_id).unwrap(), &before);
-    drop(store);
-    drop_isolated_schema(&connection, &isolated);
-}
-
-#[test]
-fn populated_v11_to_v12_preserves_authoritative_bytes_and_exact_state() {
-    let Some(connection) = connection() else {
-        return;
-    };
-    let isolated = create_isolated_schema(&connection, "migration_v11");
-    let database_id = "canonical-v11";
-    let mut client = client_in_schema(&connection, &isolated);
-    install_migration_prefix(&mut client, 11);
-    let before = provision_legacy_generation_zero_database(&mut client, database_id, schema());
-    let mut client = client_in_schema(&connection, &isolated);
-    let rows_before = authoritative_rows(&mut client, database_id);
-    let mut migrator = crate::PostgresMigrator::from_client(client);
-    migrator.migrate().unwrap();
-    drop(migrator);
-
-    let mut client = client_in_schema(&connection, &isolated);
-    assert_eq!(authoritative_rows(&mut client, database_id), rows_before);
-    let latest: i64 = client
-        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-        .unwrap()
-        .get(0);
-    assert_eq!(latest, crate::POSTGRES_SCHEMA_VERSION);
-    let mut store = PostgresStore::from_client(client);
-    assert_database_eq(&store.recover(database_id).unwrap(), &before);
-    drop(store);
-    drop_isolated_schema(&connection, &isolated);
-}
-
-#[test]
-fn legacy_segmented_compatibility_values_retain_authenticated_entity_identity() {
-    let Some(connection) = connection() else {
-        eprintln!("legacy identity witness requires ATOMIC_POSTGRES_URL");
-        return;
-    };
-    let isolated = create_isolated_schema(&connection, "legacy_entity_identity");
-    struct Cleanup<'a> {
-        connection: &'a str,
-        schema: &'a str,
-    }
-    impl Drop for Cleanup<'_> {
-        fn drop(&mut self) {
-            drop_isolated_schema(self.connection, self.schema);
-        }
-    }
-    let _cleanup = Cleanup {
-        connection: &connection,
-        schema: &isolated,
-    };
-    let database_id = "legacy-identity";
-    let mut client = client_in_schema(&connection, &isolated);
-    install_migration_prefix(&mut client, 11);
-    let database = provision_legacy_generation_zero_database(&mut client, database_id, schema());
-    let head: Vec<u8> = client
-        .query_one(
-            "SELECT tx_hash FROM atomic_heads WHERE database_id = $1",
-            &[&database_id],
-        )
-        .unwrap()
-        .get(0);
-    let tx_hash: crate::Digest = head.try_into().unwrap();
-    // Publish the actual legacy segmented representation. Current indexers
-    // produce native trees, which would never exercise this open-time path.
-    let mut segments = Vec::new();
-    for history in [false, true] {
-        for order in [
-            IndexOrder::Eavt,
-            IndexOrder::Aevt,
-            IndexOrder::Avet,
-            IndexOrder::Vaet,
-        ] {
-            let datoms = database.datoms(
-                if history {
-                    View::History
-                } else {
-                    View::Current
-                },
-                order,
-            );
-            if datoms.is_empty() {
-                continue;
-            }
-            let count = u32::try_from(datoms.len()).unwrap();
-            let payload = crate::encode_index_segment(&crate::IndexSegment {
-                order,
-                history,
-                datoms,
-            })
-            .unwrap();
-            let hash = sha256(&payload);
-            client.execute(
-                "INSERT INTO atomic_index_segments (segment_hash, payload) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-                &[&&hash[..], &payload],
-            ).unwrap();
-            segments.push(crate::SegmentRef {
-                order,
-                history,
-                ordinal: 0,
-                hash,
-                count,
-            });
-        }
-    }
-    let manifest = crate::IndexManifest {
-        database_id: database_id.into(),
-        basis_t: database.basis_t(),
-        tx_hash,
-        eidx_frontier: database.eidx_frontier(),
-        segments,
-    };
-    let payload = crate::encode_index_manifest(&manifest).unwrap();
-    let manifest_hash = sha256(&payload);
-    let basis = i64::try_from(database.basis_t()).unwrap();
-    client.execute(
-        "INSERT INTO atomic_index_manifests (database_id, basis_t, tx_hash, manifest_hash, payload) VALUES ($1, $2, $3, $4, $5)",
-        &[&database_id, &basis, &&tx_hash[..], &&manifest_hash[..], &payload],
-    ).unwrap();
-    client.execute(
-        "INSERT INTO atomic_index_publications (database_id, basis_t, tx_hash, manifest_hash) VALUES ($1, $2, $3, $4)",
-        &[&database_id, &basis, &&tx_hash[..], &&manifest_hash[..]],
-    ).unwrap();
-    let authoritative_before = authoritative_rows(&mut client, database_id);
-    let mut migrator = crate::PostgresMigrator::from_client(client);
-    migrator.migrate().unwrap();
-    drop(migrator);
-
-    let scoped = if connection.starts_with("postgres://") || connection.starts_with("postgresql://")
-    {
-        format!(
-            "{connection}{}options=-csearch_path%3D{isolated}%2Cpg_catalog",
-            if connection.contains('?') { "&" } else { "?" }
-        )
-    } else {
-        format!("{connection} options='-csearch_path={isolated},pg_catalog'")
-    };
-    let mut store = PostgresStore::connect(&scoped).unwrap();
-    let recovered = store.recover(database_id).unwrap();
-    let peer = crate::Peer::connect_compatibility(&scoped, database_id, 16).unwrap();
-    let second = crate::Peer::connect_compatibility(&scoped, database_id, 16).unwrap();
-    assert_eq!(
-        peer.durable_base_t(),
-        database.basis_t(),
-        "fixture must use its segmented base, not log-only recovery"
-    );
-    assert_eq!(peer.load_stats().compatibility_materializations, 1);
-    let entity = u64::from(ITEM_NAME);
-    let eager = peer
-        .db_compatibility()
-        .database_value()
-        .entity(entity)
-        .unwrap()
-        .unwrap();
-    let native = peer.database_value().entity(entity).unwrap().unwrap();
-    let another = second
-        .db_compatibility()
-        .database_value()
-        .entity(entity)
-        .unwrap()
-        .unwrap();
-    let recovered = recovered.database_value().entity(entity).unwrap().unwrap();
-    assert!(native.identity().lineage_id().is_some());
-    assert_eq!(eager.identity(), native.identity());
-    assert_eq!(eager.identity(), another.identity());
-    assert_eq!(eager.identity(), recovered.identity());
-    let mut client = client_in_schema(&connection, &isolated);
-    assert_eq!(
-        authoritative_rows(&mut client, database_id),
-        authoritative_before
-    );
-    assert_eq!(
-        client
-            .query_one(
-                "SELECT payload FROM atomic_index_manifests WHERE manifest_hash = $1",
-                &[&&manifest_hash[..]]
-            )
-            .unwrap()
-            .get::<_, Vec<u8>>(0),
-        payload
-    );
-    drop(eager);
-    drop(native);
-    drop(another);
-    drop(recovered);
-    drop(peer);
-    drop(second);
-    drop(store);
-    drop(client);
-}
-
-#[test]
-fn already_current_catalog_repairs_legacy_zero_state_commitments() {
-    let Some(connection) = connection() else {
-        return;
-    };
-    let isolated = create_isolated_schema(&connection, "migration_current_zero");
-    let database_id = "current-with-zero-commitments";
-    let mut client = client_in_schema(&connection, &isolated);
-    install_migration_prefix(&mut client, crate::POSTGRES_SCHEMA_VERSION);
-    let mut store = PostgresStore::from_client(client);
-    let expected = store.create_database(database_id, schema()).unwrap();
-    drop(store);
-
-    let mut client = client_in_schema(&connection, &isolated);
-    client
-        .batch_execute(
-            "ALTER TABLE atomic_transactions DISABLE TRIGGER atomic_transactions_immutable; \
-             UPDATE atomic_transactions \
-                SET state_hash = decode(repeat('00', 32), 'hex') \
-              WHERE database_id = 'current-with-zero-commitments'; \
-             ALTER TABLE atomic_transactions ENABLE TRIGGER atomic_transactions_immutable",
-        )
-        .unwrap();
-    let mut migrator = crate::PostgresMigrator::from_client(client);
-    migrator.migrate().unwrap();
-    drop(migrator);
-
-    let mut client = client_in_schema(&connection, &isolated);
-    let remaining: i64 = client
-        .query_one(
-            "SELECT count(*) FROM atomic_transactions \
-             WHERE database_id = $1 \
-               AND state_hash = decode(repeat('00', 32), 'hex')",
-            &[&database_id],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(remaining, 0);
-    let mut store = PostgresStore::from_client(client);
-    assert_database_eq(&store.recover(database_id).unwrap(), &expected);
-    drop(store);
     drop_isolated_schema(&connection, &isolated);
 }
 

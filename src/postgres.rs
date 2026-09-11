@@ -184,130 +184,20 @@ pub(crate) fn shared_program_cache_stats(cache: &SharedProgramCache) -> ProgramC
     lock_program_cache(cache).stats()
 }
 
-pub(crate) const MIGRATIONS: &[(i64, &str)] = &[
-    (1, include_str!("../migrations/0001_atomic.sql")),
-    (2, include_str!("../migrations/0002_peer_indexes.sql")),
-    (3, include_str!("../migrations/0003_programs.sql")),
-    (4, include_str!("../migrations/0004_transactor_leases.sql")),
-    (5, include_str!("../migrations/0005_operations.sql")),
-    (6, include_str!("../migrations/0006_schema_information.sql")),
-    (7, include_str!("../migrations/0007_entity_predicates.sql")),
-    (8, include_str!("../migrations/0008_index_publications.sql")),
-    (9, include_str!("../migrations/0009_state_commitments.sql")),
-    (
-        10,
-        include_str!("../migrations/0010_program_immutability.sql"),
-    ),
-    (11, include_str!("../migrations/0011_persistent_trees.sql")),
-    (
-        12,
-        include_str!("../migrations/0012_tree_publication_revisions.sql"),
-    ),
-    (
-        13,
-        include_str!("../migrations/0013_lineage_and_tree_gc.sql"),
-    ),
-    (14, include_str!("../migrations/0014_log_generations.sql")),
-    (
-        15,
-        include_str!("../migrations/0015_persistent_semantic_commitments.sql"),
-    ),
-    (
-        16,
-        include_str!("../migrations/0016_activation_semantic_roots.sql"),
-    ),
-    (
-        17,
-        include_str!("../migrations/0017_request_snapshot_bases.sql"),
-    ),
-    (
-        18,
-        include_str!("../migrations/0018_semantic_commitment_gc.sql"),
-    ),
-    (19, include_str!("../migrations/0019_dual_predicates.sql")),
-    (
-        20,
-        include_str!("../migrations/0020_request_base_archives.sql"),
-    ),
-    (
-        21,
-        include_str!("../migrations/0021_resumable_avet_projection.sql"),
-    ),
-    (
-        22,
-        include_str!("../migrations/0022_tree_retirement_intent_dependency.sql"),
-    ),
-    (
-        23,
-        include_str!("../migrations/0023_authenticated_index_basis.sql"),
-    ),
-    (
-        24,
-        include_str!("../migrations/0024_versioned_program_references.sql"),
-    ),
-    (
-        25,
-        include_str!("../migrations/0025_receipt_archive_conversion.sql"),
-    ),
-    (
-        26,
-        include_str!("../migrations/0026_optional_compressed_nodes.sql"),
-    ),
-    (27, include_str!("../migrations/0027_fulltext_sidecars.sql")),
-    (
-        28,
-        include_str!("../migrations/0028_remote_writer_endpoints.sql"),
-    ),
-    (
-        29,
-        include_str!("../migrations/0029_change_checkpoints.sql"),
-    ),
-    (
-        30,
-        include_str!("../migrations/0030_shared_fulltext_pages.sql"),
-    ),
-    (
-        31,
-        include_str!("../migrations/0031_reserved_allocation.sql"),
-    ),
-    (
-        32,
-        include_str!("../migrations/0032_query_program_references.sql"),
-    ),
-    (
-        33,
-        include_str!("../migrations/0033_native_application_computation.sql"),
-    ),
-    (
-        34,
-        concat!(
-            include_str!("../migrations/0034_logical_database_catalog.sql"),
-            "\n",
-            include_str!("../migrations/0034_retired_database_reclamation.sql")
-        ),
-    ),
-    (35, include_str!("../migrations/0035_runtime_excision.sql")),
-];
+/// Fresh-install baseline only; development migration history lives in Git.
+pub(crate) const MIGRATIONS: &[(i64, &str)] =
+    &[(36, include_str!("../migrations/0036_current_schema.sql"))];
 
-/// Latest PostgreSQL schema understood by this binary.
-///
-/// This is an operator compatibility boundary, not a data-format version.
-pub const POSTGRES_SCHEMA_VERSION: i64 = 35;
+/// Current PostgreSQL installation baseline understood by this binary.
+/// This is an operator boundary, not a canonical data-format version.
+pub const POSTGRES_SCHEMA_VERSION: i64 = 36;
 
-/// Version of the authenticated fixed-dependency walker whose result GC may
-/// trust. Any future traversal change that adds roots must bump this version
-/// and install a corresponding fail-closed SQL migration before reuse.
+/// Version of the authenticated dependency walker whose result GC may trust.
 pub(crate) const PROGRAM_REFERENCE_WALKER_VERSION: i64 = 2;
 
-/// Oldest installed native SQL schema that this binary can upgrade in place
-/// when the catalog already contains a logical database.
-///
-/// Versions 1--5 stored a prototype logical representation that cannot be
-/// reinterpreted as the schema-information/log representation introduced by
-/// migration 6.  Those databases require an offline export through an old
-/// decoder followed by import into a freshly provisioned catalog. Empty
-/// catalogs may still run through the complete migration chain.
-pub const POSTGRES_IN_PLACE_UPGRADE_FLOOR: i64 = 6;
+/// Oldest supported installation baseline. Kept as a source-API constant;
+/// earlier development schemas require a fresh database/schema, not an upgrade.
+pub const POSTGRES_IN_PLACE_UPGRADE_FLOOR: i64 = POSTGRES_SCHEMA_VERSION;
 
 const PEER_RUNTIME_TABLES: &[&str] = &[
     "atomic_schema_migrations",
@@ -456,8 +346,8 @@ impl PostgresMigrator {
         }
     }
 
-    /// Install every known migration under one transaction-scoped advisory
-    /// lock. An older binary refuses an already-installed newer migration.
+    /// Install the current schema baseline atomically, or verify/repair an
+    /// existing matching installation. Older development catalogs are rejected.
     pub fn migrate(&mut self) -> Result<(), SemanticError> {
         apply_migrations(&mut self.client)
     }
@@ -481,10 +371,8 @@ impl PostgresMigrator {
 }
 
 fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
-    debug_assert_eq!(
-        MIGRATIONS.last().map(|(version, _)| *version),
-        Some(POSTGRES_SCHEMA_VERSION)
-    );
+    debug_assert_eq!(MIGRATIONS.len(), 1);
+    debug_assert_eq!(MIGRATIONS[0].0, POSTGRES_SCHEMA_VERSION);
     let mut transaction = client
         .transaction()
         .map_err(|error| postgres_error("postgres/migration-begin", error))?;
@@ -492,80 +380,33 @@ fn apply_migrations(client: &mut Client) -> Result<(), SemanticError> {
     transaction
         .query_one("SELECT pg_advisory_xact_lock($1)", &[&0x41544f4d_i64])
         .map_err(|error| postgres_error("postgres/migration-lock", error))?;
-    let migration_table_exists: bool = transaction
-        .query_one(
-            "SELECT to_regclass('atomic_schema_migrations') IS NOT NULL",
-            &[],
-        )
-        .map_err(|error| postgres_error("postgres/migration-discovery", error))?
-        .get(0);
-    let installed = if migration_table_exists {
+    let installed = if migration_table_exists(&mut transaction)? {
         read_migration_rows(&mut transaction)?
     } else {
         Vec::new()
     };
+    // Reject previous development catalogs before running any installation or
+    // repair SQL. Never reset or relabel their existing data as this baseline.
     validate_migration_rows(&installed, false)?;
-    reject_unsupported_populated_upgrade(&mut transaction, &installed)?;
-    let installed_version = installed.last().map_or(0, |(version, _)| *version);
-    // An already-current catalog may still contain migration 9's historical
-    // zero placeholders if it was upgraded by an older binary. Schema-version
-    // equality is therefore not evidence that the data migration completed.
-    if installed_version >= 9 && state_commitment_backfill_required(&mut transaction)? {
-        backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
-    }
-
-    for (version, sql) in MIGRATIONS.iter().skip(installed.len()) {
-        // Migration 13 assigns the first durable lineage identity to every
-        // pre-lineage catalog row.  `atomic_databases` has been immutable
-        // since migration 1, so this one administrative data migration must
-        // suspend that guard while it fills the new column.  Keep the
-        // historical migration bytes unchanged: deployed catalogs authenticate
-        // them by checksum, and ordinary runtime mutation remains forbidden.
-        if *version == 13 {
-            transaction
-                .batch_execute(
-                    "ALTER TABLE atomic_databases \
-                     DISABLE TRIGGER atomic_databases_immutable",
-                )
-                .map_err(|error| postgres_error("postgres/migration-lineage-guard", error))?;
-        }
+    if installed.is_empty() {
+        let (version, sql) = MIGRATIONS[0];
         transaction
             .batch_execute(sql)
             .map_err(|error| postgres_error("postgres/migration-ddl", error))?;
-        if *version == 13 {
-            transaction
-                .batch_execute(
-                    "ALTER TABLE atomic_databases \
-                     ENABLE TRIGGER atomic_databases_immutable",
-                )
-                .map_err(|error| postgres_error("postgres/migration-lineage-guard", error))?;
-        }
-        if *version == 9 {
-            backfill_state_commitments(&mut transaction).map_err(upgrade_rebuild_required)?;
-        }
-        if matches!(*version, 15 | 16) {
-            crate::persistent_commitment::backfill_terminal_persistent_commitments(
-                &mut transaction,
-            )?;
-        }
         let checksum = sha256(sql.as_bytes());
         transaction
             .execute(
                 "INSERT INTO atomic_schema_migrations (version, checksum) VALUES ($1, $2)",
-                &[version, &&checksum[..]],
+                &[&version, &&checksum[..]],
             )
             .map_err(|error| postgres_error("postgres/migration-record", error))?;
     }
-    // Migration is also the repair boundary for derived closure metadata, but
-    // an already-current healthy catalog must be a read-only verification.
-    // Unconditionally rebuilding these ledgers takes table/row locks in the
-    // inverse direction of live generation and tree writers and made harmless
-    // concurrent `migrate` calls capable of deadlocking runtime work.
-    if POSTGRES_SCHEMA_VERSION >= 13 && tree_live_set_backfill_required(&mut transaction)? {
+    // Keep current-version derived-state repairs. Healthy repeated installs
+    // only verify these markers, avoiding inverse locks against live writers.
+    if tree_live_set_backfill_required(&mut transaction)? {
         backfill_tree_live_sets(&mut transaction)?;
     }
-    if POSTGRES_SCHEMA_VERSION >= 14 && program_generation_ref_backfill_required(&mut transaction)?
-    {
+    if program_generation_ref_backfill_required(&mut transaction)? {
         backfill_program_generation_refs(&mut transaction)?;
     }
     repair_atomic_routine_paths(&mut transaction, &schema)?;
@@ -1116,143 +957,7 @@ fn authenticated_program_closure<C: GenericClient>(
     visit_program_closure(&mut resolve, roots, &mut |_, _| {})
 }
 
-fn state_commitment_backfill_required<C: GenericClient>(
-    client: &mut C,
-) -> Result<bool, SemanticError> {
-    client
-        .query_one(
-            "SELECT EXISTS (SELECT 1 FROM atomic_transactions \
-             WHERE state_hash = decode(repeat('00', 32), 'hex'))",
-            &[],
-        )
-        .map(|row| row.get(0))
-        .map_err(|error| postgres_error("postgres/state-backfill-discovery", error))
-}
-
-fn upgrade_rebuild_required(cause: SemanticError) -> SemanticError {
-    SemanticError::new(
-        ErrorCategory::Unsupported,
-        "postgres/upgrade-rebuild-required",
-        "pre-commitment transaction history cannot be upgraded by canonical replay; export with a compatible old decoder and import into a freshly provisioned catalog",
-    )
-    .detail("cause", cause.code)
-}
-
-/// Migration 9 introduced authenticated materialized-state commitments. Its
-/// SQL DDL deliberately creates zero placeholders for existing immutable log
-/// rows; the administrative migration path replaces those placeholders by
-/// replaying the canonical v3 genesis/log once, in basis order, under the same
-/// transaction and advisory lock as the schema change.
-fn backfill_state_commitments<C: GenericClient>(client: &mut C) -> Result<(), SemanticError> {
-    client
-        .batch_execute(
-            "ALTER TABLE atomic_transactions \
-             DISABLE TRIGGER atomic_transactions_immutable",
-        )
-        .map_err(|error| postgres_error("postgres/state-backfill-disable-guard", error))?;
-    let databases = client
-        .query(
-            "SELECT database_id, genesis, genesis_hash \
-             FROM atomic_databases ORDER BY database_id",
-            &[],
-        )
-        .map_err(|error| postgres_error("postgres/state-backfill-catalog", error))?;
-    for catalog in databases {
-        let database_id: String = catalog.get(0);
-        let genesis: Vec<u8> = catalog.get(1);
-        let genesis_hash = digest(catalog.get(2), "migration genesis hash")?;
-        if sha256(&genesis) != genesis_hash {
-            return Err(fault(
-                "postgres/state-backfill-genesis-hash",
-                "migration genesis bytes do not match their hash",
-            ));
-        }
-        let mut database = Database::from_genesis(decode_genesis(&genesis)?)?;
-        let mut previous_hash = genesis_hash;
-        let rows = client
-            .query(
-                "SELECT basis_t, previous_hash, tx_hash, payload, state_hash \
-                 FROM atomic_transactions WHERE database_id = $1 ORDER BY basis_t",
-                &[&database_id],
-            )
-            .map_err(|error| postgres_error("postgres/state-backfill-log", error))?;
-        for row in rows {
-            let basis_t = pg_basis(row.get(0), "migration transaction")?;
-            let stored_previous = digest(row.get(1), "migration predecessor")?;
-            let tx_hash = digest(row.get(2), "migration transaction hash")?;
-            let payload: Vec<u8> = row.get(3);
-            let stored_state_hash = digest(row.get(4), "migration state hash")?;
-            if basis_t != database.basis_t().saturating_add(1)
-                || stored_previous != previous_hash
-                || transaction_hash(&payload) != tx_hash
-            {
-                return Err(fault(
-                    "postgres/state-backfill-log-chain",
-                    "migration transaction log is not one contiguous authenticated chain",
-                ));
-            }
-            let envelope = decode_transaction(&payload)?;
-            if envelope.database_id != database_id
-                || envelope.basis_t != basis_t
-                || envelope.previous_hash != stored_previous
-            {
-                return Err(fault(
-                    "postgres/state-backfill-envelope",
-                    "migration transaction envelope disagrees with its SQL row",
-                ));
-            }
-            database = database.apply_committed(&envelope)?;
-            let state_hash = checkpoint_state_hash(&database)?;
-            if stored_state_hash == [0; 32] {
-                let basis_sql = sql_basis(basis_t)?;
-                let updated = client
-                    .execute(
-                        "UPDATE atomic_transactions SET state_hash = $3 \
-                         WHERE database_id = $1 AND basis_t = $2 \
-                           AND state_hash = decode(repeat('00', 32), 'hex')",
-                        &[&database_id, &basis_sql, &&state_hash[..]],
-                    )
-                    .map_err(|error| postgres_error("postgres/state-backfill-write", error))?;
-                if updated != 1 {
-                    return Err(fault(
-                        "postgres/state-backfill-existing-value",
-                        "pre-commitment row changed during locked canonical replay",
-                    ));
-                }
-            } else if stored_state_hash != state_hash {
-                return Err(fault(
-                    "postgres/state-backfill-existing-value",
-                    "existing state commitment disagrees with canonical replay",
-                ));
-            }
-            previous_hash = tx_hash;
-        }
-        let head = client
-            .query_one(
-                "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
-                &[&database_id],
-            )
-            .map_err(|error| postgres_error("postgres/state-backfill-head", error))?;
-        let head_basis = pg_basis(head.get(0), "migration head")?;
-        let head_hash = digest(head.get(1), "migration head hash")?;
-        if head_basis != database.basis_t() || head_hash != previous_hash {
-            return Err(fault(
-                "postgres/state-backfill-head-mismatch",
-                "migration replay did not reach the published database head",
-            ));
-        }
-        // Audit the completed replay once, before the migration can commit.
-        database.validate_invariants()?;
-    }
-    client
-        .batch_execute(
-            "ALTER TABLE atomic_transactions \
-             ENABLE TRIGGER atomic_transactions_immutable",
-        )
-        .map_err(|error| postgres_error("postgres/state-backfill-enable-guard", error))
-}
-
-/// Authenticate only the newest v12 graph for each database and seed its one
+/// Authenticate only the newest native graph for each database and seed its one
 /// current live membership. Historical publications intentionally receive no
 /// inferred node garbage; future incremental merges maintain this set by
 /// exact changed-path deltas.
@@ -1505,37 +1210,6 @@ fn authenticated_manifest_nodes<C: GenericClient>(
     Ok(node_set.iter().map(|(hash, _)| *hash).collect())
 }
 
-fn reject_unsupported_populated_upgrade<C: GenericClient>(
-    client: &mut C,
-    installed: &[(i64, Vec<u8>)],
-) -> Result<(), SemanticError> {
-    let installed_version = installed.last().map_or(0, |(version, _)| *version);
-    if installed_version >= POSTGRES_IN_PLACE_UPGRADE_FLOOR {
-        return Ok(());
-    }
-    let catalog_exists: bool = client
-        .query_one("SELECT to_regclass('atomic_databases') IS NOT NULL", &[])
-        .map_err(|error| postgres_error("postgres/migration-discovery", error))?
-        .get(0);
-    if !catalog_exists {
-        return Ok(());
-    }
-    let populated: bool = client
-        .query_one("SELECT EXISTS (SELECT 1 FROM atomic_databases)", &[])
-        .map_err(|error| postgres_error("postgres/migration-population-check", error))?
-        .get(0);
-    if populated {
-        return Err(SemanticError::new(
-            ErrorCategory::Unsupported,
-            "postgres/upgrade-rebuild-required",
-            format!(
-                "populated native SQL schema version {installed_version} predates the supported in-place upgrade floor {POSTGRES_IN_PLACE_UPGRADE_FLOOR}; export with a compatible old decoder and import into a freshly provisioned catalog"
-            ),
-        ));
-    }
-    Ok(())
-}
-
 fn migration_table_exists<C: GenericClient>(client: &mut C) -> Result<bool, SemanticError> {
     client
         .query_one(
@@ -1578,10 +1252,22 @@ fn validate_migration_rows(
             ),
         ));
     }
+    if let Some((version, _)) = installed
+        .iter()
+        .find(|(version, _)| *version < MIGRATIONS[0].0)
+    {
+        return Err(SemanticError::new(
+            ErrorCategory::Unsupported,
+            "postgres/schema-rebuild-required",
+            format!(
+                "development schema version {version} predates the current installation baseline {POSTGRES_SCHEMA_VERSION}; create a fresh PostgreSQL database/schema with this binary; existing data has not been changed"
+            ),
+        ));
+    }
     if installed.len() > MIGRATIONS.len() {
         return Err(fault(
             "postgres/migration-history-invalid",
-            "installed migration history is not a prefix known to this binary",
+            "installed schema ledger does not match the current baseline",
         ));
     }
     for ((version, checksum), (expected_version, sql)) in installed.iter().zip(MIGRATIONS) {
@@ -1596,7 +1282,9 @@ fn validate_migration_rows(
         if checksum.as_slice() != sha256(sql.as_bytes()) {
             return Err(fault(
                 "postgres/migration-checksum-mismatch",
-                format!("installed migration {version} differs from this binary"),
+                format!(
+                    "installed baseline {version} differs from this binary; use matching schema SQL and binary"
+                ),
             ));
         }
     }
@@ -1606,7 +1294,7 @@ fn validate_migration_rows(
             ErrorCategory::Unavailable,
             "postgres/schema-upgrade-required",
             format!(
-                "database schema version {installed_version} is older than required version {POSTGRES_SCHEMA_VERSION}"
+                "database schema baseline is not completely installed (found {installed_version}, required {POSTGRES_SCHEMA_VERSION}); run explicit migration on a fresh database/schema"
             ),
         ));
     }
@@ -5359,7 +5047,7 @@ mod migration_compatibility_tests {
     }
 
     #[test]
-    fn runtime_requires_the_complete_exact_migration_prefix() {
+    fn runtime_requires_the_complete_exact_installation_baseline() {
         let rows = known_rows();
         validate_migration_rows(&rows, true).unwrap();
 
@@ -5368,14 +5056,28 @@ mod migration_compatibility_tests {
         validate_migration_rows(&rows[..rows.len() - 1], false).unwrap();
 
         let mut corrupt = rows.clone();
-        corrupt[3].1[0] ^= 1;
+        corrupt[0].1[0] ^= 1;
         let error = validate_migration_rows(&corrupt, true).unwrap_err();
         assert_eq!(error.code, "postgres/migration-checksum-mismatch");
 
-        let mut gap = rows.clone();
-        gap.remove(3);
-        let error = validate_migration_rows(&gap, false).unwrap_err();
+        let mut duplicate = rows.clone();
+        duplicate.push(rows[0].clone());
+        let error = validate_migration_rows(&duplicate, false).unwrap_err();
         assert_eq!(error.code, "postgres/migration-history-invalid");
+    }
+
+    #[test]
+    fn previous_development_ledgers_require_a_fresh_schema() {
+        let rows = (1..POSTGRES_SCHEMA_VERSION)
+            .map(|version| (version, vec![0; 32]))
+            .collect::<Vec<_>>();
+        for require_complete in [false, true] {
+            for installed in [&rows[..1], rows.as_slice()] {
+                let error = validate_migration_rows(installed, require_complete).unwrap_err();
+                assert_eq!(error.category, ErrorCategory::Unsupported);
+                assert_eq!(error.code, "postgres/schema-rebuild-required");
+            }
+        }
     }
 
     #[test]

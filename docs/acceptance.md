@@ -5,6 +5,40 @@ and integrated acceptance. Earlier repair and September9 results below remain
 historical evidence, not new cross-version support obligations. Results distinguish
 passing coverage from individual failed/interrupted invocations.
 
+## September10 final backup quality repairs
+
+The follow-up pass repaired three concrete defects: `create → backup` required
+an index publication; oversized corrupt repository objects were allocated before
+admission; and relative-path backup handles broke after a working-directory
+change. Capture now reconstructs a missing/damaged read index from authenticated
+canonical data without writing source repairs. File admission uses existing
+codec limits, and relative paths are anchored once without bypassing symlink or
+private-directory checks. See [backup reads](backup-reads.md) for recovery costs.
+
+The final optimized PostgreSQL run passed 26/26 tests, none skipped: capture
+fallback (3), copy-boundary authentication (2), file admission (1), selective
+offline reads (1), relative paths (1), backup/restore (10), semantic integrity (4)
+and maintenance controls (4). Fixtures were isolated and source schemas were
+removed before the offline-only checks. Stock CLI creation, backup and stdin EDN
+query ran without a transactor or prior consolidation. The focused library pass
+also passed 22/22 tests; the historical generation-zero upgrade test was not part
+of this current-version check. All-target compilation passed. Clippy passed with
+the same 15 library/one CLI warnings, none in the new repairs.
+
+A 96 MiB sparse corrupt root was rejected with zero measured peak-RSS growth in
+an isolated, address-space-capped process. A valid 2 MiB value remained readable
+through native indexes and the log with a 1 KiB node cache; that complete fixture
+took 2.40 seconds. At 64/8,192 entities, open plus two queries/consumption/drop
+took 2.25/11.37 ms and still read 16 objects to open plus two for the selected
+query. Fresh genesis/schema-only capture, read, speculation and deep proof took
+146/135 ms. These are local observations, not universal resource guarantees.
+
+Intermediate runs caught a new excision-record admission bound error, an
+ambiguous corrupt-root test selector, and stale restore assumptions about root
+size, lagging indexes and name/storage identity reuse. Those were corrected,
+with permanent coverage; only the complete rerun above is counted as acceptance.
+No existing database was reset and no durable format changed in these repairs.
+
 ## September10 native capability acceptance
 
 The product now combines EDN input/results, composable immutable db/tuple/log

@@ -12,8 +12,9 @@ measured limits below still apply to those commands.
 Current development support targets freshly created databases on the current
 version. Format changes can require a fresh database; old-database migrations,
 old backup/program readability and mixed-version rolling upgrades are not support
-promises. Existing migration facilities and historical results below can remain,
-but are not ongoing acceptance obligations. Unsupported formats are rejected,
+promises. The SQL installation now uses one current-schema baseline; earlier
+migration scripts remain in Git history, not in the installation path. Historical
+results below are not ongoing acceptance obligations. Unsupported formats are rejected,
 never automatically erased. Current-version durable writes, exact retries,
 restart recovery, failover and backup/restore remain supported and tested.
 For direct read-only backup access, see [backup reads](backup-reads.md).
@@ -59,13 +60,13 @@ GC conversion's total work follows retained receipt closures, and reachable
 payloads are deliberately retained. Provision administrative memory/time and
 retention policy separately from ordinary application capacity.
 
-## Provision and upgrade
+## Provisioning and current-schema repair
 
 Use a dedicated object-owning migration account to run
 `PostgresMigrator::migrate`, then grant distinct pre-created writer and peer
 roles with `grant_runtime_privileges`. Runtime accounts must not own the
 installation, inherit administrative roles or have ambient schema/column
-privileges. Runtime constructors verify the checksummed schema prefix and do
+privileges. Runtime constructors verify the checksummed installation baseline and do
 not perform DDL. Use the writer role for the service/indexer, the peer role
 for independent reads, and a separately controlled administrative account for
 restore, repair, inspection and GC. Native Unix submission is same-host,
@@ -73,43 +74,22 @@ same-OS-user only (private directory and socket), not an internet service.
 For the separately supported authenticated TLS network listener and endpoint
 discovery, see [remote applications](application.md#remote-applications).
 
-Migration 24 versions program-dependency completeness. Quiesce legacy writers,
-indexers and GC before upgrading; preserve a recoverable backup. The migration
-authenticates and repairs older marks before trusting them. A failure rolls
-back the migration and the new binary refuses the older schema. Correct the
-reported missing/corrupt information and retry; do not resume obsolete binaries
-or their unsafe GC routines after a failed repair. Atomic rollback does not
-retrofit safety into old code. Schema-24 GC refuses an incomplete/obsolete
-walker marker and retains references during repair. Do not edit applied SQL
-migrations or manually set the completeness marker to true.
+The single `migrations/0036_current_schema.sql` baseline creates the final
+current tables, indexes, constraints, triggers and functions directly. Installation
+is atomic and serialized; repeating `migrate` on a matching healthy catalog is
+idempotent. The ledger contains one version-36 checksum, not 35 historical steps.
 
-Migration 32 advances that same completeness protocol to dependency walker 2.
-It includes function-content literals embedded in native query ASTs and their
-nested data/Pull defaults, which older marks omitted. Use the same quiesced
-administrative upgrade procedure: authenticate and rebuild derived reference
-marks before resuming writers or GC. No canonical program, transaction or request
-bytes are rewritten. Missing/corrupt referenced content fails closed; restore the
-reported content from a trusted backup and retry rather than declaring an
-incomplete database healthy. New runtime/schema checks fence older writers.
+Previous development ledgers fail with `postgres/schema-rebuild-required` before
+installation or repair writes. Choose a fresh PostgreSQL database or empty schema
+in the connection configuration, then explicitly run `atomic migrate`. Existing
+databases are not reset, rewritten or silently adopted. Future versions and altered
+baseline checksums are also rejected; the migration command is not a schema reset.
 
-Migration33 adds only a compatibility fence for portable query-template4/ABI11
-and explicit native predicate deployments. It changes no canonical bytes or
-reference-walker meaning. Quiesce older writers, preserve a backup, migrate,
-then restart current binaries with their explicit native deployment registry.
-This is not permission to mix already-running old and new writer binaries.
-
-Migration 34 separates mutable public names from immutable storage IDs and adds
-retired-database lifecycle/reclamation. Existing names are seeded one-to-one;
-canonical data and identifiers are not rewritten. Quiesce old writers and
-maintenance before migrating, then restart all processes on the new release.
-See [database lifecycle](database-lifecycle.md) for name reuse, captured values,
-identity-checked operator commands and the separate storage-reclamation process.
-
-Migration 25 adds resumable exact-receipt archive conversion for ordinary GC.
-Upgrade quiescent installations with the current binary; older binaries do not
-understand its ownership transition. Applied migration1–24 bytes and durable
-request/manifest hashes are unchanged. Conversion is an administrative operation;
-neither runtime role receives new mutation or collector privileges.
+Current derived tree-membership and program-reference repair remain available via
+`migrate`. Missing, corrupt or obsolete reference evidence keeps garbage collection
+fail-closed until retained canonical log/code is authenticated and the marks rebuilt.
+This changes no canonical transaction, program or request bytes. Do not manually
+mark incomplete data as healthy or edit a checksummed baseline after installation.
 
 Exceptional reference repair is a quiesced administrative operation too. It
 locks durable owners and authenticates retained log/code roots, including code

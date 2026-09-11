@@ -101,6 +101,174 @@ impl Drop for IsolatedSchema {
 }
 
 #[test]
+fn failed_fresh_install_rolls_back_every_baseline_object() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let (_schema, connection) = IsolatedSchema::create(&connection, unique("baseline_rollback"));
+    let mut admin = Client::connect(&connection, NoTls).unwrap();
+    // A late CREATE conflict exercises transactional DDL, not a synthetic
+    // checksum rejection before the baseline executes. This is our own
+    // disposable fixture; the installer must leave its existing data intact.
+    admin
+        .batch_execute(
+            "CREATE TABLE atomic_tree_nodes (fixture_sentinel TEXT NOT NULL); \
+             INSERT INTO atomic_tree_nodes VALUES ('keep-existing-data')",
+        )
+        .unwrap();
+    let tables = |admin: &mut Client| {
+        admin
+            .query(
+                "SELECT tablename FROM pg_tables WHERE schemaname=current_schema() ORDER BY tablename",
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>()
+    };
+    let before = tables(&mut admin);
+    let mut migrator = PostgresMigrator::connect(&connection).unwrap();
+    let error = migrator.migrate().unwrap_err();
+    assert_eq!(error.code, "postgres/migration-ddl");
+    assert_eq!(
+        error.details.get("postgres_sqlstate").map(String::as_str),
+        Some("42P07")
+    );
+    assert_eq!(tables(&mut admin), before);
+    assert_eq!(
+        admin
+            .query_one("SELECT fixture_sentinel FROM atomic_tree_nodes", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        "keep-existing-data"
+    );
+    assert!(
+        admin
+            .query_one(
+                "SELECT to_regclass('atomic_schema_migrations') IS NULL",
+                &[]
+            )
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+    // Removing only our conflicting fixture object permits a clean retry.
+    admin.batch_execute("DROP TABLE atomic_tree_nodes").unwrap();
+    migrator.migrate().unwrap();
+    assert_eq!(
+        admin
+            .query_one("SELECT count(*) FROM atomic_schema_migrations", &[])
+            .unwrap()
+            .get::<_, i64>(0),
+        1
+    );
+}
+
+#[test]
+fn unsupported_development_ledger_is_rejected_without_mutation() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let (_schema, connection) =
+        IsolatedSchema::create(&connection, unique("old_baseline_boundary"));
+    let mut admin = Client::connect(&connection, NoTls).unwrap();
+    admin
+        .batch_execute(
+            "CREATE TABLE atomic_schema_migrations (version BIGINT PRIMARY KEY, checksum BYTEA NOT NULL); \
+             CREATE TABLE atomic_heads (fixture_sentinel TEXT NOT NULL); \
+             INSERT INTO atomic_heads VALUES ('old-database-is-untouched')",
+        )
+        .unwrap();
+    let old = POSTGRES_SCHEMA_VERSION - 1;
+    let checksum = vec![0x51_u8; 32];
+    admin
+        .execute(
+            "INSERT INTO atomic_schema_migrations VALUES ($1, $2)",
+            &[&old, &checksum],
+        )
+        .unwrap();
+    let mut migrator = PostgresMigrator::connect(&connection).unwrap();
+    let migration_error = migrator.migrate().unwrap_err();
+    let runtime_error = match Peer::connect(&connection, "unused", 1) {
+        Ok(_) => panic!("an old development ledger admitted a runtime reader"),
+        Err(error) => error,
+    };
+    for error in [migration_error, runtime_error] {
+        assert_eq!(error.code, "postgres/schema-rebuild-required");
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+    }
+    let rows = admin
+        .query(
+            "SELECT version, checksum FROM atomic_schema_migrations",
+            &[],
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, i64>(0), old);
+    assert_eq!(rows[0].get::<_, Vec<u8>>(1), checksum);
+    assert_eq!(
+        admin
+            .query_one("SELECT fixture_sentinel FROM atomic_heads", &[])
+            .unwrap()
+            .get::<_, String>(0),
+        "old-database-is-untouched"
+    );
+    assert!(
+        admin
+            .query_one("SELECT to_regclass('atomic_databases') IS NULL", &[])
+            .unwrap()
+            .get::<_, bool>(0)
+    );
+}
+
+#[test]
+fn current_baseline_checksum_mismatch_rejects_installer_and_runtime() {
+    let Some(connection) = connection() else {
+        return;
+    };
+    let (_schema, connection) =
+        IsolatedSchema::create(&connection, unique("baseline_checksum_boundary"));
+    let mut migrator = PostgresMigrator::connect(&connection).unwrap();
+    migrator.migrate().unwrap();
+    let mut store = PostgresStore::connect(&connection).unwrap();
+    store.create_database("checksum-witness", schema()).unwrap();
+    let mut admin = Client::connect(&connection, NoTls).unwrap();
+    let before = admin
+        .query_one("SELECT basis_t, tx_hash FROM atomic_heads", &[])
+        .unwrap();
+    let before = (before.get::<_, i64>(0), before.get::<_, Vec<u8>>(1));
+    admin
+        .execute(
+            "UPDATE atomic_schema_migrations SET checksum=set_byte(checksum,0,get_byte(checksum,0)#1)",
+            &[],
+        )
+        .unwrap();
+    let corrupt: Vec<u8> = admin
+        .query_one("SELECT checksum FROM atomic_schema_migrations", &[])
+        .unwrap()
+        .get(0);
+    let migration_error = migrator.migrate().unwrap_err();
+    let runtime_error = match Peer::connect(&connection, "checksum-witness", 1) {
+        Ok(_) => panic!("a mismatched baseline checksum admitted a reader"),
+        Err(error) => error,
+    };
+    for error in [migration_error, runtime_error] {
+        assert_eq!(error.code, "postgres/migration-checksum-mismatch");
+    }
+    assert_eq!(
+        admin
+            .query_one("SELECT checksum FROM atomic_schema_migrations", &[])
+            .unwrap()
+            .get::<_, Vec<u8>>(0),
+        corrupt
+    );
+    let after = admin
+        .query_one("SELECT basis_t, tx_hash FROM atomic_heads", &[])
+        .unwrap();
+    assert_eq!((after.get::<_, i64>(0), after.get::<_, Vec<u8>>(1)), before);
+}
+
+#[test]
 fn future_schema_fails_before_peer_or_service_reads_database_state() {
     let Some(connection) = connection() else {
         return;

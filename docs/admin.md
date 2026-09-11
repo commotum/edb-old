@@ -24,8 +24,10 @@ atomic inspect --database application
 
 The two distinct runtime roles must already exist and satisfy restricted-role
 requirements. `MIGRATED` and `GRANTED` are separate committed results: grant
-failure does not undo the migration. Migrations preserve their prior checksums;
-follow the quiesced upgrade guidance in [operations.md](operations.md).
+failure does not undo installation. The current schema is installed from one
+version-36 baseline. Earlier development catalogs require a fresh database/schema;
+the command never resets or silently upgrades them. Matching current installations
+can be verified/repaired idempotently. See [operations.md](operations.md).
 
 `status` is a lightweight catalog-coordinate observation, not a deep integrity
 check or proof of a live transactor. `inspect` captures one consistent PostgreSQL

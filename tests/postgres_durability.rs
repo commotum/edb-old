@@ -93,7 +93,12 @@ fn migrations_are_idempotent() {
         .query_one("SELECT count(*) FROM atomic_schema_migrations", &[])
         .unwrap()
         .get(0);
-    assert_eq!(versions, atomic_core::POSTGRES_SCHEMA_VERSION);
+    assert_eq!(versions, 1);
+    let installed: i64 = client
+        .query_one("SELECT version FROM atomic_schema_migrations", &[])
+        .unwrap()
+        .get(0);
+    assert_eq!(installed, atomic_core::POSTGRES_SCHEMA_VERSION);
 }
 
 #[test]

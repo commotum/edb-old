@@ -1,9 +1,6 @@
-//! Derived walker-1 evidence is not sufficient for native query literals.
-//! Fault injection is confined to a disposable catalog. This is a marker/DDL
-//! upgrade witness, not a claim that the current writer is a historical binary.
+//! Current-schema reference repair authenticates native query literals before
+//! publishing complete evidence. Fault injection uses disposable catalogs.
 mod common;
-#[path = "common/schema34_downgrade.rs"]
-mod schema34_downgrade;
 
 use atomic_core::*;
 use postgres::{Client, NoTls};
@@ -174,7 +171,7 @@ impl Fixture {
 }
 
 #[test]
-fn walker_two_migration_rebuilds_native_literal_closure_and_sql_fails_closed() {
+fn obsolete_marker_repair_rebuilds_native_literal_closure_and_sql_fails_closed() {
     let Some(mut fixture) = Fixture::new() else {
         return;
     };
@@ -182,7 +179,7 @@ fn walker_two_migration_rebuilds_native_literal_closure_and_sql_fails_closed() {
     assert_eq!(fixture.references(), fixture.expected());
     let bytes = fixture.canonical_bytes();
     fixture.make_obsolete();
-    // SQL32 rejects even an incorrectly optimistic complete walker1 marker.
+    // SQL rejects even an incorrectly optimistic obsolete complete marker.
     assert!(
         fixture
             .sql
@@ -190,48 +187,10 @@ fn walker_two_migration_rebuilds_native_literal_closure_and_sql_fails_closed() {
             .unwrap()
             .is_empty()
     );
-    let old_sql = include_str!("../migrations/0024_versioned_program_references.sql");
-    let old_gc = &old_sql[old_sql
-        .find("CREATE OR REPLACE FUNCTION atomic_collect_program_garbage(")
-        .unwrap()..];
-    let mut tx = fixture.sql.transaction().unwrap();
-    schema34_downgrade::remove_migration_34(&mut tx);
-    tx.batch_execute(old_gc).unwrap();
-    tx.batch_execute("DELETE FROM atomic_schema_migrations WHERE version>=32")
-        .unwrap();
-    tx.commit().unwrap();
-    assert_eq!(
-        PostgresStore::connect(&fixture.scope.connection)
-            .err()
-            .unwrap()
-            .code,
-        "postgres/schema-upgrade-required"
-    );
-    // Inspect actual additive DDL inside a transaction, then roll it back;
-    // the real migrator below must still execute the full31→32 upgrade.
-    let mut tx = fixture.sql.transaction().unwrap();
-    tx.batch_execute(include_str!(
-        "../migrations/0032_query_program_references.sql"
-    ))
-    .unwrap();
-    let row = tx.query_one("SELECT complete,problem_code,walker_version FROM atomic_program_reference_state WHERE singleton", &[]).unwrap();
-    assert!(!row.get::<_, bool>(0));
-    assert_eq!(
-        row.get::<_, Option<String>>(1).as_deref(),
-        Some("program/obsolete-reference-walker")
-    );
-    assert_eq!(row.get::<_, i64>(2), 1);
-    assert!(
-        tx.query("SELECT atomic_collect_program_garbage(0,4096)", &[])
-            .unwrap()
-            .is_empty()
-    );
-    tx.rollback().unwrap();
     PostgresMigrator::connect(&fixture.scope.connection)
         .unwrap()
         .migrate()
         .unwrap();
-    schema34_downgrade::assert_restored(&mut fixture.sql);
     assert_eq!(fixture.references(), fixture.expected());
     assert_eq!(fixture.canonical_bytes(), bytes);
     let row = fixture.sql.query_one("SELECT complete,problem_code,walker_version,updated_at::text FROM atomic_program_reference_state WHERE singleton", &[]).unwrap();
@@ -271,7 +230,7 @@ fn walker_two_migration_rebuilds_native_literal_closure_and_sql_fails_closed() {
         );
     }
     eprintln!(
-        "isolated SQL31→32 + walker1→2 authenticated rebuild, literal reachability and GC completed in {:?}",
+        "current-schema authenticated reference repair, literal reachability and GC completed in {:?}",
         started.elapsed()
     );
 }

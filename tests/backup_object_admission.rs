@@ -85,7 +85,7 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
     let temporary = tempfile::tempdir().unwrap();
     let small_repository = temporary.path().join("small");
     let large_repository = temporary.path().join("large");
-    PortableBackup::connect(&fixture.connection)
+    let small_point = PortableBackup::connect(&fixture.connection)
         .unwrap()
         .backup_database("admission", &small_repository)
         .unwrap();
@@ -138,17 +138,32 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
     assert!(offline.cache_stats().current_bytes <= 1024);
     drop(offline);
 
-    let root = fs::read_dir(small_repository.join("objects"))
+    let root_hash = fs::read_dir(small_repository.join("objects"))
         .unwrap()
         .find_map(|entry| {
             let path = entry.unwrap().path();
             let bytes = fs::read(&path).unwrap();
-            let node = persistent_tree::decode_tree_node(&sha256(&bytes), &bytes).ok()?;
-            matches!(node, persistent_tree::TreeNode::Root(ref node)
-            if node.order == IndexOrder::Eavt && !node.history)
-            .then_some(path)
+            let manifest = PersistentTreeManifest::decode(&bytes).ok()?;
+            // Log lookup trees and receipt bases also have EAVT roots. Select
+            // the read tree at this backup's exact endpoint, independent of
+            // filesystem enumeration order, rather than corrupting any root.
+            (manifest.database_id == small_point.lineage_id
+                && manifest.basis_t == small_point.basis_t)
+                .then(|| {
+                    manifest
+                        .tree(IndexOrder::Eavt, false)
+                        .unwrap()
+                        .descriptor
+                        .root_hash
+                })
         })
         .expect("exact EAVT root is in the repository");
+    let root = small_repository.join("objects").join(
+        root_hash
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
     fs::OpenOptions::new()
         .write(true)
         .open(root)

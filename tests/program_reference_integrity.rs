@@ -1,8 +1,6 @@
-//! Versioned program reachability is derived evidence. Upgrade authenticates
+//! Program reachability is derived evidence. Current-schema repair authenticates
 //! retained log values and fixed code dependencies before allowing reclamation.
 mod common;
-#[path = "common/schema34_downgrade.rs"]
-mod schema34_downgrade;
 
 use atomic_core::{
     Attribute, CallableRef, Cardinality, DB_EXCISE, Digest, EntityRef, Instruction, Keyword,
@@ -18,38 +16,6 @@ const PROGRAMS: u32 = 1_000;
 const NUMBER: u32 = 1_001;
 const HIDDEN_CODE: u32 = 1_002;
 static TEST_GATE: Mutex<()> = Mutex::new(());
-
-/// Regenerate the checked-in historical fixture only with the preserved
-/// pre-31 native library. Normal test runs consume its authenticated bytes;
-/// they never seed a current writer and relabel its output as an old format.
-#[test]
-#[ignore = "fixture generator: compile against the genuine schema-30 library and supply an unused private output directory"]
-fn capture_pre31_program_reference_backup_fixture() {
-    assert_eq!(
-        POSTGRES_SCHEMA_VERSION, 30,
-        "capture requires the genuine pre-31 native library"
-    );
-    let directory = std::path::PathBuf::from(
-        std::env::var("ATOMIC_PROGRAM_REFERENCE_CAPTURE")
-            .expect("explicit fixture output directory"),
-    );
-    assert!(
-        !directory.exists(),
-        "never overwrite an existing historical fixture"
-    );
-    let mut fixture =
-        Fixture::create("capture").expect("configured disposable PostgreSQL required");
-    let point = atomic_core::PortableBackup::connect(&fixture.connection)
-        .unwrap()
-        .backup_database(&fixture.database, &directory)
-        .unwrap();
-    let versions: Vec<i16> = fixture.admin.query("SELECT DISTINCT envelope_version FROM atomic_transaction_contents ORDER BY envelope_version", &[]).unwrap().into_iter().map(|row| row.get(0)).collect();
-    assert_eq!(versions, vec![1]);
-    eprintln!(
-        "historical fixture point={point:?}; noise={}; roots={:?}; dependencies={:?}; unused={:?}",
-        fixture.noise, fixture.roots, fixture.dependencies, fixture.unused
-    );
-}
 
 fn unique(label: &str) -> String {
     format!(
@@ -77,29 +43,23 @@ fn decode_hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-fn historical_hash(text: &str) -> Digest {
-    decode_hex(text)
-        .try_into()
-        .expect("fixture digest is 32 bytes")
-}
-
-fn historical_query_field(field: &str) -> Vec<u8> {
+fn fixture_query_field(field: &str) -> Vec<u8> {
     let line = include_str!("fixtures/program_query_abi7.hex")
         .lines()
         .find_map(|line| line.strip_prefix(&format!("{field} ")))
-        .expect("fixed historical field");
+        .expect("fixed program fixture field");
     decode_hex(line)
 }
 
 #[test]
-fn historical_abi7_query_bytes_hash_and_observation_are_unchanged() {
-    let bytes = historical_query_field("program");
+fn abi7_query_bytes_hash_and_observation_are_stable() {
+    let bytes = fixture_query_field("program");
     let program = atomic_core::decode_program(&bytes).unwrap();
     assert_eq!(atomic_core::encode_program(&program).unwrap(), bytes);
     assert_eq!(&bytes[16..18], &7u16.to_be_bytes());
     assert_eq!(
         atomic_core::program_hash(&program).unwrap().as_slice(),
-        historical_query_field("hash")
+        fixture_query_field("hash")
     );
     let output = atomic_core::ProgramRuntime
         .execute_runtime(
@@ -118,239 +78,8 @@ fn historical_abi7_query_bytes_hash_and_observation_are_unchanged() {
     );
     assert_eq!(
         atomic_core::encode_program_output(&output).unwrap(),
-        historical_query_field("output")
+        fixture_query_field("output")
     );
-}
-
-struct HistoricalBackup(std::path::PathBuf);
-
-impl Drop for HistoricalBackup {
-    fn drop(&mut self) {
-        // Only the unique directory this helper created is removed.
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn historical_backup() -> HistoricalBackup {
-    use std::io::Write;
-    fn create_directory(path: &std::path::Path, recursive: bool) {
-        let mut builder = std::fs::DirBuilder::new();
-        builder.recursive(recursive);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
-        }
-        builder.create(path).unwrap();
-    }
-    let directory = std::env::temp_dir().join(unique("historical_backup"));
-    create_directory(&directory, false);
-    let fixture = HistoricalBackup(directory);
-    let mut files = 0;
-    for line in include_str!("fixtures/program_reference_v1.hex").lines() {
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let (relative, hex) = line.split_once(' ').expect("fixture path and bytes");
-        assert!(
-            relative == "CLAIM"
-                || relative == "snapshots/00000000000000000003-g00000000000000000001.atbk"
-                || relative
-                    .strip_prefix("objects/")
-                    .is_some_and(|hash| hash.len() == 64
-                        && hash
-                            .bytes()
-                            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
-        );
-        let path = fixture.0.join(relative);
-        create_directory(path.parent().unwrap(), true);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options
-            .open(path)
-            .unwrap()
-            .write_all(&decode_hex(hex))
-            .unwrap();
-        files += 1;
-    }
-    assert_eq!(files, 44);
-    fixture
-}
-
-#[test]
-fn historical_program_reference_fixture_is_authenticated_without_postgres() {
-    let fixture = historical_backup();
-    let verified = atomic_core::PortableBackup::verify_backup(&fixture.0, 3, true).unwrap();
-    assert_eq!(
-        verified.point.manifest_hash,
-        historical_hash("71c964209bc86a457066a835e33aa3b5a1c576430a56018a8935731c5564c7c0")
-    );
-    assert_eq!(
-        verified.point.lineage_id,
-        "75e47868-dd17-46ca-9300-0714b8082c9d"
-    );
-    assert_eq!(verified.point.log_generation, 1);
-    assert_eq!(verified.database.basis_t(), 3);
-}
-
-/// Restore only a named historical function, never re-run an entire migration
-/// over populated fixture tables. These exact definitions make the fixture a
-/// genuine old schema instead of retaining newer behavior under old records.
-fn historical_function<'a>(sql: &'a str, name: &str) -> &'a str {
-    let start = sql
-        .find(&format!("CREATE OR REPLACE FUNCTION {name}("))
-        .expect("historical function must exist");
-    let end = start
-        + sql[start..]
-            .find("\n$$;")
-            .expect("historical function terminator")
-        + 4;
-    &sql[start..end]
-}
-
-/// Strip the later optional artifacts from this private, stopped fixture before
-/// restoring schema23. Canonical log/program/tree values are never rewritten.
-fn remove_migration_31(transaction: &mut postgres::Transaction<'_>) {
-    schema34_downgrade::remove_migration_34(transaction);
-    let latest: i64 = transaction
-        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-        .unwrap()
-        .get(0);
-    if latest > 31 {
-        assert_eq!(
-            latest, 33,
-            "each newer fixture artifact needs an explicit historical disposition"
-        );
-        // Migration 33 is an operator version fence only; it adds no objects.
-        transaction
-            .batch_execute(historical_function(
-                include_str!("../migrations/0024_versioned_program_references.sql"),
-                "atomic_collect_program_garbage",
-            ))
-            .unwrap();
-        transaction.batch_execute("UPDATE atomic_program_reference_state SET walker_version=1; DELETE FROM atomic_schema_migrations WHERE version>=32").unwrap();
-    }
-    let installed: i64 = transaction
-        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-        .unwrap()
-        .get(0);
-    if installed <= 30 {
-        return;
-    }
-    assert_eq!(
-        installed, 31,
-        "each newer fixture artifact requires an explicit historical disposition"
-    );
-    assert_eq!(transaction.query_one("SELECT count(*) FROM atomic_transaction_contents WHERE envelope_version<>1 OR substring(payload FROM 5 FOR 2)<>decode('0001','hex')", &[]).unwrap().get::<_, i64>(0), 0,
-        "only authentic pre-31 content can inhabit the historical schema fixture");
-    transaction.batch_execute("DROP TRIGGER atomic_content_envelope_version ON atomic_transaction_contents; DROP FUNCTION atomic_content_envelope_version(); ALTER TABLE atomic_transaction_contents DROP CONSTRAINT atomic_transaction_contents_envelope_version_check; ALTER TABLE atomic_transaction_contents ADD CONSTRAINT atomic_transaction_contents_envelope_version_check CHECK (envelope_version=1); DELETE FROM atomic_schema_migrations WHERE version=31").unwrap();
-}
-
-fn remove_migrations_26_through_30(transaction: &mut postgres::Transaction<'_>) {
-    remove_migration_31(transaction);
-    let installed: i64 = transaction
-        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-        .unwrap()
-        .get(0);
-    if installed <= 25 {
-        return;
-    }
-    assert_eq!(
-        installed, 30,
-        "add explicit rollback for newer fixture artifacts"
-    );
-    for relation in [
-        "atomic_change_checkpoints",
-        "atomic_remote_writer_endpoints",
-    ] {
-        assert_eq!(
-            transaction
-                .query_one(&format!("SELECT count(*) FROM {relation}"), &[])
-                .unwrap()
-                .get::<_, i64>(0),
-            0,
-            "stopped upgrade fixture must not discard consumer or routing state",
-        );
-    }
-    // Search and compressed blocks are discardable projections. Remove their
-    // tables, functions and external trigger, not just migration version rows.
-    transaction
-        .batch_execute(
-            "DROP TRIGGER atomic_tree_manifest_fulltext_garbage ON atomic_tree_manifests;
-         DROP TABLE atomic_fulltext_page_edges, atomic_fulltext_page_roots,
-                    atomic_fulltext_page_builds, atomic_fulltext_page_garbage,
-                    atomic_fulltext_pages, atomic_fulltext_projections,
-                    atomic_fulltext_blocks, atomic_fulltext_garbage,
-                    atomic_change_checkpoints, atomic_remote_writer_endpoints,
-                    atomic_tree_node_blocks;
-         DROP FUNCTION atomic_fulltext_gc_pin_key(),
-                       atomic_validate_fulltext_page_source(),
-                       atomic_validate_fulltext_projection_root(),
-                       atomic_enqueue_fulltext_source_pages(BYTEA),
-                       atomic_track_fulltext_page_reference(),
-                       atomic_retire_fulltext_build(),
-                       atomic_finish_fulltext_build(BYTEA),
-                       atomic_fulltext_garbage_candidates(BIGINT),
-                       atomic_collect_fulltext_garbage(BIGINT),
-                       atomic_mark_fulltext_garbage(),
-                       atomic_validate_fulltext_block_insert(),
-                       atomic_reject_fulltext_mutation(),
-                       atomic_validate_remote_writer_endpoint(),
-                       atomic_discover_remote_writer(TEXT,TEXT),
-                       atomic_validate_tree_node_block_insert(),
-                       atomic_reject_tree_node_block_mutation();
-         DELETE FROM atomic_schema_migrations WHERE version BETWEEN 26 AND 30;",
-        )
-        .unwrap();
-}
-
-fn remove_migration_25(transaction: &mut postgres::Transaction<'_>) {
-    remove_migrations_26_through_30(transaction);
-    let installed: i64 = transaction
-        .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-        .unwrap()
-        .get(0);
-    if installed <= 24 {
-        return;
-    }
-    assert_eq!(
-        installed, 25,
-        "add explicit fixture rollback for each newer migration; never pretend its artifacts are schema23"
-    );
-    assert_eq!(
-        transaction
-            .query_one(
-                "SELECT count(*) FROM atomic_receipt_archive_conversions",
-                &[]
-            )
-            .unwrap()
-            .get::<_, i64>(0),
-        0,
-        "upgrade fixture must not discard active receipt conversions"
-    );
-    transaction.batch_execute("DROP FUNCTION atomic_finish_receipt_archive_conversion(BYTEA,BIGINT); DROP FUNCTION atomic_begin_receipt_archive_conversion(BYTEA,BIGINT); DROP FUNCTION atomic_receipt_archive_conversion_context(BYTEA); DROP FUNCTION atomic_collect_tree_retirement(TEXT,BIGINT,BYTEA,BIGINT,BIGINT); ALTER FUNCTION atomic_collect_tree_retirement_unconverted_v22(TEXT,BIGINT,BYTEA,BIGINT,BIGINT) RENAME TO atomic_collect_tree_retirement; DROP FUNCTION atomic_collect_request_base_archive(TEXT,BIGINT,BYTEA,BIGINT,BIGINT); ALTER FUNCTION atomic_collect_request_base_archive_unconverted_v20(TEXT,BIGINT,BYTEA,BIGINT,BIGINT) RENAME TO atomic_collect_request_base_archive").unwrap();
-    let archive_sql = include_str!("../migrations/0020_request_base_archives.sql");
-    for name in [
-        "atomic_validate_request_base_archive_insert",
-        "atomic_reject_request_base_archive_mutation",
-        "atomic_collect_request_base_archive",
-    ] {
-        transaction
-            .batch_execute(historical_function(archive_sql, name))
-            .unwrap();
-    }
-    transaction
-        .batch_execute(historical_function(
-            include_str!("../migrations/0017_request_snapshot_bases.sql"),
-            "atomic_release_inactive_request_bases",
-        ))
-        .unwrap();
-    transaction.batch_execute("DROP TABLE atomic_receipt_archive_frontier; DROP TABLE atomic_receipt_archive_conversions; DELETE FROM atomic_schema_migrations WHERE version=25").unwrap();
 }
 
 struct RestoreArtifacts {
@@ -382,14 +111,6 @@ struct Fixture {
 
 impl Fixture {
     fn create(label: &str) -> Option<Self> {
-        Self::create_with_source(label, false)
-    }
-
-    fn create_historical(label: &str) -> Option<Self> {
-        Self::create_with_source(label, true)
-    }
-
-    fn create_with_source(label: &str, historical: bool) -> Option<Self> {
         let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
             eprintln!("SKIP PostgreSQL: set ATOMIC_POSTGRES_URL");
             return None;
@@ -416,60 +137,7 @@ impl Fixture {
             .unwrap()
             .migrate()
             .unwrap();
-        let database = "reference-upgrade".to_owned();
-        if historical {
-            let backup = historical_backup();
-            let restored = atomic_core::PortableBackup::connect(&connection)
-                .unwrap()
-                .restore_backup_point(&backup.0, 3, 1, &database)
-                .unwrap();
-            assert_eq!(restored.basis_t(), 3);
-            let versions: Vec<i16> = admin.query("SELECT DISTINCT envelope_version FROM atomic_transaction_contents ORDER BY envelope_version", &[]).unwrap().into_iter().map(|row| row.get(0)).collect();
-            assert_eq!(
-                versions,
-                vec![1],
-                "restore must preserve historical canonical bytes"
-            );
-            // This deliberately unreferenced blob is not part of a portable
-            // backup's closure. Deploying it does not append a transaction.
-            let unused = PostgresStore::connect(&connection)
-                .unwrap()
-                .deploy_program_blob(&Program {
-                    kind: ProgramKind::Transaction,
-                    arity: 0,
-                    instructions: vec![
-                        Instruction::PushConstant(Value::Long(999)),
-                        Instruction::Pop,
-                        Instruction::Return,
-                    ],
-                })
-                .unwrap();
-            admin.execute("UPDATE atomic_program_gc_candidates SET candidate_at=clock_timestamp()-interval '40 days'", &[]).unwrap();
-            return Some(Self {
-                _guard: guard,
-                admin,
-                schema_name,
-                connection,
-                database,
-                roots: [
-                    "7969f764efa1e5986d63b5c5821e67bddb0eb52468e1f2927f18266c8273328a",
-                    "1880b4c0e8ebfc00be87c85aae514ec8fab09bf81bccce8bac7a2b797be51100",
-                    "d1d89460aecb77b10941d3ff776f043cc261582342350cac346f610fc505e25a",
-                ]
-                .map(historical_hash)
-                .to_vec(),
-                dependencies: [
-                    "00e9978d6d0ba5ea5e4fa6146dc06185596451de08aa762fb9ae106b943e77c3",
-                    "e65a47dfa906c8c6b8aed724c121f44e8eee39173770a910da139163a561c61b",
-                    "4df59a39053e9269bcb0f1be44fbdd2c8ab8f05a7952d383ea86458769f3b621",
-                    "f02f4ab1bd4bf870c9202ca16fdfa167caf2af07a89dd7a51d2ff6aaee68cd04",
-                ]
-                .map(historical_hash)
-                .to_vec(),
-                unused,
-                noise: 17_592_186_045_419,
-            });
-        }
+        let database = "reference-integrity".to_owned();
         let mut schema = Schema::new();
         schema
             .install(Attribute::new(
@@ -649,7 +317,7 @@ impl Fixture {
         self.admin.query("SELECT program_hash FROM atomic_program_generation_refs WHERE database_id=$1 AND log_generation=$2", &[&self.database, &generation]).unwrap().into_iter().map(|row| row.get(0)).collect()
     }
 
-    fn remove_old_omissions(&mut self) {
+    fn remove_dependency_references(&mut self) {
         let mut transaction = self.admin.transaction().unwrap();
         transaction
             .batch_execute("SET LOCAL session_replication_role = replica")
@@ -666,25 +334,8 @@ impl Fixture {
     }
 
     fn obsolete(&mut self) {
-        self.remove_old_omissions();
+        self.remove_dependency_references();
         self.admin.batch_execute("UPDATE atomic_program_reference_state SET complete=true, problem_code=NULL, walker_version=0").unwrap();
-    }
-
-    fn downgrade_to_23(&mut self) {
-        self.remove_old_omissions();
-        let old = include_str!("../migrations/0014_log_generations.sql");
-        let start = old
-            .find("CREATE OR REPLACE FUNCTION atomic_collect_program_garbage(")
-            .unwrap();
-        let end = old[start..]
-            .find("CREATE OR REPLACE FUNCTION atomic_publish_tree(")
-            .unwrap()
-            + start;
-        let mut transaction = self.admin.transaction().unwrap();
-        remove_migration_25(&mut transaction);
-        transaction.batch_execute(&old[start..end]).unwrap();
-        transaction.batch_execute("ALTER TABLE atomic_program_reference_state DROP COLUMN walker_version; DELETE FROM atomic_schema_migrations WHERE version=24").unwrap();
-        transaction.commit().unwrap();
     }
 
     fn canonical_fingerprint(&mut self) -> Digest {
@@ -717,77 +368,39 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
-    let Some(mut fixture) = Fixture::create_historical("v23") else {
+fn current_schema_reference_repair_preserves_canonical_values_and_exact_retries() {
+    let Some(mut fixture) = Fixture::create("repair") else {
         return;
     };
-    let expected_v24_checksum: Vec<u8> = fixture
+    let canonical = fixture.canonical_fingerprint();
+    let baseline = fixture
         .admin
         .query_one(
-            "SELECT checksum FROM atomic_schema_migrations WHERE version=24",
+            "SELECT version, checksum FROM atomic_schema_migrations",
             &[],
         )
-        .unwrap()
-        .get(0);
-    let canonical = fixture.canonical_fingerprint();
-    fixture.downgrade_to_23();
-    assert_eq!(fixture.canonical_fingerprint(), canonical);
-    let prior = fixture
-        .admin
-        .query(
-            "SELECT version, checksum FROM atomic_schema_migrations ORDER BY version",
-            &[],
-        )
-        .unwrap()
-        .into_iter()
-        .map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1)))
-        .collect::<Vec<_>>();
-    assert_eq!(prior.len(), 23);
-    assert!(
-        fixture
-            .admin
-            .query_one(
-                "SELECT complete FROM atomic_program_reference_state WHERE singleton",
-                &[]
-            )
-            .unwrap()
-            .get::<_, bool>(0)
-    );
-    assert_eq!(
-        PostgresStore::connect(&fixture.connection)
-            .err()
-            .unwrap()
-            .code,
-        "postgres/schema-upgrade-required"
-    );
+        .unwrap();
+    let version: i64 = baseline.get(0);
+    let checksum: Vec<u8> = baseline.get(1);
+    assert_eq!(version, POSTGRES_SCHEMA_VERSION);
+    fixture.obsolete();
     PostgresMigrator::connect(&fixture.connection)
         .unwrap()
         .migrate()
         .unwrap();
-    schema34_downgrade::assert_restored(&mut fixture.admin);
     assert!(fixture.marker().0);
     assert_eq!(fixture.marker().2, 2);
     assert_eq!(fixture.references(1), fixture.expected());
     assert_eq!(fixture.canonical_fingerprint(), canonical);
-    let after = fixture.admin.query("SELECT version, checksum FROM atomic_schema_migrations WHERE version<=23 ORDER BY version", &[]).unwrap().into_iter().map(|row| (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1))).collect::<Vec<_>>();
-    assert_eq!(prior, after);
-    let restored_v24_checksum: Vec<u8> = fixture
+    let after = fixture
         .admin
         .query_one(
-            "SELECT checksum FROM atomic_schema_migrations WHERE version=24",
+            "SELECT version, checksum FROM atomic_schema_migrations",
             &[],
         )
-        .unwrap()
-        .get(0);
-    assert_eq!(restored_v24_checksum, expected_v24_checksum);
-    assert_eq!(
-        fixture
-            .admin
-            .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-            .unwrap()
-            .get::<_, i64>(0),
-        POSTGRES_SCHEMA_VERSION
-    );
+        .unwrap();
+    assert_eq!(after.get::<_, i64>(0), version);
+    assert_eq!(after.get::<_, Vec<u8>>(1), checksum);
     let collected = fixture
         .admin
         .query("SELECT atomic_collect_program_garbage(0,4096)", &[])
@@ -797,29 +410,28 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
         .collect::<Vec<_>>();
     assert_eq!(collected, vec![fixture.unused.to_vec()]);
     assert_eq!(fixture.references(1), fixture.expected());
-    // Invoke the genuinely old native query/predicate bytes, then retry a
-    // request committed by the schema30 executable. No current-writer output
-    // is relabeled as an old artifact.
+    // Exercise supported query and predicate programs after repair, then
+    // retry an existing request and verify its exact snapshot pair.
     let mut store = PostgresStore::connect(&fixture.connection).unwrap();
-    let query_bytes = historical_query_field("program");
+    let query_bytes = fixture_query_field("program");
     let query = atomic_core::decode_program(&query_bytes).unwrap();
     let query_hash = store.deploy_program_blob(&query).unwrap();
-    assert_eq!(query_hash.as_slice(), historical_query_field("hash"));
-    let old_predicate = store.resolve_program(fixture.roots[2]).unwrap();
+    assert_eq!(query_hash.as_slice(), fixture_query_field("hash"));
+    let predicate = store.resolve_program(fixture.roots[2]).unwrap();
     assert_eq!(
-        atomic_core::program_hash(&old_predicate).unwrap(),
+        atomic_core::program_hash(&predicate).unwrap(),
         fixture.roots[2]
     );
     let writer = common::start_service(&fixture.connection, &fixture.database);
     let installed = common::transact(
         &writer,
-        "old-code-bindings",
+        "code-bindings",
         3,
         &[
             TxOp::Add {
                 entity: EntityRef::Temp("query".into()),
                 attribute: atomic_core::DB_IDENT as u32,
-                value: Value::Keyword(Keyword::new("old", "query")).into(),
+                value: Value::Keyword(Keyword::new("app", "query")).into(),
             },
             TxOp::Add {
                 entity: EntityRef::Temp("query".into()),
@@ -829,7 +441,7 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
             TxOp::Add {
                 entity: EntityRef::Temp("predicate".into()),
                 attribute: atomic_core::DB_IDENT as u32,
-                value: Value::Keyword(Keyword::new("old", "predicate")).into(),
+                value: Value::Keyword(Keyword::new("app", "predicate")).into(),
             },
             TxOp::Add {
                 entity: EntityRef::Temp("predicate".into()),
@@ -843,7 +455,7 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
     let value = peer.db();
     let output = value
         .invoke(
-            Keyword::new("old", "query"),
+            Keyword::new("app", "query"),
             &[atomic_core::RuntimeValue::Vector(
                 (1..=4)
                     .map(|value| atomic_core::RuntimeValue::Scalar(Value::Long(value)))
@@ -854,7 +466,7 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
         .unwrap();
     assert_eq!(
         atomic_core::encode_program_output(&output).unwrap(),
-        historical_query_field("output")
+        fixture_query_field("output")
     );
     for (role, argument) in [
         (atomic_core::InvokeRole::AttributePredicate, Value::Long(42)),
@@ -865,7 +477,7 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
     ] {
         let output = value
             .invoke(
-                Keyword::new("old", "predicate"),
+                Keyword::new("app", "predicate"),
                 &[atomic_core::RuntimeValue::Scalar(argument)],
                 atomic_core::InvokeControl {
                     role,
@@ -878,7 +490,7 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
             | atomic_core::ProgramOutput::EntityPredicate(value) => {
                 assert!(atomic_core::is_exact_true(&value))
             }
-            other => panic!("old predicate changed role: {other:?}"),
+            other => panic!("predicate changed role: {other:?}"),
         }
     }
     let request = || {
@@ -922,7 +534,7 @@ fn schema23_complete_marks_are_rebuilt_with_unchanged_prior_checksums() {
     );
     restarted.shutdown();
     eprintln!(
-        "genuine old artifacts: ABI7 hash/output unchanged; both ABI5 predicate roles true; schema30 receipt retries retain basis3 and exact before10/after11 across restart"
+        "reference repair preserves program execution and receipt retries retain exact snapshots across restart"
     );
 }
 
@@ -977,14 +589,9 @@ fn obsolete_markers_block_both_inventory_and_sql_gc_and_healthy_migrate_is_read_
 
 #[test]
 fn missing_and_corrupt_dependencies_abort_reference_repair_atomically() {
-    for (corrupt, historical) in [(false, false), (true, false), (false, true), (true, true)] {
+    for corrupt in [false, true] {
         let label = if corrupt { "corrupt" } else { "missing" };
-        let fixture = if historical {
-            Fixture::create_historical(label)
-        } else {
-            Fixture::create(label)
-        };
-        let Some(mut fixture) = fixture else {
+        let Some(mut fixture) = Fixture::create(label) else {
             return;
         };
         fixture.obsolete();
@@ -1026,47 +633,6 @@ fn missing_and_corrupt_dependencies_abort_reference_repair_atomically() {
                 .query("SELECT atomic_collect_program_garbage(0,4096)", &[])
                 .unwrap()
                 .is_empty()
-        );
-        if !historical {
-            // Current ATLC v2 corruption coverage remains current; never
-            // pretend those canonical bytes are a historical schema23 log.
-            continue;
-        }
-        // A failing actual 23->24 upgrade rolls back DDL and its migration
-        // record too. New runtime entry points remain closed. Operators must
-        // not resume legacy GC after such a rollback; old binaries cannot be
-        // retroactively made safe by a migration that did not commit.
-        let canonical = fixture.canonical_fingerprint();
-        fixture.downgrade_to_23();
-        let error = PostgresMigrator::connect(&fixture.connection)
-            .unwrap()
-            .migrate()
-            .unwrap_err();
-        assert_eq!(
-            error.code,
-            if corrupt {
-                "postgres/program-ref-hash"
-            } else {
-                "postgres/program-ref-missing-program"
-            }
-        );
-        assert_eq!(
-            fixture
-                .admin
-                .query_one("SELECT max(version) FROM atomic_schema_migrations", &[])
-                .unwrap()
-                .get::<_, i64>(0),
-            23
-        );
-        assert!(!fixture.admin.query_one("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='atomic_program_reference_state' AND column_name='walker_version')", &[]).unwrap().get::<_, bool>(0));
-        assert_eq!(fixture.references(1), refs);
-        assert_eq!(fixture.canonical_fingerprint(), canonical);
-        assert_eq!(
-            PostgresStore::connect(&fixture.connection)
-                .err()
-                .unwrap()
-                .code,
-            "postgres/schema-upgrade-required"
         );
     }
 }
@@ -1288,7 +854,7 @@ fn retained_no_history_log_references_are_not_lost_by_materialized_replay() {
 }
 
 #[test]
-fn paused_headless_restore_keeps_prestaged_program_roots_through_upgrade_and_gc() {
+fn paused_headless_restore_keeps_prestaged_program_roots_through_repair_and_gc() {
     let Some(fixture) = Fixture::create("paused_restore") else {
         return;
     };
@@ -1395,7 +961,7 @@ fn paused_headless_restore_keeps_prestaged_program_roots_through_upgrade_and_gc(
 }
 
 #[test]
-fn authenticated_partial_generation_gc_can_resume_after_reference_upgrade() {
+fn authenticated_partial_generation_gc_can_resume_after_reference_repair() {
     let Some(mut fixture) = Fixture::create("partial_gc") else {
         return;
     };
@@ -1483,5 +1049,5 @@ fn authenticated_partial_generation_gc_can_resume_after_reference_upgrade() {
             return;
         }
     }
-    panic!("bounded collection should finish after upgrade");
+    panic!("bounded collection should finish after reference repair");
 }
