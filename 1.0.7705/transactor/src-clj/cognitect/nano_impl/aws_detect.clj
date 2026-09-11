@@ -1,5 +1,5 @@
 ;; Copyright (c) Cognitect, Inc.
-;; All rights reserved.
+
 
 ;; Legacy, probably could be removed.
 ;; See https://app.shortcut.com/datomic/story/193577.

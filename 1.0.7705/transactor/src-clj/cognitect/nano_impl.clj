@@ -1,5 +1,4 @@
 ;; Copyright (c) Cognitect, Inc.
-;; All rights reserved.
 
 (ns cognitect.nano-impl
   (:require

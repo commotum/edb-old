@@ -1,5 +1,5 @@
 ;; Copyright (c) Cognitect, Inc.
-;; All rights reserved.
+
 
 (ns ^{:doc "Common Datomic server-side specs shared across projects.
 Do not add specs here until you need cross-project sharing."}
