@@ -28,7 +28,7 @@ const MAX_LINEAGE_BYTES: usize = 64;
 // The existing transaction codec accepts a 64 MiB body. The small allowance
 // covers the lineage and collection headers while avoiding a new lower limit.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024 + 1024;
-const MAX_ENVELOPE_BYTES: usize = HEADER_LEN + MAX_BODY_BYTES + CHECKSUM_LEN;
+pub(crate) const MAX_ENVELOPE_BYTES: usize = HEADER_LEN + MAX_BODY_BYTES + CHECKSUM_LEN;
 const MEMBERSHIP_DOMAIN: &[u8] = b"atomic/generation-membership/v1\0";
 
 /// Immutable logical content shared by every physical generation that carries

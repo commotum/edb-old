@@ -4,6 +4,8 @@
 transactor, PostgreSQL connection, restore or full replay. `open_point(path,
 &point)` selects an exact `BackupPoint` from `PortableBackup::list_backup_points`.
 `db()` and `log()` keep that fixed point even when later backups are published.
+Relative repository paths are anchored when opened; changing the process's
+working directory does not redirect an existing handle's later reads.
 Retain the point's lineage, generation, basis and manifest hash when sharing it.
 An online `SnapshotReference` is not a backup locator.
 
@@ -37,6 +39,15 @@ routing references retained. This can make capture more expensive; it does not
 move a hidden full restore into the reader. Log lookup updates reuse old tree
 paths. Nothing changes PostgreSQL canonical data.
 
+A fresh database can be backed up immediately after `atomic create`, without
+starting a transactor or publishing indexes first. When usable derived indexes
+are absent or damaged, capture reconstructs from the copied canonical log using
+the existing semantic verifier and writes the exact read index into the backup.
+This recovery path is eager and costs memory proportional to the recovered
+database/log; it neither repairs the source nor adds replay to offline opening.
+Required receipt-base and program objects must still be available; missing
+canonical provenance is an error, not permission to drop exact-retry semantics.
+
 Opening reads root and schema/ident metadata; data leaves and log payloads are
 loaded on demand and authenticated against their immutable references. Missing
 or corrupt required files return errors, and failed cursors fuse. A previously
@@ -49,6 +60,14 @@ results are separate memory. `read_stats()` reports immutable-object bytes/read
 counts, including object admission; repository directory/claim/locator metadata
 and OS block traffic are not included. Complete-path wall time includes them.
 `cache_stats()` reports retained cache bytes, hits and evictions.
+
+Repository file sizes and envelope lengths are checked before body allocation
+against the existing format limits, independently of the cache budget. Reads
+cannot follow a growing file beyond its admitted length. Formats without a
+codec-wide size ceiling are authenticated with bounded scratch space before
+allocation, rather than imposing a new limit on valid receipt data. This can
+require a second file pass; these physical file passes are not cache statistics.
+Valid large datoms remain readable even with a smaller or disabled node cache.
 
 At64 and8192 entities, the optimized PostgreSQL-created fixture read16 immutable
 objects to open, then2 more for a three-result query; examined datoms were4 at

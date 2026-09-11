@@ -38,7 +38,7 @@ pub(super) fn capture_exact_read_tree(
         )?
         .eidx_frontier
     };
-    let (snapshot, _) = TieredSnapshot::open_exact_configured(
+    let opened = TieredSnapshot::open_exact_configured(
         connection,
         database_id,
         ExactEndpoint {
@@ -52,24 +52,117 @@ pub(super) fn capture_exact_read_tree(
         64,
         16 * 1024 * 1024,
         crate::recent::RecentLimits::default(),
-    )?;
-    let reserved = snapshot.reserved_allocation()?;
-    if let Some(tree) = captured {
-        let manifest =
-            PersistentTreeManifest::decode(&read_object(publisher.directory, tree.manifest_hash)?)?;
-        if manifest.basis_t == backup.basis {
-            return Ok((tree, reserved));
+    );
+    let (database, reserved) = match opened {
+        Ok((snapshot, _)) => {
+            let reserved = snapshot.reserved_allocation()?;
+            if let Some(tree) = captured {
+                let manifest = PersistentTreeManifest::decode(&read_object(
+                    publisher.directory,
+                    tree.manifest_hash,
+                )?)?;
+                if manifest.basis_t == backup.basis {
+                    return Ok((tree, reserved));
+                }
+            }
+            (snapshot.database_value(), reserved)
         }
+        Err(error)
+            if matches!(
+                error.code,
+                "peer/exact-no-native-publication" | "peer/exact-all-native-publications-invalid"
+            ) =>
+        {
+            // A newly created database need not have started a transactor or
+            // published any native index. Backups also remain an administrative
+            // recovery path when no publication survives. Reconstruct only at
+            // CAPTURE, from the already copied canonical objects, using the
+            // ordinary verifier's chain, semantic-state, receipt, program and
+            // allocation checks. This exceptional path retains an eager database
+            // and authenticated log, just like explicit recovery; offline open
+            // and all healthy native captures remain lazy/streaming.
+            reconstruct_capture_database(publisher.directory, backup, frontier)?
+        }
+        Err(error) => return Err(error),
+    };
+    let read_tree = match capture_read_projection(&database, backup, frontier, publisher) {
+        Ok(tree) => tree,
+        Err(error)
+            if database.native_tiered_snapshot().is_some() && damaged_derived_node(&error) =>
+        {
+            // A data leaf can be damaged even when all roots and metadata
+            // paths opened successfully. Already emitted immutable nodes are
+            // harmless unreferenced objects; only a complete verified read
+            // root is published. Transport, canonical-log, cancellation and
+            // capacity failures are never classified as derived corruption.
+            let (database, reserved) =
+                reconstruct_capture_database(publisher.directory, backup, frontier)?;
+            return Ok((
+                capture_read_projection(&database, backup, frontier, publisher)?,
+                reserved,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    Ok((read_tree, reserved))
+}
+
+fn damaged_derived_node(error: &SemanticError) -> bool {
+    error.category == ErrorCategory::Fault
+        && !error.details.contains_key("postgres_sqlstate")
+        && matches!(
+            error.code,
+            "tree/node-content-corrupt"
+                | "tree/content-hash-mismatch"
+                | "peer/missing-tree-node"
+                | "peer/tree-child-kind"
+                | "peer/tree-child-reference"
+        )
+}
+
+fn reconstruct_capture_database(
+    directory: &Path,
+    backup: &Manifest,
+    frontier: u64,
+) -> Result<(crate::DatabaseValue, Option<ReservedAllocation>), SemanticError> {
+    let verified = PortableBackup::verify_loaded_backup(
+        directory,
+        backup.clone(),
+        sha256(&encode_manifest(backup)?),
+        false,
+    )?;
+    let database = verified.verification.database;
+    if database.eidx_frontier() != frontier {
+        return Err(fault(
+            "backup/read-replay-frontier",
+            "reconstructed read index differs from the captured allocation frontier",
+        ));
     }
+    let reserved = if backup.basis == 0 {
+        // Current creation starts at canonical bootstrap; from_genesis keeps
+        // legacy replay unseeded until its authenticated checkpoint arrives.
+        Some(ReservedAllocation::initial())
+    } else {
+        database.reserved_allocation()
+    };
+    Ok((database.database_value(), reserved))
+}
+
+fn capture_read_projection(
+    database: &crate::DatabaseValue,
+    backup: &Manifest,
+    frontier: u64,
+    publisher: &mut ObjectPublisher<'_>,
+) -> Result<TreeBackup, SemanticError> {
     // When indexing lags, build the exact read projection at capture time.
     // This is a streaming full-index pass, not a hidden full replay at open.
     // Encoded nodes are emitted promptly; subsequent points reuse their hashes.
     let mut trees = Vec::with_capacity(8);
     for history in [false, true] {
         let db = if history {
-            snapshot.database_value().history()
+            database.clone().history()
         } else {
-            snapshot.database_value()
+            database.clone()
         };
         for order in [
             IndexOrder::Eavt,
@@ -92,12 +185,12 @@ pub(super) fn capture_exact_read_tree(
         }
     }
     // Manifest tree order is canonical by history then index order.
-    let pending_avet = snapshot
-        .database_value()
+    let pending_avet = database
         .schema()
         .attributes()
         .filter(|attribute| {
-            (attribute.indexed || attribute.unique.is_some()) && !snapshot.avet_ready(attribute.id)
+            (attribute.indexed || attribute.unique.is_some())
+                && !database.physical_avet_ready(attribute.id)
         })
         .map(|attribute| crate::AvetProjectionWork::new(attribute.id, true))
         .collect::<Vec<_>>();
@@ -120,13 +213,10 @@ pub(super) fn capture_exact_read_tree(
     let bytes = manifest.encode()?;
     let hash = sha256(&bytes);
     publisher.publish(hash, &bytes)?;
-    Ok((
-        TreeBackup {
-            manifest_hash: hash,
-            legacy_node_hashes: None,
-        },
-        reserved,
-    ))
+    Ok(TreeBackup {
+        manifest_hash: hash,
+        legacy_node_hashes: None,
+    })
 }
 
 pub(super) fn capture_read_log_index(

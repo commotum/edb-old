@@ -83,6 +83,9 @@ mod backup_read;
 pub(crate) use backup_read::{BackupReadMetadata, open_read_point, read_log_transaction};
 use backup_read::{capture_exact_read_tree, capture_read_log_index};
 
+#[path = "backup_file.rs"]
+mod backup_file;
+
 #[cfg(test)]
 thread_local! {
     #[allow(clippy::type_complexity)]
@@ -815,7 +818,7 @@ impl PortableBackup {
                 continue;
             };
             require_regular_file(&entry.path(), "backup/root-type")?;
-            let bytes = fs::read(entry.path()).map_err(io_error("backup/list-read"))?;
+            let bytes = backup_file::read_manifest_file(&entry.path())?;
             let manifest = decode_manifest(&bytes)?;
             if manifest.basis != basis || manifest.log_generation != generation {
                 return Err(fault(
@@ -6785,7 +6788,7 @@ fn ensure_claim(directory: &Path, claim: &BackupClaim) -> Result<(), SemanticErr
 
 fn require_matching_claim(path: &Path, expected: &BackupClaim) -> Result<(), SemanticError> {
     require_regular_file(path, "backup/claim-type")?;
-    let bytes = fs::read(path).map_err(io_error("backup/read-claim"))?;
+    let bytes = backup_file::read_claim_file(path)?;
     if decode_claim(&bytes)? == *expected {
         Ok(())
     } else {
@@ -6946,7 +6949,7 @@ fn publish_exact(path: &Path, bytes: &[u8], fault_at: PublishFault) -> Result<bo
 
 fn existing_file_matches(path: &Path, bytes: &[u8]) -> Result<(), SemanticError> {
     require_regular_file(path, "backup/file-type")?;
-    if fs::read(path).map_err(io_error("backup/read-existing"))? == bytes {
+    if backup_file::file_matches(path, bytes)? {
         Ok(())
     } else {
         Err(fault(
@@ -6965,7 +6968,7 @@ fn sync_directory(directory: &Path, code: &'static str) -> Result<(), SemanticEr
 pub(crate) fn read_object(directory: &Path, hash: Digest) -> Result<Vec<u8>, SemanticError> {
     let path = objects(directory).join(hex(&hash));
     require_regular_file(&path, "backup/object-type")?;
-    let bytes = fs::read(path).map_err(io_error("backup/object-read"))?;
+    let bytes = backup_file::read_object_file(&path, hash)?;
     if sha256(&bytes) != hash {
         return Err(fault(
             "backup/object-corrupt",
@@ -7041,7 +7044,7 @@ fn load_manifest_path(
     log_generation: u64,
 ) -> Result<(Manifest, Digest), SemanticError> {
     require_regular_file(path, "backup/root-type")?;
-    let bytes = fs::read(path).map_err(io_error("backup/manifest-read"))?;
+    let bytes = backup_file::read_manifest_file(path)?;
     let hash = sha256(&bytes);
     let manifest = decode_manifest(&bytes)?;
     if manifest.basis != basis || manifest.log_generation != log_generation {
@@ -7779,7 +7782,7 @@ fn decode_claim(bytes: &[u8]) -> Result<BackupClaim, SemanticError> {
 fn verify_claim(directory: &Path, manifest: &Manifest) -> Result<(), SemanticError> {
     let path = directory.join("CLAIM");
     require_regular_file(&path, "backup/claim-type")?;
-    let bytes = fs::read(path).map_err(io_error("backup/claim-read"))?;
+    let bytes = backup_file::read_claim_file(&path)?;
     let claim = decode_claim(&bytes)?;
     if claim.lineage_id != manifest.lineage_id || claim.genesis_hash != manifest.genesis_hash {
         return Err(SemanticError::new(

@@ -14,7 +14,7 @@ const VERSION: u16 = 6;
 const HEADER_LEN: usize = 12;
 const CHECKSUM_LEN: usize = 32;
 const ROOTS: usize = 8;
-const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_MANIFEST_BYTES: usize = 64 * 1024 * 1024;
 const AVET_WORK_BYTES: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]

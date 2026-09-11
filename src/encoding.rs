@@ -36,6 +36,7 @@ const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const MAX_BLOB_LEN: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_BLOB_BYTES: usize = HEADER_LEN + MAX_BLOB_LEN + CHECKSUM_LEN;
 const MAX_VALUE_LEN: usize = 16 * 1024 * 1024;
 /// Total checked canonical blob size accepted for executable database code.
 /// Programs are serialized-pipeline inputs, so they receive a deliberately

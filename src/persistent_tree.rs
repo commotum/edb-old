@@ -27,7 +27,7 @@ pub const TREE_FORMAT_VERSION: u16 = 4;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const EMPTY_NODE_LEN: usize = HEADER_LEN + CHECKSUM_LEN;
-const MAX_TREE_NODE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_TREE_NODE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_NODE_ENTRIES: usize = 1_000_000;
 
 const KIND_LEAF: u8 = 1;

@@ -61,9 +61,26 @@ impl BackupConnection {
         point: Option<&BackupPoint>,
         config: BackupReadConfig,
     ) -> Result<Self, SemanticError> {
-        let metadata = crate::backup::open_read_point(directory.as_ref(), point)?;
+        // Capture a relative repository's meaning once. Do not canonicalize:
+        // resolving a symlink here would hide it from the existing admission
+        // checks. Every later cold read uses this same anchored path.
+        let directory = directory.as_ref();
+        let directory = if directory.is_absolute() {
+            directory.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|_| {
+                    SemanticError::new(
+                        ErrorCategory::Unavailable,
+                        "backup/working-directory",
+                        "could not anchor the relative backup repository",
+                    )
+                })?
+                .join(directory)
+        };
+        let metadata = crate::backup::open_read_point(&directory, point)?;
         Ok(Self {
-            snapshot: BackupSnapshot::open(directory.as_ref(), metadata, config)?,
+            snapshot: BackupSnapshot::open(&directory, metadata, config)?,
         })
     }
     pub fn db(&self) -> DatabaseValue {

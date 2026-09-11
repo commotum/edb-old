@@ -87,7 +87,7 @@ fn hex_digest(hash: &[u8; 32]) -> String {
     hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn manifest_v4_root_shape(path: &std::path::Path) -> (usize, bool) {
+fn current_manifest_root_shape(path: &std::path::Path) -> (usize, bool) {
     let bytes = fs::read(path).unwrap();
     assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 5);
     let mut at = 14;
@@ -299,10 +299,12 @@ fn live_incremental_backup_deep_verify_and_point_restore_are_exact() {
     let second = backup.backup_database(&source, &directory).unwrap();
     assert_eq!(second.basis_t, basis2);
     assert!(second.objects_reused >= 3);
-    let first_root_shape = manifest_v4_root_shape(&snapshot_path(&directory, &first));
-    let second_root_shape = manifest_v4_root_shape(&snapshot_path(&directory, &second));
+    let first_root_shape = current_manifest_root_shape(&snapshot_path(&directory, &first));
+    let second_root_shape = current_manifest_root_shape(&snapshot_path(&directory, &second));
     assert_eq!(first_root_shape, second_root_shape);
-    assert!(second_root_shape.0 <= 320);
+    // Envelope 5 adds an exact read-tree and sparse log-index digest. Root
+    // bytes are still fixed-size rather than proportional to database history.
+    assert_eq!(second_root_shape, (328, true));
     assert_eq!(
         PortableBackup::list_backups(&directory).unwrap(),
         vec![basis1.basis_t(), basis2]
@@ -1186,13 +1188,14 @@ fn restore_faults_are_atomic_and_ambiguous_commit_retry_is_idempotent() {
     replacement_store
         .create_database(&abandoned_target, schema())
         .unwrap();
-    let replacement_lineage: String = abandoned_catalog
-        .query_one(
-            "SELECT lineage_id FROM atomic_databases WHERE database_id = $1",
-            &[&abandoned_target],
-        )
+    let replacement = atomic_core::DatabaseCatalog::connect(&abandoned_connection)
         .unwrap()
-        .get(0);
+        .resolve(&abandoned_target)
+        .unwrap();
+    // Reclaimed stable storage identities are never reused by a new database
+    // with the same public name. Resolve the route before comparing lineage.
+    assert_ne!(replacement.database_id, abandoned_target);
+    let replacement_lineage = replacement.lineage_id;
     assert_ne!(replacement_lineage, abandoned_lineage);
 
     let after_connection = isolated_catalog(&connection, "restore_after_catalog");
@@ -1430,11 +1433,13 @@ fn corrupt_derived_roots_fall_back_to_older_tree_then_log_only() {
         )
         .unwrap()
         .get(0);
-    assert_eq!(restored_tree_basis as u64, basis1);
+    // The older source tree plus its canonical tail now yields an exact
+    // offline read projection at capture, rather than a lagging backup tree.
+    assert_eq!(restored_tree_basis as u64, basis2.basis_t());
 
     // When every derived root is damaged, the immutable transaction log is
-    // still sufficient authority. Backup succeeds without a tree accelerator
-    // and restore reconstructs exactly from genesis plus transactions.
+    // still sufficient authority. Capture reconstructs from genesis plus
+    // transactions and emits a complete exact read index only in the backup.
     for hash in manifests.iter().skip(1) {
         corrupt_manifest(&mut catalog, hash);
     }
@@ -1455,7 +1460,15 @@ fn corrupt_derived_roots_fall_back_to_older_tree_then_log_only() {
         )
         .unwrap()
         .get(0);
-    assert_eq!(restored_tree_count, 0);
+    assert_eq!(restored_tree_count, 1);
+    let restored_basis: i64 = log_catalog
+        .query_one(
+            "SELECT basis_t FROM atomic_tree_publications WHERE database_id = $1",
+            &[&log_target],
+        )
+        .unwrap()
+        .get(0);
+    assert_eq!(restored_basis as u64, basis2.basis_t());
     let restored_request_base_count: i64 = log_catalog
         .query_one(
             "SELECT count(*) FROM atomic_request_base_archives archive \
