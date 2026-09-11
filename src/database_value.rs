@@ -501,6 +501,7 @@ pub struct DatabaseValue {
 enum ReadBasis {
     Eager(Arc<Database>),
     Native(TieredSnapshot),
+    Offline(crate::backup_snapshot::BackupSnapshot),
     TransactionOverlay(Arc<TransactionOverlay>),
 }
 
@@ -550,6 +551,7 @@ pub struct DatabaseValueScanCursor<'a> {
 
 enum DatabaseValueScanCursorInner<'a> {
     Native(Box<PeerIndexCursor>),
+    Offline(Box<crate::backup_snapshot::BackupIndexCursor>),
     Overlay(Box<TransactionOverlayScanCursor<'a>>),
     Eager(Cloned<Iter<'a, Datom>>),
     EagerReverse(Cloned<Rev<Iter<'a, Datom>>>),
@@ -643,6 +645,9 @@ impl DatabaseValueScanCursor<'_> {
         let window = matches!(&self.inner, DatabaseValueScanCursorInner::Window(_));
         let item = match &mut self.inner {
             DatabaseValueScanCursorInner::Native(cursor) => {
+                cursor.next_with_poll(&mut || control.check(None))
+            }
+            DatabaseValueScanCursorInner::Offline(cursor) => {
                 cursor.next_with_poll(&mut || control.check(None))
             }
             DatabaseValueScanCursorInner::Overlay(cursor) => cursor.next_controlled(control),
@@ -856,6 +861,7 @@ pub struct DatabaseValuePrefixCursor<'a> {
 enum DatabaseValuePrefixCursorInner<'a> {
     Eager(Cloned<Iter<'a, Datom>>),
     Native(Box<PeerIndexCursor>),
+    Offline(Box<crate::backup_snapshot::BackupIndexCursor>),
     Overlay(Box<TransactionOverlayScanCursor<'a>>),
     Window(Box<DatabaseValueWindowCursor<'a>>),
     Memoized { datoms: Arc<[Datom]>, next: usize },
@@ -936,6 +942,9 @@ impl DatabaseValuePrefixCursor<'_> {
         let item = match &mut self.inner {
             DatabaseValuePrefixCursorInner::Eager(cursor) => cursor.next().map(Ok),
             DatabaseValuePrefixCursorInner::Native(cursor) => {
+                cursor.next_with_poll(&mut || control.check(None))
+            }
+            DatabaseValuePrefixCursorInner::Offline(cursor) => {
                 cursor.next_with_poll(&mut || control.check(None))
             }
             DatabaseValuePrefixCursorInner::Overlay(cursor) => cursor.next_controlled(control),
@@ -1301,6 +1310,7 @@ impl fmt::Debug for DatabaseValue {
                 &match &self.basis {
                     ReadBasis::Eager(_) => "eager",
                     ReadBasis::Native(_) => "native",
+                    ReadBasis::Offline(_) => "backup",
                     ReadBasis::TransactionOverlay(_) => "transaction-overlay",
                 },
             )
@@ -1348,6 +1358,7 @@ impl DatabaseValue {
         }
         match &self.basis {
             ReadBasis::Native(snapshot) => snapshot.resolve_program(hash),
+            ReadBasis::Offline(snapshot) => snapshot.resolve_program(hash),
             ReadBasis::TransactionOverlay(overlay) => overlay.base.resolve_program(hash),
             ReadBasis::Eager(_) => Err(SemanticError::new(
                 ErrorCategory::NotFound,
@@ -1371,11 +1382,13 @@ impl DatabaseValue {
             ReadBasis::Native(snapshot) => {
                 Ok((snapshot.clone(), self.as_of_t, self.since_t, self.history))
             }
-            ReadBasis::Eager(_) | ReadBasis::TransactionOverlay(_) => Err(SemanticError::new(
-                ErrorCategory::Unsupported,
-                "database/uncommitted-snapshot",
-                "only authenticated committed native values have snapshot references",
-            )),
+            ReadBasis::Eager(_) | ReadBasis::Offline(_) | ReadBasis::TransactionOverlay(_) => {
+                Err(SemanticError::new(
+                    ErrorCategory::Unsupported,
+                    "database/uncommitted-snapshot",
+                    "only authenticated committed native values have snapshot references",
+                ))
+            }
         }
     }
 
@@ -1426,6 +1439,22 @@ impl DatabaseValue {
         }
     }
 
+    pub(crate) fn offline(snapshot: crate::backup_snapshot::BackupSnapshot) -> Self {
+        Self {
+            entity_origin: crate::entity_identity::DatabaseOrigin::durable(snapshot.lineage_id()),
+            basis: ReadBasis::Offline(snapshot),
+            read_identity: Arc::new(ReadValueIdentity),
+            last_tx_instant_memo: Arc::new(LastTxInstantMemo::empty()),
+            as_of_t: None,
+            since_t: None,
+            history: false,
+            filters: Arc::default(),
+            read_observer: None,
+            read_context: None,
+            programs: SharedMap::default(),
+        }
+    }
+
     /// Borrow the exact native backing value for connection-state adoption.
     /// Temporal, filtered, history, and speculative overlays are deliberately
     /// excluded: a live connection may publish only an unmodified committed
@@ -1436,7 +1465,7 @@ impl DatabaseValue {
         }
         match &self.basis {
             ReadBasis::Native(snapshot) => Some(snapshot.clone()),
-            ReadBasis::Eager(_) | ReadBasis::TransactionOverlay(_) => None,
+            ReadBasis::Eager(_) | ReadBasis::Offline(_) | ReadBasis::TransactionOverlay(_) => None,
         }
     }
 
@@ -1447,7 +1476,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Native(snapshot) => Some(snapshot.clone()),
             ReadBasis::TransactionOverlay(overlay) => overlay.base.fulltext_native_snapshot(),
-            ReadBasis::Eager(_) => None,
+            ReadBasis::Eager(_) | ReadBasis::Offline(_) => None,
         }
     }
 
@@ -1731,6 +1760,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.basis_t(),
             ReadBasis::Native(snapshot) => snapshot.basis_t(),
+            ReadBasis::Offline(snapshot) => snapshot.basis_t(),
             ReadBasis::TransactionOverlay(overlay) => overlay.basis_t,
         }
     }
@@ -1740,6 +1770,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.eidx_frontier(),
             ReadBasis::Native(snapshot) => snapshot.eidx_frontier(),
+            ReadBasis::Offline(snapshot) => snapshot.eidx_frontier(),
             ReadBasis::TransactionOverlay(overlay) => overlay.eidx_frontier,
         }
     }
@@ -1750,6 +1781,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => Ok(database.reserved_allocation()),
             ReadBasis::Native(snapshot) => snapshot.reserved_allocation(),
+            ReadBasis::Offline(snapshot) => Ok(snapshot.reserved_allocation()),
             ReadBasis::TransactionOverlay(overlay) => Ok(overlay.reserved_allocation),
         }
     }
@@ -1767,6 +1799,18 @@ impl DatabaseValue {
                     self.read_observer.as_deref(),
                     self.read_context.as_deref(),
                 ),
+                ReadBasis::Offline(_) => {
+                    if self.basis_t() == 0 { return Ok(None); }
+                    let mut cursor = self.basis_prefix_cursor(false, &IndexPrefix::Eavt {
+                        entity: crate::t_to_tx(self.basis_t())?,
+                        attribute: Some(crate::DB_TX_INSTANT as u32), value: None,
+                    }, self.read_observer.clone(), self.read_context.clone())?;
+                    match (cursor.next().transpose()?, cursor.next().transpose()?) {
+                        (Some(Datom { value: Value::Instant(instant), added: true, .. }), None) => Ok(Some(instant)),
+                        _ => Err(SemanticError::new(ErrorCategory::Fault, "backup/last-tx-instant",
+                            "backup must contain exactly one current transaction instant at its basis")),
+                    }
+                }
                 ReadBasis::TransactionOverlay(overlay) => Ok(Some(overlay.last_tx_instant)),
             })
     }
@@ -1775,6 +1819,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.schema(),
             ReadBasis::Native(snapshot) => snapshot.schema(),
+            ReadBasis::Offline(snapshot) => snapshot.schema(),
             ReadBasis::TransactionOverlay(overlay) => &overlay.schema,
         }
     }
@@ -1786,6 +1831,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.schema_arc(),
             ReadBasis::Native(snapshot) => snapshot.schema_arc(),
+            ReadBasis::Offline(snapshot) => snapshot.schema_arc(),
             ReadBasis::TransactionOverlay(overlay) => Arc::clone(&overlay.schema),
         }
     }
@@ -1796,6 +1842,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.entid(ident),
             ReadBasis::Native(snapshot) => snapshot.entid(ident),
+            ReadBasis::Offline(snapshot) => snapshot.entid(ident),
             ReadBasis::TransactionOverlay(overlay) => overlay
                 .indexes
                 .entids
@@ -1809,6 +1856,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(database) => database.ident(entity),
             ReadBasis::Native(snapshot) => snapshot.ident(entity),
+            ReadBasis::Offline(snapshot) => snapshot.ident(entity),
             ReadBasis::TransactionOverlay(overlay) => overlay
                 .indexes
                 .idents
@@ -1997,6 +2045,17 @@ impl DatabaseValue {
         };
         match &self.basis {
             ReadBasis::Eager(database) => Ok(database.seek_datoms(&prefix)?.first().cloned()),
+            ReadBasis::Offline(snapshot) => snapshot
+                .boundary_cursor(
+                    false,
+                    &IndexBoundary::Avet(IndexComponents::Two(
+                        crate::DB_TX_INSTANT as u32,
+                        Value::Instant(instant),
+                    )),
+                    false,
+                )?
+                .next()
+                .transpose(),
             ReadBasis::Native(snapshot) => {
                 // A real datom is sufficient as the physical lower-bound key:
                 // entity zero precedes every transaction entity at equal A/V.
@@ -2467,6 +2526,7 @@ impl DatabaseValue {
         match &self.basis {
             ReadBasis::Eager(_) => true,
             ReadBasis::Native(snapshot) => snapshot.avet_ready(attribute),
+            ReadBasis::Offline(snapshot) => snapshot.avet_ready(attribute),
             ReadBasis::TransactionOverlay(overlay) => {
                 overlay.newly_enabled_avet.binary_search(&attribute).is_ok()
                     || overlay.base.physical_avet_ready(attribute)
@@ -2478,7 +2538,7 @@ impl DatabaseValue {
     /// observability for root/generation pin pressure, not a read capability.
     pub(crate) fn native_retention_coordinate(&self) -> Option<(u64, Option<crate::Digest>)> {
         match &self.basis {
-            ReadBasis::Eager(_) => None,
+            ReadBasis::Eager(_) | ReadBasis::Offline(_) => None,
             ReadBasis::Native(snapshot) => Some((
                 snapshot.endpoint().generation,
                 snapshot.durable_manifest_hash(),
@@ -2970,6 +3030,16 @@ impl DatabaseValue {
                 operation: crate::sql_io::OperationContext::current(),
                 failed: false,
             }),
+            ReadBasis::Offline(snapshot) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Offline(Box::new(
+                    snapshot.boundary_cursor(history, boundary, false)?,
+                )),
+                observer,
+                physical_context: None,
+                physical_recorded: false,
+                operation: crate::sql_io::OperationContext::current(),
+                failed: false,
+            }),
             ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValueScanCursor {
                 inner: DatabaseValueScanCursorInner::Overlay(Box::new(overlay.scan_cursor_from(
                     history,
@@ -3009,6 +3079,9 @@ impl DatabaseValue {
             ReadBasis::Native(snapshot) => DatabaseValueScanCursorInner::Native(Box::new(
                 snapshot
                     .normalized_boundary_cursor_existing_projection(history, normalized, false)?,
+            )),
+            ReadBasis::Offline(snapshot) => DatabaseValueScanCursorInner::Offline(Box::new(
+                snapshot.normalized_cursor(history, normalized, false),
             )),
             ReadBasis::TransactionOverlay(overlay) => {
                 return Ok(DatabaseValueScanCursor {
@@ -3073,6 +3146,16 @@ impl DatabaseValue {
                 operation: crate::sql_io::OperationContext::current(),
                 failed: false,
             }),
+            ReadBasis::Offline(snapshot) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Offline(Box::new(
+                    snapshot.boundary_cursor(history, boundary, true)?,
+                )),
+                observer,
+                physical_context: None,
+                physical_recorded: false,
+                operation: crate::sql_io::OperationContext::current(),
+                failed: false,
+            }),
             ReadBasis::TransactionOverlay(overlay) => Ok(DatabaseValueScanCursor {
                 inner: DatabaseValueScanCursorInner::Overlay(Box::new(overlay.scan_cursor_from(
                     history,
@@ -3114,6 +3197,16 @@ impl DatabaseValue {
                 )),
                 observer,
                 physical_context,
+                physical_recorded: false,
+                operation: crate::sql_io::OperationContext::current(),
+                failed: false,
+            }),
+            ReadBasis::Offline(snapshot) => Ok(DatabaseValueScanCursor {
+                inner: DatabaseValueScanCursorInner::Offline(Box::new(
+                    snapshot.cursor(history, order),
+                )),
+                observer,
+                physical_context: None,
                 physical_recorded: false,
                 operation: crate::sql_io::OperationContext::current(),
                 failed: false,
@@ -3168,6 +3261,18 @@ impl DatabaseValue {
                 )),
                 observer,
                 physical_context,
+                physical_recorded: false,
+                operation: crate::sql_io::OperationContext::current(),
+                memo_source: None,
+                memo_hit: false,
+                failed: false,
+            }),
+            ReadBasis::Offline(snapshot) => Ok(DatabaseValuePrefixCursor {
+                inner: DatabaseValuePrefixCursorInner::Offline(Box::new(
+                    snapshot.prefix_cursor(history, prefix)?,
+                )),
+                observer,
+                physical_context: None,
                 physical_recorded: false,
                 operation: crate::sql_io::OperationContext::current(),
                 memo_source: None,
@@ -3291,6 +3396,24 @@ impl TransactionOverlay {
                     )),
                     observer: None,
                     physical_context: physical_context.clone(),
+                    physical_recorded: false,
+                    operation: crate::sql_io::OperationContext::current(),
+                    failed: false,
+                }
+            }
+            (ReadBasis::Offline(snapshot), Some((boundary, reverse, after)))
+                if boundary.avet_attribute().is_some_and(|attribute| {
+                    self.newly_enabled_avet.binary_search(&attribute).is_ok()
+                }) =>
+            {
+                DatabaseValueScanCursor {
+                    inner: DatabaseValueScanCursorInner::Offline(Box::new(
+                        snapshot.normalized_cursor(history, if after {
+                            boundary.normalized()?.after_prefix()
+                        } else { boundary.normalized()? }, reverse),
+                    )),
+                    observer: None,
+                    physical_context: None,
                     physical_recorded: false,
                     operation: crate::sql_io::OperationContext::current(),
                     failed: false,

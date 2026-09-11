@@ -27,7 +27,11 @@ does not turn the historical audit into a test report.
 | ST-03, ST-01 | Verified in Goal 3: independent reserved allocation, native/retained-old million-ID histories, explicit defaults, application and old receipt/backup/upgrade compatibility. See its recorded artifact boundaries and complete-path costs. |
 | SC-01 | Verified/documented in Goal 3: recovered 1.0.7705 ordering supports the existing explicit composite-upsert hint contract; no invented constituent-only upsert. |
 | SC-02 | Verified in Goal 3: sound native NaN replacement retained, with permanent eager/native PostgreSQL regressions and documented JVM difference. |
-| Remaining IDs | Explicitly assigned to Goals 8–10 or the parent's optional/platform decision table. Unapproved optional work is deferred, not a required-completion blocker. |
+| D01, D02, D03, AO06, Q06 | Verified/native equivalent in Goal8: attributable I/O, query and transaction diagnostics, bounded operational events/warnings and explained native scheduling. |
+| P05, AO09, ST-04, AO10, AO11 | Verified in Goal9: lazy fixed backup db/log and offline EDN, authenticated persistent log cache, bounded advisory prefetch/index preparation and cooperative maintenance pacing/cancellation. Actual PostgreSQL/corruption/retry and selective64/8192-entity checks pass; measured limits remain explicit. |
+| AO-C02 | Out of scope by the user's fresh-database policy: no mixed-version rolling-upgrade obligation. Current-version restart/failover/backup/restore remain required. |
+| AO02, AO13, AO08, ENV02, TU-01, OC-C1 | Explicitly deferred optional gateway/console/shared-cache/AWS/memory-Connection/BI workflows; see the parent's decision table. No implementation is claimed and none blocks required completion. |
+| TU-02, ENV01, ENV03 | Outside the retained native Rust/PostgreSQL scope: alternate durable stores, vendor topologies and JVM/runtime/wire/distribution parity. |
 
 ## Where to start
 

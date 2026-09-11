@@ -1638,6 +1638,32 @@ pub fn build_tree(
     datoms: impl IntoIterator<Item = Datom>,
     config: &TreeConfig,
 ) -> Result<TreeBuild, SemanticError> {
+    build_tree_inner(order, history, datoms.into_iter().map(Ok), config, None)
+}
+
+/// Build from a fallible ordered source, publishing completed immutable nodes
+/// incrementally. Only the active leaf and routing boundary nodes remain live;
+/// the returned node set is empty. The caller publishes the root reference last.
+type TreeNodeSink<'a> = dyn FnMut(Digest, &[u8]) -> Result<(), SemanticError> + 'a;
+
+pub(crate) fn build_tree_with_sink(
+    order: IndexOrder,
+    history: bool,
+    datoms: impl IntoIterator<Item = Result<Datom, SemanticError>>,
+    config: &TreeConfig,
+    sink: &mut TreeNodeSink<'_>,
+) -> Result<TreeBuild, SemanticError> {
+    build_tree_inner(order, history, datoms, config, Some(sink))
+}
+
+#[allow(clippy::type_complexity)]
+fn build_tree_inner(
+    order: IndexOrder,
+    history: bool,
+    datoms: impl IntoIterator<Item = Result<Datom, SemanticError>>,
+    config: &TreeConfig,
+    mut sink: Option<&mut TreeNodeSink<'_>>,
+) -> Result<TreeBuild, SemanticError> {
     config.validate()?;
 
     let mut nodes = TreeNodeSet::default();
@@ -1650,6 +1676,7 @@ pub fn build_tree(
     let mut tree_last = None::<Datom>;
 
     for datom in datoms {
+        let datom = datom?;
         if let Some(previous) = &previous
             && !previous.cmp_in(&datom, order).is_lt()
         {
@@ -1673,6 +1700,14 @@ pub fn build_tree(
                 &mut stats,
                 config,
             )?;
+            if let Some(sink) = sink.as_mut() {
+                emit_completed_build_nodes(
+                    &mut nodes,
+                    &pending_directory,
+                    &root_directories,
+                    *sink,
+                )?;
+            }
         }
 
         let prospective_bytes = leaf.encoded_len_with(value_bytes.len())?;
@@ -1754,12 +1789,52 @@ pub fn build_tree(
         first_hash: tree_first.as_ref().map(datom_boundary_hash).transpose()?,
         last_hash: tree_last.as_ref().map(datom_boundary_hash).transpose()?,
     };
-    validate_tree(&descriptor, &nodes)?;
+    if let Some(sink) = sink {
+        for (hash, payload) in std::mem::take(&mut nodes).into_nodes() {
+            sink(hash, &payload)?;
+        }
+    } else {
+        validate_tree(&descriptor, &nodes)?;
+    }
     Ok(TreeBuild {
         descriptor,
         nodes,
         stats,
     })
+}
+
+// Sparse routing needs the last completed directory and its last leaf, plus
+// the most recent leaf in the current directory. Everything else is final.
+fn emit_completed_build_nodes(
+    nodes: &mut TreeNodeSet,
+    pending: &[ChildRef],
+    root: &[ChildRef],
+    sink: &mut TreeNodeSink<'_>,
+) -> Result<(), SemanticError> {
+    let mut retained = std::collections::BTreeSet::new();
+    if let Some(leaf) = pending.last() {
+        retained.insert(leaf.hash);
+    }
+    if let Some(directory) = root.last() {
+        retained.insert(directory.hash);
+        let node = expect_directory(decode_tree_node(
+            &directory.hash,
+            resolve(nodes, &directory.hash)?,
+        )?)?;
+        if let Some(leaf) = node.leaves.last() {
+            retained.insert(leaf.hash);
+        }
+    }
+    let mut remaining = TreeNodeSet::default();
+    for (hash, payload) in std::mem::take(nodes).into_nodes() {
+        if retained.contains(&hash) {
+            remaining.insert_known(hash, payload)?;
+        } else {
+            sink(hash, &payload)?;
+        }
+    }
+    *nodes = remaining;
+    Ok(())
 }
 
 /// Apply localized logical edits by copying only affected paths in the fixed

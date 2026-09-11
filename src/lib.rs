@@ -12,6 +12,7 @@ pub use async_client::{
     AsyncStreamOptions, AsyncTransaction,
 };
 mod backup;
+mod backup_snapshot;
 mod block_codec;
 mod change_consumer;
 pub(crate) mod change_notices;
@@ -74,6 +75,7 @@ mod runtime_config;
 #[cfg(unix)]
 pub use remote_config::{remote_client_config_from_env, remote_server_credentials_from_env};
 mod io_diagnostics;
+mod maintenance_control;
 mod schema;
 mod service;
 mod shared_map;
@@ -93,6 +95,7 @@ mod value;
 mod vocabulary;
 
 pub use backup::{BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault};
+pub use backup_snapshot::{BackupConnection, BackupReadConfig, BackupReadStats};
 pub use change_consumer::{
     ChangeCheckpoint, ChangeConsumer, ChangeConsumerConfig, ChangeConsumerStats, ChangeEvent,
 };
@@ -137,6 +140,7 @@ pub use io_diagnostics::{CacheIoStats, CacheTier, IndexIoStats, ReadIoStats};
 pub use local_transport::{
     CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
 };
+pub use maintenance_control::{MaintenanceControl, MaintenanceStats};
 pub use native_registry::{
     NativeCallContext, NativeRegistry, NativeRegistryBuilder, TransactionExecutionOptions,
     native_deployment_attribute, native_deployment_ident,
@@ -216,8 +220,8 @@ pub use time_point::TimePoint;
 pub use transaction::SpeculationLimits;
 pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
 pub use transaction_hints::{
-    HintExecution, HintLimits, HintPrefetchOptions, HintPrefetchStats, HintTraceStats,
-    HintedSpeculation, ReadHint, TransactionHints,
+    HintExecution, HintLimits, HintPrefetchConcurrency, HintPrefetchOptions, HintPrefetchStats,
+    HintTraceStats, HintedSpeculation, ReadHint, TransactionHints,
 };
 pub use transaction_stats::{TransactionDiagnostics, TransactionWorkStats};
 pub use tree_manifest::{AvetProjectionWork, ManifestTree, PersistentTreeManifest};

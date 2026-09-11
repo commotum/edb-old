@@ -5,7 +5,9 @@
 The accepted capabilities form one usable native product with current-version data integrity, reliable recovery and clear fresh-database operational guidance.
 
 This is Stage 9 of [Goal 0](../goal-0/0-plan.md), owning all required stages; AO-C02 disposition (mixed-version upgrades out of scope).
-Status: scaffolded; not active. Preserve completed EDN and all other child work.
+Status: complete (2026-09-10); all three internal stages and parent integrated
+acceptance are verified. Goals1–9 are complete.
+Preserve completed EDN and all other child work.
 The historical audit is [goal-0/1-audit.md](../goal-0/1-audit.md).
 
 ## Constraints
@@ -72,4 +74,66 @@ children only for actual gaps, not another acceptance ceremony.
 This child finishes only when all three outcomes and its parent-stage signal hold.
 Record commands/results, material design decisions, remaining gaps and a concise
 next action here, then return to Goal 0. A scaffold or pure helper is not completion.
-Current next action: wait for prior required stages; reconcile source before activation.
+Continuation: return to Goal0 and close the required parent objective. No active
+child or required implementation gap remains. Optional integrations retain the
+parent's explicit deferred/out-of-scope dispositions; do not manufacture a new
+corrective goal or compatibility campaign.
+
+## Reconciled interactions
+
+- Current-format backups and exact restored receipts passed Goal9. The additional
+  native-function workflow passed1/1: speculation/commit, absent/rebound runtime
+  deployments, two restarts and backup/deep proof/restore/exact retry (whole2.809s;
+  commit/check15.24ms), with no callback execution during restore or exact replay.
+- Integrated checks exercise new CLI prefetch/index settings with the existing
+  application, new maintenance pacing through operator commands, and changed
+  service/log/tree paths through stock crash/takeover. Existing Goal6 deletion,
+  Goal7 excision and Goal9 cache-generation isolation evidence is retained.
+- Unsupported backup formats fail with an explicit fresh-current-version message;
+  no automatic reset or historical executable comparison is required.
+
+## Final acceptance — actual results
+
+Release checks used freshly created isolated fixtures through the configured
+`ATOMIC_POSTGRES_URL`, PostgreSQL15 with fsync/synchronous_commit enabled.
+`CARGO_INCREMENTAL=0 cargo test --release --offline -j4 --no-run` built the
+selected targets; their test binaries ran with `--nocapture --test-threads=1`.
+No PostgreSQL early return/skip is counted as a pass. Reuse the child's focused
+evidence for unaffected invariants; no full historical matrix was rerun.
+
+- `product_cli`:3/3,5.71s. Separate application processes with restricted roles,
+  stock writer restart, exact receipts/references and held/as-of/history values;
+  general seven-column/nested data, weighted computation, async reads, diagnostics,
+  speculative planning, partitions and native fulltext all pass. Runs use CLI
+  hint width3/index preparation2. Recovery from a deliberately removed derived
+  publication leaves the authoritative head unchanged. Warm queries perform0SQL.
+  Application baseline328/243ms and planning160/127ms are individual workload
+  observations, not general performance promises.
+- `remote_product::stock_auto_contender_health_and_cached_route_survive_process_crash`:
+  1/1,4.03s. Real stock TLS active/standby processes, restricted roles, crash,
+  exact retry, cached-route refresh, automatic excision, held reads and health
+  probes pass. Cancellation52ms, takeover2083ms, measured full scenario3920ms.
+- `admin_cli`:2/2,4.54s. Two disposable PostgreSQL databases; repeated backup,
+  offline verification, target/permission guards, restore preview, actual
+  SIGTERM at node write followed by exact-selection retry, deep inspection,
+  fulltext repair and GC preview/apply. Maintenance flags are exercised for
+  backup/restore/GC;3GC batches record3pauses/3ms pacing (223ms wholeGCcommand).
+  Three bounded GC calls do not claim global quiescence. The first run exposed
+  a stale absent-name error assertion after Goal6's catalog API; corrected to
+  `catalog/name-not-found` and reran the full target, rather than weakening the
+  product error or treating that first run as a pass.
+- `native_transaction_functions::postgres_native_host_matches_speculation_and_retries_without_old_deployment_after_restart`:
+  1/1,3.00s; detailed rebinding/backup/retry evidence above.
+- Goal9's final current-format semantic/copy and canceled-restore checks remain
+  valid. Goal6 lifecycle isolation and Goal7 recovery/excision evidence remain
+  valid. This integration did not require changing the engine or reopening a
+  child implementation; test setup/error expectations were reconciled.
+- Final `cargo check --all-targets --offline -j4` passes (14.62s).
+  Lib/bin Clippy passes with15existing library warnings and1existing CLI warning;
+  none from this stage. `git diff --check` passes. This is not warning-free or
+  commercial deployment certification.
+
+Required audit IDs have verified/native-equivalent dispositions in
+`goal-0/1-audit.md`; optional/platform cases remain explicitly deferred/out of
+scope. No migration of shared old data, old-executable comparison, automatic
+reset, JVM runtime, alternate store or optional new service was introduced.

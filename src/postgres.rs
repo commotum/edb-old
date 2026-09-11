@@ -4364,128 +4364,17 @@ where
         expected_basis = expected_basis
             .checked_add(1)
             .ok_or_else(|| fault("recovery/basis-overflow", "transaction basis overflow"))?;
-        let basis = pg_basis(row.get(0), "transaction range basis")?;
-        let stored_previous = digest(row.get(1), "transaction range predecessor")?;
-        let tx_hash = digest(row.get(2), "transaction range hash")?;
-        let payload: Vec<u8> = row.get(3);
-        let state_hash = digest(row.get(4), "transaction range state hash")?;
-        let request_kind: i16 = row.get(8);
-        let legacy_request_key: Option<String> = row.get(9);
-        let stored_request_key_hash: Option<Vec<u8>> = row.get(10);
-        let request_digest = digest(row.get::<_, Vec<u8>>(11), "transaction request digest")?;
-        if basis != expected_basis || stored_previous != expected_previous {
-            return Err(fault(
-                "recovery/invalid-log-link",
-                "transaction range is noncontiguous or has a predecessor mismatch",
-            ));
-        }
-        let content_hash = if generation == 0 {
-            None
-        } else {
-            Some(digest(row.get(5), "transaction content hash")?)
-        };
-        let mut reserved_allocation = None;
-        let transaction = if generation == 0 {
-            if transaction_hash(&payload) != tx_hash {
-                return Err(fault(
-                    "recovery/transaction-checksum-mismatch",
-                    "legacy transaction payload does not match its hash",
-                ));
-            }
-            let transaction = decode_transaction(&payload)?;
-            if transaction.database_id != database_id
-                || transaction.basis_t != basis
-                || transaction.previous_hash != stored_previous
-            {
-                return Err(fault(
-                    "recovery/envelope-mismatch",
-                    "legacy transaction envelope disagrees with its row",
-                ));
-            }
-            transaction
-        } else {
-            let content_hash = content_hash.expect("positive generation has content hash");
-            let frontier = pg_basis(row.get(6), "transaction content frontier")?;
-            let content_lineage: String = row.get(7);
-            if sha256(&payload) != content_hash {
-                return Err(fault(
-                    "recovery/content-checksum-mismatch",
-                    "lineage transaction content does not match its hash",
-                ));
-            }
-            let content = LineageTransactionContent::decode(&payload)?;
-            if content_lineage != lineage_id
-                || content.lineage_id != lineage_id
-                || content.basis_t != basis
-                || content.eidx_frontier != frontier
-            {
-                return Err(fault(
-                    "recovery/content-coordinate-mismatch",
-                    "lineage transaction content disagrees with its membership row",
-                ));
-            }
-            if generation_transaction_hash(
-                &lineage_id,
-                generation,
-                basis,
-                stored_previous,
-                content_hash,
-                state_hash,
-                frontier,
-            )? != tx_hash
-            {
-                return Err(fault(
-                    "recovery/generation-membership-mismatch",
-                    "lineage transaction membership commitment is invalid",
-                ));
-            }
-            reserved_allocation = content
-                .reserved_frontier
-                .map(|reserved| {
-                    crate::reserved_allocation::ReservedAllocation::from_frontier(
-                        reserved, frontier,
-                    )
-                })
-                .transpose()?;
-            let mut transaction = content.to_transaction(stored_previous);
-            // ATLC commits the stable lineage, not a mutable catalog alias.
-            // Consumers authenticate that lineage above, then project the
-            // transaction into the alias through which this database was
-            // opened so recent-tier and receipt boundaries remain coherent.
-            transaction.database_id = database_id.to_owned();
-            transaction
-        };
-        if !matches!(request_kind, 0..=2) || (generation == 0 && request_kind != 1) {
-            return Err(fault(
-                "recovery/request-kind",
-                "transaction request record has an invalid kind",
-            ));
-        }
-        if (generation == 0
-            && (legacy_request_key.as_deref().is_none_or(str::is_empty)
-                || stored_request_key_hash.is_some()))
-            || (generation > 0
-                && (legacy_request_key.is_some() || stored_request_key_hash.is_none()))
-        {
-            return Err(fault(
-                "recovery/request-identity",
-                "transaction request record has invalid generation identity metadata",
-            ));
-        }
-        visit(AuthenticatedLogTransaction {
-            transaction,
-            reserved_allocation,
-            tx_hash,
-            state_hash,
-            payload,
-            content_hash,
-            legacy_request_key,
-            request_key_hash: stored_request_key_hash
-                .map(|hash| digest(hash, "transaction request key hash"))
-                .transpose()?,
-            request_digest,
-            excision_replay: request_kind == 0,
-        })?;
+        let transaction = authenticate_log_row(
+            &row,
+            row.get(3),
+            database_id,
+            &lineage_id,
+            generation,
+            expected_basis,
+            expected_previous,
+        )?;
+        let tx_hash = transaction.tx_hash;
+        visit(transaction)?;
         visited = visited.checked_add(1).ok_or_else(|| {
             fault(
                 "recovery/basis-overflow",
@@ -4501,6 +4390,138 @@ where
         ));
     }
     Ok(visited)
+}
+
+/// Authenticate canonical bytes against authoritative membership/request metadata.
+/// The payload may come from a disposable local cache; no metadata or authority
+/// is accepted from that cache. Column positions match the range readers below.
+pub(crate) fn authenticate_log_row(
+    row: &postgres::Row,
+    payload: Vec<u8>,
+    database_id: &str,
+    lineage_id: &str,
+    generation: u64,
+    expected_basis: u64,
+    expected_previous: Digest,
+) -> Result<AuthenticatedLogTransaction, SemanticError> {
+    let basis = pg_basis(row.get(0), "transaction range basis")?;
+    let stored_previous = digest(row.get(1), "transaction range predecessor")?;
+    let tx_hash = digest(row.get(2), "transaction range hash")?;
+    let state_hash = digest(row.get(4), "transaction range state hash")?;
+    let request_kind: i16 = row.get(8);
+    let legacy_request_key: Option<String> = row.get(9);
+    let stored_request_key_hash: Option<Vec<u8>> = row.get(10);
+    let request_digest = digest(row.get::<_, Vec<u8>>(11), "transaction request digest")?;
+    if basis != expected_basis || stored_previous != expected_previous {
+        return Err(fault(
+            "recovery/invalid-log-link",
+            "transaction range is noncontiguous or has a predecessor mismatch",
+        ));
+    }
+    let content_hash = if generation == 0 {
+        None
+    } else {
+        Some(digest(row.get(5), "transaction content hash")?)
+    };
+    let mut reserved_allocation = None;
+    let transaction = if generation == 0 {
+        if transaction_hash(&payload) != tx_hash {
+            return Err(fault(
+                "recovery/transaction-checksum-mismatch",
+                "legacy transaction payload does not match its hash",
+            ));
+        }
+        let transaction = decode_transaction(&payload)?;
+        if transaction.database_id != database_id
+            || transaction.basis_t != basis
+            || transaction.previous_hash != stored_previous
+        {
+            return Err(fault(
+                "recovery/envelope-mismatch",
+                "legacy transaction envelope disagrees with its row",
+            ));
+        }
+        transaction
+    } else {
+        let content_hash = content_hash.expect("positive generation has content hash");
+        let frontier = pg_basis(row.get(6), "transaction content frontier")?;
+        let content_lineage: String = row.get(7);
+        if sha256(&payload) != content_hash {
+            return Err(fault(
+                "recovery/content-checksum-mismatch",
+                "lineage transaction content does not match its hash",
+            ));
+        }
+        let content = LineageTransactionContent::decode(&payload)?;
+        if content_lineage != lineage_id
+            || content.lineage_id != lineage_id
+            || content.basis_t != basis
+            || content.eidx_frontier != frontier
+        {
+            return Err(fault(
+                "recovery/content-coordinate-mismatch",
+                "lineage transaction content disagrees with its membership row",
+            ));
+        }
+        if generation_transaction_hash(
+            lineage_id,
+            generation,
+            basis,
+            stored_previous,
+            content_hash,
+            state_hash,
+            frontier,
+        )? != tx_hash
+        {
+            return Err(fault(
+                "recovery/generation-membership-mismatch",
+                "lineage transaction membership commitment is invalid",
+            ));
+        }
+        reserved_allocation = content
+            .reserved_frontier
+            .map(|reserved| {
+                crate::reserved_allocation::ReservedAllocation::from_frontier(reserved, frontier)
+            })
+            .transpose()?;
+        let mut transaction = content.to_transaction(stored_previous);
+        // ATLC commits the stable lineage, not a mutable catalog alias.
+        // Consumers authenticate that lineage above, then project the
+        // transaction into the alias through which this database was
+        // opened so recent-tier and receipt boundaries remain coherent.
+        transaction.database_id = database_id.to_owned();
+        transaction
+    };
+    if !matches!(request_kind, 0..=2) || (generation == 0 && request_kind != 1) {
+        return Err(fault(
+            "recovery/request-kind",
+            "transaction request record has an invalid kind",
+        ));
+    }
+    if (generation == 0
+        && (legacy_request_key.as_deref().is_none_or(str::is_empty)
+            || stored_request_key_hash.is_some()))
+        || (generation > 0 && (legacy_request_key.is_some() || stored_request_key_hash.is_none()))
+    {
+        return Err(fault(
+            "recovery/request-identity",
+            "transaction request record has invalid generation identity metadata",
+        ));
+    }
+    Ok(AuthenticatedLogTransaction {
+        transaction,
+        reserved_allocation,
+        tx_hash,
+        state_hash,
+        payload,
+        content_hash,
+        legacy_request_key,
+        request_key_hash: stored_request_key_hash
+            .map(|hash| digest(hash, "transaction request key hash"))
+            .transpose()?,
+        request_digest,
+        excision_replay: request_kind == 0,
+    })
 }
 
 pub(crate) fn recover_to<C: GenericClient>(

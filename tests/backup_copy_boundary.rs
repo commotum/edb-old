@@ -20,25 +20,13 @@ fn unique(label: &str) -> String {
     )
 }
 
-fn isolated_catalog(connection: &str) -> String {
-    let schema = unique("backup_copy_boundary");
-    let mut client = Client::connect(connection, NoTls).unwrap();
-    client
-        .batch_execute(&format!("CREATE SCHEMA {schema}"))
-        .unwrap();
-    let scoped = if connection.trim_start().starts_with("postgres://")
-        || connection.trim_start().starts_with("postgresql://")
-    {
-        let separator = if connection.contains('?') { '&' } else { '?' };
-        format!("{connection}{separator}options=-csearch_path%3D{schema}")
-    } else {
-        format!("{connection} options='-c search_path={schema}'")
-    };
-    PostgresMigrator::connect(&scoped)
+fn isolated_catalog(connection: &str) -> common::PostgresFixture {
+    let fixture = common::PostgresFixture::new(connection, "backup_copy_boundary");
+    PostgresMigrator::connect(&fixture.connection)
         .unwrap()
         .migrate()
         .unwrap();
-    scoped
+    fixture
 }
 
 fn hex(hash: &[u8]) -> String {
@@ -75,7 +63,8 @@ fn initial_copy_defers_semantic_replay_but_keeps_content_and_receipt_authenticat
     let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
-    let connection = isolated_catalog(&connection);
+    let fixture = isolated_catalog(&connection);
+    let connection = fixture.connection.clone();
     let source = unique("copy_source");
     let mut store = PostgresStore::connect(&connection).unwrap();
     let created = store.create_database(&source, schema()).unwrap();
@@ -184,9 +173,11 @@ fn initial_copy_defers_semantic_replay_but_keeps_content_and_receipt_authenticat
     );
     PortableBackup::verify_backup_presence(copied.path(), basis).unwrap();
     let verify_error = PortableBackup::verify_backup(copied.path(), basis, true).unwrap_err();
+    // The new exact read tree exposes the false endpoint commitment before
+    // full log replay. This is still a hard failure before restore staging.
     assert_eq!(
         (verify_error.category, verify_error.code),
-        (ErrorCategory::Fault, "backup/state-commitment")
+        (ErrorCategory::Fault, "backup/tree-binding")
     );
     let target = unique("reject_semantic_copy");
     let restore_error = backup
@@ -194,7 +185,7 @@ fn initial_copy_defers_semantic_replay_but_keeps_content_and_receipt_authenticat
         .unwrap_err();
     assert_eq!(
         (restore_error.category, restore_error.code),
-        (ErrorCategory::Fault, "backup/state-commitment")
+        (ErrorCategory::Fault, "backup/tree-binding")
     );
     assert_eq!(
         catalog
@@ -288,7 +279,8 @@ fn unchanged_retry_authenticates_leaf_bytes_and_requires_the_complete_tree() {
     let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
-    let connection = isolated_catalog(&connection);
+    let fixture = isolated_catalog(&connection);
+    let connection = fixture.connection.clone();
     let source = unique("copy_tree_source");
     let mut store = PostgresStore::connect(&connection).unwrap();
     let created = store.create_database(&source, schema()).unwrap();

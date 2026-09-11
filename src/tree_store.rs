@@ -398,6 +398,13 @@ fn read_avet_sort_workspace_page(
 /// attempted batches. Optional compression has independent physical counters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TreeStoreStats {
+    /// Successful scoped CPU preparation tasks; SQL merges remain serial.
+    pub index_preparation_workers_started: u64,
+    /// Actually overlapping edit-preparation intervals, not CPU utilization.
+    pub index_preparation_peak_workers: u64,
+    pub index_preparation_groups: u64,
+    /// Sum of group wall times, excluding subsequent SQL/path-copy merge work.
+    pub index_preparation_nanos: u64,
     pub build_intent_node_batches: u64,
     pub build_intent_node_writes: u64,
     pub node_insert_attempts: u64,
@@ -463,6 +470,16 @@ impl NodeUploadLimits {
         }
         Ok(())
     }
+}
+
+pub(crate) fn validate_index_preparation_parallelism(workers: usize) -> Result<(), SemanticError> {
+    if !(1..=8).contains(&workers) {
+        return Err(SemanticError::incorrect(
+            "index/invalid-preparation-parallelism",
+            "index edit preparation parallelism must be between one and eight",
+        ));
+    }
+    Ok(())
 }
 
 /// One of the eight roots named by a persistent-tree manifest.
@@ -542,6 +559,8 @@ pub struct PostgresTreeStore {
     compressed_node_blocks: bool,
     node_block_encoding_overlap_min_bytes: Option<usize>,
     node_upload_limits: NodeUploadLimits,
+    maintenance_control: Option<crate::MaintenanceControl>,
+    index_preparation_parallelism: usize,
     active_build_intent: Option<Digest>,
     active_build_database_lock: Option<i64>,
     avet_sort_workspace: AvetSortWorkspace,
@@ -565,6 +584,8 @@ impl PostgresTreeStore {
             compressed_node_blocks: true,
             node_block_encoding_overlap_min_bytes: Some(64 * 1024),
             node_upload_limits: NodeUploadLimits::default(),
+            maintenance_control: None,
+            index_preparation_parallelism: 1,
             active_build_intent: None,
             active_build_database_lock: None,
             avet_sort_workspace: AvetSortWorkspace::default(),
@@ -614,6 +635,46 @@ impl PostgresTreeStore {
 
     pub fn node_upload_limits(&self) -> NodeUploadLimits {
         self.node_upload_limits
+    }
+
+    /// Pace/cancel between successful canonical-node upload batches. Content
+    /// already uploaded remains valid; build-intent pins continue protecting
+    /// unpublished content. No SQL transaction is held during the pause.
+    pub fn with_maintenance_control(mut self, control: crate::MaintenanceControl) -> Self {
+        self.maintenance_control = Some(control);
+        self
+    }
+
+    pub fn with_index_preparation_parallelism(
+        mut self,
+        workers: usize,
+    ) -> Result<Self, SemanticError> {
+        validate_index_preparation_parallelism(workers)?;
+        self.index_preparation_parallelism = workers;
+        Ok(self)
+    }
+
+    pub(crate) fn index_preparation_parallelism(&self) -> usize {
+        self.index_preparation_parallelism
+    }
+
+    pub(crate) fn record_index_preparation(
+        &mut self,
+        workers: u64,
+        peak: u64,
+        elapsed: std::time::Duration,
+    ) {
+        self.stats.index_preparation_workers_started = self
+            .stats
+            .index_preparation_workers_started
+            .saturating_add(workers);
+        self.stats.index_preparation_peak_workers =
+            self.stats.index_preparation_peak_workers.max(peak);
+        self.stats.index_preparation_groups = self.stats.index_preparation_groups.saturating_add(1);
+        self.stats.index_preparation_nanos = self
+            .stats
+            .index_preparation_nanos
+            .saturating_add(elapsed.as_nanos().min(u64::MAX as u128) as u64);
     }
 
     /// Place disposable external-index runs on an operator-selected local
@@ -1060,6 +1121,21 @@ impl PostgresTreeStore {
     }
 
     fn insert_node_batch(
+        &mut self,
+        batch: &[(Digest, &[u8])],
+        batch_bytes: usize,
+    ) -> Result<(), SemanticError> {
+        if let Some(control) = &self.maintenance_control {
+            control.check()?;
+        }
+        self.insert_node_batch_unpaced(batch, batch_bytes)?;
+        if let Some(control) = &self.maintenance_control {
+            control.after_batch()?;
+        }
+        Ok(())
+    }
+
+    fn insert_node_batch_unpaced(
         &mut self,
         batch: &[(Digest, &[u8])],
         batch_bytes: usize,

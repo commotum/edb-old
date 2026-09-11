@@ -118,7 +118,16 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
         command
             .args(["transactor", "--database", DATABASE, "--endpoint"])
             .arg(&endpoint)
-            .args(["--telemetry-ms", "25", "--index-threshold-bytes", "1"]);
+            .args([
+                "--telemetry-ms",
+                "25",
+                "--index-threshold-bytes",
+                "1",
+                "--hint-workers",
+                "3",
+                "--index-workers",
+                "2",
+            ]);
         let (mut server, events) = Server::spawn_observed(command);
         loop {
             let line = events

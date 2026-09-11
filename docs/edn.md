@@ -5,6 +5,10 @@ transaction, query and pull adapters pass that data to the existing semantic
 engine. Entity maps were already supported by the typed Rust API. EDN adds the
 text authoring/interchange layer, not a new storage format or database engine.
 
+`query`, `pull` and `with` also accept `--repository PATH` for
+[direct offline backup reads](backup-reads.md). No PostgreSQL credentials or
+restore is needed; file/stdin input and EDN results are unchanged.
+
 ## Try the executable
 
 Build `cargo build --release --bin atomic`. Configure PostgreSQL and explicit

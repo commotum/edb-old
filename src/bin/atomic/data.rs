@@ -4,8 +4,8 @@ use atomic_core::edn_pull::{entity_identifier_from_edn, parse_pull_edn};
 use atomic_core::edn_query::{EdnQueryArgument, EdnQueryInput, parse_query_edn};
 use atomic_core::edn_value::{edn_keyword, query_value_to_edn, transaction_report_to_edn};
 use atomic_core::{
-    Connection, DatabaseValue, Datom, ErrorCategory, PostgresConnectionConfig, PullControl,
-    QueryControl, QuerySourceValue, SemanticError, TransactionRequest, postgres_config_from_env,
+    BackupConnection, Connection, DatabaseValue, Datom, ErrorCategory, PullControl, QueryControl,
+    QuerySourceValue, SemanticError, TransactionRequest, postgres_config_from_env,
     remote_client_config_from_env,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,13 +17,13 @@ pub const HELP: &str = "
 EDN data commands (file path '-' reads stdin; results are EDN on stdout):
   atomic transact --database ID --file PATH --request-key KEY
     (--endpoint PATH | --remote) [--basis N] [--tx-instant MILLIS] [--timeout-ms N]
-  atomic with --database ID --file PATH [--tx-instant MILLIS]
+  atomic with (--database ID | --repository PATH) --file PATH [--tx-instant MILLIS]
     [--default-partition KEYWORD]
-  atomic query [--database ID] --file PATH [--inputs PATH] [--sources PATH]
+  atomic query [--database ID | --repository PATH] --file PATH [--inputs PATH] [--sources PATH]
     [--as-of N] [--since N] [--history] [--timeout-ms N] [--max-work N]
     [--max-results N] [--max-join-bytes N] [--max-value-bytes N]
     [--query-stats] [--io-context :app/operation]
-  atomic pull --database ID --file PATH --entity EDN
+  atomic pull (--database ID | --repository PATH) --file PATH --entity EDN
     [--as-of N] [--since N] [--max-depth N] [--max-entities N]
     [--io-context :app/operation]
 
@@ -36,6 +36,10 @@ query --inputs is a vector of non-source :in arguments (including rules/patterns
 --sources is a map from source symbols to tuple rows or descriptors such as
 {$past {:database \"customers\" :as-of 42} $log {:database \"customers\" :log true}}.
 The default $ source is the selected --database value. Reads never start a writer.
+--repository reads a local backup without PostgreSQL configuration. It defaults
+to the latest point; select an exact point with BOTH --backup-basis N and
+--backup-generation N. Named sources also accept {:repository PATH :basis N
+:generation N :log true}; omit :log for a database value.
 Data-only queries need no --database or PostgreSQL connection configuration.
 The same PostgreSQL/TLS credential configuration applies. --remote uses verified
 TLS writer discovery and ATOMIC_REMOTE_TOKEN_FILE, not plaintext TCP.
@@ -75,6 +79,9 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
         "with" => (
             &[
                 "--database",
+                "--repository",
+                "--backup-basis",
+                "--backup-generation",
                 "--file",
                 "--tx-instant",
                 "--default-partition",
@@ -84,6 +91,9 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
         "query" => (
             &[
                 "--database",
+                "--repository",
+                "--backup-basis",
+                "--backup-generation",
                 "--file",
                 "--inputs",
                 "--sources",
@@ -101,6 +111,9 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
         "pull" => (
             &[
                 "--database",
+                "--repository",
+                "--backup-basis",
+                "--backup-generation",
                 "--file",
                 "--entity",
                 "--as-of",
@@ -136,8 +149,21 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
             return Err(usage("unknown or misplaced option; run atomic --help"));
         }
     }
-    if command != "query" {
+    if command == "transact" {
         args.required("--database")?;
+    } else {
+        let database = args.values.contains_key("--database");
+        let repository = args.values.contains_key("--repository");
+        if database && repository || command != "query" && !database && !repository {
+            return Err(usage("select exactly one of --database or --repository"));
+        }
+        let basis = args.values.contains_key("--backup-basis");
+        let generation = args.values.contains_key("--backup-generation");
+        if basis != generation || (basis && !repository) {
+            return Err(usage(
+                "backup point requires --repository and both --backup-basis and --backup-generation",
+            ));
+        }
     }
     args.required("--file")?;
     diagnostic_context(&args)?;
@@ -162,6 +188,8 @@ fn parse(command: &str, raw: &[String]) -> Result<Arguments, SemanticError> {
     }
     for flag in [
         "--basis",
+        "--backup-basis",
+        "--backup-generation",
         "--as-of",
         "--since",
         "--timeout-ms",
@@ -251,6 +279,65 @@ fn output(value: &EdnValue) -> Result<(), SemanticError> {
             )
         })
 }
+enum ReadConnection {
+    Live(Connection),
+    Backup(BackupConnection),
+}
+impl ReadConnection {
+    fn db(&self) -> DatabaseValue {
+        match self {
+            Self::Live(connection) => connection.db(),
+            Self::Backup(connection) => connection.db(),
+        }
+    }
+    fn log(&self) -> atomic_core::LogValue {
+        match self {
+            Self::Live(connection) => connection.log(),
+            Self::Backup(connection) => connection.log(),
+        }
+    }
+}
+
+fn open_backup(
+    repository: &str,
+    basis: Option<u64>,
+    generation: Option<u64>,
+) -> Result<BackupConnection, SemanticError> {
+    match (basis, generation) {
+        (None, None) => BackupConnection::open(repository),
+        (Some(basis), Some(generation)) => {
+            let point = atomic_core::PortableBackup::list_backup_points(std::path::Path::new(repository))?
+                .into_iter()
+                .find(|point| point.basis_t == basis && point.log_generation == generation)
+                .ok_or_else(|| usage("requested backup point does not exist in repository"))?;
+            BackupConnection::open_point(repository, &point)
+        }
+        _ => Err(usage("backup point requires both basis and generation")),
+    }
+}
+
+fn open_primary(args: &Arguments) -> Result<ReadConnection, SemanticError> {
+    if let Some(repository) = args.values.get("--repository") {
+        let coordinate = |flag| {
+            args.values
+                .contains_key(flag)
+                .then(|| args.number(flag, 0))
+                .transpose()
+        };
+        Ok(ReadConnection::Backup(open_backup(
+            repository,
+            coordinate("--backup-basis")?,
+            coordinate("--backup-generation")?,
+        )?))
+    } else {
+        Ok(ReadConnection::Live(Connection::connect_configured(
+            postgres_config_from_env()?,
+            args.required("--database")?,
+            128,
+        )?))
+    }
+}
+
 fn run(args: Arguments) -> Result<(), SemanticError> {
     let text = read_file(args.required("--file")?)?;
     // Reject lexical errors before opening any database or attempting a write.
@@ -262,11 +349,13 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
     let _scope = diagnostic
         .as_ref()
         .map(atomic_core::OperationContext::enter);
-    let config = postgres_config_from_env()?;
-    let connection =
-        Connection::connect_configured(config.clone(), args.required("--database")?, 128)?;
+    let connection = open_primary(&args)?;
     match args.command.as_str() {
         "transact" => {
+            let ReadConnection::Live(connection) = &connection else {
+                return Err(usage("transact requires a live database"));
+            };
+            let config = postgres_config_from_env()?;
             let mut request = TransactionRequest::from_edn(args.required("--request-key")?, &text)?;
             if args.values.contains_key("--basis") {
                 request = request.comparing_basis(args.number("--basis", 0)?);
@@ -409,26 +498,20 @@ fn run_query(args: &Arguments, text: &str) -> Result<(), SemanticError> {
                         // Raw data uses exactly the public EDN relation adapter.
                         arguments.push(EdnQueryArgument::Data((*descriptor).clone()));
                     } else {
-                        let config = postgres_config_from_env()?;
                         if primary.is_none()
-                            && let Some(id) = args.values.get("--database")
+                            && (args.values.contains_key("--database")
+                                || args.values.contains_key("--repository"))
                         {
-                            primary =
-                                Some(Connection::connect_configured(config.clone(), id, 128)?);
+                            primary = Some(open_primary(args)?);
                         }
                         arguments.push(EdnQueryArgument::Source(source_value(
                             descriptor,
-                            &config,
                             primary.as_ref(),
                         )?));
                     }
                 } else if name == "$" {
                     if primary.is_none() {
-                        primary = Some(Connection::connect_configured(
-                            postgres_config_from_env()?,
-                            args.required("--database")?,
-                            128,
-                        )?);
+                        primary = Some(open_primary(args)?);
                     }
                     arguments.push(EdnQueryArgument::Source(QuerySourceValue::Database(view(
                         primary.as_ref().expect("opened primary").db(),
@@ -567,8 +650,7 @@ fn source_descriptors(
 }
 fn source_value(
     value: &EdnValue,
-    config: &PostgresConnectionConfig,
-    primary: Option<&Connection>,
+    primary: Option<&ReadConnection>,
 ) -> Result<QuerySourceValue, SemanticError> {
     let EdnValue::Map(fields) = value else {
         return Err(usage("source must be rows or a database descriptor"));
@@ -581,40 +663,80 @@ fn source_value(
         if key.namespace.is_some()
             || !matches!(
                 key.name.as_str(),
-                "database" | "as-of" | "since" | "history" | "log"
+                "database"
+                    | "repository"
+                    | "basis"
+                    | "generation"
+                    | "as-of"
+                    | "since"
+                    | "history"
+                    | "log"
             )
         {
             return Err(usage("unknown source descriptor field"));
         }
         options.insert(key.name.as_str(), value);
     }
+    if options.contains_key("database") && options.contains_key("repository") {
+        return Err(usage("source cannot select both :database and :repository"));
+    }
+    if (options.contains_key("basis") || options.contains_key("generation"))
+        && !options.contains_key("repository")
+    {
+        return Err(usage(":basis and :generation select a :repository point"));
+    }
+    let coordinate = |name| -> Result<Option<u64>, SemanticError> {
+        options
+            .get(name)
+            .map(|value| match value {
+                EdnValue::Long(t) => {
+                    u64::try_from(*t).map_err(|_| usage("backup coordinate must be nonnegative"))
+                }
+                _ => Err(usage("backup coordinate must be a nonnegative integer")),
+            })
+            .transpose()
+    };
     let opened;
-    let connection = match options.get("database") {
-        Some(EdnValue::String(name)) => {
+    let connection = match (options.get("repository"), options.get("database")) {
+        (Some(EdnValue::String(repository)), None) => {
+            opened = ReadConnection::Backup(open_backup(
+                repository,
+                coordinate("basis")?,
+                coordinate("generation")?,
+            )?);
+            &opened
+        }
+        (Some(_), _) => return Err(usage("repository path must be a string")),
+        (None, Some(EdnValue::String(name))) => {
+            let config = postgres_config_from_env()?;
             // A name may have been reused while the primary still holds its
             // old identity. Compare resolved identities, never name spelling
             // against a captured storage ID.
             let selected =
-                atomic_core::DatabaseCatalog::connect_configured(config)?.resolve(name)?;
+                atomic_core::DatabaseCatalog::connect_configured(&config)?.resolve(name)?;
             if let Some(primary) = primary.filter(|primary| {
-                primary.identity().database_id() == selected.database_id
-                    && primary.identity().lineage_id() == selected.lineage_id
+                matches!(primary, ReadConnection::Live(connection)
+                    if connection.identity().database_id() == selected.database_id
+                    && connection.identity().lineage_id() == selected.lineage_id)
             }) {
                 primary
             } else {
-                opened = Connection::connect_configured(config.clone(), name.as_str(), 128)?;
-                if opened.identity().database_id() != selected.database_id
-                    || opened.identity().lineage_id() != selected.lineage_id
+                let connection = Connection::connect_configured(config, name.as_str(), 128)?;
+                if connection.identity().database_id() != selected.database_id
+                    || connection.identity().lineage_id() != selected.lineage_id
                 {
                     return Err(SemanticError::conflict(
                         "cli/source-identity-changed",
                         "source name changed identity while opening the query source",
                     ));
                 }
+                opened = ReadConnection::Live(connection);
                 &opened
             }
         }
-        None => primary.ok_or_else(|| usage("database source requires :database or --database"))?,
+        (None, None) => primary.ok_or_else(|| {
+            usage("source requires :database, :repository or a primary selection")
+        })?,
         _ => return Err(usage("database source name must be a string")),
     };
     for name in ["history", "log"] {

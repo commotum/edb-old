@@ -63,6 +63,8 @@ Transactor options (numeric limits are positive integers):
   --max-frame-bytes N          default library frame limit
   --index-threshold-bytes N    default library indexing threshold
   --index-max-bytes N          default library recent-memory maximum
+  --index-workers N            1..8 independent edit-preparation lanes, default1
+  --hint-workers N             0..8 transaction-hint lanes, default1;0 disables
   --tree-cache-entries N       default library writer cache entries
   --tree-cache-bytes N         default library writer cache bytes
   --excision-max-bytes N       eager maintenance allocation account, default512MiB (not RSS)
@@ -110,6 +112,8 @@ impl Arguments {
                 "--max-frame-bytes",
                 "--index-threshold-bytes",
                 "--index-max-bytes",
+                "--index-workers",
+                "--hint-workers",
                 "--tree-cache-entries",
                 "--tree-cache-bytes",
                 "--excision-max-bytes",

@@ -477,7 +477,10 @@ fn stock_auto_contender_health_and_cached_route_survive_process_crash() {
     assert_eq!(retry.report.unwrap().tempids, original.tempids);
     assert_ne!(route.cached_endpoint().unwrap(), original_route);
     let active_event = metric(&second_lines, "active");
-    assert!(active_event.contains(&format!("\"lease_epoch\":{}", route.cached_endpoint().unwrap().lease_epoch())));
+    assert!(active_event.contains(&format!(
+        "\"lease_epoch\":{}",
+        route.cached_endpoint().unwrap().lease_epoch()
+    )));
     assert!(active_event.contains("\"writer_available\":true"));
     assert!(active_event.contains("\"listener_ready\":true"));
     let fresh = route

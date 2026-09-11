@@ -374,7 +374,7 @@ struct CachedTreeNode {
 }
 
 #[derive(Clone, Debug)]
-struct TreeNodeCache {
+pub(crate) struct TreeNodeCache {
     max_entries: usize,
     max_bytes: usize,
     state: Arc<Mutex<TreeNodeCacheState>>,
@@ -391,7 +391,7 @@ struct TreeNodeCacheState {
 /// directory's routing table or a leaf's value columns. Cache eviction only
 /// drops the cache's reference; an active seek/cursor remains valid.
 #[derive(Clone, Debug)]
-struct LoadedDirectory(Arc<TreeNode>);
+pub(crate) struct LoadedDirectory(Arc<TreeNode>);
 
 impl Deref for LoadedDirectory {
     type Target = DirectoryNode;
@@ -405,7 +405,7 @@ impl Deref for LoadedDirectory {
 }
 
 #[derive(Clone, Debug)]
-struct LoadedLeaf(Arc<TreeNode>);
+pub(crate) struct LoadedLeaf(Arc<TreeNode>);
 
 impl Deref for LoadedLeaf {
     type Target = LeafSegment;
@@ -419,7 +419,7 @@ impl Deref for LoadedLeaf {
 }
 
 impl TreeNodeCache {
-    fn new(max_entries: usize, max_bytes: usize) -> Self {
+    pub(crate) fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self {
             max_entries,
             max_bytes,
@@ -427,7 +427,7 @@ impl TreeNodeCache {
         }
     }
 
-    fn get(&self, hash: &Digest) -> Option<Arc<TreeNode>> {
+    pub(crate) fn get(&self, hash: &Digest) -> Option<Arc<TreeNode>> {
         lock(&self.state).get(hash)
     }
 
@@ -440,11 +440,11 @@ impl TreeNodeCache {
             .map(|entry| Arc::clone(&entry.node))
     }
 
-    fn insert(&self, hash: Digest, node: Arc<TreeNode>, bytes: usize) {
+    pub(crate) fn insert(&self, hash: Digest, node: Arc<TreeNode>, bytes: usize) {
         lock(&self.state).insert(hash, node, bytes, self.max_entries, self.max_bytes);
     }
 
-    fn stats(&self) -> CacheStats {
+    pub(crate) fn stats(&self) -> CacheStats {
         lock(&self.state).stats
     }
 
@@ -1045,6 +1045,31 @@ impl PostgresIndexer {
     ) -> Result<Self, SemanticError> {
         self.tree_store = self.tree_store.with_node_upload_limits(limits)?;
         Ok(self)
+    }
+
+    /// Pace/cancel between durable upload batches; already uploaded immutable
+    /// nodes remain recoverable through the existing build-intent protocol.
+    pub fn with_maintenance_control(mut self, control: crate::MaintenanceControl) -> Self {
+        self.tree_store = self.tree_store.with_maintenance_control(control);
+        self
+    }
+
+    /// Prepare/sort incremental edits for up to eight physical projections in
+    /// scoped CPU lanes. Input and output order, SQL and publication stay serial.
+    /// The default one lane starts no preparation workers. Temporary edit sets
+    /// grow with the selected width; this does not bound whole-index residency.
+    pub fn with_index_preparation_parallelism(
+        mut self,
+        workers: usize,
+    ) -> Result<Self, SemanticError> {
+        self.tree_store = self
+            .tree_store
+            .with_index_preparation_parallelism(workers)?;
+        Ok(self)
+    }
+
+    pub fn tree_store_stats(&self) -> crate::TreeStoreStats {
+        self.tree_store.stats()
     }
 
     /// Optional compressed transfer projections do not replace canonical data.
@@ -2827,47 +2852,57 @@ fn build_incremental_native(
     let mut encoded_bytes = 0_u64;
     let mut reused_subtrees = 0_u64;
     let mut retired_nodes = BTreeSet::new();
-    for history in [false, true] {
-        for order in all_index_orders() {
+    let prepare = |(history, order)| -> Result<_, SemanticError> {
+        let mut edits = if history {
+            let mut edits =
+                history_edits(order, &recent, &changed_avet, &avet_backfills, &avet_drops)?;
+            for pair in &coordinated_no_history_pairs {
+                let avet_projection_changed = order == IndexOrder::Avet
+                    && changed_avet
+                        .iter()
+                        .any(|(attribute, _, _)| *attribute == pair.retraction.attribute);
+                if !avet_projection_changed
+                    && schema_index_member(&endpoint_projection.schema, &pair.retraction, order)?
+                {
+                    edits.no_history_pairs.push(pair.clone());
+                }
+            }
+            // Discovery was coordinated above. Disable the per-order pass
+            // so no sibling can make an additional locality-dependent
+            // omission after the canonical union is fixed.
+            edits.no_history_attributes.clear();
+            edits
+        } else {
+            current_edits(
+                order,
+                &ordinary_removals,
+                &ordinary_insertions,
+                &base_projection.schema,
+                &endpoint_projection.schema,
+                &changed_avet,
+                &avet_backfills,
+                &avet_drops,
+            )?
+        };
+        canonicalize_merge_edits(&mut edits, order);
+        Ok((history, order, edits))
+    };
+    let projections = [false, true]
+        .into_iter()
+        .flat_map(|history| {
+            all_index_orders()
+                .into_iter()
+                .map(move |order| (history, order))
+        })
+        .collect::<Vec<_>>();
+    for group in projections.chunks(store.index_preparation_parallelism()) {
+        let begin = Instant::now();
+        let (prepared, workers, peak) = prepare_index_group(group, &prepare)?;
+        store.record_index_preparation(workers, peak, begin.elapsed());
+        for (history, order, edits) in prepared {
             let old = previous.tree(order, history).ok_or_else(|| {
                 fault("index/missing-tree", "prior manifest omitted an index tree")
             })?;
-            let mut edits = if history {
-                let mut edits =
-                    history_edits(order, &recent, &changed_avet, &avet_backfills, &avet_drops)?;
-                for pair in &coordinated_no_history_pairs {
-                    let avet_projection_changed = order == IndexOrder::Avet
-                        && changed_avet
-                            .iter()
-                            .any(|(attribute, _, _)| *attribute == pair.retraction.attribute);
-                    if !avet_projection_changed
-                        && schema_index_member(
-                            &endpoint_projection.schema,
-                            &pair.retraction,
-                            order,
-                        )?
-                    {
-                        edits.no_history_pairs.push(pair.clone());
-                    }
-                }
-                // Discovery was coordinated above. Disable the per-order pass
-                // so no sibling can make an additional locality-dependent
-                // omission after the canonical union is fixed.
-                edits.no_history_attributes.clear();
-                edits
-            } else {
-                current_edits(
-                    order,
-                    &ordinary_removals,
-                    &ordinary_insertions,
-                    &base_projection.schema,
-                    &endpoint_projection.schema,
-                    &changed_avet,
-                    &avet_backfills,
-                    &avet_drops,
-                )?
-            };
-            canonicalize_merge_edits(&mut edits, order);
             preload_merge_paths(store, &old.descriptor, &edits, &mut old_cache)?;
             let merged = merge_native_tree(store, &old.descriptor, &old_cache, &edits, config)?;
             let root_bytes = merged
@@ -2913,6 +2948,70 @@ fn build_incremental_native(
             retired_nodes,
         },
     })
+}
+
+/// Only one bounded group of physical-index edits exists at a time. Workers
+/// borrow immutable logical inputs and never own a SQL connection or live pin.
+/// Results are consumed in original projection order, regardless of completion.
+fn prepare_index_group<T: Send>(
+    group: &[(bool, IndexOrder)],
+    prepare: &(impl Fn((bool, IndexOrder)) -> Result<T, SemanticError> + Sync),
+) -> Result<(Vec<T>, u64, u64), SemanticError> {
+    if group.len() == 1 {
+        return Ok((vec![prepare(group[0])?], 0, 0));
+    }
+    let active = std::sync::atomic::AtomicUsize::new(0);
+    let peak = std::sync::atomic::AtomicUsize::new(0);
+    let mut workers = 0;
+    let prepared = std::thread::scope(|scope| {
+        let mut pending = Vec::with_capacity(group.len());
+        for &projection in group {
+            let active = &active;
+            let peak = &peak;
+            let context = crate::OperationContext::current_or_process();
+            let worker = std::thread::Builder::new()
+                .name("atomic-index-prepare".into())
+                .spawn_scoped(scope, move || {
+                    let _scope = context.enter();
+                    let count = active.fetch_add(1, Ordering::AcqRel) + 1;
+                    peak.fetch_max(count, Ordering::Relaxed);
+                    let result = prepare(projection);
+                    active.fetch_sub(1, Ordering::AcqRel);
+                    result
+                });
+            pending.push(match worker {
+                Ok(worker) => {
+                    workers += 1;
+                    Ok(worker)
+                }
+                // A denied optional worker does not invalidate a legal build.
+                Err(_) => Err(prepare(projection)),
+            });
+        }
+        // Join every task, including after an error, before borrowed inputs or
+        // build ownership can be released. No worker survives publication.
+        let mut output = Vec::with_capacity(group.len());
+        let mut failure = None;
+        for task in pending {
+            let result = match task {
+                Ok(worker) => worker.join().unwrap_or_else(|_| {
+                    Err(fault(
+                        "index/preparation-panic",
+                        "index edit preparation worker panicked",
+                    ))
+                }),
+                Err(result) => result,
+            };
+            match result {
+                Ok(value) => output.push(value),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
+            }
+        }
+        failure.map_or(Ok(output), Err)
+    })?;
+    Ok((prepared, workers, peak.load(Ordering::Relaxed) as u64))
 }
 
 /// Advance one authenticated AVET projection chunk without advancing logical
@@ -4276,6 +4375,17 @@ where
     Ok(output)
 }
 
+pub(crate) fn derive_offline_metadata<F>(
+    roots: &BTreeMap<(bool, u8), Arc<RootNode>>,
+    load_node: F,
+) -> Result<(Arc<crate::Schema>, Arc<IdentIndex>), SemanticError>
+where
+    F: FnMut(Digest) -> Result<Arc<TreeNode>, SemanticError>,
+{
+    let metadata = derive_metadata_from_roots(roots, load_node)?;
+    Ok((metadata.schema, metadata.idents))
+}
+
 fn derive_metadata_from_roots<F>(
     roots: &BTreeMap<(bool, u8), Arc<RootNode>>,
     mut load_node: F,
@@ -5060,6 +5170,18 @@ impl TieredReadCore {
         self.ssd_cache
             .for_namespace(self.ssd_namespace_for_generation(generation))
     }
+
+    fn ssd_log_namespace_for_generation(&self, generation: u64) -> Digest {
+        let mut key = Vec::with_capacity(96);
+        key.extend_from_slice(b"atomic/ssd-log/atmc3-atlc1-2/v1\0");
+        key.extend_from_slice(&self.ssd_namespace_for_generation(generation));
+        crate::sha256(&key)
+    }
+
+    fn ssd_log_for_generation(&self, generation: u64) -> crate::SsdCache {
+        self.ssd_cache
+            .for_namespace(self.ssd_log_namespace_for_generation(generation))
+    }
 }
 
 struct PeerCore {
@@ -5588,10 +5710,17 @@ impl Peer {
     /// does not erase backups, OS/filesystem remnants or other cache roots.
     /// Retained values may still hold facts in RAM; excision policy is explicit.
     pub fn purge_ssd_generation(&self, generation: u64) -> bool {
-        self.core
+        let nodes = self
+            .core
             .read
             .ssd_cache
-            .purge_namespace(&self.core.read.ssd_namespace_for_generation(generation))
+            .purge_namespace(&self.core.read.ssd_namespace_for_generation(generation));
+        let log = self
+            .core
+            .read
+            .ssd_cache
+            .purge_namespace(&self.core.read.ssd_log_namespace_for_generation(generation));
+        nodes && log
     }
 
     pub fn snapshot(&self) -> PeerSnapshot {
@@ -7010,8 +7139,88 @@ pub struct PeerIndexCursor {
     work_recorded: bool,
 }
 
-struct DurableTreeCursor {
-    snapshot: TieredSnapshot,
+/// The immutable tree traversal is independent of the location of its
+/// authenticated nodes. Live peers and read-only backups use the same
+/// positioning, child verification, and bounded leaf retention.
+pub(crate) trait DurableTreeSource {
+    fn load_node(
+        &self,
+        hash: Digest,
+        stats: &mut TreeReadStats,
+    ) -> Result<Arc<TreeNode>, SemanticError>;
+
+    fn load_directory(
+        &self,
+        reference: &ChildRef,
+        order: IndexOrder,
+        history: bool,
+        stats: &mut TreeReadStats,
+    ) -> Result<LoadedDirectory, SemanticError> {
+        let misses = stats.cache_misses;
+        let node = self.load_node(reference.hash, stats);
+        crate::io_diagnostics::record_index_node(order, stats.cache_misses != misses);
+        let node = node?;
+        let TreeNode::Directory(directory) = node.as_ref() else {
+            return Err(fault(
+                "peer/tree-child-kind",
+                "root child is not a directory node",
+            ));
+        };
+        validate_loaded_child_key(
+            reference,
+            directory.order,
+            directory.history,
+            directory.count,
+            directory.leaves.first().map(|child| &child.key),
+            order,
+            history,
+        )?;
+        Ok(LoadedDirectory(node))
+    }
+
+    fn load_leaf(
+        &self,
+        reference: &ChildRef,
+        order: IndexOrder,
+        history: bool,
+        stats: &mut TreeReadStats,
+    ) -> Result<LoadedLeaf, SemanticError> {
+        let misses = stats.cache_misses;
+        let node = self.load_node(reference.hash, stats);
+        crate::io_diagnostics::record_index_node(order, stats.cache_misses != misses);
+        let node = node?;
+        let TreeNode::Leaf(leaf) = node.as_ref() else {
+            return Err(fault(
+                "peer/tree-child-kind",
+                "directory child is not a leaf node",
+            ));
+        };
+        let first = leaf.datom(0);
+        validate_loaded_child_datom(
+            reference,
+            leaf.order,
+            leaf.history,
+            leaf.len() as u64,
+            first.as_ref(),
+            order,
+            history,
+        )?;
+        Ok(LoadedLeaf(node))
+    }
+}
+
+impl DurableTreeSource for TieredSnapshot {
+    fn load_node(
+        &self,
+        hash: Digest,
+        stats: &mut TreeReadStats,
+    ) -> Result<Arc<TreeNode>, SemanticError> {
+        TieredSnapshot::load_node(self, hash, stats)
+    }
+}
+
+pub(crate) struct DurableTreeCursor<S = TieredSnapshot> {
+    snapshot: S,
     root: Arc<RootNode>,
     history: bool,
     order: IndexOrder,
@@ -7222,9 +7431,9 @@ impl TreeBoundary {
     }
 }
 
-impl DurableTreeCursor {
-    fn new(
-        snapshot: TieredSnapshot,
+impl<S: DurableTreeSource> DurableTreeCursor<S> {
+    pub(crate) fn new(
+        snapshot: S,
         root: Arc<RootNode>,
         history: bool,
         order: IndexOrder,
@@ -7255,8 +7464,8 @@ impl DurableTreeCursor {
         }
     }
 
-    fn new_prefix(
-        snapshot: TieredSnapshot,
+    pub(crate) fn new_prefix(
+        snapshot: S,
         root: Arc<RootNode>,
         history: bool,
         prefix: IndexPrefix,
@@ -7284,8 +7493,8 @@ impl DurableTreeCursor {
         }
     }
 
-    fn new_forward_boundary(
-        snapshot: TieredSnapshot,
+    pub(crate) fn new_forward_boundary(
+        snapshot: S,
         root: Arc<RootNode>,
         history: bool,
         boundary: NormalizedIndexBoundary,
@@ -7314,8 +7523,8 @@ impl DurableTreeCursor {
         }
     }
 
-    fn new_reverse(
-        snapshot: TieredSnapshot,
+    pub(crate) fn new_reverse(
+        snapshot: S,
         root: Arc<RootNode>,
         history: bool,
         boundary: NormalizedIndexBoundary,
@@ -7343,7 +7552,7 @@ impl DurableTreeCursor {
         }
     }
 
-    fn next_datom(&mut self) -> Result<Option<Datom>, SemanticError> {
+    pub(crate) fn next_datom(&mut self) -> Result<Option<Datom>, SemanticError> {
         if self.reverse_boundary.is_some() {
             return self.next_reverse_datom();
         }
@@ -8834,7 +9043,8 @@ impl TieredSnapshot {
         hash: Digest,
         stats: &mut TreeReadStats,
     ) -> Result<Arc<TreeNode>, SemanticError> {
-        let observed = crate::io_diagnostics::CacheObservation::start(crate::CacheTier::DecodedNode);
+        let observed =
+            crate::io_diagnostics::CacheObservation::start(crate::CacheTier::DecodedNode);
         if let Some(node) = self.core.tree_cache.get(&hash) {
             stats.cache_hits = stats.cache_hits.saturating_add(1);
             observed.finish(true, false, 0, 0);
@@ -8846,11 +9056,17 @@ impl TieredSnapshot {
             let mut slot = lock(&self.core.tree_node_miss);
             if let Some(miss) = slot.as_ref().cloned() {
                 drop(slot);
-                let waiting = crate::io_diagnostics::CacheObservation::start(crate::CacheTier::Inflight);
+                let waiting =
+                    crate::io_diagnostics::CacheObservation::start(crate::CacheTier::Inflight);
                 let result = miss.wait();
                 // Another node can own the serialized miss slot. Its success
                 // or failure is not this caller's hit/error; only its wait is.
-                waiting.finish(miss.hash == hash && result.is_ok(), miss.hash == hash && result.is_err(), 0, 0);
+                waiting.finish(
+                    miss.hash == hash && result.is_ok(),
+                    miss.hash == hash && result.is_err(),
+                    0,
+                    0,
+                );
                 if miss.hash == hash {
                     return result;
                 }
@@ -9729,8 +9945,12 @@ fn scan_latest_tree_base<C: GenericClient>(
                 cache,
             ) {
                 Ok(base) => Ok(TreeBaseScan::Selected(Box::new(base), stats)),
-                Err(error) if is_postgres_connection_error(&error)
-                    || error.details.contains_key("postgres_sqlstate") => Err(error),
+                Err(error)
+                    if is_postgres_connection_error(&error)
+                        || error.details.contains_key("postgres_sqlstate") =>
+                {
+                    Err(error)
+                }
                 Err(_) => {
                     stats.rejected_candidates = 1;
                     Ok(TreeBaseScan::AllInvalid(stats))
@@ -9829,8 +10049,12 @@ fn scan_latest_tree_base<C: GenericClient>(
                 cache,
             ) {
                 Ok(base) => return Ok(TreeBaseScan::Selected(Box::new(base), stats)),
-                Err(error) if is_postgres_connection_error(&error)
-                    || error.details.contains_key("postgres_sqlstate") => return Err(error),
+                Err(error)
+                    if is_postgres_connection_error(&error)
+                        || error.details.contains_key("postgres_sqlstate") =>
+                {
+                    return Err(error);
+                }
                 Err(error) if error.code == "peer/tree-publication-collecting" => {
                     stats.rejected_candidates = stats.rejected_candidates.saturating_add(1);
                     if required_manifest.is_some() {
@@ -11402,12 +11626,18 @@ mod tests {
 
     #[test]
     fn native_cache_isolation_unrelated_miss_error_is_not_this_query_error() {
-        let Some((_connection, snapshot)) = cache_isolation_fixture(0, 0) else { return; };
+        let Some((_connection, snapshot)) = cache_isolation_fixture(0, 0) else {
+            return;
+        };
         let (_, root) = snapshot.exact_tree(false, IndexOrder::Eavt).unwrap();
         let hash = root.directories[0].hash;
         let mut other_hash = hash;
         other_hash[0] ^= 1;
-        let miss = Arc::new(TreeNodeMiss { hash: other_hash, result: Mutex::new(None), ready: Condvar::new() });
+        let miss = Arc::new(TreeNodeMiss {
+            hash: other_hash,
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        });
         *lock(&snapshot.core.tree_node_miss) = Some(miss.clone());
         let reader = snapshot.clone();
         let worker = std::thread::spawn(move || {
@@ -11417,7 +11647,9 @@ mod tests {
             (result, context.snapshot())
         });
         let deadline = Instant::now() + Duration::from_secs(3);
-        while Arc::strong_count(&miss) < 3 && Instant::now() < deadline { std::thread::yield_now(); }
+        while Arc::strong_count(&miss) < 3 && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         let joined = Arc::strong_count(&miss) >= 3;
         // Remove the unrelated slot before releasing its waiter. The requested
         // node then follows its ordinary authenticated load path.
@@ -11428,7 +11660,10 @@ mod tests {
         assert!(joined);
         assert!(result.is_ok());
         let waits = &stats.reads.cache[&crate::CacheTier::Inflight];
-        assert_eq!((waits.accesses, waits.hits, waits.misses, waits.errors), (1, 0, 1, 0));
+        assert_eq!(
+            (waits.accesses, waits.hits, waits.misses, waits.errors),
+            (1, 0, 1, 0)
+        );
         assert_eq!(stats.errors, 0);
         assert_eq!(stats.reads.cache[&crate::CacheTier::PostgresBlock].hits, 1);
     }

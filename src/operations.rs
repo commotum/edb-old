@@ -330,6 +330,7 @@ impl IntegrityReport {
 pub struct PostgresOperator {
     client: Client,
     _connection: PostgresConnectionConfig,
+    maintenance: crate::MaintenanceControl,
 }
 
 impl PostgresOperator {
@@ -345,7 +346,13 @@ impl PostgresOperator {
         Ok(Self {
             client,
             _connection: connection.clone(),
+            maintenance: crate::MaintenanceControl::default(),
         })
+    }
+
+    pub fn with_maintenance_control(mut self, control: crate::MaintenanceControl) -> Self {
+        self.maintenance = control;
+        self
     }
 
     pub fn inspect_database(
@@ -857,6 +864,7 @@ impl PostgresOperator {
         &mut self,
         older_than: Duration,
     ) -> Result<GarbageInventory, SemanticError> {
+        self.maintenance.check()?;
         let millis = garbage_age_millis(older_than)?;
         let mut transaction = self
             .client
@@ -1142,6 +1150,7 @@ impl PostgresOperator {
         transaction
             .commit()
             .map_err(|error| operation_error("operations/gc-commit", error))?;
+        self.maintenance.after_batch()?;
         Ok(candidates.inventory(true))
     }
 

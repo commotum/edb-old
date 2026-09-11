@@ -1608,14 +1608,31 @@ pub struct TransactionService {
 
 /// Deployment/resource settings shared by direct activation and standby
 /// takeover. None of these settings alter the identity of an admitted request.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ServiceOptions {
+    /// CPU edit-preparation lanes for incremental indexing; SQL stays serial.
+    pub index_preparation_parallelism: usize,
+    /// Advisory prefix-read lanes, independent of transaction authority.
+    pub hint_prefetch: crate::HintPrefetchConcurrency,
     pub indexing: BackgroundIndexingConfig,
     pub execution: crate::TransactionExecutionOptions,
     pub excision: crate::ExcisionConfig,
     /// Optional bounded nonblocking diagnostics publication. The emitter owns
     /// its sink worker; transaction execution never invokes sink callbacks.
     pub telemetry: Option<crate::TelemetryEmitter>,
+}
+
+impl Default for ServiceOptions {
+    fn default() -> Self {
+        Self {
+            index_preparation_parallelism: 1,
+            hint_prefetch: crate::HintPrefetchConcurrency::default(),
+            indexing: BackgroundIndexingConfig::default(),
+            execution: crate::TransactionExecutionOptions::default(),
+            excision: crate::ExcisionConfig::default(),
+            telemetry: None,
+        }
+    }
 }
 
 /// A local observation of a one-shot leadership contender. This is not a lease
@@ -1711,6 +1728,10 @@ impl TransactionStandby {
         TransactionService::validate_config(&config)?;
         options.indexing.validate()?;
         options.excision.validate()?;
+        options.hint_prefetch.validate()?;
+        crate::tree_store::validate_index_preparation_parallelism(
+            options.index_preparation_parallelism,
+        )?;
         if poll_interval.is_zero() {
             return Err(SemanticError::incorrect(
                 "service/standby-poll",
@@ -2049,6 +2070,10 @@ impl TransactionService {
         Self::validate_config(&config)?;
         options.indexing.validate()?;
         options.excision.validate()?;
+        options.hint_prefetch.validate()?;
+        crate::tree_store::validate_index_preparation_parallelism(
+            options.index_preparation_parallelism,
+        )?;
         config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
         Self::start_identity_configured_with_options(config, connection, options)
     }
@@ -2078,6 +2103,10 @@ impl TransactionService {
         Self::validate_config(&config)?;
         let indexing_config = options.indexing.validate()?;
         let excision_config = options.excision.validate()?;
+        let hint_prefetch = crate::transaction_hints::HintWorkerSlot::new(options.hint_prefetch)?;
+        crate::tree_store::validate_index_preparation_parallelism(
+            options.index_preparation_parallelism,
+        )?;
         let lease_millis = duration_millis(config.lease_duration)?;
         let mut store = PostgresStore::connect_configured(&connection)?;
         store.set_transaction_defaults(options.execution.defaults);
@@ -2120,6 +2149,8 @@ impl TransactionService {
                     return Err(error);
                 }
             };
+        indexer =
+            indexer.with_index_preparation_parallelism(options.index_preparation_parallelism)?;
         // Probe with the strict native opener before deciding whether this is
         // the one bounded startup exception: a just-created database may build
         // its fixed bootstrap/application-schema value at basis 0/1. Once user
@@ -2223,6 +2254,7 @@ impl TransactionService {
             lease.clone(),
         );
         shared.telemetry = options.telemetry;
+        shared.hint_worker = hint_prefetch;
         let shared = Arc::new(shared);
         let index_shared = Arc::clone(&shared);
         let index_worker = match thread::Builder::new()

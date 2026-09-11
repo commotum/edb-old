@@ -5,6 +5,7 @@ use super::*;
 /// Captured immutable data only: no original read core, driver or pin ownership.
 /// A delayed worker must not become the last owner of a writer pin and perform
 /// synchronous unlock/reconnect under that writer's pin-lane mutex on drop.
+#[derive(Clone)]
 pub(crate) struct HintReadPlan {
     database_id: String,
     lineage_id: String,

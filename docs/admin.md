@@ -64,6 +64,15 @@ Backup is live and pins its captured information generation, but backup capture
 alone is not semantic verification. Media encryption and repository retention
 remain deployment responsibilities.
 
+[Direct backup reads](backup-reads.md) expose fixed database/log values and EDN
+query/Pull/preview commands without restore. Current captures include exact read
+indexes; a lagging source index entails a streaming capture-time index pass.
+`backup`, `restore` and `gc` accept `--maintenance-pause-ms N` (default0).
+Backup pauses after64 newly encountered objects or4MiB of copied/reused payload;
+restore after each committed256-transaction staging batch, GC after each
+committed collector call. `MAINTENANCE` reports actual batches/pauses/time.
+The Rust operators expose the same cloneable cancellation/pacing control.
+
 `list-backups` prints exact basis/generation pairs and manifest hashes. Generation
 matters when excision produces different physical information at one basis;
 verification/restore never silently select a different generation. Both zero

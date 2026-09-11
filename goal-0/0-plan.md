@@ -83,10 +83,12 @@ completed children; it does not waive required features or data safety.
 
 ## Current state
 
-Stages 1–7 / Goals 2–8 are verified; Stage 8 / Goal 9 is the active continuation.
-The worktree was clean at the start of this request. No audit-stage reread,
-replacement engine, recursive hierarchy or corrective parent is required.
-Only one child is active; bounded parallel tasks within it are welcome.
+**Complete (2026-09-10):** Goal1 EDN and all nine required implementation stages
+(Goals2–10) are verified, including integrated product acceptance—not just plans
+or scaffolds. No child is active. Optional/platform dispositions below remain
+explicit; this does not claim universal Datomic/JVM or deployment parity.
+The worktree was clean at the start of this continuation; completed working
+code/data/repairs were preserved. No existing database was reset.
 
 Reconciled evidence:
 
@@ -227,8 +229,8 @@ application, takeover, exact-retry and cost evidence.
 
 ### 8. Bounded large-data reads and maintenance — Goal 9
 
-**Status:** Active continuation; internal Stage1 reconciliation is next. No Goal9
-implementation or acceptance is claimed yet.
+**Status:** Complete; selective backup/log reads, effective controls and real
+PostgreSQL/offline application acceptance verified. Goal10 owns final integration.
 **Audit ownership:** P05, AO09, ST-04, AO10, AO11.
 
 **Outcome:** Selective offline backup reads, repeated log reads and maintenance use bounded resources with useful, measured operating controls.
@@ -239,7 +241,8 @@ implementation or acceptance is claimed yet.
 
 ### 9. Integrated product acceptance and recovery — Goal 10
 
-**Status:** Planned; scaffolded, not active.
+**Status:** Complete; current-version integrated application, recovery and
+operator workflows verified with actual PostgreSQL. See Goal10 for exact evidence.
 **Audit ownership:** All required stages; AO-C02.
 
 **Outcome:** The accepted capabilities form one usable native product with reliable current-version persistence, recovery and clear fresh-database setup guidance.
@@ -335,9 +338,26 @@ and durable receipts are unchanged. Relevant isolated PostgreSQL, stock
 application/restart and process-takeover checks pass; its plan owns detailed
 results. Fixed misleading report-permission errors and unrelated-wait attribution.
 
-Continuation: reconcile Goal9's selective backup/log reads and effective
-maintenance controls. Goals1–8 are complete; Goal9 has not been implemented,
-Goal10 and the parent are not complete. Apply the fresh-database policy to ongoing
-work and use current-version fixtures; completed compatibility evidence remains
-historical and does not impose further upgrade testing.
-Optional deployment/UI scope is awaiting user preference, not blocking native work.
+Verified Goal9: selective fixed backup db/log values and stock offline EDN paths,
+authenticated restart-hot log caching, bounded hint/index-preparation controls,
+and cancelable/paced backup/restore/upload/GC. Actual PostgreSQL and64/8192-entity
+offline checks pass; warm/reopened log scans fetch zero PostgreSQL payload bytes.
+Capture may make a streaming full-index pass; read does not restore/replay.
+Maintenance tests retain durable staging without exposing a partial head/root.
+Canonical PostgreSQL data is unchanged; backup envelope5 has an explicit format
+boundary. The child records measured costs, limits and resolved fixture failures.
+
+Verified Goal10: stock application3/3, stock TLS crash/standby takeover1/1,
+operator CLI2/2, and native-function rebinding/restart/backup/exact retry1/1.
+All PostgreSQL scenarios ran on disposable current-version fixtures, zero skips.
+The application covers general data/computation/async/diagnostics/planning/
+partitions/fulltext and stable values across restart. Operators pass interrupted
+restore/retry, integrity/permission guards, repair and paced GC. All-target
+compilation succeeds; Clippy retains only existing warnings. Detailed artifact,
+cost and fixture-correction notes are in the owning child.
+
+Continuation: required parent objective achieved; Goals1–10 are complete and no
+child remains active. Preserve these results and reopen an owning child only for
+a concrete new gap. Fresh-database policy governs future format changes; old
+compatibility results are historical, not a new testing obligation. Deferred
+optional gateway/UI/shared-cache/AWS/BI workflows are not claimed or blockers.

@@ -61,7 +61,7 @@ mod allocation_tests;
 mod tree_semantics_tests;
 
 const MAGIC: &[u8; 4] = b"ATBK";
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 const LEGACY_VERSION: u16 = 3;
 const CLAIM_MAGIC: &[u8; 4] = b"ATCL";
 const CLAIM_VERSION: u16 = 1;
@@ -77,6 +77,11 @@ const LEGACY_RECEIPT_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const LEGACY_RECEIPT_TAIL_DATOMS: u64 = 16_384;
 const RESTORE_SCRATCH_PINS: usize = 16;
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[path = "backup_read.rs"]
+mod backup_read;
+pub(crate) use backup_read::{BackupReadMetadata, open_read_point, read_log_transaction};
+use backup_read::{capture_exact_read_tree, capture_read_log_index};
 
 #[cfg(test)]
 thread_local! {
@@ -167,6 +172,8 @@ struct Manifest {
     requests: Vec<RequestRow>,
     programs: Vec<ProgramRow>,
     tree: Option<TreeBackup>,
+    // Authenticated sparse t -> portable membership lookup for direct log reads.
+    read_log_index: Option<Digest>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -343,6 +350,7 @@ pub enum RestoreFault {
 pub struct PortableBackup {
     connection: PostgresConnectionConfig,
     client: Client,
+    maintenance: crate::MaintenanceControl,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -367,7 +375,13 @@ impl PortableBackup {
         Ok(Self {
             connection: connection.clone(),
             client,
+            maintenance: crate::MaintenanceControl::default(),
         })
+    }
+
+    pub fn with_maintenance_control(mut self, control: crate::MaintenanceControl) -> Self {
+        self.maintenance = control;
+        self
     }
 
     /// Copy an authenticated immutable information point. Ordinary capture
@@ -389,6 +403,7 @@ impl PortableBackup {
         directory: &Path,
         fault_at: BackupFault,
     ) -> Result<BackupPoint, SemanticError> {
+        self.maintenance.check()?;
         let identity = crate::database_catalog::resolve_name_in(&mut self.client, database_id)?;
         let database_id = identity.database_id.as_str();
         for attempt in 0..MAX_BACKUP_ATTEMPTS {
@@ -603,6 +618,7 @@ impl PortableBackup {
             )
         })?;
         let mut publisher = ObjectPublisher::new(directory, fault_at);
+        publisher.maintenance = Some(self.maintenance.clone());
         if parent.is_none() {
             publisher.publish(genesis_hash, &genesis)?;
         }
@@ -688,6 +704,7 @@ impl PortableBackup {
             requests: Vec::new(),
             programs: Vec::new(),
             tree: None,
+            read_log_index: None,
         };
 
         // A backup point is a logical (lineage, t), not whichever replaceable
@@ -721,7 +738,22 @@ impl PortableBackup {
             &tree_log,
             &mut publisher,
         )?;
-        manifest.tree = tree;
+        let (read_tree, reserved_allocation) = capture_exact_read_tree(
+            &self.connection,
+            database_id,
+            &manifest,
+            captured.source_head_hash,
+            tree,
+            &mut publisher,
+        )?;
+        manifest.tree = Some(read_tree);
+        manifest.read_log_index = Some(capture_read_log_index(
+            parent.as_ref().and_then(|p| p.manifest.read_log_index),
+            start_basis,
+            &captured.portable_transaction_hashes,
+            reserved_allocation,
+            &mut publisher,
+        )?);
         transaction
             .commit()
             .map_err(|error| crate::postgres::postgres_error("backup/snapshot-commit", error))?;
@@ -849,6 +881,7 @@ impl PortableBackup {
     ) -> Result<BackupPoint, SemanticError> {
         verify_claim(directory, &manifest)?;
         let log = load_backup_log(directory, &manifest)?;
+        backup_read::verify_read_log_index(directory, &manifest, &log)?;
         load_completed_excisions(directory, &manifest)?;
         verify_program_presence(directory, &manifest, &log)?;
         if let Some(tree) = &manifest.tree {
@@ -918,7 +951,8 @@ impl PortableBackup {
         let mut previous = manifest.genesis_hash;
         let mut current_state_hash = checkpoint_state_hash(&database)?;
         let log = load_backup_log(directory, &manifest)?;
-        let mut objects_read = 1 + log.objects_read;
+        let mut objects_read =
+            1 + log.objects_read + backup_read::verify_read_log_index(directory, &manifest, &log)?;
         // Check each accelerator while the single authoritative replay is at
         // its exact endpoint. Receipt archives can name many earlier bases;
         // retaining one Database clone per archive would make deep verification
@@ -1218,6 +1252,7 @@ impl PortableBackup {
         activation_probe: Option<&mut dyn FnMut()>,
         completion_probe: Option<&mut dyn FnMut()>,
     ) -> Result<Database, SemanticError> {
+        self.maintenance.check()?;
         if target_database_id.is_empty() {
             return Err(SemanticError::incorrect(
                 "backup/empty-target",
@@ -1327,6 +1362,7 @@ impl PortableBackup {
                 target_database_id,
                 candidate,
                 fault_at,
+                &self.maintenance,
             )?;
             stage_restore_semantic_coordinates(
                 &mut self.client,
@@ -2076,6 +2112,7 @@ fn ensure_restore_candidate(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stage_restore_generation(
     client: &mut Client,
     manifest: &Manifest,
@@ -2084,12 +2121,14 @@ fn stage_restore_generation(
     target_database_id: &str,
     candidate: RestoreCandidate,
     fault_at: RestoreFault,
+    control: &crate::MaintenanceControl,
 ) -> Result<RestoredGenerationHead, SemanticError> {
     let generation_sql = sql_u64(candidate.generation, "restored log generation")?;
     let mut previous = manifest.genesis_hash;
     let mut state_hash = prepared.genesis_state_hash;
     let mut frontier = prepared.genesis_frontier;
     for chunk in prepared.rows.chunks(RESTORE_BATCH_ROWS) {
+        control.check()?;
         let mut transaction = client.transaction().map_err(|error| {
             crate::postgres::postgres_error("backup/restore-generation-begin", error)
         })?;
@@ -2265,6 +2304,7 @@ fn stage_restore_generation(
         transaction.commit().map_err(|error| {
             crate::postgres::postgres_error("backup/restore-generation-commit", error)
         })?;
+        control.after_batch()?;
     }
     // Membership hashes bind the local generation number. Initial restore of
     // a positive-generation archive can preserve its hash chain, but every
@@ -6774,6 +6814,9 @@ struct ObjectPublisher<'a> {
     seen: BTreeSet<Digest>,
     written: usize,
     reused: usize,
+    maintenance: Option<crate::MaintenanceControl>,
+    batch_objects: usize,
+    batch_bytes: usize,
 }
 
 impl<'a> ObjectPublisher<'a> {
@@ -6784,10 +6827,16 @@ impl<'a> ObjectPublisher<'a> {
             seen: BTreeSet::new(),
             written: 0,
             reused: 0,
+            maintenance: None,
+            batch_objects: 0,
+            batch_bytes: 0,
         }
     }
 
     fn publish(&mut self, hash: Digest, bytes: &[u8]) -> Result<(), SemanticError> {
+        if let Some(control) = &self.maintenance {
+            control.check()?;
+        }
         let first = self.seen.insert(hash);
         let fault_at = if first
             && self.seen.len() == 1
@@ -6803,6 +6852,15 @@ impl<'a> ObjectPublisher<'a> {
                 self.written += 1;
             } else {
                 self.reused += 1;
+            }
+            self.batch_objects += 1;
+            self.batch_bytes = self.batch_bytes.saturating_add(bytes.len());
+            if self.batch_objects >= 64 || self.batch_bytes >= 4 * 1024 * 1024 {
+                if let Some(control) = &self.maintenance {
+                    control.after_batch()?;
+                }
+                self.batch_objects = 0;
+                self.batch_bytes = 0;
             }
         }
         Ok(())
@@ -6904,7 +6962,7 @@ fn sync_directory(directory: &Path, code: &'static str) -> Result<(), SemanticEr
         .map_err(io_error(code))
 }
 
-fn read_object(directory: &Path, hash: Digest) -> Result<Vec<u8>, SemanticError> {
+pub(crate) fn read_object(directory: &Path, hash: Digest) -> Result<Vec<u8>, SemanticError> {
     let path = objects(directory).join(hex(&hash));
     require_regular_file(&path, "backup/object-type")?;
     let bytes = fs::read(path).map_err(io_error("backup/object-read"))?;
@@ -7269,6 +7327,7 @@ fn reusable_existing_point(
         ));
     }
     let log = load_backup_log(directory, &existing)?;
+    backup_read::verify_read_log_index(directory, &existing, &log)?;
     let (head_hash, head_state_hash) = match log.entries.last() {
         Some(entry) => (entry.transaction_hash, entry.legacy_state_hash),
         None => (
@@ -7837,6 +7896,13 @@ fn encode_manifest(manifest: &Manifest) -> Result<Vec<u8>, SemanticError> {
                 body.extend_from_slice(&tree.manifest_hash);
             }
         }
+        match manifest.read_log_index {
+            Some(hash) => {
+                body.push(1);
+                body.extend_from_slice(&hash);
+            }
+            None => body.push(0),
+        }
     } else if manifest.version == LEGACY_VERSION {
         put_hashes(&mut body, &manifest.transactions)?;
         put_hashes(&mut body, &manifest.state_hashes)?;
@@ -7901,7 +7967,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
         return Err(SemanticError::new(
             ErrorCategory::Unsupported,
             "backup/manifest-version",
-            "unsupported backup manifest version",
+            "unsupported backup manifest version; create a fresh current-version database and backup, or use the originating version to read this archive",
         ));
     }
     let len = usize::try_from(u64::from_be_bytes(
@@ -8019,6 +8085,15 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
             tree,
         )
     };
+    let read_log_index = if version == VERSION {
+        match cursor.u8()? {
+            0 => None,
+            1 => Some(cursor.digest()?),
+            _ => return Err(fault("backup/log-index-tag", "invalid log index tag")),
+        }
+    } else {
+        None
+    };
     cursor.finish()?;
     let manifest = Manifest {
         version,
@@ -8035,6 +8110,7 @@ fn decode_manifest(bytes: &[u8]) -> Result<Manifest, SemanticError> {
         requests,
         programs,
         tree,
+        read_log_index,
     };
     if !manifest_is_canonical(&manifest) || encode_manifest(&manifest)? != bytes {
         return Err(fault(
@@ -8383,7 +8459,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_manifest_is_a_constant_size_endpoint_root() {
+    fn current_manifest_is_a_constant_size_endpoint_root() {
         let genesis_hash = sha256(b"genesis");
         let manifest = Manifest {
             version: VERSION,
@@ -8403,16 +8479,29 @@ mod tests {
                 manifest_hash: sha256(b"tree manifest"),
                 legacy_node_hashes: None,
             }),
+            read_log_index: None,
         };
         let encoded = encode_manifest(&manifest).unwrap();
-        assert_eq!(encoded.len(), 295);
+        assert_eq!(encoded.len(), 296);
         assert_eq!(decode_manifest(&encoded).unwrap(), manifest);
+
+        // Previous development archives are not silently reinterpreted as the
+        // current read-index format. Reject before touching database state.
+        let mut unsupported = encoded.clone();
+        unsupported[4..6].copy_from_slice(&4u16.to_be_bytes());
+        let end = unsupported.len() - 32;
+        let checksum = sha256(&unsupported[..end]);
+        unsupported[end..].copy_from_slice(&checksum);
+        let error = decode_manifest(&unsupported).unwrap_err();
+        assert_eq!(error.category, ErrorCategory::Unsupported);
+        assert_eq!(error.code, "backup/manifest-version");
+        assert!(error.message.contains("fresh current-version database"));
 
         let mut no_tree = manifest;
         no_tree.basis = 1;
         no_tree.tree = None;
         let encoded = encode_manifest(&no_tree).unwrap();
-        assert_eq!(encoded.len(), 263);
+        assert_eq!(encoded.len(), 264);
         assert_eq!(decode_manifest(&encoded).unwrap(), no_tree);
     }
 
@@ -8597,6 +8686,7 @@ mod tests {
                 requests: Vec::new(),
                 programs: Vec::new(),
                 tree: None,
+                read_log_index: None,
             };
             let directory = temporary_directory("allocation-receipt-versions");
             let guard = prepare_directory(&directory).unwrap();
@@ -9374,6 +9464,7 @@ mod tests {
                 requests: Vec::new(),
                 programs: Vec::new(),
                 tree: None,
+                read_log_index: None,
             };
             let directory = temporary_directory("legacy-copy-frontier");
             let _guard = prepare_directory(&directory).unwrap();
@@ -9462,6 +9553,7 @@ mod tests {
             }],
             programs: Vec::new(),
             tree: None,
+            read_log_index: None,
         };
         let encoded = encode_manifest(&legacy).unwrap();
         assert_eq!(u16::from_be_bytes([encoded[4], encoded[5]]), LEGACY_VERSION);

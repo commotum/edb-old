@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::rc::Rc;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,31 @@ const MAX_PREFETCH_READ_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_PREFETCH_TIME: Duration = Duration::from_secs(1);
 const MAX_ACTIVE_PREFETCH_WORKERS: usize = 8;
 static ACTIVE_PREFETCH_WORKERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Per-service advisory read concurrency. Every lane has independent SQL and
+/// retention ownership; all lanes share the attempt's read budgets. The fixed
+/// process ceiling of eight workers also includes canceled/stalled old services.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HintPrefetchConcurrency {
+    /// Zero disables advisory workers. Valid values are 0..=8; default is one.
+    pub max_workers: usize,
+}
+impl Default for HintPrefetchConcurrency {
+    fn default() -> Self {
+        Self { max_workers: 1 }
+    }
+}
+impl HintPrefetchConcurrency {
+    pub(crate) fn validate(self) -> Result<Self, SemanticError> {
+        if self.max_workers > MAX_ACTIVE_PREFETCH_WORKERS {
+            return Err(SemanticError::incorrect(
+                "hints/invalid-concurrency",
+                "hint prefetch concurrency must be between zero and eight",
+            ));
+        }
+        Ok(self)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct HintLimits {
@@ -261,7 +286,8 @@ pub struct HintPrefetchOptions {
     /// At most 16,384 delivered datoms per attempt, even for larger options.
     pub max_datoms: u64,
     /// Stop between datoms after this cumulative logical read weight (clamped
-    /// to 16 MiB). One in-flight datom may exceed the remaining allowance;
+    /// to 16 MiB). Each concurrent lane may deliver one in-flight datom past
+    /// the remaining allowance; this is a shared budget, not multiplied by lanes.
     /// native block decoding/cache admission retain their separate limits.
     pub max_read_bytes: u64,
     /// Cooperative between-read deadline, clamped to one second. This is not
@@ -306,6 +332,7 @@ pub struct HintPrefetchStats {
     pub spawn_failed: bool,
     /// Active asynchronous workers. An acknowledgement does not imply zero.
     pub active_workers: u64,
+    pub peak_active_workers: u64,
     pub completed_workers: u64,
     pub skipped_busy: u64,
     pub queue_nanos: u64,
@@ -338,14 +365,33 @@ impl HintExecution {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct HintWorkerSlot(Arc<AtomicBool>);
+#[derive(Clone)]
+pub(crate) struct HintWorkerSlot {
+    active: Arc<AtomicUsize>,
+    maximum: usize,
+}
+impl Default for HintWorkerSlot {
+    fn default() -> Self {
+        Self::new(HintPrefetchConcurrency::default()).expect("valid default")
+    }
+}
+impl HintWorkerSlot {
+    pub(crate) fn new(config: HintPrefetchConcurrency) -> Result<Self, SemanticError> {
+        let config = config.validate()?;
+        Ok(Self {
+            active: Arc::new(AtomicUsize::new(0)),
+            maximum: config.max_workers,
+        })
+    }
+}
 
 struct WorkerPermit(HintWorkerSlot);
 impl WorkerPermit {
     fn acquire(slot: &HintWorkerSlot) -> Option<Self> {
-        slot.0
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        slot.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < slot.maximum).then_some(active + 1)
+            })
             .ok()?;
         if ACTIVE_PREFETCH_WORKERS
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -353,7 +399,7 @@ impl WorkerPermit {
             })
             .is_err()
         {
-            slot.0.store(false, Ordering::Release);
+            slot.active.fetch_sub(1, Ordering::AcqRel);
             return None;
         }
         Some(Self(slot.clone()))
@@ -362,7 +408,7 @@ impl WorkerPermit {
 impl Drop for WorkerPermit {
     fn drop(&mut self) {
         ACTIVE_PREFETCH_WORKERS.fetch_sub(1, Ordering::AcqRel);
-        self.0.0.store(false, Ordering::Release);
+        self.0.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -371,6 +417,9 @@ struct HintJob {
     stop: AtomicBool,
     started: Instant,
     processing_end: Mutex<Option<Instant>>,
+    next_prefix: AtomicUsize,
+    reserved_datoms: AtomicU64,
+    read_bytes: AtomicU64,
 }
 struct FinishAuthority(Arc<HintJob>);
 impl Drop for FinishAuthority {
@@ -426,7 +475,7 @@ impl PendingHints {
     }
 }
 
-/// At most one worker per writer and eight per process. Synchronous driver
+/// Configured workers per writer and at most eight per process. Synchronous driver
 /// calls cannot be interrupted safely: stuck workers retain their permits, so
 /// dropping/restarting services cannot accumulate unbounded threads or pins.
 /// Authority completion cancels further work but never waits for it. The worker
@@ -451,6 +500,9 @@ pub(crate) fn overlap<T>(
         stop: AtomicBool::new(false),
         started,
         processing_end: Mutex::new(None),
+        next_prefix: AtomicUsize::new(0),
+        reserved_datoms: AtomicU64::new(0),
+        read_bytes: AtomicU64::new(0),
     });
     let finish = FinishAuthority(job.clone());
     let plan = database
@@ -466,78 +518,87 @@ pub(crate) fn overlap<T>(
             || hints.options.max_datoms == 0
             || hints.options.max_read_bytes == 0
             || hints.hints.reads.is_empty()
+            || slot.maximum == 0
         {
             job.execution
                 .update(|stats| stats.canceled_or_limited = true);
-        } else if let Some(permit) = WorkerPermit::acquire(slot) {
-            let operation = OperationContext::current_or_process();
-            let reads = hints.hints.clone();
-            let mut options = hints.options.clone();
-            let worker_job = job.clone();
-            job.execution.update(|stats| stats.active_workers += 1);
-            let spawned = std::thread::Builder::new()
-                .name("atomic-hint-prefetch".into())
-                .spawn(move || {
-                    let phase = operation.phase(OperationKind::HintPrefetch);
-                    let begin = Instant::now();
-                    let measured = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        if worker_job.stop.load(Ordering::Acquire)
-                            || options.cancel.load(Ordering::Acquire)
-                        {
-                            return HintPrefetchStats {
-                                canceled_or_limited: true,
-                                ..Default::default()
-                            };
-                        }
-                        let independent = plan.open(options.timeout);
-                        match independent {
-                            Ok(independent) => {
-                                options.timeout = options.timeout.saturating_sub(begin.elapsed());
-                                prefetch(&independent, &reads, &options, &worker_job.stop)
-                            }
-                            Err(_) => HintPrefetchStats {
+        } else {
+            for _ in 0..slot.maximum.min(hints.hints.reads.len()) {
+                let Some(permit) = WorkerPermit::acquire(slot) else {
+                    job.execution.update(|stats| stats.skipped_busy += 1);
+                    break;
+                };
+                let operation = OperationContext::current_or_process();
+                let reads = hints.hints.clone();
+                let options = hints.options.clone();
+                let plan = plan.clone();
+                let worker_job = job.clone();
+                job.execution.update(|stats| {
+                    stats.active_workers += 1;
+                    stats.peak_active_workers = stats.peak_active_workers.max(stats.active_workers);
+                });
+                let spawned = std::thread::Builder::new()
+                    .name("atomic-hint-prefetch".into())
+                    .spawn(move || {
+                        let phase = operation.phase(OperationKind::HintPrefetch);
+                        let begin = Instant::now();
+                        let measured =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                if worker_job.stop.load(Ordering::Acquire)
+                                    || options.cancel.load(Ordering::Acquire)
+                                {
+                                    return HintPrefetchStats {
+                                        canceled_or_limited: true,
+                                        ..Default::default()
+                                    };
+                                }
+                                let independent = plan.open(options.timeout);
+                                match independent {
+                                    Ok(independent) => {
+                                        prefetch(&independent, &reads, &options, &worker_job)
+                                    }
+                                    Err(_) => HintPrefetchStats {
+                                        errors: 1,
+                                        ..Default::default()
+                                    },
+                                }
+                            }))
+                            .unwrap_or_else(|_| HintPrefetchStats {
                                 errors: 1,
                                 ..Default::default()
-                            },
-                        }
-                    }))
-                    .unwrap_or_else(|_| HintPrefetchStats {
-                        errors: 1,
-                        ..Default::default()
+                            });
+                        let end = Instant::now();
+                        let processing_end = worker_job
+                            .processing_end
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .unwrap_or(end);
+                        drop(phase);
+                        drop(permit);
+                        worker_job.execution.update(|stats| {
+                            stats.active_workers -= 1;
+                            stats.completed_workers += 1;
+                            stats.prefixes += measured.prefixes;
+                            stats.datoms += measured.datoms;
+                            stats.retained_read_bytes += measured.retained_read_bytes;
+                            stats.max_inflight_datom_bytes = stats
+                                .max_inflight_datom_bytes
+                                .max(measured.max_inflight_datom_bytes);
+                            stats.errors += measured.errors;
+                            stats.ignored_origin |= measured.ignored_origin;
+                            stats.canceled_or_limited |= measured.canceled_or_limited;
+                            stats.prefetch_nanos += nanos(end.duration_since(begin));
+                            stats.overlap_nanos +=
+                                nanos(processing_end.min(end).saturating_duration_since(begin));
+                        });
                     });
-                    let end = Instant::now();
-                    let processing_end = worker_job
-                        .processing_end
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .unwrap_or(end);
-                    drop(phase);
-                    drop(permit);
-                    worker_job.execution.update(|stats| {
+                if spawned.is_err() {
+                    job.execution.update(|stats| {
                         stats.active_workers -= 1;
-                        stats.completed_workers += 1;
-                        stats.prefixes += measured.prefixes;
-                        stats.datoms += measured.datoms;
-                        stats.retained_read_bytes += measured.retained_read_bytes;
-                        stats.max_inflight_datom_bytes = stats
-                            .max_inflight_datom_bytes
-                            .max(measured.max_inflight_datom_bytes);
-                        stats.errors += measured.errors;
-                        stats.ignored_origin |= measured.ignored_origin;
-                        stats.canceled_or_limited |= measured.canceled_or_limited;
-                        stats.prefetch_nanos += nanos(end.duration_since(begin));
-                        stats.overlap_nanos +=
-                            nanos(processing_end.min(end).saturating_duration_since(begin));
+                        stats.spawn_failed = true;
                     });
-                });
-            if spawned.is_err() {
-                job.execution.update(|stats| {
-                    stats.active_workers -= 1;
-                    stats.spawn_failed = true;
-                });
+                }
             }
-        } else {
-            job.execution.update(|stats| stats.skipped_busy += 1);
         }
     } else {
         job.execution.update(|stats| stats.ignored_origin = true);
@@ -551,7 +612,7 @@ fn prefetch(
     database: &DatabaseValue,
     hints: &TransactionHints,
     options: &HintPrefetchOptions,
-    stop: &AtomicBool,
+    job: &HintJob,
 ) -> HintPrefetchStats {
     let mut stats = HintPrefetchStats::default();
     let Ok(key) = database.snapshot_key() else {
@@ -564,22 +625,19 @@ fn prefetch(
         stats.ignored_origin = true;
         return stats;
     }
-    let start = Instant::now();
-    let mut hint_bytes = 0u64;
-    for read in hints.reads.iter().take(options.limits.max_prefixes) {
-        hint_bytes = hint_bytes.saturating_add(read.weight());
-        if hint_bytes > options.limits.max_bytes {
-            stats.canceled_or_limited = true;
+    loop {
+        let index = job.next_prefix.fetch_add(1, Ordering::Relaxed);
+        let Some(read) = hints.reads.get(index) else {
             break;
-        }
+        };
         let stopped = || {
-            stop.load(Ordering::Acquire)
+            job.stop.load(Ordering::Acquire)
                 || options.cancel.load(Ordering::Acquire)
-                || start.elapsed() >= options.timeout
+                || job.started.elapsed() >= options.timeout
         };
         if stopped()
-            || stats.datoms >= options.max_datoms
-            || stats.retained_read_bytes >= options.max_read_bytes
+            || job.reserved_datoms.load(Ordering::Acquire) >= options.max_datoms
+            || job.read_bytes.load(Ordering::Acquire) >= options.max_read_bytes
         {
             stats.canceled_or_limited = true;
             break;
@@ -595,14 +653,24 @@ fn prefetch(
         };
         stats.prefixes += 1;
         loop {
-            if stopped()
-                || stats.datoms >= options.max_datoms
-                || stats.retained_read_bytes >= options.max_read_bytes
+            if stopped() || job.read_bytes.load(Ordering::Acquire) >= options.max_read_bytes {
+                stats.canceled_or_limited = true;
+                return stats;
+            }
+            // Reserve before asking the cursor for another datom, so even
+            // concurrent reads never multiply the operation-wide count cap.
+            if job
+                .reserved_datoms
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    (count < options.max_datoms).then_some(count + 1)
+                })
+                .is_err()
             {
                 stats.canceled_or_limited = true;
                 return stats;
             }
             let Some(datum) = cursor.next() else {
+                job.reserved_datoms.fetch_sub(1, Ordering::AcqRel);
                 break;
             };
             match datum {
@@ -611,8 +679,14 @@ fn prefetch(
                     let bytes = datom.retained_bytes();
                     stats.max_inflight_datom_bytes = stats.max_inflight_datom_bytes.max(bytes);
                     stats.retained_read_bytes = stats.retained_read_bytes.saturating_add(bytes);
+                    let _ = job.read_bytes.fetch_update(
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                        |current| Some(current.saturating_add(bytes)),
+                    );
                 }
                 Err(_) => {
+                    job.reserved_datoms.fetch_sub(1, Ordering::AcqRel);
                     stats.errors += 1;
                     break;
                 }
@@ -657,7 +731,18 @@ mod tests {
         let replacement = HintWorkerSlot::default();
         assert!(WorkerPermit::acquire(&replacement).is_none());
         drop(permits);
-        assert!(WorkerPermit::acquire(&replacement).is_some());
+        let replacement_permit = WorkerPermit::acquire(&replacement).unwrap();
+        drop(replacement_permit);
+        let disabled = HintWorkerSlot::new(HintPrefetchConcurrency { max_workers: 0 }).unwrap();
+        assert!(WorkerPermit::acquire(&disabled).is_none());
+        let parallel = HintWorkerSlot::new(HintPrefetchConcurrency { max_workers: 3 }).unwrap();
+        let permits: Vec<_> = (0..3)
+            .map(|_| WorkerPermit::acquire(&parallel).unwrap())
+            .collect();
+        assert!(WorkerPermit::acquire(&parallel).is_none());
+        assert_eq!(parallel.active.load(Ordering::Acquire), 3);
+        drop(permits);
+        assert_eq!(parallel.active.load(Ordering::Acquire), 0);
     }
 
     #[test]

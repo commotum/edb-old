@@ -58,7 +58,7 @@ fn digest_at(bytes: &[u8], at: usize) -> Digest {
 /// SQL corruption is needed to make an internally valid but false index.
 fn root_offsets(bytes: &[u8]) -> (usize, usize) {
     assert_eq!(&bytes[..4], b"ATBK");
-    assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 4);
+    assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 5);
     let lineage = u32::from_be_bytes(bytes[14..18].try_into().unwrap()) as usize;
     let head = 18 + lineage + 8 + 8 + 32;
     let requests = head + 64;
@@ -142,6 +142,7 @@ fn forge_tree(
 }
 
 struct Fixture {
+    _scope: common::PostgresFixture,
     postgres: String,
     directory: tempfile::TempDir,
     point: BackupPoint,
@@ -157,6 +158,8 @@ impl Fixture {
             eprintln!("SKIP backup semantic integrity: ATOMIC_POSTGRES_URL is unset");
             return None;
         };
+        let scope = common::PostgresFixture::new(&postgres, "backup_semantic");
+        let postgres = scope.connection.clone();
         PostgresMigrator::connect(&postgres)
             .unwrap()
             .migrate()
@@ -264,6 +267,7 @@ impl Fixture {
         ));
         let root = fs::read(&root_path).unwrap();
         Some(Self {
+            _scope: scope,
             postgres,
             directory,
             point,

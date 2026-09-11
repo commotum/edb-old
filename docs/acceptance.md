@@ -1,8 +1,63 @@
 # Product acceptance and operating envelope
 
-The September10,2026 repair pass completed all twelve review repairs and integrated
-acceptance. Results below distinguish complete test coverage from individual run
-exit status. The September9 section remains historical evidence.
+The September10,2026 capability phase completed the required native features
+and integrated acceptance. Earlier repair and September9 results below remain
+historical evidence, not new cross-version support obligations. Results distinguish
+passing coverage from individual failed/interrupted invocations.
+
+## September10 native capability acceptance
+
+The product now combines EDN input/results, composable immutable db/tuple/log
+reads, general query data, native application computation, schema/identity and
+partition evolution, logical database lifecycle, asynchronous operations,
+automatic standby/excision, diagnostics, selective offline backup reads,
+persistent log caching and effective maintenance controls. These reuse the native
+engines and PostgreSQL; they are not JVM/wire compatibility or a second store.
+
+Focused new checks and representative integrated workflows ran against isolated
+current-version PostgreSQL fixtures with durability enabled. Final integration:
+
+- Stock application: 3/3, including two separate application processes across
+  writer restart, restricted roles, exact replay, held values, fulltext, planning,
+  general data, async reads and diagnostics. New CLI worker controls are exercised.
+- Stock TLS standby/crash takeover: 1/1, including cached-route recovery, exact
+  retry, automatic excision, held reads and health/readiness.
+- Operator CLI: 2/2, including repeat backup, offline verification, restore
+  preview, SIGTERM during upload followed by exact-selection retry, integrity
+  and permission guards, search repair and paced GC.
+- Native function deployment/rebinding/restart/backup/restore: 1/1, with
+  receipt-first retry that does not execute missing/replaced external code.
+
+These targets took 5.71/4.03/4.54/3.00 seconds respectively. The measured standby
+scenario took 3.920 seconds, including 2.083 seconds takeover. They are local
+workload observations, not availability or throughput guarantees. Unaffected
+earlier capability evidence was reused rather than repeating every test matrix.
+
+Selective backup reads passed after deleting their source schemas. At 64 and
+8,192 entities, open plus two queries/consumption/drop took 2.138/11.191 ms,
+reading 16 objects to open and two more for a three-result query at either size.
+Persistent log-cache checks transferred zero PostgreSQL payload bytes on warm
+and reopened scans while still authenticating authoritative metadata. See
+[backup reads](backup-reads.md), [log caching](native-log-cache.md) and
+[maintenance controls](maintenance-controls.md) for costs and boundaries.
+Four preparation workers were slower than one on the measured small input;
+the default remains one and no speedup is promised.
+
+Current-format semantic/copy checks pass (4+2), including forged indexes,
+receipt bases, noHistory and missing descendants. Cancellation checks prove
+staging survives without publishing an incomplete backup point or restore head.
+Intermediate failures from an unoptimized large-seed timeout, old unisolated
+fixtures, permissions/head assumptions and a stale error-code expectation were
+corrected and affected checks rerun; those failures are not counted as passes.
+
+All-target compilation and lib/bin Clippy succeed; 15 existing library and one
+existing CLI warning remain. No existing database was reset. Backup envelope 5
+adds direct-read metadata and explicitly rejects unsupported development formats.
+Fresh databases/backups may be required across versions; current-version durable
+writes, recovery, failover, exact retries and backup/restore remain required.
+Optional gateway/UI/shared-network-cache/AWS/BI integrations and other durable
+stores are not claimed. This is scoped product acceptance, not certification of
+every Datomic feature or a commercial deployment.
 
 ## September10 repair verification
 

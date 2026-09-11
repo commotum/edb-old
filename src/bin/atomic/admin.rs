@@ -18,10 +18,11 @@ Administrative commands (explicit credentials/targets; no automatic provisioning
   atomic delete --database NAME [--lineage UUID --apply]
   atomic gc-deleted --storage-id ID --lineage UUID --postgres-database NAME
     --catalog-schema NAME --older-than-seconds N [--apply --batches N]
-  atomic backup --database ID --repository PATH
+  atomic backup --database ID --repository PATH [--maintenance-pause-ms N]
   atomic list-backups --repository PATH
   atomic verify-backup --repository PATH --basis N --generation N [--presence-only]
   atomic restore --repository PATH --basis N --generation N --target-database ID
+    [--maintenance-pause-ms N]
     --postgres-database NAME --catalog-schema NAME [--apply]
   atomic inspect --database ID [--shallow]
   atomic gc --postgres-database NAME --catalog-schema NAME --older-than-seconds N
@@ -69,7 +70,10 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), SemanticError>> {
             ],
             &["--apply"],
         ),
-        "backup" => (&["--database", "--repository"], &[]),
+        "backup" => (
+            &["--database", "--repository", "--maintenance-pause-ms"],
+            &[],
+        ),
         "list-backups" => (&["--repository"], &[]),
         "verify-backup" => (
             &["--repository", "--basis", "--generation"],
@@ -77,6 +81,7 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), SemanticError>> {
         ),
         "restore" => (
             &[
+                "--maintenance-pause-ms",
                 "--repository",
                 "--basis",
                 "--generation",
@@ -89,6 +94,7 @@ pub fn dispatch(arguments: &[String]) -> Option<Result<(), SemanticError>> {
         "inspect" => (&["--database"], &["--shallow"]),
         "gc" => (
             &[
+                "--maintenance-pause-ms",
                 "--postgres-database",
                 "--catalog-schema",
                 "--older-than-seconds",
@@ -174,7 +180,13 @@ impl Arguments {
         for flag in required {
             parsed.required(flag)?;
         }
-        for flag in ["--basis", "--generation", "--older-than-seconds", "--limit"] {
+        for flag in [
+            "--basis",
+            "--generation",
+            "--older-than-seconds",
+            "--limit",
+            "--maintenance-pause-ms",
+        ] {
             if parsed.values.contains_key(flag) {
                 parsed.number(flag)?;
             }
@@ -386,6 +398,14 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         return Ok(());
     }
     let config = postgres_config_from_env()?;
+    let maintenance = atomic_core::MaintenanceControl::new(
+        Duration::from_millis(if args.values.contains_key("--maintenance-pause-ms") {
+            args.number("--maintenance-pause-ms")?
+        } else {
+            0
+        }),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )?;
     match args.command.as_str() {
         "migrate" => {
             let mut migrator = PostgresMigrator::connect_configured(&config)?;
@@ -526,10 +546,12 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         }
         "backup" => {
             progress("backup", "capture")?;
-            let p = PortableBackup::connect_configured(&config)?.backup_database(
-                args.required("--database")?,
-                Path::new(args.required("--repository")?),
-            )?;
+            let p = PortableBackup::connect_configured(&config)?
+                .with_maintenance_control(maintenance.clone())
+                .backup_database(
+                    args.required("--database")?,
+                    Path::new(args.required("--repository")?),
+                )?;
             point("BACKED_UP", &p);
             println!(
                 "BACKUP semantic_verification=false elapsed_ms={}",
@@ -552,12 +574,14 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                 );
             } else {
                 progress("restore", "verify-stage-activate")?;
-                let db = PortableBackup::connect_configured(&config)?.restore_backup_point(
-                    directory,
-                    p.basis_t,
-                    p.log_generation,
-                    args.required("--target-database")?,
-                )?;
+                let db = PortableBackup::connect_configured(&config)?
+                    .with_maintenance_control(maintenance.clone())
+                    .restore_backup_point(
+                        directory,
+                        p.basis_t,
+                        p.log_generation,
+                        args.required("--target-database")?,
+                    )?;
                 println!(
                     "RESTORED target_database={:?} lineage={} basis_t={} selected_generation={} elapsed_ms={}",
                     args.required("--target-database")?,
@@ -615,7 +639,8 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         "gc" => {
             verify_target(&config, &args)?;
             let age = Duration::from_secs(args.number("--older-than-seconds")?);
-            let mut operator = PostgresOperator::connect_configured(&config)?;
+            let mut operator = PostgresOperator::connect_configured(&config)?
+                .with_maintenance_control(maintenance.clone());
             println!(
                 "GC_POLICY older_than_seconds={} short_retention={} scope=entire-catalog",
                 age.as_secs(),
@@ -638,6 +663,15 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         }
         "fulltext-rebuild" => rebuild(&config, &args)?,
         _ => unreachable!("validated administrative command"),
+    }
+    if args.values.contains_key("--maintenance-pause-ms") {
+        let stats = maintenance.stats();
+        println!(
+            "MAINTENANCE batches={} pauses={} paused_ms={}",
+            stats.completed_batches,
+            stats.pauses,
+            stats.paused_nanos / 1_000_000
+        );
     }
     Ok(())
 }

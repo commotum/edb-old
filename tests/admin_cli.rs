@@ -48,7 +48,7 @@ fn rejected(connection: Option<&str>, args: &[&str], code: &str) {
     assert!(!result.status.success());
     assert!(
         String::from_utf8_lossy(&result.stderr).contains(code),
-        "unexpected error: {}",
+        "unexpected error for {args:?} (expected {code}): {}",
         String::from_utf8_lossy(&result.stderr)
     );
 }
@@ -324,7 +324,7 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
     rejected(
         Some(&fixture.source),
         &["fulltext-rebuild", "--database", "absent"],
-        "cli/no-native-publication",
+        "catalog/name-not-found",
     );
     let peer_url = fixture.peer();
     let service = common::start_service(&fixture.source, "source");
@@ -387,7 +387,15 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
     let repo = repository.to_str().unwrap();
     let first = success(
         Some(&fixture.source),
-        &["backup", "--database", "source", "--repository", repo],
+        &[
+            "backup",
+            "--database",
+            "source",
+            "--repository",
+            repo,
+            "--maintenance-pause-ms",
+            "1",
+        ],
     );
     let captured = PortableBackup::list_backup_points(&repository).unwrap();
     assert_eq!(captured.len(), 1);
@@ -453,12 +461,12 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
             .database_status("restored")
             .is_err()
     );
-    restore.push("--apply");
+    restore.extend(["--apply", "--maintenance-pause-ms", "1"]);
     #[cfg(unix)]
     interrupt_restore_at_node_write(&fixture, &restore);
-    assert!(
-        success(Some(&fixture.target), &restore).contains("RESTORED target_database=\"restored\"")
-    );
+    let restored_output = success(Some(&fixture.target), &restore);
+    assert!(restored_output.contains("RESTORED target_database=\"restored\""));
+    assert!(restored_output.contains("MAINTENANCE"));
     assert!(success(Some(&fixture.target), &restore).contains("basis_t=3"));
     assert!(
         success(
@@ -614,7 +622,7 @@ fn actual_admin_commands_backup_verify_restore_inspect_gc_and_repair() {
     wrong_gc.push("--apply");
     rejected(Some(&fixture.source), &wrong_gc, "cli/target-mismatch");
     let mut applied = gc.to_vec();
-    applied.extend(["--apply", "--batches", "3"]);
+    applied.extend(["--apply", "--batches", "3", "--maintenance-pause-ms", "1"]);
     let collected = success(Some(&fixture.source), &applied);
     println!("{collected}");
     assert!(

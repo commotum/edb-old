@@ -89,7 +89,7 @@ fn hex_digest(hash: &[u8; 32]) -> String {
 
 fn manifest_v4_root_shape(path: &std::path::Path) -> (usize, bool) {
     let bytes = fs::read(path).unwrap();
-    assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 4);
+    assert_eq!(u16::from_be_bytes(bytes[4..6].try_into().unwrap()), 5);
     let mut at = 14;
     let lineage_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
     at += 4 + lineage_len + 8 + 8 + 32;

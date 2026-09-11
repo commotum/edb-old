@@ -9,6 +9,15 @@ The supported executable commands and explicit target/preview/apply controls
 are documented in [Administrative CLI](admin.md). The API-level guarantees and
 measured limits below still apply to those commands.
 
+Current development support targets freshly created databases on the current
+version. Format changes can require a fresh database; old-database migrations,
+old backup/program readability and mixed-version rolling upgrades are not support
+promises. Existing migration facilities and historical results below can remain,
+but are not ongoing acceptance obligations. Unsupported formats are rejected,
+never automatically erased. Current-version durable writes, exact retries,
+restart recovery, failover and backup/restore remain supported and tested.
+For direct read-only backup access, see [backup reads](backup-reads.md).
+
 ## Historical G3 integrated acceptance — 2026-09-09
 
 The 100,000-record/400,000-business-fact system-of-record workload uses two
