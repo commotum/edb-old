@@ -1809,6 +1809,19 @@
       (datomic.btset/btset datomic.db/aevt-cmp)
       (datomic.btset/btset datomic.db/raet-cmp)
       nil))
+  ;; ATOMIC-NOTE BEGIN immutable-value-window
+  ;; [observed] seek-datoms, datoms, rseek-datoms and attr-index-range share this
+  ;; adapter over the immutable Db's ordered indexes. Temporal predicates and
+  ;; the custom predicate run before current retraction collapse; raw history
+  ;; bypasses collapse. The callback receives the same temporal/raw value with
+  ;; only :filt removed, so a contextual lookup does not recursively filter.
+  ;; [documented] Database Filters describes inclusive as-of, exclusive since,
+  ;; composable views and a direct current-index path. [native adaptation]
+  ;; Atomic retains one shared incremental window/cursor engine for eager,
+  ;; committed and speculative values; peer refresh is not its owner. Its
+  ;; transaction-attempt prefix memo is discardable, separately charged state,
+  ;; not part of a database's information or source wire representation.
+  ;; ATOMIC-NOTE END immutable-value-window
   (defn windowed
     "Applies a database value's temporal and custom predicates to an index iterator. Point-in-time views collapse retractions; history views retain both assertions and retractions."
     ([db whilep iter]
@@ -5598,6 +5611,10 @@
       'recalc-elements
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] update/process-request-index freezes the current
+  ;; memidx as :indexing and installs an empty :memidx for later transactions.
+  ;; complete-indexing replaces the durable base, not that newer live memidx.
+  ;; [inferred] This split permits background merging without losing arrivals.
   (defn prepare-for-indexing
     ([db]
       (if (.-indexing ^datomic.db.Db db)
@@ -5618,6 +5635,10 @@
       'prepare-for-indexing
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] update/process-new-index supplies an already-published
+  ;; result. A newer revision is accepted only at the frozen indexingNextT;
+  ;; mismatch throws, while stale/no-active-job results leave db unchanged.
+  ;; This is local adoption/novelty retirement, not the index reference CAS.
   (defn complete-indexing
     ([db p__12945]
       (let [map__12946 p__12945
@@ -5950,6 +5971,11 @@
   (reset-meta!
     #'string-tempid
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'string-tempid :ns *ns*))
+  ;; ATOMIC-NOTE [observed] Anonymous nested-map admission checks enum 38,
+  ;; :db.unique/identity, not :db.unique/value (37). [documented] The Nested
+  ;; Maps paragraph says "unique" and explains orphan prevention more broadly.
+  ;; Keep this version/contract distinction explicit; unique-value collisions
+  ;; must not accidentally acquire identity-upsert semantics.
   (defn has-unique-id?
     ([db emap]
       (let [unique_id? (fn unique_id_QMARK_
@@ -6037,6 +6063,11 @@
   (reset-meta!
     #'part-requests
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'part-requests :ns *ns*))
+  ;; ATOMIC-NOTE [observed] Only anonymous children need this allocation guard:
+  ;; expand-submap first tries the explicit :db/id. Component ownership or the
+  ;; child's domain identity makes otherwise anonymous creation intentional.
+  ;; Reject before expanding facts; this is authoring policy, not a stored
+  ;; document shape or an instruction to delete omitted child attributes.
   (defn make-child-id
     ([db parentid attrid childmap]
       (let [attr (datomic.db/attribute db attrid)]
@@ -6057,6 +6088,10 @@
       :ns
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.db" "expand-map") {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE [observed] Emit the reference edge and ordinary child additions
+  ;; through the same expander. Explicit numeric/ident/lookup/temp identifiers
+  ;; bypass make-child-id, but not subsequent ID/type/uniqueness validation.
+  ;; Component partition affinity is recorded separately from relationship data.
   (defn expand-submap
     ([db parentid attrid v part_reqs local_tempids]
       (let [v (datomic.db/force-map-keywords db (datomic.db/normalize-map v))
@@ -6285,6 +6320,20 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "tuple-elem?")
         (assoc protocol_signature__7472 :name protocol_method_name__7473 :ns *ns*))))
+  ;; ATOMIC-NOTE BEGIN foundation-tuple-limits
+  ;; Observed: validated-tuple calls tuple-elem? for each asserted slot, and
+  ;; validated-v-for-attr routes tuple-valued transaction data through that path.
+  ;; The following limits are representation-specific, not generic "length":
+  ;; String.length counts UTF-16 units; BigInteger.bitLength counts minimal
+  ;; two's-complement bits excluding the sign bit; BigDecimal.precision counts
+  ;; coefficient digits. Thus 129 astral characters exceed 256 string units,
+  ;; while -2^256 fits the 256-bit integer limit. Rust's scalar-character count
+  ;; and unsigned magnitude bit count originally differed at those boundaries.
+  ;; These compact-key limits constrain accepted facts, so the native schema
+  ;; validator must choose the same meaning explicitly; changing collection
+  ;; representation does not by itself justify silently changing admission.
+  ;; Evidence/repair trace: 03_schema/03_identity_and_uniqueness.atomic.md.
+  ;; ATOMIC-NOTE END foundation-tuple-limits
   (extend nil datomic.db/TupleElem {:tuple-elem? (fn fn__13076 ([_] true))})
   ;; Tuple slots use compact scalar representations. Strings, BigIntegers, and
   ;; BigDecimals are bounded to 256 characters, bits, and digits respectively.
@@ -6409,6 +6458,13 @@
       'valid-tuple-assert?
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN foundation-tuple-validation-call
+  ;; Observed: reference resolution/coercion happens before the assertion-only
+  ;; element and tuple-shape checks. Non-asserting operations return the coerced
+  ;; tuple without reapplying those restrictions. This note traces the actual
+  ;; tuple-elem? consumer; it does not claim Rust's complete retraction/lookup
+  ;; validation policy has been reconciled by fixing the size counters.
+  ;; ATOMIC-NOTE END foundation-tuple-validation-call
   (defn validated-tuple
     ([db op attr v]
       (let [tup (datomic.db/coerce-tuple (datomic.db/require-tuple-ids db attr v))]
@@ -6647,6 +6703,15 @@
       'default-partition
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN transaction-keyed-identities
+  ;; [observed] get-ids consults db-before AVET and a transaction-local map
+  ;; keyed by [attribute value], assigning tempid->eid mappings before
+  ;; ProcessExpander.getData replaces references. These keyed maps carry the
+  ;; mechanism; this recovered body does not use Rust-style parent chains.
+  ;; [native adaptation] Atomic groups sorted identity keys with minimum-root
+  ;; union-find. Compressing its private paths preserves representatives and
+  ;; allocation/conflict behavior; it is not a claim of identical source code.
+  ;; ATOMIC-NOTE END transaction-keyed-identities
   (defn get-ids
     "Assigns permanent entity ids to transaction tempids and resolves unique-identity upserts against db-before. A tempid that identifies multiple existing entities is rejected as a conflict."
     ([db data part_reqs]

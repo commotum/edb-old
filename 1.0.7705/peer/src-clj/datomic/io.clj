@@ -147,6 +147,14 @@
       'byte-source->buffer
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-io-counterpart
+  ;; See transactor/src-clj/datomic/io.clj serialization-buffer-ownership,
+  ;; compression, edn-boundary, exact-io and checksum-role notes. The inspected
+  ;; helper bodies have the same mechanisms; generated local symbols differ,
+  ;; so the entire files are not claimed byte-identical. Buffer ownership, EDN,
+  ;; binary serialization and storage integrity remain separate responsibilities.
+  ;; Baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d.
+  ;; ATOMIC-NOTE END serialization-io-counterpart
   (defn alias-buf-bytes
     ([buffer]
       (if (and

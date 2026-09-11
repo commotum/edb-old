@@ -3,10 +3,11 @@
 //! The index is a compressed binary radix trie of scoped request-key digests.
 //! Lookup and insertion visit at most 256 branches, regardless of history size;
 //! ordinary hashed keys have logarithmic paths. Neither operation reads the
-//! complete mapping. Publication/protection belong to the caller.
+//! complete mapping. Edits accept objects through ObjectWriter; the caller must
+//! flush before independent reads/publication. Protection remains caller-owned.
 
-use super::object_io::ObjectReader;
-use super::{ObjectId, PgBlockStore, root::Block};
+use super::object_io::{ObjectReader, ObjectWriter};
+use super::{ObjectId, root::Block};
 use crate::{Digest, ErrorCategory, SemanticError};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
@@ -67,7 +68,7 @@ pub struct ExactReceipt {
 }
 
 impl ExactReceipt {
-    pub fn put(&self, store: &mut PgBlockStore) -> Result<ObjectId, SemanticError> {
+    pub fn put(&self, store: &mut dyn ObjectWriter) -> Result<ObjectId, SemanticError> {
         validate_coordinate(self.identity, self.basis)?;
         let tempids = encode_tempids(&self.tempids, self.basis)?;
         let mut payload = Vec::with_capacity(RECEIPT_HEADER + tempids.len().min(INLINE_BYTES));
@@ -81,7 +82,7 @@ impl ExactReceipt {
         } else {
             for chunk in tempids.chunks(CHUNK_BYTES) {
                 links.push(
-                    store.put(
+                    store.put_object(
                         &Block {
                             kind: RECEIPT_CHUNK_KIND,
                             links: vec![],
@@ -92,7 +93,7 @@ impl ExactReceipt {
                 );
             }
         }
-        store.put(
+        store.put_object(
             &Block {
                 kind: RECEIPT_KIND,
                 links,
@@ -398,7 +399,7 @@ impl RequestIndex {
     /// for an occupied key is a conflict and performs no object writes.
     pub fn insert(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         key: Digest,
         receipt: ObjectId,
     ) -> Result<Self, SemanticError> {
@@ -410,7 +411,7 @@ impl RequestIndex {
     /// tombstone object; ordinary receipt insertion remains insert-only.
     pub fn upsert(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         key: Digest,
         value: ObjectId,
     ) -> Result<Self, SemanticError> {
@@ -418,11 +419,11 @@ impl RequestIndex {
     }
 
     /// Apply a sorted, unique page of replacements/deletions. Only the final
-    /// affected Patricia nodes are persisted, once each: intermediate roots
+    /// affected Patricia nodes are submitted, once each: intermediate roots
     /// exist solely in memory and untouched subtrees keep their object IDs.
     pub fn apply_batch(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         changes: &[(Digest, Option<ObjectId>)],
     ) -> Result<Self, SemanticError> {
         if changes.len() > 4096 || changes.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
@@ -443,7 +444,7 @@ impl RequestIndex {
     /// Remove one mapping by path copying, collapsing its binary parent. No
     /// value or unrelated subtree is read or changed; the previous root keeps
     /// its original meaning for any retained owner.
-    pub fn remove(&self, store: &mut PgBlockStore, key: Digest) -> Result<Self, SemanticError> {
+    pub fn remove(&self, store: &mut dyn ObjectWriter, key: Digest) -> Result<Self, SemanticError> {
         let Some(mut id) = self.root else {
             return Ok(*self);
         };
@@ -525,7 +526,7 @@ impl RequestIndex {
 
     fn insert_inner(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         key: Digest,
         receipt: ObjectId,
         replace: bool,
@@ -616,7 +617,7 @@ impl BatchNode {
             body: BatchBody::Leaf { key, value },
         })
     }
-    fn load(&mut self, store: &mut PgBlockStore) -> Result<(), SemanticError> {
+    fn load(&mut self, store: &mut dyn ObjectReader) -> Result<(), SemanticError> {
         if let BatchBody::Stored(parent) = self.body {
             self.body =
                 match Node::load(store, self.original.expect("stored node identity"), parent)? {
@@ -641,7 +642,7 @@ impl BatchNode {
     /// Recursion is bounded by the 256-bit key width, not the entry count.
     fn edit(
         tree: Option<Box<Self>>,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectReader,
         key: Digest,
         value: Option<ObjectId>,
     ) -> Result<(Option<Box<Self>>, bool), SemanticError> {
@@ -724,7 +725,7 @@ impl BatchNode {
             true,
         ))
     }
-    fn persist(self, store: &mut PgBlockStore) -> Result<ObjectId, SemanticError> {
+    fn persist(self, store: &mut dyn ObjectWriter) -> Result<ObjectId, SemanticError> {
         if let Some(id) = self.original {
             return Ok(id);
         }
@@ -769,7 +770,7 @@ impl Node {
             Self::Branch(b) => b.prefix,
         }
     }
-    fn put(self, store: &mut PgBlockStore) -> Result<ObjectId, SemanticError> {
+    fn put(self, store: &mut dyn ObjectWriter) -> Result<ObjectId, SemanticError> {
         let block = match self {
             Self::Leaf { key, receipt } => Block {
                 kind: REQUEST_LEAF_KIND,
@@ -786,7 +787,7 @@ impl Node {
                 }
             }
         };
-        store.put(&block.encode()?)
+        store.put_object(&block.encode()?)
     }
     fn load(
         store: &mut (impl ObjectReader + ?Sized),
@@ -895,5 +896,150 @@ mod frontier_tests {
         assert!(validate(crate::make_eid(crate::USER_PARTITION, 2000).unwrap()).is_err());
         validate(crate::t_to_tx(5000).unwrap()).unwrap(); // t exceeds entity frontier
         assert!(validate(crate::t_to_tx(5001).unwrap()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod object_writer_tests {
+    use super::*;
+    use crate::storage::log::{LOG_ENTRY_KIND, LOG_PAGE_KIND, LogEntry, LogRoot};
+
+    // A test-only immutable byte collection, not a publication/GC backend.
+    #[derive(Default)]
+    struct Objects {
+        bytes: BTreeMap<ObjectId, Vec<u8>>,
+        writes: Vec<u16>,
+        reject_kind: Option<u16>,
+    }
+
+    impl ObjectReader for Objects {
+        fn read_object(&mut self, id: ObjectId) -> Result<Vec<u8>, SemanticError> {
+            self.bytes
+                .get(&id)
+                .cloned()
+                .ok_or_else(|| invalid("test/missing-object", "Missing test object"))
+        }
+    }
+
+    impl ObjectWriter for Objects {
+        fn put_object(&mut self, bytes: &[u8]) -> Result<ObjectId, SemanticError> {
+            let id = crate::sha256(bytes);
+            let block = Block::decode(&id, bytes)?;
+            if self.reject_kind == Some(block.kind) {
+                return Err(SemanticError::conflict(
+                    "test/write-rejected",
+                    "Injected write failure",
+                ));
+            }
+            assert_eq!(
+                self.bytes
+                    .entry(id)
+                    .or_insert_with(|| bytes.to_vec())
+                    .as_slice(),
+                bytes
+            );
+            self.writes.push(block.kind);
+            Ok(id)
+        }
+        fn flush_objects(&mut self) -> Result<(), SemanticError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn opaque_writer_preserves_log_receipt_and_request_index_structures() {
+        let mut objects = Objects::default();
+        let entry = |basis_t| LogEntry {
+            basis_t,
+            eidx_frontier: crate::INITIAL_EIDX_FRONTIER,
+            reserved_frontier: crate::INITIAL_EIDX_FRONTIER,
+            tx_data: Vec::new(),
+        };
+        let mut log = LogRoot::empty();
+        for basis in 1..=130 {
+            log = log.append(&mut objects, &entry(basis)).unwrap();
+        }
+        assert_eq!(objects.writes, [LOG_ENTRY_KIND, LOG_PAGE_KIND].repeat(130));
+        let reopened = LogRoot::open(&mut objects, log.head().unwrap()).unwrap();
+        reopened.validate_structure(&mut objects).unwrap();
+        assert_eq!(
+            reopened
+                .range(&mut objects, 63, 130)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            (63..130).map(entry).collect::<Vec<_>>()
+        );
+
+        let receipt = ExactReceipt {
+            identity: [1; 16],
+            request_digest: [2; 32],
+            basis: 130,
+            transaction: log.latest_entry_id().unwrap(),
+            before: [3; 32],
+            after: [4; 32],
+            // Cross the inline/chunk boundary without large test allocations.
+            tempids: BTreeMap::from([("alias".repeat(14_000), 1000)]),
+        };
+        let receipt_id = receipt.put(&mut objects).unwrap();
+        assert_eq!(&objects.writes[260..], &[RECEIPT_CHUNK_KIND, RECEIPT_KIND]);
+        assert_eq!(
+            ExactReceipt::load(&mut objects, receipt_id).unwrap(),
+            receipt
+        );
+        let mut expected = BTreeMap::new();
+        let mut index = RequestIndex::empty();
+        for key in [0, 64, 128, 255].map(|n| [n; 32]) {
+            index = index.insert(&mut objects, key, receipt_id).unwrap();
+            expected.insert(key, receipt_id);
+        }
+        let retained = index;
+        let retained_entries = expected.clone().into_iter().collect::<Vec<_>>();
+        let writes = objects.writes.len();
+        assert_eq!(
+            index
+                .insert(&mut objects, [0; 32], receipt_id)
+                .unwrap()
+                .root(),
+            index.root()
+        );
+        assert_eq!(
+            index
+                .insert(&mut objects, [0; 32], [5; 32])
+                .unwrap_err()
+                .code,
+            "storage/request-key-exists"
+        );
+        assert_eq!(objects.writes.len(), writes);
+
+        index = index.upsert(&mut objects, [0; 32], [5; 32]).unwrap();
+        expected.insert([0; 32], [5; 32]);
+        index = index.remove(&mut objects, [128; 32]).unwrap();
+        expected.remove(&[128; 32]);
+        index = index
+            .apply_batch(
+                &mut objects,
+                &[([64; 32], None), ([192; 32], Some(receipt_id))],
+            )
+            .unwrap();
+        expected.remove(&[64; 32]);
+        expected.insert([192; 32], receipt_id);
+        assert_eq!(
+            index.scan(&mut objects, None, 16).unwrap(),
+            expected.into_iter().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            retained.scan(&mut objects, None, 16).unwrap(),
+            retained_entries
+        );
+
+        objects.reject_kind = Some(LOG_PAGE_KIND);
+        let head = log.head();
+        let error = log.append(&mut objects, &entry(131)).unwrap_err();
+        assert_eq!(error.code, "test/write-rejected");
+        assert_eq!(error.category, ErrorCategory::Conflict);
+        assert_eq!(objects.writes.last(), Some(&LOG_ENTRY_KIND));
+        assert_eq!(log.head(), head);
+        assert_eq!(log.read(&mut objects, 130).unwrap(), Some(entry(130)));
     }
 }

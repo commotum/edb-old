@@ -1,10 +1,35 @@
 //! Explicit repair uses fresh isolated schemas; ordinary readers never replay.
 use super::*;
-use crate::storage::{BlockDatabase, BlockReader, BlockTransactor, BlockWriterOptions};
+use crate::storage::{BlockDatabase, BlockReader};
 use crate::{
     Attribute, Cardinality, EntityRef, Keyword, PostgresConnectionConfig, PostgresOperator, Schema,
     TransactionRequest, TxOp, Value, ValueType,
 };
+use crate::{BlockTransactor, BlockWriterOptions};
+
+thread_local! {
+    static PAGE_READS: std::cell::RefCell<Option<BTreeMap<ObjectId, usize>>> = const { std::cell::RefCell::new(None) };
+}
+pub(super) fn observe_log_page(id: ObjectId, bytes: &[u8]) {
+    PAGE_READS.with(|slot| {
+        let mut counts = slot.borrow_mut();
+        if let Some(counts) = counts.as_mut()
+            && bytes.get(..4) == Some(b"ATOB")
+            && u16::from_be_bytes(bytes[6..8].try_into().unwrap())
+                == super::super::log::LOG_PAGE_KIND
+        {
+            *counts.entry(id).or_default() += 1;
+        }
+    });
+}
+struct PageObservation;
+impl Drop for PageObservation {
+    fn drop(&mut self) {
+        PAGE_READS.with(|slot| {
+            slot.borrow_mut().take();
+        });
+    }
+}
 
 struct Fixture {
     admin: postgres::Client,
@@ -82,6 +107,76 @@ fn erase(f: &mut Fixture, id: ObjectId) {
             .unwrap(),
         1,
         "corruption is confined to this newly created fixture"
+    );
+}
+
+#[test]
+fn actual_recovery_reads_each_sealed_page_once_for_validation_and_once_for_replay() {
+    let Some(f) = fixture() else { return };
+    let mut writer =
+        BlockTransactor::claim(&f.config, f.database.clone(), BlockWriterOptions::default())
+            .unwrap();
+    for n in 0..129 {
+        writer
+            .transact(
+                &TransactionRequest::new(format!("page-{n}"), Vec::<TxOp>::new())
+                    .with_tx_instant(n + 10),
+            )
+            .unwrap();
+    }
+    writer.release().unwrap();
+    let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
+    let capture = reader
+        .capture_reference(&f.database.reference_key())
+        .unwrap();
+    let mut store = PgBlockStore::connect(&f.config).unwrap();
+    let before = root(&mut store, &f.database);
+    assert_eq!(before.basis, 130);
+    let log = super::super::log::LogRoot::open(&mut store, before.log.unwrap()).unwrap();
+    let tail = log.head().unwrap();
+    PAGE_READS.with(|slot| *slot.borrow_mut() = Some(BTreeMap::new()));
+    let _observation = PageObservation;
+    let operation = crate::OperationContext::new(crate::OperationKind::Recovery);
+    let prepared = {
+        let _scope = operation.enter();
+        prepare_recovery(
+            &mut store,
+            &capture,
+            &TreeConfig::default(),
+            &crate::FulltextBuildLimits::default(),
+            &mut || Ok(()),
+        )
+        .unwrap()
+    };
+    let counts = PAGE_READS.with(|slot| slot.borrow().as_ref().unwrap().clone());
+    assert_eq!(counts.len(), 3);
+    assert_eq!(counts[&tail], 1, "captured tail is loaded once");
+    for (id, count) in &counts {
+        if *id != tail {
+            assert_eq!(*count, 2, "one validation pass plus one forward replay");
+        }
+    }
+    assert_eq!(prepared.descriptor.basis, 130);
+    assert_eq!(prepared.endpoint_entry, log.latest_entry_id());
+    assert_eq!(
+        root(&mut store, &f.database),
+        before,
+        "preparation never publishes"
+    );
+    assert_eq!(
+        prepared.stats.input_datoms,
+        129 + log
+            .read_record(&mut store, 1)
+            .unwrap()
+            .unwrap()
+            .entry
+            .tx_data
+            .len() as u64
+    );
+    eprintln!(
+        "RECOVERY_FORWARD basis=130 pages=3 page_reads={} sql_calls={}",
+        counts.values().sum::<usize>(),
+        operation.snapshot().sql_calls
     );
 }
 

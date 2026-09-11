@@ -73,11 +73,35 @@ delivery through the normal transport.
 
 Omitted attributes are not retractions. Lists/vectors of many-values, nested
 reference maps, reverse attributes, tuple slots, string tempids, idents, lookup
-references and transaction metadata reuse the native normalizer. Nested entities
-must satisfy the existing component/uniqueness rules; explicit child IDs do not
-waive those rules. Schema is ordinary map data; install attributes before using
-them, following the engine's db-before rules. A vector is not guessed to be a
-lookup reference solely because it has two elements.
+references and transaction metadata reuse the native normalizer. An explicit
+nested `:db/id`, including an existing numeric ID or lookup reference, identifies
+the child without requiring a component edge or a repeated unique attribute:
+
+```edn
+[{:db/id [:person/email "alice@example.com"]
+  :person/friends [{:db/id [:person/email "bob@example.com"]
+                    :person/name "Robert"}]}]
+```
+
+This changes Bob's name through the noncomponent `:person/friends` reference;
+his omitted email and Alice's omitted attributes remain unchanged.
+Without `:db/id`, a forward nested map needs a component edge or a unique
+attribute. An anonymous reverse nested map needs a unique attribute: a reverse
+component reference does not make the nested entity the outer entity's component.
+Atomic retains reverse nested maps as a native authoring convenience; their
+support is not a claim of equivalent recovered-source behavior.
+
+Atomic admits either `:db.unique/identity` or `:db.unique/value` for this anonymous
+map guard. Only identity uniqueness supplies upsert semantics; value uniqueness
+does not merge a new entity with an existing one and still rejects conflicts.
+The reference prose says “unique attribute,” while the inspected source guard
+tests identity uniqueness specifically. Atomic retains the broader admission;
+see the [source/implementation trace](../datomic_pro_docs/04_transactions/02_transaction_data.atomic.md)
+for that explicit difference.
+
+Schema is ordinary map data; install attributes before using them, following the
+engine's db-before rules. A vector is not guessed to be a lookup reference solely
+because it has two elements.
 
 For a cardinality-many reference attribute, wrap a lookup reference in its outer
 collection: `:person/friends [[:person/email "bob@example.com"]]`. For a
@@ -203,7 +227,7 @@ Native types without an unambiguous standard representation use these data tags:
 | `#atomic/float` | Finite Float text, or an explicitly converted Double literal |
 | `#atomic/float-bits`, `#atomic/double-bits` | Hexadecimal IEEE bits; preserve nonfinite values/NaN payloads |
 | `#atomic/bytes` | Hexadecimal bytes |
-| `#atomic/uri` | Retained URI string |
+| `#atomic/uri` | Syntax-checked URI string; original spelling retained |
 | `#atomic/function` | 32-byte native program hash as hexadecimal |
 | `#atomic/instant-millis` | Signed milliseconds, including years outside RFC3339's four-digit range |
 
@@ -211,6 +235,15 @@ These are namespaced data extensions, not JVM objects or executable constructors
 The reader preserves unfamiliar Datomic-specific tags too, but an adapter rejects
 tags without a native meaning instead of treating them as valid facts. The
 documented string-tempid form needs no `#db/id` reader extension.
+
+URI equality compares components: scheme and server host ignore ASCII case,
+percent-escape hex digits ignore case, and ports compare numerically. It does
+not resolve names, remove default ports, normalize paths or decode escapes.
+Thus `HTTP://EXAMPLE.COM/a%2fb` identifies the same URI as
+`http://example.com/a%2Fb`, but `/a%2fb` and `/a/b` differ. Indexes, lookup refs
+and query joins share this equality. EDN and durable request encoding preserve
+the submitted spelling; changing spelling is still a different exact retry
+request. See [value and identity rules](schema-identity.md).
 
 ## Limits, errors and evidence
 

@@ -147,6 +147,14 @@
       'byte-source->buffer
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-buffer-ownership (baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d)
+  ;; Observed: complete heap buffers can share their backing array; partial or
+  ;; inaccessible regions copy via slurp-bytes, whose duplicate preserves the
+  ;; caller's cursor. kv_sql and cache consumers use this byte bridge. Sharing
+  ;; an array is not making it immutable: consumers still control mutation.
+  ;; Native slices/owned buffers make the visible region and ownership explicit;
+  ;; retain that contract rather than a second ByteBuffer-like mutable cursor.
+  ;; ATOMIC-NOTE END serialization-buffer-ownership
   (defn alias-buf-bytes
     ([buffer]
       (if (and
@@ -491,6 +499,15 @@
       'unchunk
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-compression
+  ;; Observed durable consumers fressian/fressian-val and index/fress supply
+  ;; serialized buffers, then gzip them. Compression is below value handlers;
+  ;; it does not define equality or change schema meaning. The inverse streams
+  ;; output into a growing buffer. Atomic's block_codec instead declares and
+  ;; bounds output size, verifies one member and its expected canonical hash,
+  ;; and keeps raw bytes when compression would grow them. Those are native
+  ;; storage-envelope choices, not a port of the Fressian/JVM byte grammar.
+  ;; ATOMIC-NOTE END serialization-compression
   (.setMeta
     (clojure.lang.RT/var "datomic.io" "gzip-buffer")
     {:tag java.nio.ByteBuffer,
@@ -564,6 +581,14 @@
       'byte-buffer-seq
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-edn-boundary
+  ;; Observed: unlimited print length/depth prevents ordinary debug-print
+  ;; truncation from silently changing serialized collections. catalog/put-catalog
+  ;; uses clj->bbuf; catalog/pod->catalog reads EDN back. This is a text metadata
+  ;; boundary, distinct from fressian's binary value/index paths. Atomic keeps
+  ;; EDN reading/writing and conversion to stored or query values separate from
+  ;; canonical object codecs; EDN collections are not all legal stored values.
+  ;; ATOMIC-NOTE END serialization-edn-boundary
   (def with-serialization-print-settings
    (fn with_serialization_print_settings
      ([&form &env & forms]
@@ -686,6 +711,13 @@
   (reset-meta!
     #'context-resource
     (assoc {:arglists (clojure.core/list ['r]), :column (int 1)} :name 'context-resource :ns *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-exact-io
+  ;; Observed: valcache record/header callers require an exact byte count, not
+  ;; one channel read. This loop and write-buffer handle short I/O; premature
+  ;; EOF is a failure. Native read_exact/write_all preserve this framing rule.
+  ;; These helpers do not themselves provide a commit acknowledgement, timeout,
+  ;; caller cancellation or bounds on an externally supplied allocation size.
+  ;; ATOMIC-NOTE END serialization-exact-io
   (defn read-into-buffer
     ([bb n rc]
       (.limit (.clear ^java.nio.ByteBuffer bb) (int n))
@@ -759,6 +791,13 @@
       'write-bytes
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-checksum-role
+  ;; Observed consumer: cache/report-val-fn-fail calls describe-bbuf to include
+  ;; byte count and CRC in conversion-error diagnostics. This CRC helper is not
+  ;; evidence that object names are content hashes or that bytes are authentic.
+  ;; Native canonical SHA-256 commitments and gzip-integrity checks have separate
+  ;; callers and contracts; neither alone proves publication durability.
+  ;; ATOMIC-NOTE END serialization-checksum-role
   (defn crc32
     ([bbuf]
       (long

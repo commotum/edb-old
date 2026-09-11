@@ -1,8 +1,9 @@
-use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions};
+use atomic_core::storage::BlockDatabase;
 use atomic_core::{
     Attribute, Cardinality, Database, EntityRef, IndexPrefix, Keyword, Peer, Schema, TxOp, TxValue,
     Unique, Value, ValueType,
 };
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use atomic_core::{
     PostgresConnectionConfig, SemanticError, ServiceTransactionReport, TransactionRequest,
 };

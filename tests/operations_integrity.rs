@@ -2,11 +2,9 @@
 mod common;
 use atomic_core::storage::log::LogRoot;
 use atomic_core::storage::root::DatabaseRoot;
-use atomic_core::storage::{
-    BlockDatabase, BlockReader, BlockTransactor, BlockWriterOptions, CasOutcome, IndexDescriptor,
-    PgBlockStore,
-};
+use atomic_core::storage::{BlockDatabase, BlockReader, CasOutcome, IndexDescriptor, PgBlockStore};
 use atomic_core::*;
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 
 fn fixture(
     label: &str,
@@ -145,13 +143,9 @@ fn deep_inspection_rejects_coherent_indexes_that_disagree_with_authenticated_log
                 }
             }
             datoms.sort_by(|a, b| a.cmp_in(b, order));
-            let built = atomic_core::persistent_tree::build_tree(
-                order,
-                history,
-                datoms,
-                &Default::default(),
-            )
-            .unwrap();
+            let built =
+                atomic_core::index::tree::build_tree(order, history, datoms, &Default::default())
+                    .unwrap();
             for (_, bytes) in built.nodes.iter() {
                 store.put(bytes).unwrap();
             }

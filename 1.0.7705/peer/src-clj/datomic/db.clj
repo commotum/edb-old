@@ -1807,6 +1807,25 @@
       (datomic.btset/btset datomic.db/aevt-cmp)
       (datomic.btset/btset datomic.db/raet-cmp)
       nil))
+  ;; ATOMIC-NOTE BEGIN immutable-value-window
+  ;; [observed] seek-datoms, datoms, rseek-datoms and attr-index-range share this
+  ;; adapter over the immutable Db's ordered indexes. Temporal predicates and
+  ;; the custom predicate run before current retraction collapse; raw history
+  ;; bypasses collapse. The callback receives the same temporal/raw value with
+  ;; only :filt removed, so a contextual lookup does not recursively filter.
+  ;; [documented] Database Filters describes inclusive as-of, exclusive since,
+  ;; composable views and a direct current-index path. [native adaptation]
+  ;; Atomic retains one shared incremental window/cursor engine for eager,
+  ;; committed and speculative values; peer refresh is not its owner. Its
+  ;; transaction-attempt prefix memo is discardable, separately charged state,
+  ;; not part of a database's information or source wire representation.
+  ;; ATOMIC-NOTE END immutable-value-window
+  ;; ATOMIC-NOTE [observed]: Inclusive asOfT and exclusive sinceT filter the
+  ;; selected index stream before point-in-time retraction elimination. History
+  ;; bypasses that elimination, retaining assertions and retractions. Custom
+  ;; predicates receive the same temporal view with only filt cleared.
+  ;; [inferred] Applying bounds before collapse can recover an earlier assertion
+  ;; hidden by a later retraction; filtering the already-current view cannot.
   (defn windowed
     "Applies a database value's temporal and custom predicates to an index iterator. Point-in-time views collapse retractions; history views retain both assertions and retractions."
     ([db whilep iter]
@@ -3992,6 +4011,12 @@
             (datomic.btset/seek aevt d))))))
   (.setMeta (clojure.lang.RT/var "datomic.db" "with-tx+opts") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.db" "add-fulltext") {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE [observed]: Date bounds seek :db/txInstant in AVET; an equal
+  ;; instant yields that datom's t, an in-between instant yields next-found t-1,
+  ;; and no later instant yields nextT. Numeric t/tx inputs use eid->eidx.
+  ;; [documented] Best Practices recommends exact t/tx: equal millisecond instants
+  ;; do not uniquely identify a transaction. This helper resolves a bound, not a
+  ;; new durable snapshot or a transaction rewrite.
   (defn as-of-t
     "Resolves a transaction id, t value, or instant to the greatest database t at or before that point. Instants are located through :db/txInstant."
     ([db t-or-date]
@@ -5040,6 +5065,10 @@
                     (error/arg
                       :db.error/not-a-data-function
                       (str "Not a data function: " x))))))))))
+    ;; ATOMIC-NOTE [observed]: Each seek merges fixed persistent recent/frozen/
+    ;; mid/current layers. Stored history joins only for raw history or an as-of
+    ;; bound older than indexBasisT. [inferred] Ordinary present reads need not
+    ;; traverse the historical index merely because historical data exists.
     (^datomic.iter.Iter seekRAET
       [this ^datomic.impl.db.IDatum d]
       (iter/merge-iters
@@ -5144,6 +5173,11 @@
         (when raw (throw (java.lang.IllegalStateException. "Can't create entity from history")))
         (let [temp__5804__auto__ (datomic.db/resolve-id this eid)]
           (when temp__5804__auto__ (let [id temp__5804__auto__] (Circular/emap this id))))))
+    ;; ATOMIC-NOTE [observed]: These derive a record with one bound replaced;
+    ;; basisT, nextT and immutable index roots are retained. Chaining asOf or
+    ;; since replaces that bound rather than automatically intersecting it.
+    ;; [documented] Database Filters / as-of Is Not a Branch: speculative with
+    ;; does not rewind the underlying transaction/allocation basis.
     (^datomic.Database since [this t] (assoc this :sinceT (datomic.db/as-of-t this t)))
     (^datomic.Database asOf [this t] (assoc this :asOfT (datomic.db/as-of-t this t)))
     (^boolean isFiltered [this] (boolean filt))
@@ -5956,6 +5990,11 @@
   (reset-meta!
     #'string-tempid
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'string-tempid :ns *ns*))
+  ;; ATOMIC-NOTE [observed] Anonymous nested-map admission checks enum 38,
+  ;; :db.unique/identity, not :db.unique/value (37). [documented] The Nested
+  ;; Maps paragraph says "unique" and explains orphan prevention more broadly.
+  ;; Keep this version/contract distinction explicit; unique-value collisions
+  ;; must not accidentally acquire identity-upsert semantics.
   (defn has-unique-id?
     ([db emap]
       (let [unique_id? (fn unique_id_QMARK_
@@ -6043,6 +6082,11 @@
   (reset-meta!
     #'part-requests
     (assoc {:arglists (clojure.core/list []), :column (int 1)} :name 'part-requests :ns *ns*))
+  ;; ATOMIC-NOTE [observed] Only anonymous children need this allocation guard:
+  ;; expand-submap first tries the explicit :db/id. Component ownership or the
+  ;; child's domain identity makes otherwise anonymous creation intentional.
+  ;; Reject before expanding facts; this is authoring policy, not a stored
+  ;; document shape or an instruction to delete omitted child attributes.
   (defn make-child-id
     ([db parentid attrid childmap]
       (let [attr (datomic.db/attribute db attrid)]
@@ -6063,6 +6107,10 @@
       :ns
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.db" "expand-map") {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE [observed] Emit the reference edge and ordinary child additions
+  ;; through the same expander. Explicit numeric/ident/lookup/temp identifiers
+  ;; bypass make-child-id, but not subsequent ID/type/uniqueness validation.
+  ;; Component partition affinity is recorded separately from relationship data.
   (defn expand-submap
     ([db parentid attrid v part_reqs local_tempids]
       (let [v (datomic.db/force-map-keywords db (datomic.db/normalize-map v))
@@ -6292,6 +6340,14 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.db" "tuple-elem?")
         (assoc protocol_signature__7472 :name protocol_method_name__7473 :ns *ns*))))
+  ;; ATOMIC-NOTE BEGIN foundation-tuple-limits-counterpart
+  ;; This artifact uses the same TupleElem limit rules and validated-tuple
+  ;; assertion consumer as transactor/src-clj/datomic/db.clj; generated function
+  ;; numbers differ. See its foundation-tuple-limits/validation-call notes:
+  ;; UTF-16 string units and signed BigInteger.bitLength must not be mistaken
+  ;; for Rust character counts and unsigned magnitude bits. Non-asserting tuple
+  ;; validation remains a separate reconciliation question.
+  ;; ATOMIC-NOTE END foundation-tuple-limits-counterpart
   (extend nil datomic.db/TupleElem {:tuple-elem? (fn fn__12643 ([_] true))})
   ;; Tuple slots use compact scalar representations. Strings, BigIntegers, and
   ;; BigDecimals are bounded to 256 characters, bits, and digits respectively.
@@ -8565,6 +8621,10 @@
       'accept-data-no-check
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Binary search chooses an exclusive t suffix of the
+  ;; ordered persistent transaction vector. adopter uses the view to replay only
+  ;; unseen transactions; trim-log separately copies the retained suffix so a
+  ;; newly indexed value need not keep the entire old vector reachable.
   (defn memlog-txes-since
     ([db t]
       (let [memlog (get-in db [:memlog :txes])

@@ -1,7 +1,8 @@
 //! Direct, selective backup reads after the PostgreSQL source has disappeared.
 mod common;
-use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions, PgBlockStore};
+use atomic_core::storage::{BlockDatabase, PgBlockStore};
 use atomic_core::*;
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -512,8 +513,8 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
                     bytes.clone()
                 };
                 let hash = sha256(&canonical);
-                if let Ok(atomic_core::persistent_tree::TreeNode::Leaf(leaf)) =
-                    atomic_core::persistent_tree::decode_tree_node(&hash, &canonical)
+                if let Ok(atomic_core::index::tree::TreeNode::Leaf(leaf)) =
+                    atomic_core::index::tree::decode_tree_node(&hash, &canonical)
                     && leaf.order == IndexOrder::Eavt
                     && !leaf.history
                     && (0..leaf.len()).any(|i| {

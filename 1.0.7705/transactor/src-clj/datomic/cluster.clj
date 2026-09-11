@@ -152,6 +152,9 @@
         [cs ^String pod-key]
         "Returns reference to pod-meta, without walking entire linked list a la get-pod.")
       (delete [cs ^String key] "Soft delete. Returns a reference to :ok")
+      ;; ATOMIC-NOTE [boundary] Reading immutable bytes is separate from reading
+      ;; publication authority. This selected protocol has no per-read registration
+      ;; or protection-epoch contract; such a policy cannot be inferred from get-val.
       (get-val
         [cs ^String val-key]
         "Gets the value at a key. Returns a reference to {:buf buf} or nil if not found")

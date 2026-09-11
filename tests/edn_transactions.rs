@@ -288,6 +288,206 @@ fn nested_reverse_and_anonymous_identities_share_the_typed_normalizer() {
 }
 
 #[test]
+fn explicit_nested_ids_target_entities_without_reasserting_identity_or_ownership() {
+    let empty = Database::new(schema()).unwrap();
+    let seeded = checked_preview(
+        &empty,
+        r#"[{:db/id "child" :db/ident :person/known
+             :person/name "Before" :person/email "known@example.com" :person/tags ["keep"]}]"#,
+        10,
+    );
+    let child = seeded.tempids["child"];
+    let before = &seeded.db_after;
+    let history = before.datoms(atomic_core::View::History, IndexOrder::Eavt);
+    for id in [
+        child.to_string(),
+        ":person/known".into(),
+        r#"[:person/email "known@example.com"]"#.into(),
+    ] {
+        for reverse in [false, true] {
+            let attr = if reverse { "_friend" } else { "friend" };
+            let input = format!(
+                r#"[{{:db/id "owner" :person/name "Owner" :person/{attr} {{:db/id {id} :person/name "After"}}}}]"#
+            );
+            let report = checked_preview(before, &input, 20);
+            let owner = report.tempids["owner"];
+            let (source, target) = if reverse {
+                (child, owner)
+            } else {
+                (owner, child)
+            };
+            assert_eq!(
+                report.db_after.values(source, FRIEND),
+                vec![&Value::Ref(target)]
+            );
+            assert_eq!(
+                report.db_after.values(child, NAME),
+                vec![&Value::String("After".into())]
+            );
+            assert_eq!(
+                report.db_after.values(child, EMAIL),
+                vec![&Value::String("known@example.com".into())]
+            );
+            assert_eq!(
+                report.db_after.values(child, TAGS),
+                vec![&Value::String("keep".into())]
+            );
+        }
+    }
+    // Reversing the edge makes the outer id a value. An explicit nested id
+    // does not waive the ordinary requirement that a new tempid be asserted
+    // in entity position somewhere in the transaction.
+    assert_eq!(
+        before
+            .with_edn(
+                &format!(r#"[{{:db/id "only-a-value" :person/_friend {{:db/id {child} :person/name "After"}}}}]"#),
+                20,
+            )
+            .unwrap_err()
+            .code,
+        "transaction/tempid-not-an-entity"
+    );
+    let typed = before
+        .with_forms(
+            &[TxForm::EntityMap(EntityMap {
+                id: Some(EntityRef::Temp("owner".into())),
+                attributes: vec![(
+                    AttributeRef::Id(FRIEND),
+                    MapValue::Nested(Box::new(EntityMap {
+                        id: Some(EntityRef::Id(child)),
+                        attributes: vec![(
+                            AttributeRef::Id(NAME),
+                            MapValue::Value(Value::String("Typed".into()).into()),
+                        )],
+                    })),
+                )],
+            })],
+            &TxFunctions::new(),
+            20,
+        )
+        .unwrap();
+    assert_eq!(
+        typed.db_after.values(child, NAME),
+        vec![&Value::String("Typed".into())]
+    );
+    assert_eq!(
+        typed.db_after.values(typed.tempids["owner"], FRIEND),
+        vec![&Value::Ref(child)]
+    );
+    // An explicit tempid is also intentional authoring, not an anonymous orphan.
+    let created = checked_preview(
+        before,
+        r#"[{:db/id "owner" :person/friend {:db/id "named-child" :person/name "New"}}]"#,
+        20,
+    );
+    assert_eq!(
+        created.db_after.values(created.tempids["owner"], FRIEND),
+        vec![&Value::Ref(created.tempids["named-child"])]
+    );
+    assert_eq!(
+        created
+            .db_after
+            .values(created.tempids["named-child"], NAME),
+        vec![&Value::String("New".into())]
+    );
+    for input in [
+        r#"[{:person/friend {:person/name "orphan"}}]"#,
+        r#"[{:person/friend {:db/id nil :person/name "orphan"}}]"#,
+        r#"[{:person/_friend {:person/name "orphan"}}]"#,
+        r#"[{:person/_children {:person/name "unowned-parent"}}]"#,
+    ] {
+        assert_eq!(
+            before.with_edn(input, 20).unwrap_err().code,
+            "transaction/orphan-nested-map"
+        );
+    }
+    assert!(
+        before
+            .with_edn(
+                r#"[{:person/friend {:db/id [:person/email "absent"] :person/name "No"}}]"#,
+                20
+            )
+            .is_err()
+    );
+    assert_eq!(
+        before.values(child, NAME),
+        vec![&Value::String("Before".into())]
+    );
+    assert_eq!(
+        before.datoms(atomic_core::View::History, IndexOrder::Eavt),
+        history
+    );
+}
+
+#[test]
+fn anonymous_unique_value_nested_maps_keep_collision_not_upsert_semantics() {
+    const KEY: u32 = 1_008;
+    let mut schema = schema();
+    schema
+        .install(
+            Attribute::new(
+                KEY,
+                Keyword::new("person", "key"),
+                ValueType::String,
+                Cardinality::One,
+            )
+            .unique(Unique::Value),
+        )
+        .unwrap();
+    let before = Database::new(schema).unwrap();
+    // Retained native behavior follows the docs' component-or-unique rule;
+    // recovered make-child-id is narrower and is recorded in the map trace.
+    let input = r#"[{:db/id "owner" :person/friend {:person/key "unique" :person/name "Child"}}]"#;
+    let first = checked_preview(&before, input, 10);
+    let child = first
+        .db_after
+        .database_value()
+        .lookup(KEY, &Value::String("unique".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        first.db_after.values(first.tempids["owner"], FRIEND),
+        vec![&Value::Ref(child)]
+    );
+    assert_eq!(
+        first.db_after.values(child, NAME),
+        vec![&Value::String("Child".into())]
+    );
+    // A new anonymous tempid with the same unique/value key must fail; only
+    // unique/identity has tempid upsert semantics. The successful value is stable.
+    assert_eq!(
+        first.db_after.with_edn(input, 20).unwrap_err().code,
+        "transaction/unique-value-conflict"
+    );
+    assert_eq!(
+        first
+            .db_after
+            .database_value()
+            .with_edn(input, 20)
+            .unwrap_err()
+            .code,
+        "transaction/unique-value-conflict"
+    );
+    assert_eq!(
+        first.db_after.values(child, NAME),
+        vec![&Value::String("Child".into())]
+    );
+    let lookup = checked_preview(
+        &first.db_after,
+        r#"[{:db/id "next" :person/friend {:db/id [:person/key "unique"] :person/name "Updated"}}]"#,
+        20,
+    );
+    assert_eq!(
+        lookup.db_after.values(lookup.tempids["next"], FRIEND),
+        vec![&Value::Ref(child)]
+    );
+    assert_eq!(
+        lookup.db_after.values(child, NAME),
+        vec![&Value::String("Updated".into())]
+    );
+}
+
+#[test]
 fn schema_disambiguates_tuples_lookups_and_many_reference_collections() {
     let before = Database::new(schema()).unwrap();
     let created = checked_preview(

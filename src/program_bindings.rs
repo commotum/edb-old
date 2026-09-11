@@ -1,9 +1,9 @@
 //! Controlled transaction semantics shared by durable publication and pure
 //! native speculation. The resolver grants immutable code content only; these
 //! helpers cannot acquire writer authority or follow a mutable database head.
-use crate::database::PredicateRole;
 use crate::encoding::program_call_digest;
 use crate::program::ValidatedProgram;
+use crate::transaction::functions::PredicateRole;
 use crate::{
     CallableRef, DatabaseValue, Datom, Digest, ErrorCategory, ProgramBudget, ProgramCall,
     ProgramHash, ProgramKind, ProgramOutput, ProgramRuntime, SemanticError, TxForm, TxFunctions,
@@ -86,17 +86,18 @@ pub(crate) fn resolve_predicate_binding(
     let ident = qualified_program_ident(name)?;
     let Some(entity) = database.entid(&ident) else {
         let symbol = crate::Symbol::new(ident.namespace.as_deref().unwrap(), &ident.name);
-        crate::native_registry::validate_name(&symbol)?;
+        crate::transaction::native::validate_name(&symbol)?;
         return Ok(PredicateBinding::Native(symbol));
     };
     let programs = database.values(entity, crate::DB_FN as u32)?;
-    let native = match crate::native_registry::deployment_attribute_id(database) {
+    let native = match crate::transaction::native::deployment_attribute_id(database) {
         Some(attribute) => database.values(entity, attribute)?,
         None => Vec::new(),
     };
     if !programs.is_empty() {
         let hash = bound_program_hash(database, &ident)?;
-        if !native.is_empty() && crate::native_registry::deployment_attribute(database).is_ok() {
+        if !native.is_empty() && crate::transaction::native::deployment_attribute(database).is_ok()
+        {
             return Err(SemanticError::incorrect(
                 "native/ambiguous-binding",
                 "a predicate cannot bind both :db/fn and :atomic.native/deployment",
@@ -105,14 +106,14 @@ pub(crate) fn resolve_predicate_binding(
         return Ok(PredicateBinding::Program(hash));
     }
     if !native.is_empty() {
-        crate::native_registry::deployment_attribute(database)?;
+        crate::transaction::native::deployment_attribute(database)?;
         let [Value::Symbol(name)] = native.as_slice() else {
             return Err(SemanticError::incorrect(
                 "native/invalid-binding",
                 "native deployment binding must be one qualified Symbol",
             ));
         };
-        crate::native_registry::validate_name(name)?;
+        crate::transaction::native::validate_name(name)?;
         return Ok(PredicateBinding::Native(name.clone()));
     }
     bound_program_hash(database, &ident).map(PredicateBinding::Program)
@@ -253,11 +254,11 @@ pub(crate) fn expand_submission_forms_with_native(
     budget: &mut ProgramBudget<'_>,
     native: &crate::NativeRegistry,
 ) -> Result<Vec<TxForm>, SemanticError> {
-    crate::transaction::validate_forms_input(submitted)?;
+    crate::transaction::input::validate_forms_input(submitted)?;
     // This runs inside the receipt-miss branch against the locked db-before.
     // Neither schema resolution nor program rebinding can change old retries.
     let lowered;
-    let submitted = if crate::transaction::forms_have_edn(submitted) {
+    let submitted = if crate::transaction::forms::forms_have_edn(submitted) {
         lowered = crate::edn_transaction::lower_forms(db_before, submitted)?;
         lowered.as_slice()
     } else {
@@ -323,7 +324,7 @@ fn expand_program_call(
         };
         forms
     };
-    let forms = if crate::transaction::forms_have_edn(&forms) {
+    let forms = if crate::transaction::forms::forms_have_edn(&forms) {
         crate::edn_transaction::lower_forms(db_before, &forms)?
     } else {
         forms
@@ -376,8 +377,8 @@ pub(crate) fn validate_successor_program_bindings_with_native(
     tx_data: &[Datom],
     native: &crate::NativeRegistry,
 ) -> Result<(), SemanticError> {
-    let marker_before = crate::native_registry::deployment_attribute_id(db_before);
-    let marker_after = crate::native_registry::deployment_attribute_id(db_after);
+    let marker_before = crate::transaction::native::deployment_attribute_id(db_before);
+    let marker_after = crate::transaction::native::deployment_attribute_id(db_after);
     let marker_definition_changed = marker_before != marker_after
         || tx_data.iter().any(|datom| {
             (Some(datom.entity) == marker_before.map(u64::from)
@@ -468,7 +469,7 @@ pub(crate) fn validate_successor_program_bindings_with_native(
             let markers = db_after.values(entity, attribute)?;
             if !markers.is_empty()
                 && !functions.is_empty()
-                && crate::native_registry::deployment_attribute(db_after).is_ok()
+                && crate::transaction::native::deployment_attribute(db_after).is_ok()
             {
                 return Err(SemanticError::incorrect(
                     "native/ambiguous-binding",

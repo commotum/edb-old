@@ -6,7 +6,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-const MAX_FILE: u64 = crate::block_codec::MAX_PHYSICAL_BLOCK_BYTES as u64;
+const MAX_FILE: u64 = crate::storage::codec::MAX_PHYSICAL_BLOCK_BYTES as u64;
 const CLAIM_MAGIC: &[u8; 6] = b"ATBC\0\x01";
 
 pub(super) fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
@@ -168,7 +168,7 @@ pub(super) fn read_object(directory: &Path, id: Digest) -> Result<Vec<u8>, Seman
     private_directory(directory)?;
     private_directory(&directory.join("objects"))?;
     let bytes = read_bounded(&object_path(directory, id), MAX_FILE)?;
-    crate::block_codec::decode_block(&id, &bytes)
+    crate::storage::codec::decode_block(&id, &bytes)
         .map_err(|error| fault("backup/object-corrupt", error.message).detail("object_id", hex(id)))
 }
 pub(super) fn put_object(directory: &Path, bytes: &[u8]) -> Result<(Digest, bool), SemanticError> {
@@ -188,7 +188,7 @@ pub(super) fn put_object(directory: &Path, bytes: &[u8]) -> Result<(Digest, bool
         }
         return Ok((id, false));
     }
-    let encoded = crate::block_codec::encode_block(bytes)?;
+    let encoded = crate::storage::codec::encode_block(bytes)?;
     let written = publish_file(&object_path(directory, id), &encoded)?;
     if !written && read_object(directory, id)? != bytes {
         return Err(fault(

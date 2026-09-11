@@ -3,10 +3,11 @@
 //! Each append writes an entry and one replacement tail page, independent of
 //! log length. Large entries additionally write payload chunks. Full pages are
 //! sealed without rewriting them: the next page links back by powers of two.
-//! Root publication and reader/build protection belong to the caller.
+//! Append accepts objects through ObjectWriter; the caller must flush before
+//! independent reads/publication. Root publication and protection remain separate.
 
 use super::root::Block;
-use super::{ObjectId, ObjectReader, PgBlockStore};
+use super::{ObjectId, ObjectReader, ObjectWriter};
 use crate::encoding::{
     canonical_datom_bytes, decode_canonical_datoms, validate_transaction_content,
 };
@@ -62,7 +63,7 @@ impl LogEntry {
 
     fn store_encoded(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         bytes: &[u8],
     ) -> Result<ObjectId, SemanticError> {
         let mut payload = Vec::with_capacity(ENTRY_HEADER + bytes.len().min(INLINE_BYTES));
@@ -81,7 +82,7 @@ impl LogEntry {
         } else {
             for chunk in bytes.chunks(CHUNK_BYTES) {
                 links.push(
-                    store.put(
+                    store.put_object(
                         &Block {
                             kind: LOG_CHUNK_KIND,
                             links: vec![],
@@ -92,7 +93,7 @@ impl LogEntry {
                 );
             }
         }
-        store.put(
+        store.put_object(
             &Block {
                 kind: LOG_ENTRY_KIND,
                 links,
@@ -229,7 +230,7 @@ impl LogRoot {
     /// Branching from an older root does not change any captured endpoint.
     pub fn append(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         entry: &LogEntry,
     ) -> Result<Self, SemanticError> {
         let bytes = entry.encode_datoms()?;
@@ -242,7 +243,7 @@ impl LogRoot {
     /// SQL read or a second value-normalization algorithm.
     pub(crate) fn append_canonical(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         entry: &LogEntry,
     ) -> Result<(Self, Vec<Datom>), SemanticError> {
         let bytes = entry.encode_datoms()?;
@@ -253,7 +254,7 @@ impl LogRoot {
 
     fn append_encoded(
         &self,
-        store: &mut PgBlockStore,
+        store: &mut dyn ObjectWriter,
         entry: &LogEntry,
         bytes: &[u8],
     ) -> Result<Self, SemanticError> {
@@ -302,7 +303,7 @@ impl LogRoot {
         page.entries.push(entry.store_encoded(store, bytes)?);
         page.eidx_frontier = entry.eidx_frontier;
         page.reserved_frontier = entry.reserved_frontier;
-        let head = store.put(&page.encode()?)?;
+        let head = store.put_object(&page.encode()?)?;
         Ok(Self {
             head: Some(head),
             tail: Some(page),
@@ -489,9 +490,9 @@ impl LogRoot {
         Ok(Some(crate::sha256(&page.encode()?)))
     }
 
-    /// Inclusive start, exclusive end. The iterator owns one page and returns
-    /// one bounded transaction at a time; consumers enforce recent-tier budgets
-    /// while consuming it instead of collecting an unbounded historical range.
+    /// Inclusive start, exclusive end. The iterator retains only the current
+    /// page and logarithmically many forward anchors from the captured tail.
+    /// Consumers enforce recent-tier budgets one bounded transaction at a time.
     pub fn range<'a>(
         &self,
         store: &'a mut dyn ObjectReader,
@@ -506,7 +507,7 @@ impl LogRoot {
         }
         Ok(LogRange {
             store,
-            root: self.clone(),
+            anchors: self.tail.iter().cloned().collect(),
             next: start_t,
             end: end_t.min(self.basis_t() + 1),
             page: None,
@@ -538,7 +539,9 @@ impl LogRoot {
 
 pub struct LogRange<'a> {
     store: &'a mut dyn ObjectReader,
-    root: LogRoot,
+    // Greater-index pages, descending toward the nearest unvisited ancestor.
+    // Only the original captured tail may be partial; loaded pages are sealed.
+    anchors: Vec<Page>,
     next: u64,
     end: u64,
     page: Option<Page>,
@@ -554,18 +557,66 @@ impl Iterator for LogRange<'_> {
 }
 
 impl LogRange<'_> {
+    fn next_page(&mut self, wanted: u64) -> Result<Page, SemanticError> {
+        let mut page = self.anchors.pop().ok_or_else(|| {
+            invalid(
+                "storage/log-skip-coordinate",
+                "Log range has no forward anchor for its next page",
+            )
+        })?;
+        if page.index < wanted {
+            return Err(invalid(
+                "storage/log-skip-coordinate",
+                "Log range anchor precedes its next page",
+            ));
+        }
+        while page.index > wanted {
+            let distance = page.index - wanted;
+            let level = (u64::BITS - 1 - distance.leading_zeros()) as usize;
+            let expected = page.index - (1_u64 << level);
+            let id = page.skips[level];
+            // Keep the parent for forward traversal rather than reseeking
+            // from the tail at the next boundary. Each loaded page is either
+            // yielded once or retained as one of O(log P) future anchors.
+            self.anchors.push(page);
+            page = Page::load(self.store, id)?;
+            if page.index != expected || page.entries.len() != LOG_PAGE_ENTRIES {
+                return Err(invalid(
+                    "storage/log-skip-coordinate",
+                    "Log navigation did not reach the authenticated sealed page",
+                ));
+            }
+        }
+        Ok(page)
+    }
+
     /// The same streaming read with its actual authenticated object identity
     /// and canonical content byte count for recent-tier admission/accounting.
     pub fn next_record(&mut self) -> Option<Result<LogRecord, SemanticError>> {
+        self.next_record_bounded(usize::MAX)
+    }
+
+    /// The same cursor with per-entry encoded-byte admission before chunk fetch
+    /// or datom decoding. Exceeding the bound fuses the cursor like other errors;
+    /// checkpoint owners resume with a new range from their last durable basis.
+    pub(crate) fn next_record_bounded(
+        &mut self,
+        max_bytes: usize,
+    ) -> Option<Result<LogRecord, SemanticError>> {
         if self.failed || self.next >= self.end {
             return None;
         }
         let result = (|| {
             let index = (self.next - 1) / LOG_PAGE_ENTRIES as u64;
             if self.page.as_ref().is_none_or(|p| p.index != index) {
-                self.page = Some(self.root.page_for(self.store, self.next)?);
+                self.page = Some(self.next_page(index)?);
             }
-            read_entry(self.store, self.page.as_ref().unwrap(), self.next)
+            read_entry_bounded(
+                self.store,
+                self.page.as_ref().unwrap(),
+                self.next,
+                max_bytes,
+            )
         })();
         self.failed = result.is_err();
         self.next += 1;
@@ -772,6 +823,279 @@ mod tests {
         }
         .encode()
         .unwrap()
+    }
+
+    fn range_fixture(page_count: usize) -> (LogRoot, BTreeMap<ObjectId, Vec<u8>>, Vec<ObjectId>) {
+        let mut objects = BTreeMap::new();
+        let mut ids = Vec::new();
+        for index in 0..page_count {
+            let count = if index + 1 == page_count {
+                17
+            } else {
+                LOG_PAGE_ENTRIES
+            };
+            let entries = (1..=count)
+                .map(|offset| {
+                    put(
+                        &mut objects,
+                        entry_bytes(
+                            (index * LOG_PAGE_ENTRIES + offset) as u64,
+                            INITIAL_EIDX_FRONTIER,
+                        ),
+                    )
+                })
+                .collect();
+            let page = Page {
+                index: index as u64,
+                eidx_frontier: INITIAL_EIDX_FRONTIER,
+                reserved_frontier: INITIAL_EIDX_FRONTIER,
+                entries,
+                skips: (0..(usize::BITS - index.leading_zeros()))
+                    .map(|level| ids[index - (1 << level)])
+                    .collect(),
+            };
+            ids.push(put(&mut objects, page.encode().unwrap()));
+        }
+        let mut reader = |id| Ok(objects[&id].clone());
+        let root = LogRoot::open(&mut reader, *ids.last().unwrap()).unwrap();
+        (root, objects, ids)
+    }
+
+    #[test]
+    fn bounded_forward_entry_rejects_before_chunk_reads_and_fuses() {
+        let mut objects = BTreeMap::new();
+        let mut payload = Vec::new();
+        for n in [
+            1,
+            INITIAL_EIDX_FRONTIER,
+            INITIAL_EIDX_FRONTIER,
+            0,
+            (INLINE_BYTES + 1) as u64,
+        ] {
+            payload.extend_from_slice(&n.to_be_bytes());
+        }
+        let missing_chunk = crate::sha256(b"must-not-be-read");
+        let entry = put(
+            &mut objects,
+            Block {
+                kind: LOG_ENTRY_KIND,
+                links: vec![missing_chunk],
+                payload,
+            }
+            .encode()
+            .unwrap(),
+        );
+        let page = Page {
+            index: 0,
+            eidx_frontier: INITIAL_EIDX_FRONTIER,
+            reserved_frontier: INITIAL_EIDX_FRONTIER,
+            entries: vec![entry],
+            skips: vec![],
+        };
+        let root = LogRoot {
+            head: Some(put(&mut objects, page.encode().unwrap())),
+            tail: Some(page),
+        };
+        let reads = std::cell::RefCell::new(Vec::new());
+        let mut reader = |id| {
+            reads.borrow_mut().push(id);
+            Ok(objects
+                .get(&id)
+                .expect("bound must reject before chunk fetch")
+                .clone())
+        };
+        let mut range = root.range(&mut reader, 1, 2).unwrap();
+        assert_eq!(
+            range
+                .next_record_bounded(ENTRY_HEADER + INLINE_BYTES)
+                .unwrap()
+                .unwrap_err()
+                .code,
+            "storage/log-read-limit"
+        );
+        assert!(range.next_record().is_none());
+        assert_eq!(*reads.borrow(), [entry]);
+        let (root, objects, _) = range_fixture(3);
+        let mut reader = |id| Ok(objects[&id].clone());
+        let mut range = root.range(&mut reader, 63, 67).unwrap();
+        let mut bases = Vec::new();
+        while let Some(record) = range.next_record_bounded(ENTRY_HEADER) {
+            bases.push(record.unwrap().entry.basis_t);
+        }
+        assert_eq!(bases, [63, 64, 65, 66]);
+    }
+
+    struct RangeSample {
+        entries: Vec<LogEntry>,
+        page_reads: BTreeMap<ObjectId, usize>,
+        entry_reads: usize,
+        peak_anchors: usize,
+        elapsed: std::time::Duration,
+    }
+
+    fn sample_range(
+        root: &LogRoot,
+        objects: &BTreeMap<ObjectId, Vec<u8>>,
+        page_ids: &[ObjectId],
+        bounds: (u64, u64, usize),
+        repeated_seek: bool,
+    ) -> RangeSample {
+        let (start, end, limit) = bounds;
+        let page_ids = page_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let mut page_reads = BTreeMap::new();
+        let mut entry_reads = 0;
+        let mut peak_anchors = 0;
+        let mut entries = Vec::new();
+        let started = std::time::Instant::now();
+        let mut reader = |id| {
+            if page_ids.contains(&id) {
+                *page_reads.entry(id).or_insert(0) += 1;
+            } else {
+                entry_reads += 1;
+            }
+            Ok(objects[&id].clone())
+        };
+        if repeated_seek {
+            // The previous cursor: retain one page, then reseek from the tail
+            // at each boundary. This remains independent of next_page's stack.
+            let mut page: Option<Page> = None;
+            for basis in (start..end.min(root.basis_t() + 1)).take(limit) {
+                let index = (basis - 1) / LOG_PAGE_ENTRIES as u64;
+                if page.as_ref().is_none_or(|page| page.index != index) {
+                    page = Some(root.page_for(&mut reader, basis).unwrap());
+                }
+                entries.push(
+                    read_entry(&mut reader, page.as_ref().unwrap(), basis)
+                        .unwrap()
+                        .entry,
+                );
+            }
+        } else {
+            let mut range = root.range(&mut reader, start, end).unwrap();
+            peak_anchors = range.anchors.len();
+            while entries.len() < limit {
+                let Some(record) = range.next_record() else {
+                    break;
+                };
+                entries.push(record.unwrap().entry);
+                peak_anchors = peak_anchors.max(range.anchors.len());
+            }
+        }
+        RangeSample {
+            entries,
+            page_reads,
+            entry_reads,
+            peak_anchors,
+            elapsed: started.elapsed(),
+        }
+    }
+
+    #[test]
+    fn forward_anchors_match_reseeks_with_linear_page_reads_and_bounded_state() {
+        let mut unreadable = |_: ObjectId| -> Result<Vec<u8>, SemanticError> {
+            panic!("an empty range must not read objects")
+        };
+        let empty = LogRoot::empty();
+        assert!(
+            empty
+                .range(&mut unreadable, 1, 20)
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        assert!(empty.range(&mut unreadable, 0, 1).is_err());
+        for pages in [8, 13, 32, 65, 128] {
+            let (root, objects, ids) = range_fixture(pages);
+            let end = root.basis_t() + 1;
+            let height = (usize::BITS - pages.leading_zeros()) as usize;
+            for bounds in [
+                (1, end, usize::MAX),
+                (61, end - 8, usize::MAX),
+                (
+                    (pages / 2 * LOG_PAGE_ENTRIES + 3) as u64,
+                    end - 5,
+                    usize::MAX,
+                ),
+                (1, end, 0),
+                (1, end, 1),
+                (63, end, 3),
+                (end, end + 9, usize::MAX),
+            ] {
+                let old = sample_range(&root, &objects, &ids, bounds, true);
+                let new = sample_range(&root, &objects, &ids, bounds, false);
+                assert_eq!(new.entries, old.entries);
+                assert_eq!(new.entry_reads, old.entry_reads);
+                assert_eq!(new.entry_reads, new.entries.len());
+                assert!(new.page_reads.values().all(|reads| *reads == 1));
+                let touched =
+                    new.entries
+                        .first()
+                        .zip(new.entries.last())
+                        .map_or(0, |(first, last)| {
+                            ((last.basis_t - 1) / LOG_PAGE_ENTRIES as u64
+                                - (first.basis_t - 1) / LOG_PAGE_ENTRIES as u64
+                                + 1) as usize
+                        });
+                assert!(new.page_reads.len() <= touched + height);
+                assert!(new.peak_anchors <= height);
+                if bounds == (1, end, usize::MAX) {
+                    assert_eq!(new.page_reads.len(), pages - 1); // tail already captured
+                    assert!(old.page_reads.values().sum::<usize>() > new.page_reads.len());
+                }
+                eprintln!(
+                    "LOG_RANGE_SAMPLE pages={pages} bounds={bounds:?} entries={} old_page_reads={} new_page_reads={} peak_anchors={} old_memory_us={} new_memory_us={}",
+                    new.entries.len(),
+                    old.page_reads.values().sum::<usize>(),
+                    new.page_reads.len(),
+                    new.peak_anchors,
+                    old.elapsed.as_micros(),
+                    new.elapsed.as_micros()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forward_anchor_coordinate_and_sealed_page_errors_are_fused() {
+        for partial in [false, true] {
+            let (root, mut objects, ids) = range_fixture(8);
+            let mut reader = |id| Ok(objects[&id].clone());
+            let mut bad = Page::load(&mut reader, ids[3]).unwrap();
+            if partial {
+                bad.entries.pop();
+            } else {
+                // The initial seek uses skip[1]. A later forward step uses
+                // this bad skip[0], after two complete pages were returned.
+                bad.skips[0] = ids[0];
+            }
+            let bad_id = put(&mut objects, bad.encode().unwrap());
+            let mut tail = root.tail.unwrap();
+            tail.skips[2] = bad_id;
+            let head = put(&mut objects, tail.encode().unwrap());
+            let reads = std::cell::Cell::new(0);
+            let mut reader = |id| {
+                reads.set(reads.get() + 1);
+                Ok(objects[&id].clone())
+            };
+            let root = LogRoot::open(&mut reader, head).unwrap();
+            let mut range = root.range(&mut reader, 1, 193).unwrap();
+            if !partial {
+                for basis in 1..=128 {
+                    assert_eq!(range.next().unwrap().unwrap().basis_t, basis);
+                }
+            }
+            assert_eq!(
+                range.next().unwrap().unwrap_err().code,
+                "storage/log-skip-coordinate"
+            );
+            let after_error = reads.get();
+            assert!(range.next().is_none());
+            assert!(range.next_record().is_none());
+            assert_eq!(reads.get(), after_error);
+        }
     }
 
     #[test]

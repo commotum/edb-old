@@ -146,7 +146,7 @@ fn checkpoint_key(identity: [u8; 16], principal: &str, name: &str) -> String {
         .collect::<String>();
     format!(
         "consumers/{}/{digest}",
-        crate::storage::engine::identity_string(identity)
+        crate::storage::catalog::identity_string(identity)
     )
 }
 fn encode_checkpoint(checkpoint: &ChangeCheckpoint, identity: [u8; 16]) -> Vec<u8> {
@@ -188,7 +188,7 @@ fn decode_checkpoint(
         ));
     }
     Ok(ChangeCheckpoint {
-        lineage_id: crate::storage::engine::identity_string(identity),
+        lineage_id: crate::storage::catalog::identity_string(identity),
         generation: u64::from_be_bytes(bytes[24..32].try_into().unwrap()),
         last_t,
         commit_hash,
@@ -204,7 +204,7 @@ fn decode_checkpoint(
     })
 }
 fn verify_head(head: &Head, checkpoint: &ChangeCheckpoint) -> Result<(), SemanticError> {
-    if crate::storage::engine::identity_string(head.identity) != checkpoint.lineage_id {
+    if crate::storage::catalog::identity_string(head.identity) != checkpoint.lineage_id {
         return Err(unavailable(
             "consumer/lineage-changed",
             "Database publication belongs to another lineage",
@@ -420,7 +420,7 @@ impl ChangeConsumer {
         // Listen before reading a durable endpoint; hints never supply data.
         let listener = Some(NoticeListener::connect(
             &connection,
-            &crate::storage::engine::identity_string(database.route),
+            &crate::storage::catalog::identity_string(database.route),
         )?);
         for _ in 0..MAX_PUBLICATION_RETRIES {
             let checkpoint = with_head(&mut store, &reader, &database, |store, head| {
@@ -430,7 +430,7 @@ impl ChangeConsumer {
                     return Ok(Some(checkpoint));
                 }
                 let checkpoint = ChangeCheckpoint {
-                    lineage_id: crate::storage::engine::identity_string(database.identity),
+                    lineage_id: crate::storage::catalog::identity_string(database.identity),
                     generation: head.generation,
                     last_t: 0,
                     commit_hash: [0; 32],
@@ -493,7 +493,7 @@ impl ChangeConsumer {
         self.reader.reconnect()?;
         self.listener = Some(NoticeListener::connect(
             &self.connection,
-            &crate::storage::engine::identity_string(self.database.route),
+            &crate::storage::catalog::identity_string(self.database.route),
         )?);
         with_head(
             &mut self.store,
@@ -737,7 +737,7 @@ mod tests {
     fn checkpoint_codec_is_bounded_current_and_keeps_provider_cas_revision() {
         let identity = [7; 16];
         let checkpoint = ChangeCheckpoint {
-            lineage_id: crate::storage::engine::identity_string(identity),
+            lineage_id: crate::storage::catalog::identity_string(identity),
             generation: 2,
             last_t: 3,
             commit_hash: [8; 32],

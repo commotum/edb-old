@@ -2814,6 +2814,12 @@
   (reset-meta!
     #'vecdiff
     (assoc {:arglists (clojure.core/list ['minv 'maxv]), :column (int 1)} :name 'vecdiff :ns *ns*))
+  ;; ATOMIC-NOTE [observed, baseline 2800] mindiff shortens only String/vector;
+  ;; every other runtime value returns maxv unchanged. vecdiff recurses here,
+  ;; so URI elements also stay exact inside shortened vector separators.
+  ;; [Rust consequence] URI numeric-port/host component ordering is not raw
+  ;; string ordering: prior :9 and next :10 cannot use raw prefix :1. Keep
+  ;; exact component-comparable URI values in durable routing, not strdiff.
   (defn mindiff
     ([minv maxv]
       (cond

@@ -3,17 +3,18 @@
 //! The PostgreSQL provider never decodes a database, log, index or receipt. Rust
 //! owns those structures and the publication/protection protocol using them.
 pub mod catalog;
+pub(crate) mod codec;
 pub mod descriptors;
-pub mod engine;
 pub mod excision;
 pub mod fulltext;
 pub(crate) mod index_publication;
 pub(crate) mod index_recovery;
 pub mod indexing;
 pub mod log;
-mod object_io;
+pub(crate) mod object_io;
 pub mod ownership;
 mod postgres;
+pub(crate) mod protection;
 mod protocol;
 pub mod read_authorization;
 pub mod receipts;
@@ -21,8 +22,8 @@ pub(crate) mod report_handoff;
 pub mod root;
 pub mod snapshot;
 
+pub use catalog::BlockDatabase;
 pub use descriptors::{BlockAvetWork, IndexDescriptor, SnapshotMetadata};
-pub use engine::{BlockDatabase, BlockTransactor, BlockWriterOptions};
 pub use indexing::{BlockIndexStats, IndexInput, PreparedIndex};
 pub use object_io::{ObjectReader, ObjectWriter};
 pub use postgres::{ObjectInfo, ObjectReadStats, PgBlockStore, WriteProtection};

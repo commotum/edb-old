@@ -14,6 +14,16 @@
       (do
         (clojure.core/refer 'clojure.core)
         (clojure.core/import 'org.apache.commons.codec.binary.Base64))))
+  ;; ATOMIC-NOTE BEGIN serialization-text-codec (baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d)
+  ;; Observed consumers: crypto's key/ciphertext text conversions and
+  ;; coordination's encoded metadata use these UTF-8/Base64 helpers. No value
+  ;; tags, canonical datom ordering, object integrity or commit protocol lives
+  ;; here. Base64 changes representation; it does not encrypt or authenticate.
+  ;; Native &[u8]/str conversions and boundary-specific textual formats retain
+  ;; this responsibility without reproducing Apache Commons' JVM API. Do not
+  ;; route binary database objects through text simply to mimic the namespace.
+  ;; The peer source is byte-identical at the baseline.
+  ;; ATOMIC-NOTE END serialization-text-codec
   (defn string->bytes ([s] (.getBytes ^java.lang.String s "UTF-8")))
   (reset-meta!
     #'string->bytes

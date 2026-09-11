@@ -974,6 +974,11 @@
       'fressianed-leaf
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] This cursor retains root/directory/segment positions;
+  ;; next advances within a segment, then to adjacent segments/directories. It
+  ;; does not restart the root seek for every segment. Rust's forward-anchor
+  ;; stack adapts that stateful traversal benefit to its immutable skip pages,
+  ;; without adopting this layout or its separate read-ahead policy.
   (deftype
     LogTxIter
     [lookup
@@ -1654,6 +1659,11 @@
       'excise-dir-map
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] excise-ts and excise-dir-map select affected times
+  ;; and segments first. This rewrites selected segments/directories while
+  ;; retaining other references; it does not replay every log transaction.
+  ;; [inferred] Atomic's full-generation rewrite has a different cost model;
+  ;; this selection alone does not bound predicate discovery or index merging.
   (defn write-excised-log
     ([cs lookup xpreds ts dir_map]
       (reduce
@@ -1755,6 +1765,12 @@
       'excise
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] update's log-treeifier supplies its CURRENT root,
+  ;; not the root used to compute replacements. If an old directory has been
+  ;; replaced meanwhile, seek-seg-path relocates it and patch_dir substitutes
+  ;; only rewritten children, retaining later segments. The returned root is
+  ;; still a candidate: writer-process :adopt-tree publishes it with the live
+  ;; tail before marking old IDs and completing the waiting index worker.
   (defn excise-root
     ([cs lookup current_root_id p__17564]
       (let [map__17565 p__17564

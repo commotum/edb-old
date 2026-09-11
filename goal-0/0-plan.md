@@ -161,7 +161,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   and the next component change are justified by callers and contracts. Corpus
   inventory exists; unrelated detailed annotation is not a prerequisite.
 
-### 2. Reconcile shared values, structures and storage — active
+### 2. Reconcile shared values, structures and storage — complete
 
 - **Outcome:** Coherent shared foundations with small opaque-storage boundaries,
   preserving useful existing mechanisms instead of recreating them by default.
@@ -175,7 +175,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   PostgreSQL primitive/publication checks pass. Evidence supports selective
   traversal and sharing; SQL does not acquire database-engine policy.
 
-### 3. Reconcile the transactor and lifecycle — pending
+### 3. Reconcile the transactor and lifecycle — complete
 
 - **Outcome:** Readable serialized write processing and reliable operations over
   the shared structures, with one authoritative transaction implementation.
@@ -189,7 +189,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   writer/failover and maintenance cases pass using the actual service. Completed
   indexing preserves subsequent novelty, and acknowledgements follow durability.
 
-### 4. Reconcile peer-local reads and computation — pending
+### 4. Reconcile peer-local reads and computation — active
 
 - **Outcome:** A coherent peer library using shared immutable structures, with
   source-grounded algorithms and an understandable cache/observation model.
@@ -274,7 +274,7 @@ for 32/128/512 added entities took 208490/312017/693514 microseconds in this run
 query processes took 63391/93569/163964 and Pull 58907/65404/108007 microseconds.
 These are local samples, not throughput or performance-parity claims.
 
-Stage 2 is active. Shared collection repair is integrated: the private
+Stage 2 is complete. Shared collection repair is integrated: the private
 collections::LruMap uses HashMap lookup plus reusable doubly-linked slots. Tree,
 program and fulltext consumers keep their policy/counters and Arc ownership;
 no persistent priority-map or Caffeine-policy port is claimed. SharedMap's real
@@ -319,12 +319,165 @@ writer phases took about 100 ms median with 710 calls/3 writes and 1195/5 writes
 including maintenance. Publication/encoding amplification remains a real Stage 3
 cost issue to explain and address, not something the cache improvement closes.
 
-Next active component: shared model URI equality/order/hash. Source comparison
-found raw-string URI equality differs from source component semantics, affecting
-identity/lookup; preserve original encoded spelling while fixing logical value
-behavior. Opaque SQL/provider study is in its chapter-local trace; guarded
-publication/collector design and remaining foundation ownership still need
-comparison. Stages 3–7 and complete source/doc coverage remain unfinished.
+Shared model repair is now implemented and its focused integration verified.
+The actual value/datom/schema/ident/vocabulary/coordinate code lives under
+src/model, including the independent numeric oracle; private old module paths
+were removed, while the curated root public type facade remains intentional.
+URI syntax is checked at EDN, native admission, schema and canonical decoding
+boundaries. Comparison/hashing use URI components without normalizing stored
+spelling. Native authority-kind ordering deliberately fixes a source-platform
+ordering-law problem; it is documented, not claimed as byte-for-byte Java parity.
+The deeper tree review found and removed raw-text URI sparse separators: exact
+URI keys now work recursively inside tuple separators. This costs parent bytes
+for long URIs and retains explicit tree capacity limits. Opaque-block envelope version 2
+and tree version 5 reject older development comparison/layout generations;
+canonical value spelling remains exact. No database was reset or converted.
+
+Source TupleElem also exposed UTF-16 versus Unicode-scalar length and signed
+BigInteger bit-length boundary differences. Shared schema admission now uses
+the source's units. The scalar 8192-bit interpretation is documentation-backed;
+its recovered scalar guard remains unlocated. Unique-bytes rejection is retained:
+the specific documented Bytes limitation resolves the broader identity prose,
+so it is not an omitted feature. Physical AVET readiness remains separate from
+schema intent. These decisions are in the schema and index chapter companions.
+
+Fresh focused checks: all 10 tuple_schema_repair and 10 uri_values tests pass,
+including real PostgreSQL URI consolidation/reopen, immutable before/after
+receipts, receipt-first retry and changed-spelling request rejection. The first
+retraction test wrongly required the earlier assertion's spelling: source
+ProcessExpander constructs a new retraction from submitted v. Corrected that
+expectation, not the working behavior. A tuple test's hardcoded empty basis was
+also corrected to account for installed schema. These failures were test errors,
+not silently removed assertions. The library run with PostgreSQL configured and
+host socket/SSD permissions passed all 445 tests in 249.91 seconds. It includes
+the URI multi-leaf/tuple routing, codec admission, exact-number oracles, fulltext
+cache policy, publication/failover, collection and backup checks. This run covers
+the model/routing repair before the following index/module and ObjectWriter
+changes, not their uncompiled state or final product acceptance. Source
+preservation currently accounts for 493 files and confirms 27 comment-only
+modified source files.
+
+The subsequent foundation cutover is now compiled and verified. index/ owns
+boundary/eager/recent/overlay, cursor, tree/cache/navigation, metadata and edit
+preparation; metadata no longer depends on preparation. Current callers and
+subprocess test selectors use the new owners, with no old module aliases or
+path-attributed test wiring there. encoding/ owns canonical bytes and its
+program/query/submission children; physical compression is storage::codec.
+Keep those layers separate rather than moving higher-level protocols into model.
+Log/receipt builders use ObjectWriter instead of a concrete PostgreSQL driver.
+Forward log ranges retain ancestor pages rather than reseeking the tail per page.
+That gives O(Q + log P) page fetches and O(log P) retained pages; skip arrays
+vary in size, so this is not a constant-memory or whole-query speedup claim.
+
+Fresh post-cutover checks: cargo check --offline --all-targets passed. The full
+library suite passed all 448 tests in 251.41 s with real PostgreSQL and host
+socket/ownership permissions. Then block_log (5), block_receipts (4),
+block_storage (12), and the actual EDN CLI workflow passed with PostgreSQL
+configured. This includes maximum-current-size chunked log/receipt cases,
+provider corruption/reuse, root CAS, restart/retry and restricted reader roles.
+The forward-range comparison independently matched the old point-seek path at
+8/13/32/65/128 pages, with full/partial/empty/early-stop and fused-error cases.
+At 128 pages, page reads fell from 448 to 127 (tail already captured). The real
+18-page range read 1091 entries with exactly 1108 SQL calls/135550 payload bytes
+in 719247 us. Local debug timings used uncontrolled warm OS/PostgreSQL caches;
+some checks overlapped, so these are operating samples, not controlled latency
+improvement claims. The post-cutover EDN 32/128/512-entity transaction processes
+took 188078/301661/661575 us. Source inventory still accounts for 493 files,
+with 35 comment-only annotated files at this checkpoint, not full coverage.
+
+Opaque SQL/CAS/protection primitives were compared with their consumers: keep
+guarded monotone protection and tombstones, not engine policy in SQL. Fixed stale
+comments that claimed racing reads must conflict, reads persist wrappers, or
+content existence proves a protected-put attempt. Read handles use durable
+ownership plus retirement grace, not reader pins. Serialization study retains
+exact decimal scale and URI spelling but explicitly records existing canonical
+float zero/NaN handling; bundled datomic/data is a permutation table, not a
+missing value-model implementation.
+
+Stage 3: transaction expansion, shared assessment and durable write preparation
+are integrated. Explicit nested-ID admission is repaired, preserving native
+unique-value/reverse-map capability and documenting the source/doc distinction.
+All 11 edn_transactions and four edn_cli cases pass with real PostgreSQL. The
+new CLI cases update a noncomponent child by numeric/lookup ID via stdin/file,
+preserve omitted facts and held values, and replay exactly after restart. One
+new reverse-map fixture initially introduced a value-only tempid: corrected the
+fixture and retained the engine's rejection as an independent assertion.
+
+Path compression now preserves minimum identity representatives while removing
+the demonstrated quadratic parent walk. Independent chain and actual-assessment
+tests pass, including partition/upsert conflicts and immutable predecessors.
+At 32/128/512 tempids, old-reference parent steps 992/16256/261632 compare with
+184/760/3064 compressed steps. Complete debug assessment/drop took
+2.55/10.80/48.95 ms, separate from setup 189.80/448.46/1632.21 ms. These are
+sequence-specific bounds/samples, not whole-product scalability claims.
+
+Guarded immutable uploads are now grouped behind an explicit persistence barrier;
+this is not the source's multi-stage/multi-transaction pipeline. Nine buffer
+regressions pass, including bounded groups, read-your-writes, sticky errors and
+no Drop I/O. Both real-provider batch tests pass. Existing writer fence/recovery,
+lost-ack, final-GC-CAS and receipt-first regressions pass. The new prepublication
+witness initially assumed all objects used ATOB: tree nodes use ATIX. Its scan
+and traversal were corrected to respect canonical object families; the corrected
+witness now passes on real PostgreSQL in the post-move library run.
+Before batching, the complete service-phase check passed with 114 SQL calls
+(about 46.86 ms total/36.03 ms encoding/8.18 ms commit in that local sample),
+and 17 replay calls; it covered rejected publication, unknown-outcome recovery
+and once-only callbacks. The same check now passes with 32 SQL calls and 17
+replay calls, about 15.40 ms total/7.06 ms encoding/6.51 ms commit in a local
+debug sample. Different concurrent activity/cache conditions mean no controlled
+latency ratio is claimed. Object/guard round-trip reduction is directly measured.
+Transaction and service organization is now implemented and verified: forms,
+normalization, callbacks, input validation, assessment and clock/pipeline have
+transaction owners; authority, activation/standby, admission, write scheduling,
+index/excision lanes and reports have transactor owners. Catalog identity/genesis
+and generic GC guards no longer import writer ownership. Administrative excision
+claims/drives/releases its writer from transactor/excision_operator; shared jobs
+only prepare resumable candidates. Obsolete engine/service/runtime paths are
+removed, without compatibility aliases. Local commit hints are bounded channels,
+not generic callbacks invoked on the writer. Their loss is repaired by durable
+peer catch-up; the separate lossless report contract is unchanged.
+
+Fresh verification: all-targets check passed after these moves (10.53 s), formatting
+and diff checks pass. The host-permitted PostgreSQL library run passed 463 tests
+in 266.85 s. All 46 selected integration tests passed: automatic_excision (1),
+block_gc (2), block_service (2), block_transactions (8), edn_cli (4),
+native_transaction_functions (6), program_transactions (6), service_leadership (3),
+service_standby (5) and service_worker (9). The final administrative-driver move
+was compiled and its exact operator checkpoint/restart regression rerun (1 pass).
+The 5 MiB live transaction crossed upload groups/two log chunks and reopened with
+its exact receipt (6.89 s complete debug sample). The actual EDN workflow verifies
+map updates, immutable held values, source joins, preview and writer-independent
+reads, restricted roles and restart/retry. Concurrent test activity makes these
+durations operational samples, not controlled performance comparisons.
+
+Recovery and excision now reuse the forward log cursor rather than reseeking
+per entry. New real-path regressions pass: 130-transaction recovery reads three
+pages five times total (tail once, sealed pages once for validation and once for
+replay), with 412 complete driver calls; excision reads 130 source entries plus
+two pages, with 14,896 total driver calls including immutable rewrite/receipt
+work. Entry size rejection happens before chunk reads and leaves its checkpoint
+unchanged. This reduces navigation, not whole-history rewrite costs. Native
+excision still pauses fresh writes through rewriting; GC is bounded per call
+but scans all namespace objects per cycle. Both are explicit source adaptations
+in the lifecycle traces, not hidden scalability claims.
+
+The isolated block_live_costs application sample also passed, with no concurrent
+test or compilation workload during execution: 2,048 entities/1,572,864 scalar
+payload bytes versus 1 MiB configured caches. Startup through shutdown took
+13.73 s/1,889 SQL calls. Seed commit took 2.10 s and seed plus automatic indexing
+8.24 s; 24 small writes took 0.543 s/1,062 calls, and writes plus automatic
+indexing 4.74 s. Three automatic jobs ran; subsequent 32 warm reads took 697 us
+with zero SQL. This includes actual write/index/sync/shutdown, with uncontrolled
+warm OS/PostgreSQL caches in debug; byte accounting is not RSS. Together with
+the fresh fault/restart/maintenance checks, this closes Stage 3, not the parent.
+
+Stage 4 active component: immutable database values and peer capture/observation.
+Read its source/callers and Pro time/read contracts before changing its owners;
+preserve the shared assessor and the verified storage/publication boundary.
+Peer/application packaging, Stages 4–7, complete source/doc coverage and final
+integrated acceptance remain unfinished. Carry the backup verifier's repeated
+per-entry seeks and obsolete fulltext idle-retry statistics into Stage 5; do not
+lose these identified cleanup/cost issues during the moves.
 
 Disposable live fixture (leave unrelated databases alone):
 host=/tmp/atomic-cutover-pg.GbbJ4R/socket port=56147 dbname=atomic_cutover user=jake.

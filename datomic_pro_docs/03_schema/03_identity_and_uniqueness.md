@@ -144,3 +144,7 @@ Lookup refs used in a transaction will be resolved by the transactor. Lookup ref
 Entity ids are native to Datomic, have a compact numeric representation, and are stored as part of every datom.
 
 Queries against a single database can lookup entity ids via other kinds of identifiers, but for efficiency should join by entity id.
+
+<!-- ATOMIC-NOTE: Development trace, separate from the reference text. -->
+See the [Atomic value/schema/identity source trace](03_identity_and_uniqueness.atomic.md)
+for passage-level implementation links, native decisions and verification scope.

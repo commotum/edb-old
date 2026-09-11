@@ -1,10 +1,23 @@
 //! Bounded, discardable canonical-program decoding cache. Scope is captured
 //! database lineage plus excision generation; a cache entry never grants a
 //! snapshot, writer lease, or authorization to open a retired value.
+use crate::ProgramHash;
 use crate::collections::LruMap;
 use crate::program::ValidatedProgram;
-use crate::{ProgramCacheStats, ProgramHash};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+/// Cumulative canonical-program decoding work and bounded accounted cache
+/// footprint. Hits cross no new decode or validation boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ProgramCacheStats {
+    pub hits: u64,
+    pub misses: u64,
+    pub decodes: u64,
+    pub validations: u64,
+    pub evictions: u64,
+    pub current_entries: usize,
+    pub current_bytes: usize,
+}
 
 pub(crate) type ProgramCacheKey = ([u8; 16], u64, ProgramHash);
 pub(crate) type SharedProgramCache = Arc<Mutex<ProgramCache>>;

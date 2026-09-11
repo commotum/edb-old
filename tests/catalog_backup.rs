@@ -1,8 +1,9 @@
 //! Visible headless restore reservations and route retirement fences.
 mod common;
 use atomic_core::storage::ownership::{BlockCollector, CollectionPhase};
-use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions, PgBlockStore};
+use atomic_core::storage::{BlockDatabase, PgBlockStore};
 use atomic_core::*;
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use std::time::Duration;
 
 fn fixture(label: &str) -> Option<common::PostgresFixture> {

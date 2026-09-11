@@ -323,3 +323,12 @@ Calling *gc-deleted-dbs* has two weaknesses when compared to deleting the underl
 
 - Datomic must walk all the data structures associated with deleted databases, which takes time proportional to the size of the deleted data
 - Datomic does not mark all garbage in all cases, so *gc-deleted-dbs* will reclaim most (but not necessarily all) storage used by deleted databases
+
+<!-- ATOMIC-DEVELOPMENT: appended source trace; original chapter preserved above. -->
+
+## Atomic development trace
+
+The [lifecycle reclamation trace](../00_architecture_and_storage/00_storage_services.atomic.md#atomic-note-lifecycle-reclamation-boundary)
+maps the live/deleted-database GC passages to recorded-garbage publication,
+queued versus synchronous completion, reader cutoffs and Atomic's distinct
+ownership/epoch collector. It does not claim full capacity-planning coverage.

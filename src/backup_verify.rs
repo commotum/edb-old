@@ -2,10 +2,10 @@
 //! this replay. Deep verification retains one eager canonical database and
 //! small object/basis schedules, never one database clone per receipt prefix.
 use super::{BackupVerification, ReadPoint, load_publication, read_object};
+use crate::index::tree::{TreeDescriptor, TreeNode};
 use crate::operations::{
     derive_index_projection, same_stored_datoms, validate_physical_history_projection,
 };
-use crate::persistent_tree::{TreeDescriptor, TreeNode};
 use crate::storage::descriptors::{INDEX_DESCRIPTOR_KIND, SNAPSHOT_METADATA_KIND};
 use crate::storage::log::LogRoot;
 use crate::storage::receipts::{ExactReceipt, RECEIPT_KIND, RequestIndex, basis_receipt_key};
@@ -73,7 +73,7 @@ fn inventory(
             &bytes,
         )?);
         if bytes.starts_with(b"ATIX") {
-            if let TreeNode::Leaf(leaf) = crate::persistent_tree::decode_tree_node(&id, &bytes)? {
+            if let TreeNode::Leaf(leaf) = crate::index::tree::decode_tree_node(&id, &bytes)? {
                 for value in &leaf.values {
                     crate::program_bindings::collect_program_hashes(value, &mut programs);
                 }
@@ -102,7 +102,7 @@ fn inventory(
                             .iter()
                             .chain(descriptor.avet_work.iter().map(|w| &w.source))
                         {
-                            crate::persistent_tree::validate_tree_streaming(tree, |id| {
+                            crate::index::tree::validate_tree_streaming(tree, |id| {
                                 reader.read_object(*id)
                             })?;
                         }
@@ -502,9 +502,9 @@ fn read_tree(
     descriptor: &TreeDescriptor,
 ) -> Result<Vec<Datom>, SemanticError> {
     let mut datoms = Vec::new();
-    crate::persistent_tree::validate_tree_streaming(descriptor, |id| {
+    crate::index::tree::validate_tree_streaming(descriptor, |id| {
         let bytes = reader.read_object(*id)?;
-        if let TreeNode::Leaf(leaf) = crate::persistent_tree::decode_tree_node(id, &bytes)? {
+        if let TreeNode::Leaf(leaf) = crate::index::tree::decode_tree_node(id, &bytes)? {
             for row in 0..leaf.len() {
                 datoms.push(leaf.datom(row).expect("decoded leaf columns"));
             }
@@ -629,7 +629,7 @@ fn verify_pending(
 ) -> Result<BTreeSet<u32>, SemanticError> {
     let mut pending = BTreeSet::new();
     for attribute in &index.pending_avet {
-        if !crate::index_support::effective_avet(database.schema(), *attribute) {
+        if !crate::index::metadata::effective_avet(database.schema(), *attribute) {
             return Err(fault(
                 "backup/avet-direction",
                 "Pending AVET attribute is not indexed in its frozen schema",
@@ -640,7 +640,7 @@ fn verify_pending(
         }
     }
     for work in &index.avet_work {
-        if work.adding != crate::index_support::effective_avet(database.schema(), work.attribute)
+        if work.adding != crate::index::metadata::effective_avet(database.schema(), work.attribute)
             || work.source != index.trees[usize::from(work.history) * 4 + 1]
         {
             return Err(fault(
@@ -695,7 +695,7 @@ fn projection_prefix(
 ) -> Result<Vec<Datom>, SemanticError> {
     let bytes = reader.read_object(work.source.root_hash)?;
     let TreeNode::Root(root) =
-        crate::persistent_tree::decode_tree_node(&work.source.root_hash, &bytes)?
+        crate::index::tree::decode_tree_node(&work.source.root_hash, &bytes)?
     else {
         return Err(fault("backup/avet-root", "AVET source is not a root"));
     };
@@ -707,7 +707,7 @@ fn projection_prefix(
         }
         let bytes = reader.read_object(child.hash)?;
         let TreeNode::Directory(directory) =
-            crate::persistent_tree::decode_tree_node(&child.hash, &bytes)?
+            crate::index::tree::decode_tree_node(&child.hash, &bytes)?
         else {
             return Err(fault(
                 "backup/avet-directory",
@@ -719,8 +719,7 @@ fn projection_prefix(
                 break;
             }
             let bytes = reader.read_object(child.hash)?;
-            let TreeNode::Leaf(leaf) =
-                crate::persistent_tree::decode_tree_node(&child.hash, &bytes)?
+            let TreeNode::Leaf(leaf) = crate::index::tree::decode_tree_node(&child.hash, &bytes)?
             else {
                 return Err(fault("backup/avet-leaf", "AVET source leaf is invalid"));
             };
@@ -778,7 +777,7 @@ mod tests {
                 IndexOrder::Avet,
                 IndexOrder::Vaet,
             ] {
-                let built = crate::persistent_tree::build_tree(
+                let built = crate::index::tree::build_tree(
                     order,
                     history,
                     database.datoms(
@@ -871,7 +870,7 @@ mod tests {
             // during ordinary open; the deep semantic comparator must catch it.
             let mut missing = database.datoms(View::Current, IndexOrder::Vaet);
             assert!(missing.pop().is_some());
-            let built = crate::persistent_tree::build_tree(
+            let built = crate::index::tree::build_tree(
                 IndexOrder::Vaet,
                 false,
                 missing,
@@ -940,7 +939,7 @@ mod tests {
             tx: crate::t_to_tx(1).unwrap(),
             added: true,
         };
-        let tree = crate::persistent_tree::build_tree(
+        let tree = crate::index::tree::build_tree(
             IndexOrder::Eavt,
             false,
             vec![invalid],
@@ -1046,7 +1045,7 @@ mod tests {
                     datoms.pop();
                 }
                 let tree =
-                    crate::persistent_tree::build_tree(order, history, datoms, &Default::default())
+                    crate::index::tree::build_tree(order, history, datoms, &Default::default())
                         .unwrap();
                 for (_, bytes) in tree.nodes.iter() {
                     put(directory, bytes);
@@ -1207,7 +1206,7 @@ mod tests {
             let mut index = original.clone();
             let source = index.trees[usize::from(history) * 4 + 1].clone();
             let mut position = None;
-            let TreeNode::Root(root) = crate::persistent_tree::decode_tree_node(
+            let TreeNode::Root(root) = crate::index::tree::decode_tree_node(
                 &source.root_hash,
                 &reader.read_object(source.root_hash).unwrap(),
             )
@@ -1215,7 +1214,7 @@ mod tests {
                 unreachable!()
             };
             for (directory_index, child) in root.directories.iter().enumerate() {
-                let TreeNode::Directory(dir) = crate::persistent_tree::decode_tree_node(
+                let TreeNode::Directory(dir) = crate::index::tree::decode_tree_node(
                     &child.hash,
                     &reader.read_object(child.hash).unwrap(),
                 )
@@ -1223,7 +1222,7 @@ mod tests {
                     unreachable!()
                 };
                 for (leaf_index, child) in dir.leaves.iter().enumerate() {
-                    let TreeNode::Leaf(leaf) = crate::persistent_tree::decode_tree_node(
+                    let TreeNode::Leaf(leaf) = crate::index::tree::decode_tree_node(
                         &child.hash,
                         &reader.read_object(child.hash).unwrap(),
                     )

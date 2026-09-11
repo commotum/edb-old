@@ -93,3 +93,8 @@ A storage copy is a consistent copy if and only if it always comprises a complet
 
 - SQL log shipping makes a consistent copy and is suitable for disaster recovery
 - Replication or backup of eventually consistent storage cannot (by definition) make consistent copies and is **not** suitable for disaster recovery
+
+## Atomic implementation notes
+
+[Selected authority and recovery trace](01_high_availability.atomic.md) is marked
+development commentary, separate from the recovered documentation above.

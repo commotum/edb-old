@@ -8,7 +8,7 @@ package datomic;
 // Observed implementation: src-clj/datomic/db.clj::Datum implements this public
 // tuple and impl.db.IDatum on the same value. eavt-cmp/avet-cmp group logical E/A/V
 // before descending transaction time and assertion-before-retraction ordering.
-// This interface alone does not specify those index rules. Rust src/datom.rs
+// This interface alone does not specify those index rules. Rust model/datom
 // retains one typed fact plus index comparators; boxed getters are a JVM boundary,
 // not a second domain model to reproduce. The peer interface is baseline-identical.
 // ATOMIC-NOTE END foundation-datom

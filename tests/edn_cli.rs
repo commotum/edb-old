@@ -440,6 +440,104 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
             && return_maps.contains("Alicia")
             && return_maps.contains("Bob")
     );
+    // :person/friends is noncomponent. An explicit nested :db/id identifies
+    // Bob without repeating his unique email as an assertion in the child map.
+    let held_peer = atomic_core::Peer::connect_configured(
+        &atomic_core::PostgresConnectionConfig::plaintext(&fixture.peer_url),
+        "edn",
+        0,
+    )
+    .unwrap();
+    let held = held_peer.database_value();
+    let name_attr = held
+        .entid(&atomic_core::Keyword::new("person", "name"))
+        .unwrap() as u32;
+    let email_attr = held
+        .entid(&atomic_core::Keyword::new("person", "email"))
+        .unwrap() as u32;
+    let bob_id = held
+        .lookup(
+            email_attr,
+            &atomic_core::Value::String("bob@example.com".into()),
+        )
+        .unwrap()
+        .unwrap();
+    let held_key = held.snapshot_key().unwrap();
+    let numeric_nested = format!(
+        "[{{:db/id [:person/email \"alice@example.com\"] :person/friends [{{:db/id {bob_id} :person/name \"Robert\"}}]}}]"
+    );
+    transact(
+        &fixture.peer_url,
+        &endpoint,
+        "nested-numeric",
+        &numeric_nested,
+    );
+    let child = data(
+        &fixture.peer_url,
+        &[
+            "pull",
+            "--database",
+            "edn",
+            "--file",
+            "-",
+            "--entity",
+            "[:person/email \"bob@example.com\"]",
+        ],
+        "[:person/name :person/email]",
+    );
+    assert_eq!(field(&child, "name"), EdnValue::String("Robert".into()));
+    assert_eq!(
+        field(&child, "email"),
+        EdnValue::String("bob@example.com".into())
+    );
+
+    let lookup_nested = r#"[{:db/id [:person/email "alice@example.com"]
+        :person/friends [{:db/id [:person/email "bob@example.com"] :person/name "Bobby"}]}]"#;
+    let mut nested_file = tempfile::NamedTempFile::new().unwrap();
+    nested_file.write_all(lookup_nested.as_bytes()).unwrap();
+    let nested_report = cli(
+        &fixture.peer_url,
+        &[
+            "transact",
+            "--database",
+            "edn",
+            "--endpoint",
+            endpoint.to_str().unwrap(),
+            "--request-key",
+            "nested-lookup",
+            "--file",
+            nested_file.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(field(&nested_report, "committed"), EdnValue::Bool(true));
+    let nested_pull = data(
+        &fixture.peer_url,
+        &[
+            "pull",
+            "--database",
+            "edn",
+            "--file",
+            "-",
+            "--entity",
+            "[:person/email \"alice@example.com\"]",
+        ],
+        pull,
+    );
+    assert!(nested_pull.contains("Bobby") && nested_pull.contains("bob@example.com"));
+    assert_eq!(
+        field(&nested_pull, "name"),
+        EdnValue::String("Alicia".into())
+    );
+    assert_eq!(field(&nested_pull, "aliases"), field(&updated, "aliases"));
+    assert_eq!(
+        held.values(bob_id, name_attr).unwrap(),
+        vec![atomic_core::Value::String("Bob".into())]
+    );
+    assert_eq!(
+        held.values(bob_id, email_attr).unwrap(),
+        vec![atomic_core::Value::String("bob@example.com".into())]
+    );
+    assert_eq!(held.snapshot_key().unwrap(), held_key);
     server.stop();
     // A peer query is independent of writer availability.
     assert!(
@@ -451,18 +549,29 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         .contains("Alicia")
     );
     let mut server = Server::start(&fixture.writer_url, "edn", &endpoint);
-    let replay = transact(&fixture.peer_url, &endpoint, "alice", alice);
-    for name in [
-        "basis-t",
-        "tx-hash",
-        "tx-data",
-        "tempids",
-        "db-before-t",
-        "db-after-t",
+    for (key, text, original) in [
+        ("alice", alice, &first),
+        ("nested-lookup", lookup_nested, &nested_report),
     ] {
-        assert_eq!(field(&first, name), field(&replay, name), "{name}");
+        let replay = transact(&fixture.peer_url, &endpoint, key, text);
+        for name in [
+            "basis-t",
+            "tx-hash",
+            "tx-data",
+            "tempids",
+            "db-before-t",
+            "db-after-t",
+        ] {
+            assert_eq!(field(original, name), field(&replay, name), "{key}/{name}");
+        }
+        assert_eq!(field(&replay, "replayed"), EdnValue::Bool(true));
     }
-    assert_eq!(field(&replay, "replayed"), EdnValue::Bool(true));
+    assert_eq!(held.snapshot_key().unwrap(), held_key);
+    assert_eq!(
+        held.values(bob_id, name_attr).unwrap(),
+        vec![atomic_core::Value::String("Bob".into())]
+    );
+    drop((held, held_peer));
     assert!(
         data(
             &fixture.peer_url,
@@ -472,7 +581,7 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
         .contains("Alicia")
     );
     println!(
-        "EDN_APPLICATION_OK schema=true maps=true nested=true lookup=true omitted_preserved=true preview_isolated=true history=true multiple_sources=true general_relations=true rules=true return_maps=true independent_reads=true restart_exact_retry=true restricted_roles={}",
+        "EDN_APPLICATION_OK schema=true maps=true nested=true nested_explicit_numeric_and_lookup=true lookup=true omitted_preserved=true held_snapshot_preserved=true preview_isolated=true history=true multiple_sources=true general_relations=true rules=true return_maps=true independent_reads=true restart_exact_retry=true restricted_roles={}",
         fixture.roles.is_some()
     );
 

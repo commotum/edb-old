@@ -206,7 +206,7 @@ pub(crate) fn lower_forms(
             lowered.push(form.clone());
         }
     }
-    crate::transaction::validate_forms_input(&lowered)?;
+    crate::transaction::input::validate_forms_input(&lowered)?;
     Ok(lowered)
 }
 

@@ -121,6 +121,10 @@
       'index-includes-some-log-tail?
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Reconnection prefers the greater transaction basis;
+  ;; ties retain the first argument, so this is not an index-revision chooser.
+  ;; [inferred] Keeping a newer in-memory basis avoids replaying already accepted
+  ;; transactions merely because the durable index is still behind.
   (defn most-current-db
     ([& dbs]
       (let [basis (fn basis ([db] (if db (long (.basisT ^datomic.Database db)) -1)))]
@@ -140,6 +144,10 @@
       *ns*))
   ;; Rebuilds the most current immutable database from an index root and the subsequent log tail.
   ;; An optional basis database avoids moving backward when the caller already holds newer state.
+  ;; ATOMIC-NOTE [observed]: Index and log heads are captured separately, then
+  ;; log/catchup seeks from the selected Db's nextT. This is not a full user-data
+  ;; materialization and not an atomic multi-reference read. Current peer startup
+  ;; calls this once before notifier creation and again before starting delivery.
   (defn load-db-from-basis
     ([cluster-db-conn olookup db-id & p__19575]
       (let [vec__19576 p__19575

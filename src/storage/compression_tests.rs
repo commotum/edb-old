@@ -44,8 +44,8 @@ fn fixture() -> Option<Fixture> {
 fn aggregate_expansion_is_admitted_before_any_decompression() {
     let canonical = vec![b'x'; 1024];
     let id = sha256(&canonical);
-    let mut physical = crate::block_codec::encode_block(&canonical).unwrap();
-    assert!(crate::block_codec::is_encoded(&physical));
+    let mut physical = crate::storage::codec::encode_block(&canonical).unwrap();
+    assert!(crate::storage::codec::is_encoded(&physical));
     // Neither member is actually valid for its advertised length. An eager
     // decoder would fail decompression before ever checking the batch bound.
     physical[10..18].copy_from_slice(&((MAX_BLOCK_BYTES / 2 + 1) as u64).to_be_bytes());
@@ -76,7 +76,7 @@ fn aggregate_expansion_is_admitted_before_any_decompression() {
 #[test]
 fn exact_aggregate_boundary_preserves_order_duplicates_and_raw_marker_content() {
     let canonical = vec![b'a'; MAX_BLOCK_BYTES / 2];
-    let physical = crate::block_codec::encode_block(&canonical).unwrap();
+    let physical = crate::storage::codec::encode_block(&canonical).unwrap();
     let id = sha256(&canonical);
     let mut stats = ObjectReadStats::default();
     let result = decode_objects(

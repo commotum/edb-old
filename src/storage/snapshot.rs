@@ -9,13 +9,12 @@ use super::root::{
 };
 use super::{ObjectId, PgBlockStore, RefCondition};
 use crate::async_client::executor::Owned;
-use crate::idents::IdentIndex;
 use crate::index::NormalizedIndexBoundary;
-use crate::persistent_tree::{RootNode, TreeNode, TreeReadStats, decode_tree_node};
-use crate::recent::{EndpointProjection, RecentLimits, RecentRange, RecentTier};
-use crate::tree_cursor::{
-    DurableTreeCursor, DurableTreeSource, MergeCursor, MergeSource, TreeNodeCache,
-};
+use crate::index::cursor::{DurableTreeCursor, DurableTreeSource, MergeCursor, MergeSource};
+use crate::index::recent::{EndpointProjection, RecentLimits, RecentRange, RecentTier};
+use crate::index::tree::cache::TreeNodeCache;
+use crate::index::tree::{RootNode, TreeNode, TreeReadStats, decode_tree_node};
+use crate::model::idents::IdentIndex;
 use crate::{
     CacheStats, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, IndexBoundary,
     IndexOrder, IndexPrefix, Keyword, PeerCursorStats, PostgresConnectionConfig, Schema,
@@ -138,8 +137,8 @@ struct SnapshotInner {
     route: Option<Arc<str>>,
     metadata: SnapshotMetadata,
     indexes: Arc<IndexDescriptor>,
-    base_metadata: Arc<crate::index_support::MetadataProjection>,
-    endpoint_metadata: Arc<crate::index_support::MetadataProjection>,
+    base_metadata: Arc<crate::index::metadata::MetadataProjection>,
+    endpoint_metadata: Arc<crate::index::metadata::MetadataProjection>,
     lineage: String,
     roots: BTreeMap<(bool, u8), Arc<RootNode>>,
     schema: Arc<Schema>,
@@ -147,8 +146,8 @@ struct SnapshotInner {
     recent: RecentTier,
     log: Option<super::log::LogRoot>,
     avet_unready: Arc<BTreeSet<u32>>,
-    metadata_residency: crate::index_support::ResidentMetadataStats,
-    root_residency: crate::index_support::ResidentTreeRootStats,
+    metadata_residency: crate::index::metadata::ResidentMetadataStats,
+    root_residency: crate::index::metadata::ResidentTreeRootStats,
     limits: BlockReadConfig,
 }
 impl std::fmt::Debug for BlockSnapshot {
@@ -391,8 +390,10 @@ impl BlockReader {
         })
     }
 
-    /// Resolve a publication/value reference once and capture its immutable
-    /// revision. A racing publication returns Conflict; it is never remapped.
+    /// Resolve a publication/value reference once and follow that immutable
+    /// capture. Concurrent publication does not retarget it or require a retry.
+    /// Durable ownership and retirement grace, not a reader registration, keep
+    /// the referenced objects available; missing required objects fail closed.
     pub fn capture(&self, reference_key: &str) -> Result<BlockSnapshot, SemanticError> {
         let capture = self.capture_reference(reference_key)?;
         self.capture_root(&capture)
@@ -720,7 +721,7 @@ impl BlockReader {
                     tx_data: record.entry.tx_data,
                 };
                 retained = retained.saturating_add(
-                    crate::recent::retained_entry_stats(&transaction)?.accounted_bytes,
+                    crate::index::recent::retained_entry_stats(&transaction)?.accounted_bytes,
                 );
                 datoms = datoms.saturating_add(transaction.tx_data.len() as u64);
                 if retained > self.limits.max_recent_bytes as u64
@@ -741,7 +742,7 @@ impl BlockReader {
             ));
         }
         let (hashes, transactions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-        let (endpoint, unready) = crate::index_support::apply_metadata_and_avet_readiness(
+        let (endpoint, unready) = crate::index::metadata::apply_metadata_and_avet_readiness(
             previous.endpoint_metadata(),
             &previous.inner.avet_unready,
             &transactions,
@@ -1035,7 +1036,7 @@ impl BlockReader {
             tempids: BTreeMap::new(),
             tx_data,
         };
-        let (endpoint, unready) = crate::index_support::apply_metadata_and_avet_readiness(
+        let (endpoint, unready) = crate::index::metadata::apply_metadata_and_avet_readiness(
             &before.inner.endpoint_metadata,
             &before.inner.avet_unready,
             std::slice::from_ref(&transaction),
@@ -1204,7 +1205,7 @@ impl BlockSnapshot {
                 || root
                     .directories
                     .first()
-                    .map(|child| crate::persistent_tree::routing_key_hash(&child.key))
+                    .map(|child| crate::index::tree::routing_key_hash(&child.key))
                     .transpose()?
                     != descriptor.first_hash
             {
@@ -1218,7 +1219,7 @@ impl BlockSnapshot {
                 Arc::new(root.clone()),
             );
         }
-        let base = crate::index_support::derive_metadata_from_roots(&roots, |hash| {
+        let base = crate::index::metadata::derive_metadata_from_roots(&roots, |hash| {
             source.load_node(hash, &mut TreeReadStats::default())
         })?;
         let lineage = format_identity(captured.identity);
@@ -1273,7 +1274,7 @@ impl BlockSnapshot {
                         "Captured recent byte window exceeds reader admission",
                     ));
                 }
-                let retained = crate::recent::retained_entry_stats(&transaction)?;
+                let retained = crate::index::recent::retained_entry_stats(&transaction)?;
                 tail_bytes = tail_bytes.saturating_add(retained.accounted_bytes);
                 if tail_bytes > limits.max_recent_bytes as u64 {
                     return Err(limit(
@@ -1304,7 +1305,7 @@ impl BlockSnapshot {
             ));
         }
         let initial = Arc::new(indexes.pending_avet.iter().copied().collect());
-        let (endpoint, unready) = crate::index_support::apply_metadata_and_avet_readiness(
+        let (endpoint, unready) = crate::index::metadata::apply_metadata_and_avet_readiness(
             &base,
             &initial,
             &transactions,
@@ -1340,7 +1341,7 @@ impl BlockSnapshot {
         // walking a wide schema or routing table on a service statistics read.
         let metadata_residency = endpoint.resident_stats();
         let root_residency = roots.values().fold(
-            crate::index_support::ResidentTreeRootStats::default(),
+            crate::index::metadata::ResidentTreeRootStats::default(),
             |mut total, root| {
                 total.children = total.children.saturating_add(root.directories.len());
                 total.estimated_bytes = total
@@ -1396,10 +1397,10 @@ impl BlockSnapshot {
     pub(crate) fn index_descriptor(&self) -> &IndexDescriptor {
         &self.inner.indexes
     }
-    pub(crate) fn base_metadata(&self) -> &crate::index_support::MetadataProjection {
+    pub(crate) fn base_metadata(&self) -> &crate::index::metadata::MetadataProjection {
         &self.inner.base_metadata
     }
-    pub(crate) fn endpoint_metadata(&self) -> &crate::index_support::MetadataProjection {
+    pub(crate) fn endpoint_metadata(&self) -> &crate::index::metadata::MetadataProjection {
         &self.inner.endpoint_metadata
     }
     pub(crate) fn recent_tier(&self) -> &RecentTier {

@@ -171,6 +171,11 @@
       'get-before-t
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] The request entity's t bounds removal independently
+  ;; of an optional earlier cutoff, and history-as-of-request supplies component
+  ;; edges. Thus later assertions do not expand the same request indefinitely.
+  ;; [documented] Excision is outside transaction history; callers still must
+  ;; rewrite both index and log, then separately reclaim their superseded bytes.
   (defn pred-and-extent
     ([db spec]
       (let [id (fn id ([p1__14070#] (or (:db/id p1__14070#) (db/resolve-id db p1__14070#))))

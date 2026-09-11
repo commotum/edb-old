@@ -77,6 +77,14 @@
         (clojure.core/import 'org.fressian.impl.BytesOutputStream)
         (clojure.core/import 'org.fressian.impl.ByteBufferInputStream))))
   (set! *warn-on-reflection* true)
+  ;; ATOMIC-NOTE BEGIN serialization-fressian-counterpart
+  ;; See transactor/src-clj/datomic/fressian.clj serialization-handler-boundary,
+  ;; footer-contract, named-and-exact-values and materialization notes. The
+  ;; inspected handlers/decoder have the same mechanisms, with generated-local
+  ;; differences; no whole-file byte-identity claim. Peers share these value and
+  ;; index/log serialization contracts rather than owning another wire grammar.
+  ;; Baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d.
+  ;; ATOMIC-NOTE END serialization-fressian-counterpart
   (defn as-lookup
     ([o] (if (map? o) (reify org.fressian.handlers.ILookup (valAt [this k] (get o k))) o)))
   (reset-meta!

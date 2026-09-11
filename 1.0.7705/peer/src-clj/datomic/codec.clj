@@ -14,6 +14,11 @@
       (do
         (clojure.core/refer 'clojure.core)
         (clojure.core/import 'org.apache.commons.codec.binary.Base64))))
+  ;; ATOMIC-NOTE BEGIN serialization-text-counterpart
+  ;; Baseline-identical to transactor/src-clj/datomic/codec.clj at cd7192e63d883a4a34aa7de4d5bcd17e6edb692d.
+  ;; See serialization-text-codec there: these are text-boundary conversions,
+  ;; not Datomic's tagged value codec or a durability/security guarantee.
+  ;; ATOMIC-NOTE END serialization-text-counterpart
   (defn string->bytes ([s] (.getBytes ^java.lang.String s "UTF-8")))
   (reset-meta!
     #'string->bytes

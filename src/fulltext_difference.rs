@@ -2,8 +2,8 @@
 //! Equal directories/leaves are skipped before any contained datom is decoded.
 //! Unequal leaf streams are merged globally, including across changed physical
 //! boundaries; a split/repack alone therefore creates no document mutations.
-use crate::persistent_tree::{ChildRef, RootNode, TreeReadStats};
-use crate::tree_cursor::{LoadedDirectory, LoadedLeaf};
+use crate::index::cursor::{LoadedDirectory, LoadedLeaf};
+use crate::index::tree::{ChildRef, RootNode, TreeReadStats};
 use crate::{Datom, Digest, ErrorCategory, IndexOrder, SemanticError};
 use std::cmp::Ordering as Cmp;
 use std::sync::Arc;
@@ -242,8 +242,8 @@ impl<S: HistorySource> Iterator for HistoryDifference<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::persistent_tree::{TreeConfig, TreeNode, TreeNodeSet, build_tree, decode_tree_node};
-    use crate::tree_cursor::{validate_loaded_child_datom, validate_loaded_child_key};
+    use crate::index::tree::navigation::{validate_loaded_child_datom, validate_loaded_child_key};
+    use crate::index::tree::{TreeConfig, TreeNode, TreeNodeSet, build_tree, decode_tree_node};
     use crate::{Value, make_eid, t_to_tx};
 
     #[derive(Clone)]

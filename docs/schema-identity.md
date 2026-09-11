@@ -1,4 +1,32 @@
-# Composite identity and NaN values
+# Value and identity rules
+
+## URI identity and exact input
+
+URI values retain their original spelling but use component comparison for
+identity, redundancy, index order and query joins. Scheme and server-host ASCII
+case, percent-escape hex case and numeric port padding do not create different
+identities. URI normalization is not performed: default ports, dot path segments
+and escaped/unescaped characters remain distinct. An equivalent reassertion is
+redundant; a retraction may record the alias spelling supplied with that new fact.
+Previously captured values remain unchanged. Exact retry digests distinguish the
+submitted spellings even when they identify the same logical URI.
+
+For native ordered indexes, absent authority sorts before server authority,
+which sorts before registry authority. This intentional total-order rule avoids
+the source platform's inconsistent mixed-authority fallback without changing
+component equality. URI separators retain exact values, so very long URIs also
+consume space in index parent nodes; ordinary parent-size limits still apply.
+
+Current tree and database-root formats include these comparison semantics.
+Earlier development databases require fresh databases, not an in-place upgrade.
+
+## Tuple and large-number boundaries
+
+Tuple strings are limited to 256 UTF-16 code units (128 supplementary Unicode
+characters such as emoji), matching the recovered tuple admission rule. This
+storage bound is separate from the [native query string functions](application-computation.md).
+Tuple integers use at most 256 bits excluding the sign bit; ordinary BigIntegers
+use at most 8192. For a limit of N bits the interval is `[-2^N, 2^N - 1]`.
 
 ## Composite identity: derive values, supply identity when upserting
 

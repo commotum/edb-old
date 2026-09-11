@@ -1,6 +1,6 @@
 //! Untrusted, empty PostgreSQL wakeups. Only authenticated log/index reads
 //! advance a peer; disconnects and lost hints are repaired by anti-entropy.
-use crate::runtime::postgres_error;
+use crate::postgres_connection::postgres_error;
 use crate::storage::PgBlockStore;
 use crate::{PostgresConnectionConfig, SemanticError};
 use std::future::{Future, poll_fn};

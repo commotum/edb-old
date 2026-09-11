@@ -1,11 +1,12 @@
 //! Deterministic interleavings at the derived publication boundary. Hooks are
 //! test-only and run real writer operations on an independent connection.
 use super::*;
-use crate::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions, PreparedIndex};
+use crate::storage::{BlockDatabase, PreparedIndex};
 use crate::{
     Attribute, Cardinality, EntityRef, Keyword, PostgresConnectionConfig, Schema,
     TransactionRequest, TxOp, Value, ValueType,
 };
+use crate::{BlockTransactor, BlockWriterOptions};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -126,7 +127,7 @@ fn operator_staging_tolerates_same_writer_renewal_but_owned_lease_stays_exact() 
             .borrow_mut()
             .index_input()
             .unwrap()
-            .prepare(&mut store, &crate::persistent_tree::TreeConfig::default())
+            .prepare(&mut store, &crate::index::tree::TreeConfig::default())
             .unwrap();
         let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
         let capture = reader
@@ -215,7 +216,7 @@ fn moving_publication_fences_staged_root_and_retry_preserves_the_newer_tail() {
         .borrow_mut()
         .index_input()
         .unwrap()
-        .prepare(&mut store, &crate::persistent_tree::TreeConfig::default())
+        .prepare(&mut store, &crate::index::tree::TreeConfig::default())
         .unwrap();
     let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
     let capture = reader

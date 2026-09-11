@@ -9,9 +9,11 @@
 //!
 //! Membership alone is insufficient: the candidate's entire log and metadata
 //! pointers must match a canonical committed value at the requested basis.
-//! Callers retain the trusted publication while checking, then protected-put a
-//! value wrapper before opening it. Authorization proves child reachability;
-//! it does not make an arbitrary caller-supplied wrapper a retained object.
+//! Callers follow a captured trusted publication while checking, then open the
+//! authorized wrapper in memory without writing it. Durable ownership and grace
+//! protect the underlying objects, not the lifetime of the caller's handle.
+//! Authorization proves child reachability; it does not make an arbitrary
+//! caller-supplied wrapper a retained object.
 
 use super::descriptors::{IndexDescriptor, SnapshotMetadata};
 use super::receipts::{ExactReceipt, RequestIndex, basis_receipt_key};
@@ -258,7 +260,7 @@ impl ReadAuthorization {
         if removals.is_empty() {
             return Ok(report);
         }
-        let mut protection = super::engine::protection(store, &report.guards)?;
+        let mut protection = crate::storage::protection::protection(store, &report.guards)?;
         protection.conditions = merge_guards(protection.conditions)?;
         report.guards = protection.conditions.clone();
         store.set_write_protection(Some(protection))?;

@@ -293,7 +293,7 @@ fn lagging_peer_adopts_indexed_prefix_larger_than_its_recent_limit() {
         &id,
         0,
         0,
-        atomic_core::recent::RecentLimits {
+        atomic_core::index::recent::RecentLimits {
             soft_datoms: 2,
             hard_datoms: 5,
             soft_bytes: 512 * 1024,

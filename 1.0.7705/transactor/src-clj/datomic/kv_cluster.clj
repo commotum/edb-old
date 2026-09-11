@@ -216,6 +216,11 @@
   (reset-meta!
     #'same-ref?
     (assoc {:arglists (clojure.core/list ['r1 'r2]), :column (int 1)} :name 'same-ref? :ns *ns*))
+  ;; ATOMIC-NOTE [observed/unknown] Reset callers publish old-tail candidates to
+  ;; the garbage handler after installing the replacement. This function emits
+  ;; an event only; it proves neither immediate deletion nor a reader grace period.
+  ;; Atomic's epoch/ownership collector needs its own safety argument, not parity
+  ;; inferred from this callback's name.
   (defn mark-pod-garbage
     ([cs tail_keys_ref]
       (events/publish {:key :datomic.garbage/mark, :cluster cs, :garbage (deref tail_keys_ref)})))

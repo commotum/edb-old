@@ -28,8 +28,8 @@ impl ReservedAllocation {
         frontier: u64,
         ordinary_frontier: u64,
     ) -> Result<Self, SemanticError> {
-        crate::identity::validate_frontier(frontier)?;
-        crate::identity::validate_frontier(ordinary_frontier)?;
+        crate::model::identity::validate_frontier(frontier)?;
+        crate::model::identity::validate_frontier(ordinary_frontier)?;
         if frontier > ordinary_frontier {
             return Err(SemanticError::incorrect(
                 "allocation/reserved-frontier-out-of-range",

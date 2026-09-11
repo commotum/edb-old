@@ -1,4 +1,78 @@
-use atomic_core::{Attribute, Cardinality, Database, Keyword, Schema, TupleSpec, TxOp, ValueType};
+use atomic_core::{
+    Attribute, Cardinality, Database, EntityRef, Keyword, Schema, TupleSpec, TxOp, Value, ValueType,
+};
+use num_bigint::BigInt;
+
+#[test]
+fn tuple_and_scalar_boundaries_use_source_string_and_signed_integer_units() {
+    let mut schema = Schema::new();
+    schema
+        .install(tuple_attribute(
+            1000,
+            "text",
+            TupleSpec::Homogeneous(ValueType::String),
+        ))
+        .unwrap();
+    schema
+        .install(tuple_attribute(
+            1001,
+            "integer",
+            TupleSpec::Homogeneous(ValueType::BigInt),
+        ))
+        .unwrap();
+    schema
+        .install(attribute(
+            1002,
+            "scalar",
+            ValueType::BigInt,
+            Cardinality::One,
+        ))
+        .unwrap();
+    let db = Database::new(schema).unwrap().database_value();
+    let basis = db.basis_t();
+    let attempt = |attribute, value: Value| {
+        db.with(
+            &[TxOp::Add {
+                entity: EntityRef::Temp("value".into()),
+                attribute,
+                value: value.into(),
+            }],
+            1000,
+        )
+    };
+    let tuple = |value| Value::Tuple(vec![Some(value), None]);
+    for text in ["a".repeat(256), "\u{1f30a}".repeat(128)] {
+        attempt(1000, tuple(Value::String(text))).unwrap();
+    }
+    for text in ["a".repeat(257), "\u{1f30a}".repeat(129)] {
+        assert_eq!(
+            attempt(1000, tuple(Value::String(text))).unwrap_err().code,
+            "transaction/tuple-string-too-large"
+        );
+    }
+    // Two's-complement bit length excludes the sign bit, not the magnitude's
+    // top bit for all negatives. The accepted interval is [-2^n, 2^n - 1].
+    for (attribute, limit, code) in [
+        (1001, 256, "transaction/tuple-bigint-too-large"),
+        (1002, 8192, "transaction/bigint-too-large"),
+    ] {
+        let power: BigInt = BigInt::from(1) << limit;
+        let value = |n| {
+            if attribute == 1001 {
+                tuple(Value::BigInt(n))
+            } else {
+                Value::BigInt(n)
+            }
+        };
+        for n in [BigInt::from(0), BigInt::from(-1), -&power, &power - 1] {
+            attempt(attribute, value(n)).unwrap();
+        }
+        for n in [power.clone(), -&power - 1] {
+            assert_eq!(attempt(attribute, value(n)).unwrap_err().code, code);
+        }
+    }
+    assert_eq!(db.basis_t(), basis, "all attempts are speculative");
+}
 
 fn attribute(id: u32, name: &str, value_type: ValueType, cardinality: Cardinality) -> Attribute {
     Attribute::new(

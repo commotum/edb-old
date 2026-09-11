@@ -32,8 +32,8 @@ entity IDs in partition 3, and derives the entity partition from the entity ID.
 The index comparators group logical keys before descending time and assertion
 before retraction. Public tuple shape alone does not specify this order.
 
-Rust owners: [datom.rs](../../src/datom.rs), `Datom::cmp_in`, and
-[identity.rs](../../src/identity.rs), `make_eid`, `eid_to_part`, `eid_to_eidx`,
+Rust owners: [model/datom.rs](../../src/model/datom.rs), `Datom::cmp_in`, and
+[model/identity.rs](../../src/model/identity.rs), `make_eid`, `eid_to_part`, `eid_to_eidx`,
 `partition_eid`, `t_to_tx`, `tx_to_t`. Retain these typed fields and checked ID
 construction: they preserve the coordinate distinction without reproducing JVM
 boxing or exposing negative packed tempids. The 42-bit entity-index field includes
@@ -42,7 +42,7 @@ a source sign bit; Rust deliberately accepts only its permanent nonnegative half
 Independent assertions: [identity_repair.rs](../../tests/identity_repair.rs),
 `transaction_time_and_user_entities_have_disjoint_recovered_ids` and
 `explicit_ids_must_be_issued_but_empty_issued_ids_can_be_reused`, assert exact
-partition/frontier behavior and transaction metadata; [datom.rs](../../src/datom.rs),
+partition/frontier behavior and transaction metadata; [model/datom.rs](../../src/model/datom.rs),
 `transaction_sorts_descending_and_assertion_first`, checks ordering directly.
 [partitions.rs](../../tests/partitions.rs),
 `implicit_partition_boundaries_round_trip_without_allocating_entities`, checks
@@ -65,8 +65,8 @@ checks in `Accrual` (4856) and the prefetch path (7303). These are not unused
 general-purpose comparison helpers: equality determines grouping and identity.
 
 Rust owners: [model/value/mod.rs](../../src/model/value/mod.rs), `Value::index_cmp`, `logical_hash`,
-`stored_eq`, `stored_cmp`; [datom.rs](../../src/datom.rs), `Datom::cmp_in`;
-[tiered_assessor.rs](../../src/tiered_assessor.rs), `Reader::lookup`,
+`stored_eq`, `stored_cmp`; [model/datom.rs](../../src/model/datom.rs), `Datom::cmp_in`;
+[transaction/assess/mod.rs](../../src/transaction/assess/mod.rs), `Reader::lookup`,
 `validate_unique_successor`, `group_unique_deltas`;
 [database_value.rs](../../src/database_value.rs), `DatabaseValue::lookup_with_control`.
 Retain length-first signed-byte ordering, UTF-16 string ordering, and separate
@@ -123,7 +123,7 @@ for unchecked public enum construction. Do not add a raw-spelling tie-break to
 scale, so URI aliases must remain redundant facts. Ordinary raw bytes in durable
 receipts still preserve exactly what was submitted. No implicit dot-segment
 removal, percent decoding, default-port removal, DNS lookup or Unicode host
-conversion is introduced. [transaction.rs](../../src/transaction.rs),
+conversion is introduced. [transaction/canonical.rs](../../src/transaction/canonical.rs),
 `compare_value`, retains its raw-URI tie-break for exact submitted representation,
 unlike stored-fact or domain-key equality.
 
@@ -162,11 +162,11 @@ Source: [transactor `db.clj`](../../1.0.7705/transactor/src-clj/datomic/db.clj),
 `prevent-ident-retarget!` (2527) additionally protects active composite constituents.
 Retractions do not remove historical names from the lookup dictionary.
 
-Rust owners: [idents.rs](../../src/idents.rs), `IdentIndex::derive` and
-`apply_assertion`; [schema.rs](../../src/schema.rs),
+Rust owners: [model/idents.rs](../../src/model/idents.rs), `IdentIndex::derive` and
+`apply_assertion`; [model/schema.rs](../../src/model/schema.rs),
 `derive_from_information_with_work` and `derive_from_entity_information`;
 [database.rs](../../src/database.rs), `rebuild_derived_caches`, and
-[tiered_assessor.rs](../../src/tiered_assessor.rs)'s successor-schema derivation.
+[transaction/assess/mod.rs](../../src/transaction/assess/mod.rs)'s successor-schema derivation.
 Retain discardable dictionaries, historical assertion folding and schema projection
 from ordinary datoms. They preserve the source's fast name lookup without making
 Rust's descriptor maps a second authoritative database.
@@ -192,10 +192,21 @@ Source: [transactor `Attribute.java`](../../1.0.7705/transactor/src-java/datomic
 The public descriptor represents installed facts; it does not make background
 physical index work synchronous.
 
-Rust owners: [schema.rs](../../src/schema.rs), `Attribute.indexed` and derived
-unique membership; [tiered_assessor.rs](../../src/tiered_assessor.rs),
+The actual schema-change path is `add-unique` (baseline 3413): reject bytes;
+when AVET exists, scan adjacent current values for conflicts; without AVET, allow
+the immediate change only if `has-values?` (3382) finds no datoms in the history
+AEVT slice. “No current values” is not the same as “nothing to backfill.”
+
+Rust owners: [model/schema.rs](../../src/model/schema.rs), `Attribute.indexed` and derived
+unique membership; [transaction/assess/mod.rs](../../src/transaction/assess/mod.rs),
 `validate_unique_successor` consults `physical_avet_ready` before choosing AVET.
 Retain the distinction rather than collapsing these facts into one boolean.
+The public [database_value.rs](../../src/database_value.rs), `has_avet`, reports
+captured readiness without waiting or refreshing; `resolve_ready_avet_attribute`
+rejects an unready raw AVET range. Eager values have complete in-memory coverage;
+block values consult snapshot coverage; transaction overlays track newly enabled
+backfill separately. These are implementations of readiness, not extra schema
+attributes to persist as user information.
 Independent assertions: [schema_information_repair.rs](../../tests/schema_information_repair.rs),
 `explicit_index_fact_is_distinct_from_unique_derived_avet_membership`;
 [avet_schema_semantics.rs](../../tests/avet_schema_semantics.rs),
@@ -205,13 +216,54 @@ PostgreSQL-dependent `postgres_writer_rejects_logical_but_unready_avet_until_pub
 time view uses its creating database value's schema while a held older value
 keeps its own schema. The full temporal-view source path remains unreviewed here.
 
-## Source/document conflict and remaining scope
+## Bytes uniqueness — resolved specific documentation exception
 
-The identity chapter's “any value type” uniqueness sentence conflicts with
-`db/install-attribute-errors` (baseline 2870), which rejects value type 27 (bytes).
-Rust `Schema::validate_attribute_with_work` also rejects unique bytes and requires
-cardinality one. This is **not** evidence to silently remove the guard. Reconcile
-the documented domain before changing it or claiming complete behavior coverage.
+The identity chapter's broad “any value type” uniqueness sentence must be read
+with [Schema Data Reference / Legacy / Limitations of Bytes](00_schema_data_reference.md#limitations-of-bytes)
+(reference lines 685–693), which explicitly disallows unique bytes and lookup by
+bytes. This specific exception agrees with `db/install-attribute-errors` (baseline
+2870), `add-unique` (3413), and Rust `Schema::validate_attribute_with_work`.
+**Retain the rejection.** An earlier version of this development trace called
+the two paragraphs an unresolved conflict; the explicit exception resolves the
+decision. Native byte-content ordering does not itself authorize expanding the
+documented uniqueness domain.
+
+## Tuple size boundaries — demonstrated differences requiring repair
+
+Passages: [Schema Data Reference](00_schema_data_reference.md), “Tuples,” the
+256-character string limit; “Notes on Value Types,” the scalar BigInteger bit
+length of 8192 and BigDecimal precision of 1024.
+
+Source: [transactor `db.clj`](../../1.0.7705/transactor/src-clj/datomic/db.clj),
+`TupleElem` extensions (baseline 6287–6302), `validated-tuple` (6406), and its
+`validated-v-for-attr` caller. Assertions run `tuple-elem?` before tuple-shape
+validation. String `.length` counts UTF-16 units: 128 astral characters fit, 129
+do not. BigInteger `.bitLength` uses minimal signed representation without a sign
+bit, rather than magnitude width: `-2^256` fits; `+2^256` and `-2^256 - 1` do not.
+The latter follows the primary
+[BigInteger.bitLength contract](https://docs.oracle.com/en/java/javase/17/docs/api/java.base/java/math/BigInteger.html#bitLength()),
+not an executed JVM comparison.
+
+At discovery, [model/schema.rs](../../src/model/schema.rs), `validate_tuple_slot`, used
+`chars().count()` and `BigInt::bits()`. The latter delegates to unsigned magnitude
+in the locally installed num-bigint implementation. Consequently Rust accepted
+129 astral characters and rejected the valid negative power-of-two boundary.
+The parent task repaired the shared schema helpers to count UTF-16 units and use
+signed bit length, without replacing the numeric engine. The independent
+[tuple_schema_repair.rs](../../tests/tuple_schema_repair.rs),
+`tuple_and_scalar_boundaries_use_source_string_and_signed_integer_units`, checks
+immediately inside/outside the boundaries. No fresh test result for that repair
+is claimed by this trace.
+
+Scalar 8192-bit disposition has weaker source evidence: the Pro paragraph names
+bit length and maps the type to Java BigInteger, but a search of both recovered
+Java/Clojure artifact trees found only the tuple `.bitLength` check, not the scalar
+8192 guard. Applying the same signed meaning to the scalar limit is doc-driven
+consistency, not proof that an unseen scalar implementation was read.
+`validated-tuple` also applies slot/shape checks only to assertions; the complete
+Rust non-asserting tuple validation policy has not been reconciled in this pass.
+
+## Remaining scope
 
 Not covered by this pass: all numeric edge cases; every supported type's cross-type
 ordering; complete tuple lifecycle and predicates; squuid generation; complete

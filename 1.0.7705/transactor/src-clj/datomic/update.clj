@@ -696,6 +696,11 @@
       *ns*))
   ;; Install a completed index root, release the single-index permit, schedule
   ;; any remaining work, and publish the new basis to peers.
+  ;; ATOMIC-NOTE [observed] index/merge-db already conditionally published its
+  ;; durable index ref before this notification reaches the processor. This
+  ;; function adopts that result into the current db-ref and releases scheduling
+  ;; state; it is not the index's storage-CAS boundary. Pending log excision is
+  ;; awaited by process-request-index before it queues :new-index here.
   (defn process-new-index
     ([p__30859 p__30860]
       (let [map__30861 p__30859
@@ -1636,6 +1641,10 @@
         (if (log/tail-empty? tail)
           (deliver completed true)
           (queue/put log_tree_queue {:type :extend-tree, :completed completed, :tail tail})))))
+  ;; ATOMIC-NOTE [observed] Both ordinary treeification and excision converge
+  ;; here. log/adopt-root conditionally publishes the tree plus newer live tail;
+  ;; only afterward are superseded IDs marked and :completed delivered. A
+  ;; log-treeifier root-id-ref reset alone is not durable adoption or GC authority.
   (defmethod
     writer-process
     :adopt-tree
@@ -1812,6 +1821,10 @@
   ;; :logged before sending to tx/push-address, invoking process/fail on timeout.
   ;; [documented] ACID / Durability explains this boundary: a computed or encoded
   ;; result cannot be reported as complete merely because it entered the pipeline.
+  ;; ATOMIC-NOTE [observed] The delivery boundary sends immutable encoded data to
+  ;; a producer; it does not invoke application observer code in the assessor.
+  ;; [native adaptation] Local Rust observers likewise receive a bounded channel
+  ;; hint. Log catch-up, not successful hint delivery, proves complete observation.
   (defn block-notifier
     ([shutdown_hook & p__31009]
       (let [map__31010 p__31009

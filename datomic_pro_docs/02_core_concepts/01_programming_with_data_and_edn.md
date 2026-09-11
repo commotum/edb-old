@@ -114,3 +114,9 @@ In the transaction above:
 - the entire transaction is a vector containing a nested map.
 
 Check [transaction structure](https://docs.datomic.com/transactions/transaction-data-reference.html) for more information about how transactions are structured.
+
+<!-- ATOMIC-NOTE BEGIN development-trace-link -->
+
+Development trace (separate from the original reference): [EDN, exact values and serialized storage](01_programming_with_data_and_edn.atomic.md).
+
+<!-- ATOMIC-NOTE END development-trace-link -->

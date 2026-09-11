@@ -4,6 +4,16 @@
   (when-not (.equals 'datomic.data 'clojure.core)
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.data))
     (clojure.core/with-loading-context (clojure.core/refer 'clojure.core)))
+  ;; ATOMIC-NOTE BEGIN serialization-data-role (baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d)
+  ;; Observed: this namespace contains only a fixed permutation of 0..127.
+  ;; config-ext optionally loads it with obscure and license-inline; no table
+  ;; consumer was found in the recovered trees, and those implementations are
+  ;; not present here. Its further purpose is unknown from this evidence.
+  ;; Do not mistake the name "data" for Datomic's datom/value model or invent a
+  ;; native serialization requirement from this table. Preserve the artifact;
+  ;; the actual value handler and storage callers are traced in fressian.clj.
+  ;; The peer copy is byte-identical at the baseline.
+  ;; ATOMIC-NOTE END serialization-data-role
   (def table
    [35
     47

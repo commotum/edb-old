@@ -94,6 +94,31 @@ fn append_has_constant_object_writes_and_selective_authenticated_navigation() {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(range, (61..70).map(entry).collect::<Vec<_>>());
+    let range_context = OperationContext::new(OperationKind::Query);
+    let range_started = Instant::now();
+    let complete_range = {
+        let _guard = range_context.enter();
+        root.range(&mut store, 1, total + 1)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let range_elapsed = range_started.elapsed();
+    let range_io = range_context.snapshot();
+    assert_eq!(complete_range, (1..=total).map(entry).collect::<Vec<_>>());
+    let pages = total.div_ceil(LOG_PAGE_ENTRIES as u64);
+    assert_eq!(
+        range_io.sql_calls,
+        total + pages - 1,
+        "one inline entry read per record and one read per page except the captured tail"
+    );
+    assert!(range_io.known_payload_read_bytes > 0);
+    eprintln!(
+        "BLOCK_LOG_RANGE_SAMPLE transactions={total} pages={pages} sql_calls={} payload_read_bytes={} complete_us={}",
+        range_io.sql_calls,
+        range_io.known_payload_read_bytes,
+        range_elapsed.as_micros()
+    );
     assert!(root.read(&mut store, 0).unwrap().is_none());
     assert!(root.read(&mut store, total + 1).unwrap().is_none());
     let captured = captured.unwrap();

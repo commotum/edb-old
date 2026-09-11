@@ -66,7 +66,7 @@ pub(super) fn maintain(
     expected_index: Option<ObjectId>,
     control: &MaintenanceControl,
     fulltext_limits: &FulltextBuildLimits,
-    tree: &crate::persistent_tree::TreeConfig,
+    tree: &crate::index::tree::TreeConfig,
 ) -> Result<IndexMaintenanceReceipt, SemanticError> {
     fulltext_limits.validate()?;
     tree.validate()?;
@@ -84,7 +84,7 @@ pub(super) fn maintain(
         control.check()?;
         let capture = reader.capture_reference(&key)?;
         let root = load_root(&mut store, capture.root_id())?;
-        if crate::storage::engine::identity_string(root.identity) != entry.lineage_id {
+        if crate::storage::catalog::identity_string(root.identity) != entry.lineage_id {
             return Err(fault(
                 "Catalog lineage differs from the captured publication",
             ));
@@ -183,7 +183,7 @@ fn prepare_search(
     control: &MaintenanceControl,
     fulltext_limits: &FulltextBuildLimits,
 ) -> Result<PreparedIndex, SemanticError> {
-    let protection = crate::storage::engine::protection(store, &[])?;
+    let protection = crate::storage::protection::protection(store, &[])?;
     store.set_write_protection(Some(protection.clone()))?;
     let result = (|| {
         let mut descriptor = snapshot.index_descriptor().clone();

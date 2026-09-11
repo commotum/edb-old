@@ -52,7 +52,7 @@ impl PgBlockStore {
         let unique_ids = unique.keys().copied().collect::<Vec<_>>();
         let encoded = unique
             .values()
-            .map(|bytes| crate::block_codec::encode_block(bytes))
+            .map(|bytes| crate::storage::codec::encode_block(bytes))
             .collect::<Result<Vec<_>, _>>()?;
         let keys = unique_ids
             .iter()

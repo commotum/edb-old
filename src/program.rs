@@ -64,7 +64,7 @@ impl RuntimeValue {
     }
     pub fn map(mut entries: Vec<(Value, RuntimeValue)>) -> Result<Self, SemanticError> {
         for (key, _) in &entries {
-            crate::transaction::validate_stored_input(key)?;
+            crate::transaction::input::validate_stored_input(key)?;
         }
         entries.sort_by(|left, right| left.0.stored_cmp(&right.0));
         if entries
@@ -807,7 +807,7 @@ impl<'a> ProgramBudget<'a> {
 
     pub(crate) fn native_forms(&mut self, forms: &[TxForm]) -> Result<(), SemanticError> {
         self.check_cancel()?;
-        crate::transaction::validate_forms_input(forms)?;
+        crate::transaction::input::validate_forms_input(forms)?;
         for form in forms {
             let bytes = crate::encoding::persistent_tx_form_bytes(form)?;
             self.charge(usize_as_u64(bytes)?)?;

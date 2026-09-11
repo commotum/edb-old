@@ -1,12 +1,13 @@
 //! Real opaque-store preparation/adoption witnesses; each test owns a fresh
 //! schema. No server restart or existing catalog is changed.
 use super::*;
-use crate::index_support as peer;
-use crate::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions};
+use crate::index::metadata;
+use crate::storage::BlockDatabase;
 use crate::{
     Attribute, Cardinality, EntityRef, Keyword, PostgresConnectionConfig, Schema,
     TransactionRequest, TxOp, Value, ValueType,
 };
+use crate::{BlockTransactor, BlockWriterOptions};
 
 const VALUE: u32 = 1000;
 const LINK: u32 = 1001;
@@ -308,7 +309,7 @@ fn frozen_prefix_adoption_preserves_newer_writes_and_coordinated_no_history() {
     for order in [IndexOrder::Aevt, IndexOrder::Avet, IndexOrder::Vaet] {
         let mut expected = retained
             .iter()
-            .filter(|d| peer::schema_index_member(current.schema(), d, order).unwrap())
+            .filter(|d| metadata::schema_index_member(current.schema(), d, order).unwrap())
             .cloned()
             .collect::<Vec<_>>();
         expected.sort_by(|a, b| a.cmp_in(b, order));
@@ -408,7 +409,9 @@ fn avet_structural_work_resumes_after_worker_restart_and_concurrent_toggle_tail(
             .datoms(IndexOrder::Aevt)
             .unwrap()
             .into_iter()
-            .filter(|d| peer::schema_index_member(current.schema(), d, IndexOrder::Avet).unwrap())
+            .filter(|d| {
+                metadata::schema_index_member(current.schema(), d, IndexOrder::Avet).unwrap()
+            })
             .collect::<Vec<_>>();
         expected.sort_by(|a, b| a.cmp_in(b, IndexOrder::Avet));
         assert_eq!(view.datoms(IndexOrder::Avet).unwrap(), expected);

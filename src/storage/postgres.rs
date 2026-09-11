@@ -333,7 +333,9 @@ impl PgBlockStore {
     /// With a configured write context, both new and reused objects receive its
     /// epoch protection under all supplied guards. Lost guards return Conflict.
     /// Without a context this is the unprotected fixture/admin primitive.
-    /// Uncertain acknowledgements can be resolved by authenticated `get(id)`.
+    /// After a lost acknowledgement, authenticated `get(id)` proves content
+    /// presence only. With protection enabled, repeat the guarded operation:
+    /// a pre-existing object does not prove this attempt refreshed its epoch.
     pub fn put(&mut self, payload: &[u8]) -> Result<ObjectId, SemanticError> {
         if let Some(protection) = self.write_protection.clone() {
             return match self.put_protected(payload, protection.epoch, &protection.conditions)? {
@@ -346,7 +348,7 @@ impl PgBlockStore {
         }
         validate_payload(payload)?;
         let id = sha256(payload);
-        let physical = crate::block_codec::encode_block(payload)?;
+        let physical = crate::storage::codec::encode_block(payload)?;
         self.client
             .execute(
                 &format!(
@@ -376,7 +378,7 @@ impl PgBlockStore {
         super::protocol::validate_batch(conditions, &[])?;
         let epoch = sql_epoch(epoch)?;
         let id = sha256(payload);
-        let physical = crate::block_codec::encode_block(payload)?;
+        let physical = crate::storage::codec::encode_block(payload)?;
         let mut tx = self
             .client
             .build_transaction()
@@ -898,7 +900,7 @@ fn decode_objects(
             let decoder = bytes
                 .as_ref()
                 .map(|bytes| {
-                    crate::block_codec::inspect_block(id, bytes)
+                    crate::storage::codec::inspect_block(id, bytes)
                         .map_err(|error| corrupt().detail("codec", error.code))
                 })
                 .transpose()?;

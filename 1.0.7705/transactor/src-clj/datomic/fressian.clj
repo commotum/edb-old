@@ -77,6 +77,15 @@
         (clojure.core/import 'org.fressian.impl.BytesOutputStream)
         (clojure.core/import 'org.fressian.impl.ByteBufferInputStream))))
   (set! *warn-on-reflection* true)
+  ;; ATOMIC-NOTE BEGIN serialization-handler-boundary (baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d)
+  ;; Observed: custom lookups compose with Fressian's handlers, allowing shared
+  ;; scalar values plus index/log-specific structures. index/fress, log's leaf
+  ;; and directory serializers, and fulltext/write-changed-val are real callers.
+  ;; Native encoding's shared value grammar plus separate tree/log envelopes is
+  ;; the analogous ownership boundary; no JVM wire reader is required. Runtime
+  ;; handler extension and native content-addressed programs are deliberately
+  ;; different application models, not interchangeable serialization features.
+  ;; ATOMIC-NOTE END serialization-handler-boundary
   (defn as-lookup
     ([o] (if (map? o) (reify org.fressian.handlers.ILookup (valAt [this k] (get o k))) o)))
   (reset-meta!
@@ -151,6 +160,14 @@
       'end-list
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-footer-contract
+  ;; Observed: writing a footer and requiring its validation are explicit options
+  ;; here. create-reader's default does not prove every caller validates a footer:
+  ;; defressian passes its own footer flag, and val->obj below disables Fressian
+  ;; checksumming while fully consuming gzip. Preserve the actual call path when
+  ;; explaining corruption detection. Framing/checksums are not atomic commit or
+  ;; proof that an untrusted sender was authorized.
+  ;; ATOMIC-NOTE END serialization-footer-contract
   (defn fressian
     ([out obj & {:keys [handlers footer]}]
       (with-open [os (jio/output-stream out)]
@@ -273,6 +290,16 @@
       'read-seq
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-named-and-exact-values
+  ;; Observed: keyword/symbol tags keep namespace and name separately, with
+  ;; writer caching requested for repeated names. The BigInt handler writes a
+  ;; signed BigInteger byte array rather than converting through floating point.
+  ;; Builtin scalar handling is delegated to org.fressian, whose implementation
+  ;; is not present in these recovered Java trees. Atomic keeps typed native
+  ;; tags, exact integer/decimal coefficient+scale and original URI spelling;
+  ;; its durable codec intentionally canonicalizes NaNs and signed zero. EDN-only
+  ;; bit-preserving roundtrip tests must not be cited as durable bit preservation.
+  ;; ATOMIC-NOTE END serialization-named-and-exact-values
   (defn write-named
     ([tag w s]
       (.writeTag ^org.fressian.Writer w tag (int 2))
@@ -392,6 +419,16 @@
       'record-latencies
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN serialization-materialization
+  ;; Observed domain/uncached-lookup-factory and peer-object-lookup install this decoder.
+  ;; Decode one value with the supplied structure handlers, then drain gzip so
+  ;; its trailer is processed even when object parsing ended earlier. Exceptions
+  ;; are recorded and rethrown; an incomplete/corrupt value is not returned as
+  ;; success. The Fressian reader's checksum flag is explicitly false on this
+  ;; path; do not claim that it calls validateFooter. Native block decoding also
+  ;; checks declared lengths, exact input consumption and expected SHA-256 before
+  ;; the tree/log parser runs. Neither helper alone owns durable publication.
+  ;; ATOMIC-NOTE END serialization-materialization
   (defn val->obj
     ([read-lookup]
       (fn fn__11507

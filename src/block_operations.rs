@@ -36,7 +36,7 @@ pub(super) fn inspect(
     let mut store = PgBlockStore::connect(config)?;
     let root_id = capture.root_id();
     let root = DatabaseRoot::decode(&root_id, &required(&mut store, root_id)?)?;
-    if crate::storage::engine::identity_string(root.identity) != entry.lineage_id {
+    if crate::storage::catalog::identity_string(root.identity) != entry.lineage_id {
         return Err(fault("Inspection root has another identity"));
     }
     let mut metrics = OperationalMetrics {
@@ -109,7 +109,7 @@ pub(super) fn inspect(
         metrics.reachable_objects = Some(seen.len() as u64);
         metrics.reachable_bytes = Some(bytes);
         for descriptor in &indexes.trees {
-            crate::persistent_tree::validate_tree_streaming(descriptor, |id| {
+            crate::index::tree::validate_tree_streaming(descriptor, |id| {
                 control.check()?;
                 required(&mut store, *id)
             })?;

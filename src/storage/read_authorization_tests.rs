@@ -1,9 +1,10 @@
 use super::*;
-use crate::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions};
+use crate::storage::BlockDatabase;
 use crate::{
     Attribute, Cardinality, Keyword, PostgresConnectionConfig, Schema, TransactionRequest,
     ValueType,
 };
+use crate::{BlockTransactor, BlockWriterOptions};
 
 struct Fixture {
     admin: postgres::Client,
@@ -398,7 +399,8 @@ fn pruning_respects_age_shared_owners_and_atomic_new_owner_guards() {
     // released, its value wrapper may be collected. Re-stage the wrapper
     // under root/GC protection before publishing a new owner.
     let protection =
-        super::super::engine::protection(&mut store, std::slice::from_ref(&condition)).unwrap();
+        crate::storage::protection::protection(&mut store, std::slice::from_ref(&condition))
+            .unwrap();
     let mut owner_guards = protection.conditions.clone();
     store.set_write_protection(Some(protection)).unwrap();
     assert_eq!(store.put(&captured.encode().unwrap()).unwrap(), captured_id);
@@ -708,7 +710,7 @@ fn readonly_peer_reopens_embedded_value_after_old_publication_wrapper_is_collect
     let prepared = writer
         .index_input()
         .unwrap()
-        .prepare(&mut store, &crate::persistent_tree::TreeConfig::default())
+        .prepare(&mut store, &crate::index::tree::TreeConfig::default())
         .unwrap();
     writer.adopt_index(prepared).unwrap();
     let value = writer.hint_database_value().unwrap();
@@ -824,7 +826,7 @@ fn publication_authorizes_indexes_atomically_and_retains_initial_and_receipt_val
         let prepared = writer
             .index_input()
             .unwrap()
-            .prepare(&mut store, &crate::persistent_tree::TreeConfig::default())
+            .prepare(&mut store, &crate::index::tree::TreeConfig::default())
             .unwrap();
         let candidate = DatabaseValueRoot {
             indexes: Some(prepared.descriptor_id()),

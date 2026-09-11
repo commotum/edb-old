@@ -1,13 +1,10 @@
 //! Actual Rust-owned publication and exact outcomes on fresh opaque storage.
 mod common;
 
-use atomic_core::persistent_tree::{TreeConfig, build_tree};
+use atomic_core::index::tree::{TreeConfig, build_tree};
 use atomic_core::storage::receipts::{ExactReceipt, RequestIndex, scoped_request_key};
 use atomic_core::storage::root::DatabaseRoot;
-use atomic_core::storage::{
-    BlockDatabase, BlockReader, BlockTransactor, BlockWriterOptions, CasOutcome, IndexDescriptor,
-    PgBlockStore,
-};
+use atomic_core::storage::{BlockDatabase, BlockReader, CasOutcome, IndexDescriptor, PgBlockStore};
 use atomic_core::{
     Attribute, CallableRef, Cardinality, Database, DatabaseValue, EntityRef, IndexOrder,
     IndexTransaction, Instruction, Keyword, NativeRegistry, OperationContext, OperationKind,
@@ -15,6 +12,7 @@ use atomic_core::{
     ServiceTransactionReport, Symbol, TransactionDefaults, TransactionRequest, TxForm, TxOp,
     Unique, Value, ValueType, View, encode_program, native_deployment_attribute,
 };
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -721,6 +719,67 @@ fn measured_complete_small_writes_on_populated_database_include_publication_and_
         sql.sql_calls,
         sql.known_payload_write_bytes,
         reopen_started.elapsed().as_millis()
+    );
+    writer.release().unwrap();
+}
+
+#[test]
+fn chunked_transaction_crosses_upload_groups_and_reopens_with_exact_receipt() {
+    let Some((_fixture, config, database)) = fixture("block_transaction_grouped") else {
+        return;
+    };
+    // Exceed the staging target and one canonical log chunk. Repeated text
+    // keeps the fixture cheap; this is not a compression or RSS benchmark.
+    let payload = "x".repeat(5 * 1024 * 1024);
+    let request = TransactionRequest::new(
+        "multiple-upload-groups",
+        vec![add(
+            EntityRef::Temp("large".into()),
+            LABEL,
+            Value::String(payload.clone()),
+        )],
+    )
+    .with_tx_instant(1000);
+    let mut writer =
+        BlockTransactor::claim(&config, database.clone(), BlockWriterOptions::default()).unwrap();
+    let started = Instant::now();
+    let report = writer.transact(&request).unwrap();
+    let entity = report.tempids["large"];
+    assert!(report.db_before.values(entity, LABEL).unwrap().is_empty());
+    assert_eq!(
+        report.db_after.values(entity, LABEL).unwrap(),
+        vec![Value::String(payload.clone())]
+    );
+    // An independent connection sees all canonical chunks after acknowledgement.
+    let mut inspect = PgBlockStore::connect(&config).unwrap();
+    let bytes = inspect.get(report.tx_hash).unwrap().unwrap();
+    let entry = atomic_core::storage::root::Block::decode(&report.tx_hash, &bytes).unwrap();
+    assert_eq!(entry.kind, atomic_core::storage::log::LOG_ENTRY_KIND);
+    assert_eq!(entry.links.len(), 2);
+    for id in &entry.links {
+        let chunk = inspect.get(*id).unwrap().unwrap();
+        assert_eq!(
+            atomic_core::storage::root::Block::decode(id, &chunk)
+                .unwrap()
+                .kind,
+            atomic_core::storage::log::LOG_CHUNK_KIND
+        );
+    }
+    writer.release().unwrap();
+    let mut writer =
+        BlockTransactor::claim(&config, database, BlockWriterOptions::default()).unwrap();
+    let replay = writer.transact(&request).unwrap();
+    same_receipt(&replay, &report);
+    assert_eq!(replay.tx_data, report.tx_data);
+    assert_eq!(
+        replay.db_after.values(entity, LABEL).unwrap(),
+        vec![Value::String(payload)]
+    );
+    assert!(replay.db_before.values(entity, LABEL).unwrap().is_empty());
+    eprintln!(
+        "GROUPED_TRANSACTION_OK payload_bytes={} chunks=2 commit_reopen_retry_us={}",
+        5 * 1024 * 1024,
+        started.elapsed().as_micros()
     );
     writer.release().unwrap();
 }

@@ -24,6 +24,10 @@
           ['datomic.coordination :as 'coord]
           ['datomic.garbage :as 'garbage]
           ['datomic.uri :as 'uri]))))
+  ;; ATOMIC-NOTE [observed] This entry point calls the shared recorded-garbage
+  ;; walker directly, bypassing the transactor's queued admin command. :finished
+  ;; follows gc returning; neither path walks ordinary live index/log roots to
+  ;; rediscover unmarked garbage. No cross-process collector lock is shown here.
   (defn -main
     ([& args]
       (if (= (count args) 2)

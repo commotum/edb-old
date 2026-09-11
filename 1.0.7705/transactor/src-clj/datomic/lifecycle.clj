@@ -35,6 +35,10 @@
   (set! *warn-on-reflection* true)
   ;; Publishes the next heartbeat revision with compare-and-swap semantics.
   ;; A failed write means this process no longer owns the active endpoint.
+  ;; ATOMIC-NOTE [observed] This CAS fences the process endpoint, not a database
+  ;; log. update/internal-start-database separately calls log/claim before catchup.
+  ;; [documented] HA distinguishes takeover from subsequent log recovery; Atomic's
+  ;; per-database epoch/token lease is an explicit different authority scope.
   (defn pump
     ([cluster endpoint tick previous-rev]
       (let [timestamp (java.lang.System/currentTimeMillis)

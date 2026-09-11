@@ -41,14 +41,14 @@ Caffeine. Neither that description nor S-LRU establishes identity with a simple
 exact-LRU implementation or with every Caffeine admission/eviction heuristic.
 
 **Rust owner/disposition:** retain immutable `Arc` payloads and per-process caches
-in [tree_cursor.rs](../../../src/tree_cursor.rs),
+in [index/tree/cache.rs](../../../src/index/tree/cache.rs),
 [program_cache.rs](../../../src/program_cache.rs) and
-[fulltext_store.rs](../../../src/fulltext_store.rs). Active tree cursors hold
+[fulltext_store.rs](../../../src/fulltext_store.rs). Active [tree cursors](../../../src/index/cursor.rs) hold
 `LoadedDirectory`/`LoadedLeaf` owners; eviction releases the cache's ownership and
 does not invalidate those active values. Persistent data ownership remains in
 [`collections/persistent_map.rs`](../../../src/collections/persistent_map.rs),
-[`recent_btset.rs`](../../../src/recent_btset.rs) and
-[`persistent_tree.rs`](../../../src/persistent_tree.rs), as explained in the
+[`index/recent/btset.rs`](../../../src/index/recent/btset.rs) and
+[`index/tree/mod.rs`](../../../src/index/tree/mod.rs), as explained in the
 [index-model companion](../../06_indexes/01_index_model.atomic.md).
 
 ## MC-RECENCY: selected native adaptation
@@ -118,9 +118,9 @@ uses the caught-up value. The public durable-completion boundary is supported;
 the prose is not an exact internal scheduling trace. Preserve both pieces of
 evidence instead of rewriting the reference or copying an unsafe early reply.
 
-**Rust trace:** [recent.rs](../../../src/recent.rs) owns recent sorted tiers;
+**Rust trace:** [index/recent/mod.rs](../../../src/index/recent/mod.rs) owns recent sorted tiers;
 [storage/snapshot.rs](../../../src/storage/snapshot.rs) captures/rebuilds a basis
-and detects changed index roots; [storage/engine.rs](../../../src/storage/engine.rs)
+and detects changed index roots; [transactor/authority/mod.rs](../../../src/transactor/authority/mod.rs)
 publishes before replacing the writer's current snapshot.
 [block_service.rs](../../../src/block_service.rs) owns index scheduling/adoption
 and fresh-work backpressure. This companion leaves full restart, failover and

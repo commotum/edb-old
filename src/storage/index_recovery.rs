@@ -9,7 +9,7 @@ use super::{
     BlockIndexStats, IndexDescriptor, ObjectId, ObjectReader, PgBlockStore, SnapshotMetadata,
     WriteProtection,
 };
-use crate::persistent_tree::TreeConfig;
+use crate::index::tree::TreeConfig;
 use crate::{Database, DurableTransaction, ErrorCategory, IndexOrder, SemanticError, View};
 use std::collections::BTreeMap;
 
@@ -78,14 +78,17 @@ pub(crate) fn prepare_recovery(
     }
     log.validate_structure(&mut reader)?;
     let mut database = Database::bootstrap()?;
-    let lineage = super::engine::identity_string(root.identity);
+    let lineage = crate::storage::catalog::identity_string(root.identity);
     database.entity_origin = crate::entity_identity::DatabaseOrigin::durable(&lineage);
     let mut endpoint_entry = None;
     let mut stats = BlockIndexStats::default();
+    // Recovery is ordered replay: retain page navigation instead of seeking
+    // from the captured endpoint independently for every transaction.
+    let mut records = log.range(&mut reader, 1, root.basis + 1)?;
     for basis in 1..=root.basis {
-        let record = log
-            .read_record(&mut reader, basis)?
-            .ok_or_else(|| fault("Canonical log has a gap"))?;
+        let record = records
+            .next_record()
+            .ok_or_else(|| fault("Canonical log has a gap"))??;
         let before = database
             .reserved_allocation()
             .ok_or_else(|| fault("Canonical replay lost allocation proof"))?;
@@ -120,7 +123,7 @@ pub(crate) fn prepare_recovery(
         ));
     }
     database.validate_invariants()?;
-    let protection = super::engine::protection(store, &[])?;
+    let protection = crate::storage::protection::protection(store, &[])?;
     store.set_write_protection(Some(protection.clone()))?;
     let result = (|| {
         let mut trees = Vec::with_capacity(8);
@@ -140,7 +143,7 @@ pub(crate) fn prepare_recovery(
                     },
                     order,
                 );
-                let built = crate::persistent_tree::build_tree_with_sink(
+                let built = crate::index::tree::build_tree_with_sink(
                     order,
                     history,
                     datoms.into_iter().map(Ok),
@@ -209,7 +212,10 @@ struct ControlledReader<'a> {
 impl ObjectReader for ControlledReader<'_> {
     fn read_object(&mut self, id: ObjectId) -> Result<Vec<u8>, SemanticError> {
         (self.control)()?;
-        self.store.read_object(id)
+        let bytes = self.store.read_object(id)?;
+        #[cfg(test)]
+        tests::observe_log_page(id, &bytes);
+        Ok(bytes)
     }
 }
 fn fault(message: &str) -> SemanticError {

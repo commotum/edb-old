@@ -97,6 +97,8 @@ public interface Database {
      * @param timePoint a transaction id, t, or date
      * @return a database value bounded by {@code timePoint}
      */
+    // ATOMIC-NOTE [observed]: Db.asOf changes its temporal bound, not basisT or
+    // nextT. The original captured value and its persistent index layers remain.
     public Database asOf(Object timePoint);
 
     /**

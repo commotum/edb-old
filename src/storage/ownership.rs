@@ -212,7 +212,7 @@ impl BlockCollector {
                 if report.complete { None } else { report.after },
             )),
         }];
-        let protection = super::engine::protection(&mut self.store, &guards)?;
+        let protection = crate::storage::protection::protection(&mut self.store, &guards)?;
         guards = protection.conditions.clone();
         self.store.set_write_protection(Some(protection))?;
         let result = (|| {
@@ -267,7 +267,9 @@ impl BlockCollector {
             Some(id) => State::load(&mut self.store, root_id(id)?)?,
             None => State::empty(),
         };
-        let gc = self.store.read_ref(super::engine::GC_REFERENCE)?;
+        let gc = self
+            .store
+            .read_ref(crate::storage::protection::GC_REFERENCE)?;
         if state.phase == CollectionPhase::Complete {
             let current = epoch(&gc)?;
             let next = current
@@ -284,7 +286,7 @@ impl BlockCollector {
                 .saturating_sub(u64::try_from(minimum_age.as_millis()).unwrap_or(u64::MAX));
             let guards = [
                 condition(STATE_REF, previous.as_ref()),
-                condition(super::engine::GC_REFERENCE, gc.as_ref()),
+                condition(crate::storage::protection::GC_REFERENCE, gc.as_ref()),
             ];
             self.store.set_write_protection(Some(WriteProtection {
                 epoch: next,
@@ -300,7 +302,7 @@ impl BlockCollector {
                             value: Some(id.to_vec()),
                         },
                         RefChange {
-                            key: super::engine::GC_REFERENCE.into(),
+                            key: crate::storage::protection::GC_REFERENCE.into(),
                             value: Some(next.to_be_bytes().to_vec()),
                         },
                     ],
@@ -321,7 +323,7 @@ impl BlockCollector {
         }
         let guards = vec![
             condition(STATE_REF, previous.as_ref()),
-            condition(super::engine::GC_REFERENCE, gc.as_ref()),
+            condition(crate::storage::protection::GC_REFERENCE, gc.as_ref()),
         ];
         let protection = WriteProtection {
             epoch: state.epoch + 1,
@@ -670,7 +672,7 @@ pub(crate) fn settled_count(
     id: ObjectId,
 ) -> Result<Option<(u64, Vec<RefCondition>)>, SemanticError> {
     let clock = store.read_ref(CLOCK_REF)?;
-    let gc = store.read_ref(super::engine::GC_REFERENCE)?;
+    let gc = store.read_ref(crate::storage::protection::GC_REFERENCE)?;
     let reference = store.read_ref(STATE_REF)?;
     let Some(bytes) = reference.as_ref().and_then(|r| r.value.as_deref()) else {
         return Ok(None);
@@ -690,7 +692,7 @@ pub(crate) fn settled_count(
         vec![
             condition(CLOCK_REF, clock.as_ref()),
             condition(STATE_REF, reference.as_ref()),
-            condition(super::engine::GC_REFERENCE, gc.as_ref()),
+            condition(crate::storage::protection::GC_REFERENCE, gc.as_ref()),
         ],
     )))
 }
@@ -1025,7 +1027,7 @@ pub(crate) fn object_children(
             children.extend(super::log::entry_program_links(store, &block)?);
         }
     } else if bytes.starts_with(b"ATIX") {
-        use crate::persistent_tree::{TreeNode, decode_tree_node};
+        use crate::index::tree::{TreeNode, decode_tree_node};
         match decode_tree_node(&id, bytes)? {
             TreeNode::Root(root) => children.extend(root.directories.iter().map(|c| c.hash)),
             TreeNode::Directory(dir) => children.extend(dir.leaves.iter().map(|c| c.hash)),
@@ -1113,9 +1115,9 @@ pub(crate) fn publish_refs(
         return store.compare_exchange_many(conditions, changes);
     }
     let mut guards = conditions.to_vec();
-    let gc = store.read_ref(super::engine::GC_REFERENCE)?;
+    let gc = store.read_ref(crate::storage::protection::GC_REFERENCE)?;
     let epoch = epoch(&gc)?;
-    let gc_condition = condition(super::engine::GC_REFERENCE, gc.as_ref());
+    let gc_condition = condition(crate::storage::protection::GC_REFERENCE, gc.as_ref());
     if let Some(existing) = guards.iter().find(|g| g.key == gc_condition.key) {
         if *existing != gc_condition {
             return Ok(BatchOutcome::Conflict(vec![(gc_condition.key, gc)]));

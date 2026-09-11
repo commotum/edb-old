@@ -11,8 +11,8 @@ import clojure.lang.RT;
 // ATOMIC-NOTE BEGIN foundation-schema-counterpart
 // Baseline-identical to transactor/src-java/datomic/Attribute.java at
 // cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; see its foundation-schema note for
-// derived schema ownership, configured-versus-available AVET and the bytes
-// uniqueness source/docs conflict. This is the same contract at the peer boundary.
+// derived schema ownership, configured-versus-available AVET and the specific
+// documented bytes-uniqueness exception. This is the same peer boundary contract.
 // ATOMIC-NOTE END foundation-schema-counterpart
 public interface Attribute {
     /** Cardinality-many schema value. */

@@ -183,10 +183,10 @@ fn exact_read_reopening_retains_observed_publication_without_reader_coordination
             Schema::new(),
         )
         .unwrap();
-        let mut writer = crate::storage::BlockTransactor::claim(
+        let mut writer = crate::BlockTransactor::claim(
             &fixture.config,
             database.clone(),
-            crate::storage::BlockWriterOptions::default(),
+            crate::BlockWriterOptions::default(),
         )
         .unwrap();
         let request = crate::TransactionRequest::new(
@@ -213,7 +213,7 @@ fn exact_read_reopening_retains_observed_publication_without_reader_coordination
             .indexes;
         let expected_basis = report.basis_t;
         let config = fixture.config.clone();
-        let route = crate::storage::engine::identity_string(database.route);
+        let route = crate::storage::catalog::identity_string(database.route);
         let hook_route = route.clone();
         let advanced = std::rc::Rc::new(std::cell::Cell::new(false));
         let advanced_hook = advanced.clone();
@@ -283,7 +283,7 @@ fn exact_read_reopening_retains_observed_publication_without_reader_coordination
                 assert_eq!(point.basis_t, report.basis_t);
                 assert_eq!(
                     point.lineage_id,
-                    crate::storage::engine::identity_string(database.identity)
+                    crate::storage::catalog::identity_string(database.identity)
                 );
                 assert_eq!(point.log_generation, 0);
                 let reopened = crate::BackupConnection::open(&repository).unwrap().db();

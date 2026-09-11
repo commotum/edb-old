@@ -141,3 +141,8 @@ Excision does not affect the memory database, as the memory database has no stor
 Excision of *:db/fulltext* attributes is not supported.
 
 Excision cannot guarantee full removal of all datoms with a *:db/noHistory* attribute from index and log.
+
+## Atomic implementation notes
+
+[Selected excision lifecycle trace](02_excision.atomic.md) is marked development
+commentary, separate from the recovered documentation above.

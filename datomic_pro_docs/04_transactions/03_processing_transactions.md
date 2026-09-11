@@ -6,6 +6,10 @@ description: "Learn how to process, monitor and operate Datomic transactions."
 word_count: 373
 ---
 
+> ATOMIC-NOTE — [Source-to-Rust processing trace](03_processing_transactions.atomic.md)
+> covers shared assessment, db-before function semantics, identity resolution and
+> their separation from durable submission. The reference text below is unchanged.
+
 After a transaction data structure is built, you must submit it to the transactor for processing. The transactor queues transactions and processes them serially.
 
 ## Submitting Transactions

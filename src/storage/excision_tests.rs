@@ -13,8 +13,7 @@ const WAIT: Duration = Duration::from_secs(60);
 fn completion_observation_does_not_hide_pending_requests() {
     let Some(f) = fixture() else { return };
     let mut writer =
-        super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
     writer
         .transact(&TransactionRequest::new("sync-source", seed()))
         .unwrap();
@@ -280,8 +279,7 @@ fn fixture() -> Option<Fixture> {
     // Issue real IDs through normal tempid allocation; labels are only fixture
     // shorthand. Explicit unissued numeric IDs are intentionally not accepted.
     let mut writer =
-        super::super::BlockTransactor::claim(&config, database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&config, database.clone(), Default::default()).unwrap();
     let allocated = writer
         .transact(&TransactionRequest::new(
             "allocate-fixture",
@@ -421,11 +419,107 @@ fn automatic_excision_sanitizes_history_search_retries_and_reopen_but_not_held_v
 }
 
 #[test]
+fn rewrite_checkpoint_uses_forward_source_reads_and_retries_admission_without_progress() {
+    let Some(f) = fixture() else { return };
+    let mut writer =
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
+    writer
+        .transact(&TransactionRequest::new("source", seed()))
+        .unwrap();
+    for n in 0..126 {
+        writer
+            .transact(&TransactionRequest::new(
+                format!("empty-{n}"),
+                Vec::<TxOp>::new(),
+            ))
+            .unwrap();
+    }
+    let requested = writer
+        .transact(&TransactionRequest::new("erase", request()))
+        .unwrap();
+    assert_eq!(requested.basis_t, 130);
+    let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
+    let mut store = PgBlockStore::connect(&f.config).unwrap();
+    let mut job = ExcisionJob::open(
+        reader.clone(),
+        &mut store,
+        f.database.clone(),
+        ExcisionConfig {
+            log_batch_transactions: 130,
+            ..Default::default()
+        },
+        &mut || Ok(()),
+    )
+    .unwrap()
+    .unwrap();
+    let checkpoint = store.read_ref(&work_key(&f.database.route)).unwrap();
+    let candidate = job.state.candidate;
+    let normal_limit = job.config.max_admitted_bytes;
+    job.config.max_admitted_bytes = 1024 * 1024;
+    assert_eq!(
+        job.step(&mut store, &mut || Ok(())).unwrap_err().code,
+        "storage/log-read-limit"
+    );
+    assert_eq!(
+        store.read_ref(&work_key(&f.database.route)).unwrap(),
+        checkpoint
+    );
+    assert_eq!(job.state.candidate, candidate);
+    assert_eq!(job.progress().rewritten_transactions, 0);
+    job.config.max_admitted_bytes = normal_limit;
+    let reads_before = reader.read_stats();
+    let operation = crate::OperationContext::new(crate::OperationKind::Administration);
+    {
+        let _scope = operation.enter();
+        assert!(!job.step(&mut store, &mut || Ok(())).unwrap());
+    }
+    let reads = reader.read_stats().object_reads - reads_before.object_reads;
+    assert_eq!(
+        reads, 132,
+        "130 entries plus two sealed source pages; tail already captured"
+    );
+    assert_eq!(job.progress().rewritten_transactions, 130);
+    assert_eq!(
+        job.state.phase, 1,
+        "rewrite checkpoint still precedes index preparation"
+    );
+    assert!(job.progress().removed_datoms > 0);
+    let current = reader
+        .capture(&f.database.reference_key())
+        .unwrap()
+        .database_value();
+    assert_eq!(
+        current.values(eid(4000), TEXT).unwrap(),
+        [Value::String("private needle root".into())]
+    );
+    let candidate = value(&mut store, job.state.candidate).unwrap();
+    let candidate_log = LogRoot::open(&mut store, candidate.log.unwrap()).unwrap();
+    let mut range = candidate_log.range(&mut store, 1, 131).unwrap();
+    let mut bases = Vec::new();
+    while let Some(record) = range.next_record() {
+        let record = record.unwrap();
+        bases.push(record.entry.basis_t);
+        assert!(
+            !record
+                .entry
+                .tx_data
+                .iter()
+                .any(|d| d.entity == eid(4000) && d.attribute == TEXT)
+        );
+    }
+    assert_eq!(bases, (1..=130).collect::<Vec<_>>());
+    eprintln!(
+        "EXCISION_FORWARD basis=130 source_object_reads={reads} sql_calls={}",
+        operation.snapshot().sql_calls
+    );
+    writer.release().unwrap();
+}
+
+#[test]
 fn cancelled_checkpoint_resumes_after_writer_restart_and_retains_source_prefix_progress() {
     let Some(f) = fixture() else { return };
     let mut writer =
-        super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
     let original = TransactionRequest::new("source", seed());
     let first = writer.transact(&original).unwrap();
     writer
@@ -466,8 +560,7 @@ fn cancelled_checkpoint_resumes_after_writer_restart_and_retains_source_prefix_p
     drop(job);
     writer.release().unwrap();
     let mut writer =
-        super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
     // A suffix committed while the admitted job was stopped must be appended,
     // not cause the completed prefix to be replayed or a fresh request lost.
     writer
@@ -570,8 +663,7 @@ fn failed_automatic_admission_leaves_ordinary_writes_available_and_request_pendi
 fn public_operator_uses_same_checkpoint_resume_and_atomic_completion() {
     let Some(f) = fixture() else { return };
     let mut writer =
-        super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
     writer
         .transact(&TransactionRequest::new("source", seed()))
         .unwrap();
@@ -640,8 +732,7 @@ fn public_operator_uses_same_checkpoint_resume_and_atomic_completion() {
             .database_value(),
     );
     let mut writer =
-        super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
     assert_eq!(
         writer
             .transact(&TransactionRequest::new("source", seed()))
@@ -681,8 +772,7 @@ fn programs_and_search_survive_grace_then_excision_releases_expired_plaintext() 
         .put(&encode_program(&code(Value::Long(88))).unwrap())
         .unwrap();
     let mut writer =
-        super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
-            .unwrap();
+        crate::BlockTransactor::claim(&f.config, f.database.clone(), Default::default()).unwrap();
     let mut attr = Attribute::new(
         1003,
         Keyword::new("private", "code"),

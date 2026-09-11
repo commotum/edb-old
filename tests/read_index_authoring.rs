@@ -1,9 +1,10 @@
-use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions};
+use atomic_core::storage::BlockDatabase;
 use atomic_core::{
     Attribute, AttributeName, Cardinality, DB_IDENT, Database, DatabaseValue, EntityIdentifier,
     EntityRef, IndexBoundary, IndexComponents, IndexOrder, Keyword, Peer, RawIndexValue, Schema,
     TupleSpec, TxOp, Unique, Value, ValueType,
 };
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use atomic_core::{PostgresConnectionConfig, TransactionRequest};
 use std::cmp::Ordering;
 

@@ -4,8 +4,8 @@ use crate::encoding::{
     WireOutcome, decode_submission, decode_submission_outcome, encode_submission,
     encode_submission_outcome,
 };
-use crate::runtime::TransactorLease;
 use crate::storage::{BatchOutcome, PgBlockStore, RefChange, RefCondition};
+use crate::transactor::client::TransactorLease;
 use crate::{
     CommittedTransaction, Connection, DatabaseIdentity, Digest, ErrorCategory,
     PostgresConnectionConfig, SemanticError, TransactionClient, TransactionHints,
@@ -364,7 +364,7 @@ impl RemoteTransactionServer {
         let key = endpoint_key(&self.identity);
         let mut store = PgBlockStore::connect(connection)?;
         for _ in 0..3 {
-            let mut guards = crate::storage::engine::writer_endpoint_guards(
+            let mut guards = crate::transactor::authority::writer_endpoint_guards(
                 &mut store,
                 &self.identity,
                 self.lease.epoch,
@@ -428,7 +428,7 @@ impl Connection {
                 "Endpoint identity differs from its captured route",
             ));
         }
-        crate::storage::engine::writer_endpoint_guards(
+        crate::transactor::authority::writer_endpoint_guards(
             &mut store,
             self.identity(),
             endpoint.lease_epoch,

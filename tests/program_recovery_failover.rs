@@ -329,10 +329,10 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
     let block_config = atomic_core::PostgresConnectionConfig::plaintext(&connection);
     let database =
         atomic_core::storage::BlockDatabase::resolve(&block_config, &database_id).unwrap();
-    let abandoned = atomic_core::storage::BlockTransactor::claim(
+    let abandoned = atomic_core::BlockTransactor::claim(
         &block_config,
         database,
-        atomic_core::storage::BlockWriterOptions {
+        atomic_core::BlockWriterOptions {
             lease_duration: Duration::from_millis(150),
             ..Default::default()
         },

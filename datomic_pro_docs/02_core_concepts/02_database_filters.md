@@ -8,6 +8,9 @@ word_count: 1569
 
 Filters take a database value and return a new database value that exposes only datoms that satisfy a predicate. This makes it possible to have a single set of queries and index traversals that can be used without change against different filtered views of your data.
 
+<!-- ATOMIC-NOTE: Development trace only; original reference text is preserved. -->
+[Atomic source and implementation trace](02_database_filters.atomic.md)
+
 Datomic databases can be filtered with the time-based predicates `as-of` and `since`. In addition, you can get an unfiltered view of all history via `history`.
 
 Each of these APIs is described below.

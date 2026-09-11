@@ -4,8 +4,8 @@
 use super::{BlockSnapshot, IndexDescriptor, ObjectId, ObjectWriter, root::Block};
 use crate::fulltext_store::incremental::{self, Pages};
 use crate::fulltext_store::{self, Child, FulltextMutation, Page, PageSummary};
-use crate::persistent_tree::{ChildRef, RootNode, TreeNode, TreeReadStats};
-use crate::tree_cursor::{DurableTreeCursor, DurableTreeSource, LoadedDirectory, LoadedLeaf};
+use crate::index::cursor::{DurableTreeCursor, DurableTreeSource, LoadedDirectory, LoadedLeaf};
+use crate::index::tree::{ChildRef, RootNode, TreeNode, TreeReadStats};
 use crate::{
     ErrorCategory, FulltextBuildLimits, FulltextBuildStats, FulltextCursor, FulltextProjection,
     FulltextReadLimits, FulltextReadStats, IndexOrder, IndexPrefix, NativeFulltextReader, Schema,
@@ -24,7 +24,9 @@ const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 /// Build or incrementally advance an attachment for an exact indexed source.
 /// The caller retains both snapshots and protects the source and destination
 /// until publication. Live stores use write protection; repository writers
-/// write only to their separately published destination.
+/// write only to their separately published destination. A buffering ObjectWriter
+/// must be flushed before independent reads/publication; returned block/byte
+/// statistics count accepted page uploads, not that durability barrier or SQL I/O.
 pub fn build(
     store: &mut dyn ObjectWriter,
     source: &BlockSnapshot,
@@ -535,7 +537,7 @@ impl<'a> HistoryPages<'a> {
     }
     fn root(
         &self,
-        descriptor: &crate::persistent_tree::TreeDescriptor,
+        descriptor: &crate::index::tree::TreeDescriptor,
     ) -> Result<Arc<RootNode>, SemanticError> {
         let node = self.load_node(descriptor.root_hash, &mut TreeReadStats::default())?;
         let TreeNode::Root(root) = node.as_ref() else {
@@ -563,7 +565,7 @@ impl DurableTreeSource for HistoryPages<'_> {
         stats: &mut TreeReadStats,
     ) -> Result<Arc<TreeNode>, SemanticError> {
         let bytes = self.read(hash)?;
-        let node = crate::persistent_tree::decode_tree_node(&hash, &bytes)?;
+        let node = crate::index::tree::decode_tree_node(&hash, &bytes)?;
         let mut total = self.reads.borrow_mut();
         for reads in [stats, &mut *total] {
             reads.cache_misses += 1;

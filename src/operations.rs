@@ -108,7 +108,7 @@ pub struct PostgresOperator {
     connection: PostgresConnectionConfig,
     maintenance: crate::MaintenanceControl,
     fulltext_build_limits: crate::FulltextBuildLimits,
-    tree_config: crate::persistent_tree::TreeConfig,
+    tree_config: crate::index::tree::TreeConfig,
 }
 
 impl PostgresOperator {
@@ -124,7 +124,7 @@ impl PostgresOperator {
             connection: connection.clone(),
             maintenance: crate::MaintenanceControl::default(),
             fulltext_build_limits: crate::FulltextBuildLimits::default(),
-            tree_config: crate::persistent_tree::TreeConfig::default(),
+            tree_config: crate::index::tree::TreeConfig::default(),
         })
     }
 
@@ -138,7 +138,7 @@ impl PostgresOperator {
     /// does not change logical value limits or the independent search builder.
     pub fn with_tree_config(
         mut self,
-        config: crate::persistent_tree::TreeConfig,
+        config: crate::index::tree::TreeConfig,
     ) -> Result<Self, SemanticError> {
         config.validate()?;
         self.tree_config = config;
@@ -277,7 +277,7 @@ impl PostgresOperator {
         database_id: &str,
         fault_point: ExcisionFault,
     ) -> Result<ExcisionReceipt, SemanticError> {
-        crate::storage::excision::process_requests(
+        crate::transactor::excision_operator::process_requests(
             &self.connection,
             database_id,
             fault_point,

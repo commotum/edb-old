@@ -11,8 +11,8 @@ package datomic.impl.db;
 // Its index comparator consumers use getT, while public datoms expose getTx.
 // WHY: the logical transaction position and its reified entity are distinct
 // coordinates even when represented by integers. Primitive access also avoids
-// boxing on this JVM path. Rust src/identity.rs keeps checked t_to_tx/tx_to_t and
-// partition extraction; src/datom.rs stores typed fields rather than this ABI.
+// boxing on this JVM path. Rust model/identity keeps checked t_to_tx/tx_to_t and
+// partition extraction; model/datom stores typed fields rather than this ABI.
 // This is a native representation choice, not permission to conflate t and tx.
 // ATOMIC-NOTE END foundation-idatum
 public interface IDatum {

@@ -10,6 +10,13 @@
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.adopter))
     (clojure.core/with-loading-context
       (do (clojure.core/refer 'clojure.core) (clojure.core/require ['datomic.db :as 'db]))))
+  ;; ATOMIC-NOTE [observed]: This CAS publishes only a process-local Db pointer,
+  ;; not a durable index reference. Start from the completed index and replay the
+  ;; captured memlog suffix; after a losing CAS replay only transactions newer
+  ;; than the candidate's basis. [inferred] Retrying the missing suffix preserves
+  ;; intervening commits without rebuilding the whole stored database.
+  ;; [unknown] The initial indexBasisT check is not repeated on each CAS retry;
+  ;; concurrent index notifications require their own scheduling analysis.
   (defn adopt-index
     ([db_ref adopt_db]
       (let [initial_db (deref db_ref)]

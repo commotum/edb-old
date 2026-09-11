@@ -24,11 +24,13 @@ inspected, not the authors' original source or a runnable Datomic distribution.
 
 The current Rust owners are [edn_transaction.rs](../../src/edn_transaction.rs)
 for EDN admission and schema-aware lowering,
-[transaction.rs](../../src/transaction.rs) for typed forms, map normalization and
-shared assessment orchestration, [transaction_input.rs](../../src/transaction_input.rs)
-for input validation, and [tiered_assessor.rs](../../src/tiered_assessor.rs) for
+[transaction/forms.rs](../../src/transaction/forms.rs) for typed forms,
+[transaction/expand.rs](../../src/transaction/expand.rs) for map normalization,
+[transaction/pipeline.rs](../../src/transaction/pipeline.rs) for shared assessment
+orchestration, [transaction/input.rs](../../src/transaction/input.rs)
+for input validation, and [transaction/assess/mod.rs](../../src/transaction/assess/mod.rs) for
 identity resolution, the logical delta and successor validation. Durable
-publication belongs to [storage/engine.rs](../../src/storage/engine.rs);
+publication belongs to [transactor/authority/mod.rs](../../src/transactor/authority/mod.rs);
 [connection.rs](../../src/connection.rs), [database_value.rs](../../src/database_value.rs)
 and [edn_query.rs](../../src/edn_query.rs) provide the captured read value and query
 boundary. These are present owners, not a claim that final module organization
@@ -53,11 +55,12 @@ of the complete information set against one `db-before`.
 
 **Rust trace:** `read_edn_transaction` (111) retains admitted data as `TxForm::Edn`;
 `lower_forms` (194) resolves its meaning against a supplied database value.
-`normalize_forms_against` (1280) expands forms; `assess_forms_with_clock` (1051)
+`transaction/expand.rs::normalize_forms_against` expands forms;
+`transaction/pipeline.rs::assess_forms_with_clock`
 passes normalized operations to
-`assess_tiered_with_remaining_limits_and_defaults` (442), which resolves tempids,
+`transaction/assess/mod.rs::assess_tiered_with_remaining_limits_and_defaults`, which resolves tempids,
 checks the combined delta and constructs a successor. `validate_forms_input`
-(transaction_input.rs:119) guards shapes/depth before normalization; it is an
+in `transaction/input.rs` guards shapes/depth before normalization; it is an
 input-boundary check, not the transaction semantic engine.
 
 **Existing checks:** [anonymous_identity.rs](../../tests/anonymous_identity.rs),
@@ -81,9 +84,9 @@ identity assertion unifies with an existing one.
 
 **Rust trace:** `Adapter::entity_map` (433) removes `:db/id` from attribute data;
 `Adapter::entity` (392) admits IDs, idents, tempids and lookup references.
-`Normalizer::expand_map` (1558) chooses the explicit ID or
-`anonymous_tempid` (1516); the allocator avoids collisions with submitted names.
-`resolve_tempids` (tiered_assessor.rs:1464) and `resolve_entity` (1942) perform
+`transaction/expand.rs::Normalizer::expand_map` chooses the explicit ID or
+`anonymous_tempid`; the allocator avoids collisions with submitted names.
+`transaction/assess/mod.rs::{resolve_tempids,resolve_entity}` perform
 allocation/upsert and authoritative resolution. Numeric IDs must satisfy the
 database's issued-ID rules; the reference's illustrative `42` is not a promise
 that any arbitrary integer is valid in a fresh Atomic database.
@@ -110,7 +113,7 @@ state an entity-replacement operation.
 `:db/add`; it does not enumerate the entity's other attributes for deletion.
 **Rust trace:** `Normalizer::expand_map`/`expand_map_value` iterate those entries
 and emit `TxOp::Add`. `add_cardinality_one_retractions`
-(tiered_assessor.rs:2128) retracts a previous value when an addition changes that
+in `transaction/assess/mod.rs` retracts a previous value when an addition changes that
 same cardinality-one attribute. It does not clear unrelated omitted attributes;
 many-valued additions accumulate members unless explicit retractions are given.
 
@@ -161,18 +164,40 @@ the child's stored name, parent edge, rejection of an anonymous orphan, and the
 unchanged predecessor. The many-friends example reaches the actual application
 in the complete-path check below.
 
-**Unresolved source/doc reconciliation:** the recovered source permits an
-explicit child `:db/id` without calling `make-child-id`; Rust's forward nested-map
-guard currently requires component-or-unique even when an explicit ID exists.
-Also, S-DB `has-unique-id?` checks enum 38 (`:db.unique/identity` in `BOOT-IDS`),
-whereas Rust `has_unique_attribute` (1738) accepts both `Unique::Identity` and
-`Unique::Value`. The documentation says “unique” without this distinction.
-These are observed branch differences, not conclusions inferred from names.
-The next reconciliation must exercise (1) a noncomponent nested map naming an
-existing ID with no unique attribute and (2) an anonymous noncomponent nested
-map with only a unique-value attribute, then settle the documented/source-version
-contract and add independent expected outcomes. The inspected tests above do not
-cover those two boundary cases. No Datomic runtime was used for this trace.
+**Stage 3 disposition (implemented and focused execution verified):** remove the
+extra native guard on explicitly identified nested entities. `Normalizer` now
+applies orphan prevention only if `nested.id` is absent. Numeric IDs, idents,
+lookup refs and deliberate tempids still undergo ordinary identity/type/uniqueness
+assessment; bypassing anonymous allocation is not bypassing validation. This
+agrees with source `expand-submap` and the map-form optional-ID rule. Reasserting
+an existing child's domain key is unnecessary and can be actively inconvenient.
+
+Retain two existing native conveniences explicitly, not as recovered parity:
+
+- `has_unique_attribute` admits both `Unique::Identity` and `Unique::Value`.
+  Source `has-unique-id?` checks enum 38 (identity), not 37 (value). The Nested
+  Maps wording says “unique,” and the identity chapter's Unique Values and
+  Lookup Refs passages allow unique-value keys to identify entities while
+  rejecting duplicate tempid assertions. A unique-value key satisfies the stated
+  orphan-prevention purpose without acquiring upsert semantics. Follow that
+  broader documented contract and preserve current capability rather than
+  silently narrowing it to this recovered branch. The narrower source check
+  remains a documented version/implementation distinction.
+- Atomic expands nested reverse maps and collections into ordinary forward
+  assertions. Source `expand-map`'s reverse branch directly emits `[:db/add v
+  attrid dbid]`; this is not evidence of the same nested convenience there.
+  Keep Atomic's existing authoring support. An explicit ID suffices in either
+  direction, but a reverse component attribute does not own the newly created
+  nested parent: an anonymous reverse parent still needs a unique key.
+
+Permanent independent cases in [edn_transactions.rs](../../tests/edn_transactions.rs):
+`explicit_nested_ids_target_entities_without_reasserting_identity_or_ownership`
+checks numeric/ident/lookup targets, typed input, explicit tempids, both edge
+directions, retained omitted facts, rejected anonymous orphans and unchanged
+predecessors. `anonymous_unique_value_nested_maps_keep_collision_not_upsert_semantics`
+checks new unique-value children, duplicate-key rejection and explicit lookup
+updates. These assertions supplement the shared-engine consistency comparisons.
+No Datomic runtime was used; passing native tests alone is not such evidence.
 
 The reference also spells the parent edge `:order/line-items` in its maps but
 `:order/line-item` in its primitive example. Preserve this reference discrepancy;
@@ -198,7 +223,7 @@ database value; S-API `q` → S-QUERY `q*` evaluates explicit sources. A databas
 value, rather than a transaction authoring map, is the source for a database query.
 
 **Rust trace:** `assess_forms`/`assess_durable_forms` share successor assessment.
-`BlockTransactor::transact_captured` (engine.rs:790) resolves an existing receipt
+`BlockTransactor::transact_captured` in `transactor/authority/mod.rs` resolves an existing receipt
 before fresh lowering/assessment, persists the new objects/receipt and calls
 `publish_refs` (994); a fresh `ServiceTransactionReport` is constructed only after
 an applied publication result (1045). `Connection::db` (428) captures the peer
@@ -236,7 +261,13 @@ result. Record any actual run and its prerequisites in the active goal's existin
 verification record; do not convert this test inventory into a passing claim.
 
 **Disposition from this pilot:** retain the shared normalizer/assessor and native
-EDN application path, subject to the explicit nested-map reconciliation above.
+EDN application path. The subsequent Stage 3 run passed all 11 EDN transaction
+tests and all four CLI tests with PostgreSQL configured. It includes numeric and
+lookup-ID nested updates through stdin/file, omitted-attribute preservation,
+held snapshots and exact retry after service restart. A new reverse-map test
+initially introduced its outer tempid only as a value; the engine correctly
+rejected it. The valid fixture now asserts the outer entity's name, and a
+separate assertion preserves that value-only-tempid rejection.
 Their information flow implements the main documented map-form path; reorganize
 their ownership as part of the component cutover. This finding does not establish
 full transaction, query, lifecycle or corpus coverage.

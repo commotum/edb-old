@@ -81,3 +81,68 @@ decode allocation. These are native representation choices, not evidence of
 Datomic wire-format equivalence. Cached object bytes are not cached mutable
 refs. Provider SQL and Rust orchestration must continue to be inspected separately:
 a small DDL file alone cannot establish a small or faithful storage boundary.
+
+## ATOMIC-NOTE: lifecycle reclamation boundary
+
+Source [garbage.clj](../../../1.0.7705/transactor/src-clj/datomic/garbage.clj)::
+`do-mark-garbage` (baseline 244) timestamps supplied superseded IDs; `gc-leaf`
+(475) selects marks strictly before the caller's cutoff, and `gc-delete-vals`
+(456) issues paced deletes. This is recorded-garbage traversal, not a scan/count
+of every live root. Source `gc-deleted-db` (676) uses `partition 1000`, dropping
+trailing smaller traversal groups even while its final message reports the full
+count. That recovered behavior is not a deletion algorithm to preserve in Rust.
+
+The precise documentation passages are Capacity Planning's
+[live-database GC](../01_capacity_and_reliability/00_capacity_planning.md#garbage-collection-for-live-databases),
+[separate collector](../01_capacity_and_reliability/00_capacity_planning.md#separated-garbage-collection-tool-for-datomic)
+and [deleted-database GC](../01_capacity_and_reliability/00_capacity_planning.md#garbage-collection-for-deleted-databases).
+The conservative cutoff protects readers that have not adopted new trees; it is
+not a reader pin or permission to collect every held snapshot safely.
+
+`append-leaf` (151) path-copies garbage metadata, includes superseded metadata
+among its marks, awaits leaf/directory/root creation, then conditionally publishes
+the next garbage-root revision. That is separate from the index/log publication
+which emitted the marks. In the recovered `do-mark-garbage` body, an append
+exception is caught/logged and the pending cluster batch is still removed.
+`flush-garbage` (400) awaits this agent, so it cannot by itself prove every mark
+was persisted. The reviewed live `gc` and standalone tool do not reconstruct
+unmarked IDs by scanning ordinary roots; the deleted-database walker traverses
+its current log/index trees and recorded garbage, not every storage object.
+Recovery of omitted marks elsewhere remains unproven; this is a bounded observed
+error-handling limitation, not a claim that all such failures permanently leak.
+The source documentation itself disclaims complete reclamation of all garbage.
+
+[update.clj](../../../1.0.7705/transactor/src-clj/datomic/update.clj)::
+`run-admin-command` (3203) returns `:queued` after `queue-gc` (617) schedules its
+process-wide agent; errors alarm/log within that task. In contrast,
+[tools/gc_db.clj](../../../1.0.7705/transactor/src-clj/datomic/tools/gc_db.clj)::
+`-main` (27) calls the same collector synchronously and prints completion after
+it returns. Missing garbage leaves/directories count as complete, allowing a
+later attempt to revisit a partly collected tree. Neither entry point shown here
+introduces a cross-process collector lock. `gc-deleted-dbs` (771) skips IDs also
+present in its captured active catalog, but this review does not prove safety
+against every concurrent restore or catalog mutation schedule.
+
+Native [ownership.rs](../../../src/storage/ownership.rs)::`publish_refs` records
+root additions/removals atomically with root publication. `BlockCollector::advance`
+seals an epoch, folds additions before removals, protects ownership metadata and
+checkpoints folded state before deletion; provider `remove_unprotected` checks
+collector guards and the protection threshold atomically. These barriers address
+shared content, stale collectors and interrupted progress; replacing them with
+source-style recorded-ID deletion would omit native safety conditions.
+
+The implementation is bounded per advance, not sublinear per collection cycle.
+`ProtectingMetadata` walks the count-index metadata; `Sweeping` enumerates every
+namespace object with `list_object_info(..., 1)`, including live objects. Thus
+there is at least a full object-enumeration cost per cycle, independent of how
+little new garbage exists. Keep that cost visible before any batching/frontier
+optimization; a small `maximum_steps` limits one call, not total work. Retirement
+age protects previously owned objects; unknown orphan writes are handled by epoch
+fencing, not an assertion that every object receives the same age grace.
+
+Keep root classification/events with publication, mutable resumable collector
+state with collection, and opaque guarded deletion in the provider. The existing
+`object_children` interpreter is the graph-codec boundary (tree blocks are not
+all generic `ATOB` blocks). Splitting files is useful only if those dependencies
+remain explicit; neither a generic coordinator nor SQL payload interpretation is
+required. This review did not execute collector tests or prove all failure schedules.

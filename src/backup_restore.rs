@@ -2,15 +2,17 @@
 //! only fully copied child-closed objects enter the checkpoint's ownership map.
 use super::{PortableBackup, ReadPoint, RestoreFault, RestoreResult, load_selected, read_object};
 use crate::storage::catalog::{self, identity_key, lineage_key};
-use crate::storage::engine::{identity_string, name_key, protection, restore_lease_guard};
+use crate::storage::catalog::{identity_string, name_key};
 use crate::storage::log::LogRoot;
 use crate::storage::ownership::{object_children, publish_refs};
+use crate::storage::protection::protection;
 use crate::storage::receipts::{ExactReceipt, RequestIndex, basis_receipt_key};
 use crate::storage::root::{Block, DatabaseRoot};
 use crate::storage::{
     BatchOutcome, BlockDatabase, ObjectId, ObjectReader, PgBlockStore, RefChange, RefCondition,
     Reference,
 };
+use crate::transactor::authority::restore_lease_guard;
 use crate::{ErrorCategory, SemanticError};
 use std::collections::BTreeSet;
 use std::path::Path;

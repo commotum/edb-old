@@ -1,9 +1,10 @@
 //! Resumable, Rust-owned excision over immutable objects. The work reference
 //! owns the frozen source and every checkpoint; only the writer can activate
 //! the completed successor. Ordinary SQL never interprets these objects.
+use super::catalog::{BlockDatabase, identity_string};
 use super::descriptors::{IndexDescriptor, SnapshotMetadata};
-use super::engine::{BlockDatabase, identity_string, protection};
 use super::log::LogRoot;
+use super::protection::protection;
 use super::receipts::{ExactReceipt, RequestIndex, basis_receipt_key};
 use super::root::{Block, DatabaseRoot, DatabaseValueRoot};
 use super::{
@@ -11,7 +12,7 @@ use super::{
 };
 use crate::database::{ExcisionCutoff, FrozenExcisionRequest};
 use crate::excision::{ExcisionPlan, ExcisionTargetKind, PlannedExcisionPredicate};
-use crate::persistent_tree::{TreeConfig, build_tree};
+use crate::index::tree::{TreeConfig, build_tree};
 use crate::{
     Database, DatabaseValue, Digest, ErrorCategory, ExcisionConfig, ExcisionProgress, IndexOrder,
     IndexPrefix, SemanticError, Value, View, sha256, tx_to_t,
@@ -112,100 +113,6 @@ pub(crate) struct PreparedExcision {
     pub progress: ExcisionProgress,
 }
 
-/// Administrative driver over exactly the service's checkpoint protocol. A
-/// running service keeps its writer lease; callers must stop it or let its
-/// automatic worker handle the request instead of bypassing write authority.
-pub(crate) fn process_requests(
-    config: &crate::PostgresConnectionConfig,
-    database_id: &str,
-    fault_point: crate::ExcisionFault,
-    maintenance: &crate::MaintenanceControl,
-    fulltext_limits: &crate::FulltextBuildLimits,
-) -> Result<crate::ExcisionReceipt, SemanticError> {
-    use super::engine::{BlockTransactor, BlockWriterOptions};
-    maintenance.check()?;
-    fulltext_limits.validate()?;
-    let database = operator_database(config, database_id)?;
-    let reader = BlockReader::connect(config, Default::default())?;
-    let mut store = PgBlockStore::connect(config)?;
-    let mut writer =
-        BlockTransactor::claim(config, database.clone(), BlockWriterOptions::default())?;
-    let result = (|| {
-        let resumed = store
-            .read_ref(&work_key(&database.route))?
-            .is_some_and(|r| r.value.is_some());
-        let mut control = || maintenance.check();
-        let Some(mut job) = ExcisionJob::open_with_fulltext_limits(
-            reader.clone(),
-            &mut store,
-            database.clone(),
-            ExcisionConfig::default(),
-            fulltext_limits.clone(),
-            &mut control,
-        )?
-        else {
-            let snapshot = reader.capture(&database.reference_key())?;
-            let root = snapshot.captured_root();
-            let hash = root.log.unwrap_or([0; 32]);
-            return Ok(crate::ExcisionReceipt {
-                database_id: database_id.to_owned(),
-                source_generation: snapshot.generation(),
-                generation: snapshot.generation(),
-                basis_t: root.basis,
-                request_count: 0,
-                removed_datoms: 0,
-                old_head_hash: hash,
-                new_head_hash: hash,
-                // Completion is already authoritative; this call performed no rewrite.
-                resumed: true,
-            });
-        };
-        let source = job.source(&mut store)?;
-        let source_generation = metadata(&mut store, &DatabaseValueRoot::from(&source))?.generation;
-        writer.admit_excision(&source)?;
-        let inject = |at| -> Result<(), SemanticError> {
-            if fault_point == at {
-                Err(fault(
-                    "excision/injected-fault",
-                    "Injected interruption; durable checkpoints remain resumable",
-                ))
-            } else {
-                Ok(())
-            }
-        };
-        inject(crate::ExcisionFault::AfterCapture)?;
-        loop {
-            writer.renew()?;
-            let finished = job.step(&mut store, &mut control)?;
-            maintenance.after_batch()?;
-            if finished {
-                break;
-            }
-        }
-        let prepared = job.prepared(&mut store)?;
-        let receipt = crate::ExcisionReceipt {
-            database_id: database_id.to_owned(),
-            source_generation,
-            generation: job.state.generation,
-            basis_t: prepared.candidate.basis,
-            request_count: job.plan.predicates_len() as u64,
-            removed_datoms: prepared.progress.removed_datoms,
-            old_head_hash: source.log.unwrap_or([0; 32]),
-            new_head_hash: prepared.candidate.log.unwrap_or([0; 32]),
-            resumed,
-        };
-        inject(crate::ExcisionFault::AfterCandidateStaged)?;
-        writer.adopt_excision(prepared)?;
-        inject(crate::ExcisionFault::AfterActivation)?;
-        Ok(receipt)
-    })();
-    let release = writer.release();
-    match (result, release) {
-        (Err(error), _) | (_, Err(error)) => Err(error),
-        (Ok(receipt), Ok(())) => Ok(receipt),
-    }
-}
-
 pub(crate) fn sync_requests(
     config: &crate::PostgresConnectionConfig,
     database_id: &str,
@@ -222,7 +129,7 @@ pub(crate) fn sync_requests(
         && sync_complete_with_control(&snapshot, through_t, &mut || control.check())?)
 }
 
-fn operator_database(
+pub(crate) fn operator_database(
     config: &crate::PostgresConnectionConfig,
     database_id: &str,
 ) -> Result<BlockDatabase, SemanticError> {
@@ -524,6 +431,12 @@ impl ExcisionJob {
     pub fn progress(&self) -> ExcisionProgress {
         self.state.progress.clone()
     }
+    pub(crate) fn generation(&self) -> u64 {
+        self.state.generation
+    }
+    pub(crate) fn request_count(&self) -> u64 {
+        self.plan.predicates_len() as u64
+    }
     pub(crate) fn source(&self, store: &mut PgBlockStore) -> Result<DatabaseRoot, SemanticError> {
         DatabaseRoot::decode_for_identity(
             &self.state.source,
@@ -598,18 +511,23 @@ impl ExcisionJob {
                 .basis
                 .saturating_add(self.config.log_batch_transactions as u64),
         );
+        // Source reads use the job's existing authenticated reader while writes
+        // keep their guarded provider. Frozen source IDs, not a fresh database
+        // capture, determine this range. This also retains normal source-read
+        // telemetry and avoids holding the write connection inside the cursor.
+        let source_reader = self.reader.clone();
+        let mut read_source = |id| source_reader.read_object(id);
+        let mut records = source_log.range(&mut read_source, candidate.basis + 1, end + 1)?;
         for t in candidate.basis + 1..=end {
             control()?;
-            let record = source_log
-                .read_record_bounded(
-                    store,
-                    t,
+            let record = records
+                .next_record_bounded(
                     usize::try_from(
                         self.config.max_admitted_bytes.saturating_sub(1024 * 1024) / 64,
                     )
                     .unwrap_or(usize::MAX),
-                )?
-                .ok_or_else(|| fault("excision/log-gap", "Source transaction is missing"))?;
+                )
+                .ok_or_else(|| fault("excision/log-gap", "Source transaction is missing"))??;
             let required = record
                 .encoded_bytes
                 .saturating_mul(64)
@@ -853,6 +771,14 @@ fn sanitized_digest(generation: u64, basis: u64) -> Digest {
 fn value(store: &mut PgBlockStore, id: ObjectId) -> Result<DatabaseValueRoot, SemanticError> {
     DatabaseValueRoot::decode(&id, &required(store, id)?)
 }
+/// Read the already captured source's generation without reopening its root.
+pub(crate) fn source_generation(
+    store: &mut PgBlockStore,
+    source: &DatabaseRoot,
+) -> Result<u64, SemanticError> {
+    Ok(metadata(store, &DatabaseValueRoot::from(source))?.generation)
+}
+
 fn metadata(
     store: &mut PgBlockStore,
     value: &DatabaseValueRoot,

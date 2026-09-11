@@ -1,298 +1,22 @@
-use crate::identity::{validate_frontier, validate_supported_eid};
-use crate::idents::IdentIndex;
-use crate::index::IndexRoots;
-use crate::reserved_allocation::ReservedAllocation;
-use crate::state_commitment::{CommitmentWork, SemanticStateCommitment};
-use crate::vocabulary::{
+use crate::index::eager::IndexRoots;
+use crate::model::identity::{validate_frontier, validate_supported_eid};
+use crate::model::idents::IdentIndex;
+use crate::model::vocabulary::{
     DB_EXCISE, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_IDENT, DB_TX_INSTANT,
     canonical_genesis_datoms, supported_system_attributes, supported_system_idents,
 };
+use crate::reserved_allocation::ReservedAllocation;
+use crate::state_commitment::{CommitmentWork, SemanticStateCommitment};
 use crate::{
     Cardinality, Datom, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, IndexPrefix, Schema,
-    SemanticError, TX_PARTITION, TupleSpec, Value, ValueType, eid_to_eidx, eid_to_part, t_to_tx,
+    SemanticError, TX_PARTITION, TxOp, Value, ValueType, eid_to_eidx, eid_to_part, t_to_tx,
     tx_to_t,
 };
 #[cfg(test)]
-use crate::{DB_EXCISE_ATTRS, USER_PARTITION, Unique, make_eid};
+use crate::{DB_EXCISE_ATTRS, EntityRef, TupleSpec, TxValue, USER_PARTITION, Unique, make_eid};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EntityRef {
-    Id(u64),
-    Ident(crate::Keyword),
-    Temp(String),
-    Lookup {
-        attribute: u32,
-        value: Value,
-    },
-    /// A lookup key whose ref or tuple-ref slots use transaction entity forms.
-    /// Resolution is always against db-before, never transaction-local tempids.
-    LookupInput {
-        attribute: u32,
-        value: Box<TxValue>,
-    },
-    Tx,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TxValue {
-    Scalar(Value),
-    Entity(EntityRef),
-    /// Transaction-only tuple slots. References remain symbolic until entity
-    /// allocation; `None` is a tuple nil. Stored tuple values never contain
-    /// unresolved identities, and nested tuple slots are not valid schema data.
-    Tuple(Vec<Option<TxValue>>),
-}
-
-/// The raw value key used while resolving unique identities. Datomic permits
-/// uniqueness on refs (`datomic_pro_docs/03_schema/03_identity_and_uniqueness.md`),
-/// and recovered `ProcessExpander/get-ids` compares unresolved ref tempids
-/// before replacing them (`db.clj:6712-6797, 7366-7455`). Reference tempids
-/// therefore remain symbolic here: two entity tempids asserting the same
-/// ref-valued identity must unify even when the referenced entity is new.
-#[derive(Clone, Debug)]
-pub(crate) enum UpsertIdentityValue {
-    Resolved(Value),
-    TempRef(String),
-    Tuple(Vec<Option<UpsertIdentityValue>>),
-}
-
-impl UpsertIdentityValue {
-    pub(crate) fn same_key(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Resolved(left), Self::Resolved(right)) => left.index_cmp(right).is_eq(),
-            (Self::TempRef(left), Self::TempRef(right)) => left == right,
-            (Self::Tuple(left), Self::Tuple(right)) => {
-                left.len() == right.len()
-                    && left
-                        .iter()
-                        .zip(right)
-                        .all(|(left, right)| match (left, right) {
-                            (None, None) => true,
-                            (Some(left), Some(right)) => left.same_key(right),
-                            _ => false,
-                        })
-            }
-            _ => false,
-        }
-    }
-
-    pub(crate) fn resolved(&self) -> Option<&Value> {
-        match self {
-            Self::Resolved(value) => Some(value),
-            Self::TempRef(_) | Self::Tuple(_) => None,
-        }
-    }
-
-    pub(crate) fn is_nan(&self) -> bool {
-        self.resolved().is_some_and(Value::is_nan)
-    }
-}
-
-/// Resolve only ref-typed input slots; scalar and nil slots retain their
-/// stored meaning. Symbolic references remain available to identity grouping.
-pub(crate) fn resolve_tuple_input(
-    schema: &Schema,
-    attribute: &crate::Attribute,
-    slots: &[Option<TxValue>],
-    mut resolve: impl FnMut(&EntityRef) -> Result<UpsertIdentityValue, SemanticError>,
-) -> Result<UpsertIdentityValue, SemanticError> {
-    let types = match &attribute.tuple {
-        Some(TupleSpec::Homogeneous(kind)) => vec![*kind; slots.len()],
-        Some(TupleSpec::Heterogeneous(types)) => types.clone(),
-        Some(TupleSpec::Composite(attributes)) => attributes
-            .iter()
-            .map(|attribute| {
-                schema
-                    .attribute(*attribute)
-                    .map(|attribute| attribute.value_type)
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        None => {
-            return Err(SemanticError::incorrect(
-                "transaction/value-type",
-                "tuple input requires a tuple attribute",
-            ));
-        }
-    };
-    if !(2..=8).contains(&slots.len()) || types.len() != slots.len() {
-        return Err(SemanticError::incorrect(
-            "transaction/invalid-tuple-length",
-            "tuple input does not match its schema length",
-        ));
-    }
-    let mut resolved = Vec::with_capacity(slots.len());
-    for (slot, kind) in slots.iter().zip(types) {
-        resolved.push(match slot {
-            None => None,
-            Some(TxValue::Scalar(value)) => Some(UpsertIdentityValue::Resolved(value.clone())),
-            Some(TxValue::Entity(entity)) if kind == ValueType::Ref => Some(resolve(entity)?),
-            Some(_) => return Err(SemanticError::incorrect("transaction/invalid-tuple-element", "tuple reference input requires a ref-typed slot; nested tuples are not scalar slots")),
-        });
-    }
-    // A temporary ref's final numeric id cannot change tuple shape/type.
-    // Validate with a type-only placeholder, never store or allocate it.
-    let shape = Value::Tuple(
-        resolved
-            .iter()
-            .map(|slot| {
-                slot.as_ref().map(|value| {
-                    value
-                        .resolved()
-                        .cloned()
-                        .unwrap_or(Value::Ref(crate::DB_IDENT))
-                })
-            })
-            .collect(),
-    );
-    schema.validate_value(attribute, &shape)?;
-    if resolved
-        .iter()
-        .flatten()
-        .all(|value| value.resolved().is_some())
-    {
-        Ok(UpsertIdentityValue::Resolved(shape))
-    } else {
-        Ok(UpsertIdentityValue::Tuple(resolved))
-    }
-}
-
-impl From<Value> for TxValue {
-    fn from(value: Value) -> Self {
-        Self::Scalar(value)
-    }
-}
-
-#[derive(Clone, Debug)]
-pub enum TxOp {
-    Add {
-        entity: EntityRef,
-        attribute: u32,
-        value: TxValue,
-    },
-    Retract {
-        entity: EntityRef,
-        attribute: u32,
-        value: Option<TxValue>,
-    },
-    Cas {
-        entity: EntityRef,
-        attribute: u32,
-        old: Option<TxValue>,
-        new: TxValue,
-    },
-    RetractEntity(EntityRef),
-    Ensure {
-        entity: EntityRef,
-        spec: EntityRef,
-    },
-    /// Transaction-local allocation policy, never a stored datom. Existing
-    /// upsert identities keep their entity IDs regardless of this directive.
-    ForcePartition {
-        tempid: String,
-        partition: EntityRef,
-    },
-    /// Assign a new tempid to the partition of an existing entity or another
-    /// transaction tempid's assignment. Affinity cycles are invalid.
-    MatchPartition {
-        tempid: String,
-        entity: EntityRef,
-    },
-    /// Native normalized form of an ordinary schema installation transaction.
-    InstallAttribute(crate::Attribute),
-    /// Native normalized form of an ordinary schema alteration transaction.
-    AlterAttribute(crate::Attribute),
-}
-
-/// Reserve all explicit partition-zero operands before allocating any tempid.
-/// A no-op retraction or a reference-only argument still acknowledges an ID;
-/// it need not survive as material transaction data. This is input-sized work,
-/// independent of the database's accumulated schema or ordinary allocation.
-pub(crate) fn observe_reserved_transaction_inputs(
-    reserved: &mut ReservedAllocation,
-    ops: &[TxOp],
-) -> Result<(), SemanticError> {
-    enum Input<'a> {
-        Entity(&'a EntityRef),
-        Value(&'a TxValue),
-    }
-    let mut pending = Vec::new();
-    for op in ops {
-        match op {
-            TxOp::Add {
-                entity,
-                attribute,
-                value,
-            } => {
-                reserved.observe_attribute(*attribute)?;
-                pending.push(Input::Entity(entity));
-                pending.push(Input::Value(value));
-            }
-            TxOp::Retract {
-                entity,
-                attribute,
-                value,
-            } => {
-                reserved.observe_attribute(*attribute)?;
-                pending.push(Input::Entity(entity));
-                if let Some(value) = value {
-                    pending.push(Input::Value(value));
-                }
-            }
-            TxOp::Cas {
-                entity,
-                attribute,
-                old,
-                new,
-            } => {
-                reserved.observe_attribute(*attribute)?;
-                pending.push(Input::Entity(entity));
-                pending.push(Input::Value(new));
-                if let Some(value) = old {
-                    pending.push(Input::Value(value));
-                }
-            }
-            TxOp::RetractEntity(entity) | TxOp::MatchPartition { entity, .. } => {
-                pending.push(Input::Entity(entity))
-            }
-            TxOp::ForcePartition { partition, .. } => pending.push(Input::Entity(partition)),
-            TxOp::Ensure { entity, spec } => {
-                pending.push(Input::Entity(entity));
-                pending.push(Input::Entity(spec));
-            }
-            TxOp::InstallAttribute(attribute) | TxOp::AlterAttribute(attribute) => {
-                reserved.observe_attribute(attribute.id)?;
-                if let Some(TupleSpec::Composite(attributes)) = &attribute.tuple {
-                    for attribute in attributes {
-                        reserved.observe_attribute(*attribute)?;
-                    }
-                }
-            }
-        }
-        while let Some(input) = pending.pop() {
-            match input {
-                Input::Entity(EntityRef::Id(entity)) => reserved.observe_entity(*entity)?,
-                Input::Entity(EntityRef::Lookup { attribute, value }) => {
-                    reserved.observe_attribute(*attribute)?;
-                    reserved.observe_value(value)?;
-                }
-                Input::Entity(EntityRef::LookupInput { attribute, value }) => {
-                    reserved.observe_attribute(*attribute)?;
-                    pending.push(Input::Value(value));
-                }
-                Input::Entity(EntityRef::Ident(_) | EntityRef::Temp(_) | EntityRef::Tx) => {}
-                Input::Value(TxValue::Scalar(value)) => reserved.observe_value(value)?,
-                Input::Value(TxValue::Entity(entity)) => pending.push(Input::Entity(entity)),
-                Input::Value(TxValue::Tuple(slots)) => {
-                    pending.extend(slots.iter().flatten().map(Input::Value))
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SchemaChange {
@@ -354,27 +78,6 @@ pub(crate) struct FrozenExcisionRequest {
     pub(crate) target: u64,
     pub(crate) attributes: BTreeSet<u64>,
     pub(crate) cutoff: Option<ExcisionCutoff>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PredicateRole {
-    Attribute,
-    Entity,
-    Both,
-}
-
-impl PredicateRole {
-    pub(crate) fn include(self, role: Self) -> Self {
-        if self == role { self } else { Self::Both }
-    }
-
-    pub(crate) fn requires_attribute(self) -> bool {
-        matches!(self, Self::Attribute | Self::Both)
-    }
-
-    pub(crate) fn requires_entity(self) -> bool {
-        matches!(self, Self::Entity | Self::Both)
-    }
 }
 
 /// Immutable, single-process database value.
@@ -1305,7 +1008,7 @@ impl Database {
         tx_instant: i64,
         defaults: &crate::TransactionDefaults,
     ) -> Result<TxReport, SemanticError> {
-        let assessed = crate::transaction::assess_operations(
+        let assessed = crate::transaction::pipeline::assess_operations(
             &self.database_value(),
             ops,
             tx_instant,
@@ -1704,7 +1407,7 @@ impl Database {
     /// Transaction resolution and constraints belong only to the shared assessor.
     pub(crate) fn materialize_assessment(
         &self,
-        assessed: crate::tiered_assessor::TieredAssessment,
+        assessed: crate::transaction::assess::TieredAssessment,
     ) -> Result<TxReport, SemanticError> {
         let logical: Vec<_> = assessed
             .tx_data
@@ -1847,80 +1550,6 @@ impl Database {
             }
         }
         Ok(())
-    }
-}
-
-/// Match recovered `ProcessExpander`: permanent ids are assigned to tempids in
-/// E position. A reference tempid may be used in V only when another
-/// normalized datom establishes it as an entity; otherwise `replace_tempid`
-/// raises `:db.error/tempid-not-an-entity` (`db.clj:7376-7390`). Running this
-/// after form normalization also covers tempids introduced by nested maps.
-pub(crate) fn validated_entity_tempids(ops: &[TxOp]) -> Result<BTreeSet<String>, SemanticError> {
-    let mut entities = BTreeSet::new();
-    let mut values = BTreeSet::new();
-    for op in ops {
-        collect_tempids_op(op, &mut entities, &mut values);
-    }
-    if let Some(tempid) = values.difference(&entities).next() {
-        return Err(SemanticError::incorrect(
-            "transaction/tempid-not-an-entity",
-            format!("tempid '{tempid}' is used only as a value in transaction data"),
-        )
-        .detail("tempid", tempid.clone()));
-    }
-    Ok(entities)
-}
-
-fn collect_tempids_op(op: &TxOp, entities: &mut BTreeSet<String>, values: &mut BTreeSet<String>) {
-    match op {
-        TxOp::Add { entity, value, .. } => {
-            collect_tempids_entity(entity, entities);
-            collect_tempids_value(value, values);
-        }
-        TxOp::Retract { entity, value, .. } => {
-            collect_tempids_entity(entity, entities);
-            if let Some(value) = value {
-                collect_tempids_value(value, values);
-            }
-        }
-        TxOp::Cas {
-            entity, old, new, ..
-        } => {
-            collect_tempids_entity(entity, entities);
-            if let Some(old) = old {
-                collect_tempids_value(old, values);
-            }
-            collect_tempids_value(new, values);
-        }
-        TxOp::RetractEntity(entity) => collect_tempids_entity(entity, entities),
-        TxOp::Ensure { entity, spec } => {
-            collect_tempids_entity(entity, entities);
-            collect_tempids_entity(spec, values);
-        }
-        TxOp::InstallAttribute(_)
-        | TxOp::AlterAttribute(_)
-        | TxOp::ForcePartition { .. }
-        | TxOp::MatchPartition { .. } => {}
-    }
-}
-
-fn collect_tempids_value(value: &TxValue, output: &mut BTreeSet<String>) {
-    match value {
-        TxValue::Entity(entity) => collect_tempids_entity(entity, output),
-        TxValue::Tuple(slots) => {
-            for value in slots.iter().flatten() {
-                if let TxValue::Entity(entity) = value {
-                    collect_tempids_entity(entity, output);
-                }
-            }
-        }
-        TxValue::Scalar(_) => {}
-    }
-}
-
-fn collect_tempids_entity(entity: &EntityRef, output: &mut BTreeSet<String>) {
-    if let EntityRef::Temp(tempid) = entity {
-        output.insert(tempid.clone());
     }
 }
 

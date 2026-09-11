@@ -207,7 +207,7 @@ fn queued_public_service_reports_exact_values_and_retries_before_changed_limits(
 }
 
 #[test]
-fn standby_takes_over_the_same_block_identity_without_starting_legacy_workers() {
+fn standby_takes_over_the_same_immutable_database_identity() {
     let Some((fixture, connection)) = fixture("block_service_standby") else {
         return;
     };

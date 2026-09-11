@@ -7,15 +7,14 @@ mod common;
 
 use atomic_core::edn::{read_edn, write_edn};
 use atomic_core::edn_value::{edn_to_value, value_to_edn};
-use atomic_core::storage::{
-    BlockDatabase, BlockReader, BlockTransactor, BlockWriterOptions, PgBlockStore,
-};
+use atomic_core::storage::{BlockDatabase, BlockReader, PgBlockStore};
 use atomic_core::{
     Attribute, Cardinality, Database, DatabaseValue, Datom, EntityRef, FindElement, FindSpec,
     InputSpec, Keyword, PostgresConnectionConfig, Query, QueryControl, QueryEngine, QueryInput,
     QueryResult, QueryValue, Schema, ServiceTransactionReport, TransactionRequest, TxOp, Unique,
     Value, ValueType, canonical_datom_bytes, request_digest, submission_request_digest, t_to_tx,
 };
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use std::cmp::Ordering;
 
 const URI_KEY: u32 = 1000;
@@ -469,7 +468,10 @@ fn invalid_uri_admission_is_atomic_and_alias_retraction_removes_the_original_fac
         .find(|d| d.attribute == URI_KEY)
         .unwrap();
     assert!(!fact.added);
-    assert_eq!(spelling(&fact.value), ORIGINAL);
+    // The new retraction fact records the submitted value; source
+    // ProcessExpander.inject likewise constructs retracting-datum from input v.
+    // It need not rewrite that value to the earlier assertion's spelling.
+    assert_eq!(spelling(&fact.value), ALIAS);
     assert_key_spelling(&first.db_after, entity, ORIGINAL);
 }
 

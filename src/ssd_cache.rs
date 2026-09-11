@@ -1,7 +1,7 @@
 //! Optional disposable immutable-block cache. A namespace separates access,
 //! lineage, generation and format domains; it grants no database authorization.
 //! Callers authenticate/open the database and establish retention independently.
-use crate::block_codec::{MAX_PHYSICAL_BLOCK_BYTES, decode_block, encode_block};
+use crate::storage::codec::{MAX_PHYSICAL_BLOCK_BYTES, decode_block, encode_block};
 use crate::{Digest, ErrorCategory, SemanticError};
 use std::fs::{File, FileTimes, Metadata, OpenOptions};
 use std::io::{Read, Seek, Write};

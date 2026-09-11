@@ -1,7 +1,7 @@
 //! Fulltext uses the opaque object provider and the actual Rust index worker.
 mod common;
 
-use atomic_core::persistent_tree::{TreeConfig, build_tree};
+use atomic_core::index::tree::{TreeConfig, build_tree};
 use atomic_core::storage::fulltext::{build_for_descriptor, build_for_descriptor_with_control};
 use atomic_core::storage::log::{LogEntry, LogRoot};
 use atomic_core::storage::root::{Block, DatabaseValueRoot};

@@ -333,6 +333,12 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "release-pending-syncs")
         (assoc protocol_signature__7477 :name protocol_method_name__7478 :ns *ns*))))
+  ;; ATOMIC-NOTE [observed]: One target-ordered queue releases every satisfied
+  ;; future using the Db that advanced its chosen coordinate. Transaction and
+  ;; index watchers use different fields; a future does not mutate older Db values.
+  ;; [unknown] sync-t and sync-background-t capture db before taking lck and
+  ;; recheck that same lexical value inside it. The lock alone therefore does not
+  ;; prove absence of a registration/notification lost-wakeup schedule.
   (deftype
     TWatcherImpl
     [q db_ref f lck]
@@ -366,6 +372,9 @@
                  (.remove ^java.util.Queue q)
                  (recur (.peek ^java.util.Queue q))))))
          nil)))
+    ;; ATOMIC-NOTE [observed]: When transaction basis already covers t, inspect
+    ;; only requested schema/excision work through t and wait for its latest
+    ;; necessary index coordinate. This may finish before syncIndex(t).
     (sync-background-t
       [this btype t_or_tx]
       (let [t (db/eid->eidx (long ^java.lang.Number t_or_tx)) db (deref db_ref)]
@@ -560,6 +569,9 @@
     datomic.Connection
     datomic.common.AsyncShutdown
     datomic.connector.NotificationHandler
+    ;; ATOMIC-NOTE [observed]: An index notice triggers storage loading off the
+    ;; notifier path; adopter/adopt-index then merges concurrent memlog arrivals
+    ;; before local CAS. All three watcher classes see the accepted result.
     (notify-index
       [this]
       (future-call
@@ -623,6 +635,9 @@
                   (monitor/alarm :UnhandledException)
                   (throw ^java.lang.Throwable t__8798__auto__)
                   nil)))))))
+    ;; ATOMIC-NOTE [observed]: Reconnect initialization replaces the local value
+    ;; and releases watchers without inventing per-transaction reports. Live
+    ;; notify-data instead constructs reports from its accepted before/after pair.
     (notify-db
       [this db]
       (do
@@ -747,6 +762,10 @@
             (let [connector temp__5802__auto__]
               (conn/admin-request connector :request-gc {:db-id db_id, :older-than older_than}))))
         nil))
+    ;; ATOMIC-NOTE [documented/observed]: A live connection has one optional
+    ;; lossless, unbounded report queue. notify-data delivers a submitting future
+    ;; before enqueueing its report; consumers must drain or remove the queue.
+    ;; This contract is distinct from a bounded, discardable change-notice hint.
     (^void removeTxReportQueue [this] (do (reset! tx_report_queue nil) nil))
     (^java.util.concurrent.BlockingQueue txReportQueue
       [this]
@@ -789,6 +808,9 @@
     (^datomic.ListenableFuture transact
       [this ^java.util.List txdata]
       (await-tx-result (.transactAsync this ^java.util.List txdata)))
+    ;; ATOMIC-NOTE [observed]: Explicit-t sync variants register local observation
+    ;; demand. The zero-argument sync below instead queues a transactor barrier;
+    ;; notify-sync resolves it with the then-current local Db after prior messages.
     (^datomic.ListenableFuture syncExcise
       [this ^long t]
       (sync-background-t bg_watcher :excise (long t)))
@@ -868,6 +890,10 @@
         (if temp__5802__auto__
           (let [o temp__5802__auto__] (recon/reconnect o))
           (do (throw (java.lang.IllegalStateException. "Peer reconnector setup failed.")) nil))))
+    ;; ATOMIC-NOTE [observed]: Load once, install the notifier, load again, then
+    ;; start notification delivery. [inferred] This bridges the storage-load /
+    ;; notification-subscription interval; duplicate data is trimmed on acceptance.
+    ;; Failover still fails unresolved submissions rather than replaying callbacks.
     (create-connection-state
       [this cluster_conf endpoint mode]
       (do
@@ -1139,6 +1165,9 @@
       *ns*))
   ;; Immutable storage-backed connection used for backup and read-only URIs.
   ;; Transaction submission, report queues, indexing requests, and storage GC are unavailable.
+  ;; ATOMIC-NOTE [observed]: This constructor holds one Db, unlike live Connection.
+  ;; Explicit-t sync only succeeds when that captured basis already covers t;
+  ;; no-argument sync and requests requiring a transactor are rejected.
   (deftype
     StorageOnlyConnection
     [db-id cluster db log]

@@ -3,10 +3,9 @@ mod common;
 
 use atomic_core::storage::ownership::{BlockCollector, CollectionPhase, CollectionStats};
 use atomic_core::storage::root::{Block, DatabaseRoot};
-use atomic_core::storage::{
-    BlockDatabase, BlockTransactor, BlockWriterOptions, IndexDescriptor, PgBlockStore,
-};
+use atomic_core::storage::{BlockDatabase, IndexDescriptor, PgBlockStore};
 use atomic_core::*;
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use postgres::{Client, NoTls};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 

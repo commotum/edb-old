@@ -280,7 +280,7 @@ fn committed_windows_survive_changed_writer_policy_but_explicit_reader_limits_ap
         bounded.capture(&database.reference_key()).unwrap_err().code,
         "storage/recent-window-limit"
     );
-    let explicit = atomic_core::recent::RecentLimits {
+    let explicit = atomic_core::index::recent::RecentLimits {
         soft_bytes: 1,
         hard_bytes: 1,
         soft_datoms: 1,

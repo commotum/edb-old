@@ -1,8 +1,6 @@
-use atomic_core::storage::{
-    BlockDatabase, BlockReadConfig, BlockReader, BlockTransactor, BlockWriterOptions, CasOutcome,
-    PgBlockStore,
-};
+use atomic_core::storage::{BlockDatabase, BlockReadConfig, BlockReader, CasOutcome, PgBlockStore};
 use atomic_core::*;
+use atomic_core::{BlockTransactor, BlockWriterOptions};
 use std::sync::{Arc, Barrier};
 mod common;
 

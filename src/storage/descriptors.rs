@@ -1,7 +1,7 @@
 //! Compact Rust-owned read descriptors. Tree objects retain the current raw
 //! canonical tree encoding; their hashes are direct outgoing object links.
 use super::{ObjectId, root::Block};
-use crate::persistent_tree::TreeDescriptor;
+use crate::index::tree::TreeDescriptor;
 use crate::{ErrorCategory, IndexOrder, SemanticError};
 
 pub const INDEX_DESCRIPTOR_KIND: u16 = 3;

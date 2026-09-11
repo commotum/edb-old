@@ -3,7 +3,8 @@
 //! The kernel applies declarative transaction information to immutable
 //! database values. PostgreSQL stores the serialized durable log and indexes;
 //! independent peers provide local queries, pull, temporal views, and native
-//! immutable snapshots. The pure kernel remains available as an explicit oracle.
+//! immutable snapshots. Memory and durable writes share transaction assessment;
+//! the memory representation is not an independent semantic oracle.
 
 pub mod async_client;
 pub use async_client::{
@@ -12,18 +13,16 @@ pub use async_client::{
 };
 mod backup;
 mod backup_snapshot;
-mod block_codec;
 mod change_consumer;
 pub(crate) mod change_notices;
 mod collections;
-mod connection;
+mod application;
 mod database;
 pub(crate) mod database_catalog;
 pub use database_catalog::{CreateDatabaseResult, DatabaseCatalog, DatabaseCatalogEntry};
 pub mod database_invoke;
 mod database_stats;
 mod database_value;
-mod datom;
 pub mod edn;
 pub mod edn_pull;
 pub mod edn_query;
@@ -36,21 +35,15 @@ mod excision;
 mod fulltext;
 mod fulltext_analysis;
 mod fulltext_store;
-mod identity;
-mod idents;
-mod index;
+pub mod index;
 mod index_pull;
-mod index_support;
 #[cfg(unix)]
 mod local_transport;
 mod operations;
-mod overlay_index;
 mod partitions;
 mod reserved_allocation;
 pub use partitions::TransactionDefaults;
-mod native_registry;
 mod peer;
-pub mod persistent_tree;
 mod postgres_connection;
 mod program;
 mod program_bindings;
@@ -59,37 +52,29 @@ mod pull;
 mod query;
 mod query_return_maps;
 mod query_value_debug;
-pub mod recent;
-mod recent_btset;
 #[cfg(unix)]
 mod remote_config;
 #[cfg(unix)]
 mod remote_routing;
 #[cfg(unix)]
 mod remote_transport;
-mod runtime;
 mod runtime_config;
 #[cfg(unix)]
 pub use remote_config::{remote_client_config_from_env, remote_server_credentials_from_env};
 mod io_diagnostics;
 mod maintenance_control;
 mod model;
-mod schema;
-mod service;
 pub mod sql_io;
 mod ssd_cache;
 mod state_commitment;
 pub mod storage;
 mod telemetry;
-mod tiered_assessor;
 mod time_point;
 mod transaction;
 mod transaction_hints;
 mod transaction_stats;
-mod tree_cursor;
-mod tree_read;
+mod transactor;
 mod uuid;
-mod vocabulary;
 
 pub use backup::{
     BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault, RestoreResult,
@@ -102,15 +87,15 @@ pub use change_notices::{
     NoticeListenerStats, NoticePublisherStats, ObservationConfig, notice_listener_stats,
     notice_publisher_stats,
 };
-pub use connection::{Connection, ConnectionTransactionTicket, DatabaseIdentity};
-pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
+pub use application::connection::{Connection, ConnectionTransactionTicket};
+pub use model::identity::DatabaseIdentity;
+pub use database::{Database, TxReport, View};
 pub use database_invoke::{InvokeControl, InvokeRole};
 pub use database_stats::{AttributeStats, DatabaseStats};
 pub use database_value::{
     DatabaseValue, DatabaseValuePrefixCursor, DatabaseValueScanCursor, RawIndexValue,
     SpeculativeTransactionReport,
 };
-pub use datom::{Datom, IndexOrder};
 pub use encoding::{
     Digest, DurableTransaction, canonical_datom_bytes, decode_genesis, decode_program,
     decode_transaction, encode_genesis, encode_program, encode_program_output, encode_transaction,
@@ -125,11 +110,7 @@ pub use fulltext_store::{
     FulltextBuildLimits, FulltextBuildStats, FulltextCacheStats, FulltextCursor,
     FulltextProjection, FulltextReadLimits, FulltextReadStats, FulltextRecord,
 };
-pub use identity::{
-    DB_PARTITION, EIDX_BITS, EIDX_MASK, INITIAL_EIDX_FRONTIER, MAX_EID, MAX_EIDX, MAX_PARTITION,
-    PARTITION_BITS, TX_PARTITION, USER_PARTITION, eid_to_eidx, eid_to_part, implicit_part,
-    implicit_part_id, make_eid, partition_eid, t_to_tx, tx_to_t,
-};
+pub use index::NodeBlockReadStats;
 pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
 pub use index_pull::{IndexPullCursor, IndexPullOptions};
 pub use io_diagnostics::{CacheIoStats, CacheTier, IndexIoStats, ReadIoStats};
@@ -138,10 +119,25 @@ pub use local_transport::{
     CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
 };
 pub use maintenance_control::{MaintenanceControl, MaintenanceStats};
+pub use model::datom::{Datom, IndexOrder};
+pub use model::identity::{
+    DB_PARTITION, EIDX_BITS, EIDX_MASK, INITIAL_EIDX_FRONTIER, MAX_EID, MAX_EIDX, MAX_PARTITION,
+    PARTITION_BITS, TX_PARTITION, USER_PARTITION, eid_to_eidx, eid_to_part, implicit_part,
+    implicit_part_id, make_eid, partition_eid, t_to_tx, tx_to_t,
+};
+pub use model::schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use model::value::{Keyword, Symbol, Value};
-pub use native_registry::{
-    NativeCallContext, NativeRegistry, NativeRegistryBuilder, TransactionExecutionOptions,
-    native_deployment_attribute, native_deployment_ident,
+pub use model::vocabulary::{
+    DB_ADD, DB_ALTER_ATTRIBUTE, DB_ATTR_PREDS, DB_CARDINALITY, DB_CARDINALITY_MANY,
+    DB_CARDINALITY_ONE, DB_DOC, DB_ENSURE, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_EXCISE,
+    DB_EXCISE_ATTRS, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_FN, DB_FN_CAS, DB_FN_RETRACT_ENTITY,
+    DB_FULLTEXT, DB_IDENT, DB_INDEX, DB_INSTALL_ATTRIBUTE, DB_INSTALL_PARTITION, DB_IS_COMPONENT,
+    DB_NO_HISTORY, DB_PART_DB, DB_PART_TX, DB_PART_USER, DB_RETRACT, DB_TUPLE_ATTRS,
+    DB_TUPLE_DISCONTINUED, DB_TUPLE_TYPE, DB_TUPLE_TYPES, DB_TX_INSTANT, DB_TYPE_BIGDEC,
+    DB_TYPE_BIGINT, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_DOUBLE, DB_TYPE_FLOAT, DB_TYPE_FN,
+    DB_TYPE_INSTANT, DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING, DB_TYPE_SYMBOL,
+    DB_TYPE_TUPLE, DB_TYPE_URI, DB_TYPE_UUID, DB_UNIQUE, DB_UNIQUE_IDENTITY, DB_UNIQUE_VALUE,
+    DB_VALUE_TYPE, MAX_SCHEMA_ATTRIBUTE_ID, canonical_genesis_datoms, schema_eid_to_attr_id,
 };
 pub use operations::{
     ExcisionConfig, ExcisionFault, ExcisionProgress, ExcisionReceipt, GarbageInventory,
@@ -149,8 +145,8 @@ pub use operations::{
     OperationalMetrics, PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE,
     RetiredDatabaseReclamation,
 };
-pub use peer::native_log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
-pub use peer::snapshot_reference::{SnapshotKey, SnapshotReference};
+pub use database_value::log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
+pub use database_value::reference::{SnapshotKey, SnapshotReference};
 pub use peer::{
     CacheStats, Peer, PeerCursorStats, PeerIndexCursor, PeerLoadStats, PeerSnapshot, RecoveryStats,
 };
@@ -162,6 +158,7 @@ pub use program::{
     QueryTemplateSource, QueryTemplateTime, QueryTerm, RuntimeValue, is_exact_true,
     require_exact_true,
 };
+pub use program_cache::ProgramCacheStats;
 pub use pull::{
     AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl,
     PullDirection, PullLimit, PullNested, PullPattern, PullTransform,
@@ -183,16 +180,7 @@ pub use remote_transport::{
     RemoteAuthToken, RemoteClientConfig, RemoteTransactionEndpoint, RemoteTransactionServer,
     RemoteTransportConfig, RemoteTransportStats, RemoteWriterEndpoint,
 };
-pub use runtime::{CapacityLimits, ProgramCacheStats, WriterResidencyStats};
 pub use runtime_config::postgres_config_from_env;
-pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
-pub use service::{
-    BackgroundFulltextStats, BackgroundIndexingConfig, BackgroundIndexingFailure,
-    BackgroundIndexingStats, IndexRequest, OperationalServiceStats, ReportSubscription,
-    ServiceOptions, ServiceStats, ServiceTransactionReport, StandbyStatus, TransactionClient,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TransactionStandby,
-    TransactionTicket,
-};
 pub use sql_io::{
     OperationContext, OperationKind, SqlCallKind, SqlCallStats, SqlIoReport, SqlIoStats,
     SqlMetricCallback, process_sql_stats,
@@ -204,23 +192,24 @@ pub use telemetry::{
 };
 pub use time_point::TimePoint;
 pub use transaction::SpeculationLimits;
-pub use transaction::{AttributeRef, EntityMap, MapValue, TxCall, TxForm, TxFunctions};
+pub use transaction::native::{
+    NativeCallContext, NativeRegistry, NativeRegistryBuilder, TransactionExecutionOptions,
+    native_deployment_attribute, native_deployment_ident,
+};
+pub use transaction::{
+    AttributeRef, EntityMap, EntityRef, MapValue, TxCall, TxForm, TxFunctions, TxOp, TxValue,
+};
 pub use transaction_hints::{
     HintExecution, HintLimits, HintPrefetchConcurrency, HintPrefetchOptions, HintPrefetchStats,
     HintTraceStats, HintedSpeculation, ReadHint, TransactionHints,
 };
 pub use transaction_stats::{TransactionDiagnostics, TransactionWorkStats};
-pub use tree_read::NodeBlockReadStats;
-pub use uuid::{squuid, squuid_at, squuid_time_millis, uuid_v7, uuid_v7_at, uuid_v7_time_millis};
-pub use vocabulary::{
-    DB_ADD, DB_ALTER_ATTRIBUTE, DB_ATTR_PREDS, DB_CARDINALITY, DB_CARDINALITY_MANY,
-    DB_CARDINALITY_ONE, DB_DOC, DB_ENSURE, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_EXCISE,
-    DB_EXCISE_ATTRS, DB_EXCISE_BEFORE, DB_EXCISE_BEFORE_T, DB_FN, DB_FN_CAS, DB_FN_RETRACT_ENTITY,
-    DB_FULLTEXT, DB_IDENT, DB_INDEX, DB_INSTALL_ATTRIBUTE, DB_INSTALL_PARTITION, DB_IS_COMPONENT,
-    DB_NO_HISTORY, DB_PART_DB, DB_PART_TX, DB_PART_USER, DB_RETRACT, DB_TUPLE_ATTRS,
-    DB_TUPLE_DISCONTINUED, DB_TUPLE_TYPE, DB_TUPLE_TYPES, DB_TX_INSTANT, DB_TYPE_BIGDEC,
-    DB_TYPE_BIGINT, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_DOUBLE, DB_TYPE_FLOAT, DB_TYPE_FN,
-    DB_TYPE_INSTANT, DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING, DB_TYPE_SYMBOL,
-    DB_TYPE_TUPLE, DB_TYPE_URI, DB_TYPE_UUID, DB_UNIQUE, DB_UNIQUE_IDENTITY, DB_UNIQUE_VALUE,
-    DB_VALUE_TYPE, MAX_SCHEMA_ATTRIBUTE_ID, canonical_genesis_datoms, schema_eid_to_attr_id,
+pub use transactor::{
+    BackgroundFulltextStats, BackgroundIndexingConfig, BackgroundIndexingFailure,
+    BackgroundIndexingStats, IndexRequest, OperationalServiceStats, ReportSubscription,
+    ServiceOptions, ServiceStats, ServiceTransactionReport, StandbyStatus, TransactionClient,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TransactionStandby,
+    TransactionTicket,
 };
+pub use transactor::{BlockTransactor, BlockWriterOptions, CapacityLimits, WriterResidencyStats};
+pub use uuid::{squuid, squuid_at, squuid_time_millis, uuid_v7, uuid_v7_at, uuid_v7_time_millis};

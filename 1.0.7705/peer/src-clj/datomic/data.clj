@@ -4,6 +4,11 @@
   (when-not (.equals 'datomic.data 'clojure.core)
     (dosync (commute (deref #'clojure.core/*loaded-libs*) conj 'datomic.data))
     (clojure.core/with-loading-context (clojure.core/refer 'clojure.core)))
+  ;; ATOMIC-NOTE BEGIN serialization-data-counterpart
+  ;; Baseline-identical to transactor/src-clj/datomic/data.clj at cd7192e63d883a4a34aa7de4d5bcd17e6edb692d.
+  ;; See its serialization-data-role note: a fixed table in an optional loading
+  ;; path, not evidence of a missing Rust value codec. Its consumer is unrecovered.
+  ;; ATOMIC-NOTE END serialization-data-counterpart
   (def table
    [35
     47

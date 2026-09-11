@@ -21,7 +21,7 @@ pub struct ReportHandoffMaintenance {
 pub(crate) fn handoff_key(route: [u8; 16], generation: u64) -> String {
     format!(
         "{PREFIX}{}/{generation:016x}",
-        super::engine::identity_string(route)
+        crate::storage::catalog::identity_string(route)
     )
 }
 

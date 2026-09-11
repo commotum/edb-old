@@ -7,6 +7,9 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+mod error;
+pub(crate) use error::{is_postgres_connection_error, postgres_error};
+
 /// Explicit per-connection I/O settings shared by plaintext and verified TLS.
 /// `None` preserves the parameter string/driver/server default. There is no
 /// implicit production timeout: administrative and runtime roles may need
@@ -386,7 +389,7 @@ impl PostgresConnectionConfig {
         match tls {
             None => config
                 .connect(NoTls)
-                .map_err(|error| crate::runtime::postgres_error(operation, error)),
+                .map_err(|error| postgres_error(operation, error)),
             Some(connector) => config
                 .connect(connector)
                 .map_err(|_| Self::tls_connection_error(operation)),
@@ -652,7 +655,7 @@ mod tests {
             Err(error) => error,
         };
         let elapsed = started.elapsed();
-        assert!(crate::runtime::is_postgres_connection_error(&error));
+        assert!(is_postgres_connection_error(&error));
         assert!(
             elapsed < Duration::from_millis(300),
             "unreachable host exceeded the caller's deadline envelope: {elapsed:?}"

@@ -31,7 +31,7 @@ fn deploy_graph(
     let mut store = PgBlockStore::connect(config)?;
     for _ in 0..8 {
         control.check()?;
-        let protection = crate::storage::engine::protection(&mut store, &[])?;
+        let protection = crate::storage::protection::protection(&mut store, &[])?;
         let mut guards = protection.conditions.clone();
         store.set_write_protection(Some(protection))?;
         let result = (|| {

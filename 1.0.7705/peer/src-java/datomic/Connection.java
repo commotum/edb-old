@@ -40,6 +40,9 @@ public interface Connection {
      *
      * @return the current immutable database value
      */
+    // ATOMIC-NOTE [observed]: The live peer implementation dereferences one local
+    // Db reference here. Capturing is separate from storage reads done later by
+    // lazy indexes, and separate from the zero-argument sync transactor barrier.
     public Database db();
 
     /**

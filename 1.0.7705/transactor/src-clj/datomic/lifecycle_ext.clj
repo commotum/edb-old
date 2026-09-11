@@ -81,6 +81,10 @@
       *ns*))
   ;; Observe the active heartbeat once per tick. Two consecutive unchanged
   ;; timestamps trigger the attempt to acquire the active process reference.
+  ;; ATOMIC-NOTE [observed] missed compares consecutive published timestamps;
+  ;; it does not subtract the active machine's clock from the standby clock.
+  ;; pump must win the revision CAS before serve starts. [inferred] Timing is
+  ;; failure detection, while the storage revision is the ownership fence.
   (defn standby-loop
     ([p__28136]
       (let [map__28137 p__28136

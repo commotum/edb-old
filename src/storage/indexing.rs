@@ -3,9 +3,10 @@
 //! The serialized writer validates the source and adopts the descriptor later.
 use super::descriptors::{BlockAvetWork, IndexDescriptor};
 use super::{BlockSnapshot, ObjectId, ObjectWriter, PgBlockStore, WriteProtection};
-use crate::index_support::{self, IndexEavLookup, IndexNodeReader};
-use crate::persistent_tree::{TreeConfig, TreeDescriptor, TreeMergeEdits, TreeNodeSet};
-use crate::tree_cursor::MergeSource;
+use crate::index::cursor::MergeSource;
+use crate::index::metadata;
+use crate::index::prepare::{self, IndexEavLookup, IndexNodeReader};
+use crate::index::tree::{TreeConfig, TreeDescriptor, TreeMergeEdits, TreeNodeSet};
 use crate::{Datom, ErrorCategory, IndexOrder, SemanticError};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,7 +17,10 @@ pub struct BlockIndexStats {
     pub input_datoms: u64,
     pub nodes_read: u64,
     pub bytes_read: u64,
+    /// Objects accepted by the writer, including deduplicated content. The live
+    /// preparation path uses immediate guarded puts; these are not SQL counts.
     pub nodes_written: u64,
+    /// Canonical accepted bytes, not physical traffic or unique retained bytes.
     pub bytes_written: u64,
     pub reused_subtrees: u64,
     pub no_history_pairs: u64,
@@ -115,7 +119,7 @@ impl IndexInput {
                 "Index worker requires an unconfigured independent store",
             ));
         }
-        let protection = super::engine::protection(store, &[])?;
+        let protection = crate::storage::protection::protection(store, &[])?;
         store.set_write_protection(Some(protection.clone()))?;
         let result = (|| {
             let through_basis = self.through_basis();
@@ -256,12 +260,12 @@ impl PreparationIo<'_> {
         cache: &mut TreeNodeSet,
     ) -> Result<TreeDescriptor, SemanticError> {
         (self.control)()?;
-        index_support::preload_merge_paths(self, descriptor, edits, cache)?;
+        prepare::preload_merge_paths(self, descriptor, edits, cache)?;
         self.stats.peak_preloaded_bytes = self
             .stats
             .peak_preloaded_bytes
             .max(cache.iter().map(|(_, b)| b.len() as u64).sum());
-        let merged = index_support::merge_index_tree(self, descriptor, cache, edits, config)?;
+        let merged = prepare::merge_index_tree(self, descriptor, cache, edits, config)?;
         self.stats.reused_subtrees = self
             .stats
             .reused_subtrees
@@ -341,7 +345,7 @@ fn prepare_tail(
     {
         (io.control)()?;
         io.stats.input_datoms = io.stats.input_datoms.saturating_add(1);
-        let key = index_support::stored_eav_key(datom)?;
+        let key = prepare::stored_eav_key(datom)?;
         if let std::collections::btree_map::Entry::Vacant(entry) = changes.entry(key) {
             let found = lookup.exact(io, datom, &mut cache)?;
             entry.insert((found.clone(), found));
@@ -353,7 +357,7 @@ fn prepare_tail(
     {
         (io.control)()?;
         let change = changes
-            .get_mut(&index_support::stored_eav_key(datom)?)
+            .get_mut(&prepare::stored_eav_key(datom)?)
             .expect("collected change");
         if datom.added {
             if change.1.is_none() || u64::from(datom.attribute) == crate::DB_ALTER_ATTRIBUTE {
@@ -381,7 +385,7 @@ fn prepare_tail(
     let transitions = if std::sync::Arc::ptr_eq(&base.schema, &endpoint.schema) {
         Vec::new()
     } else {
-        index_support::changed_avet_attributes(&base.schema, &endpoint.schema)
+        metadata::changed_avet_attributes(&base.schema, &endpoint.schema)
     };
     let mut changed: BTreeMap<u32, (u32, bool, bool)> = transitions
         .into_iter()
@@ -391,20 +395,20 @@ fn prepare_tail(
     for attribute in unready.iter().copied() {
         changed.entry(attribute).or_insert((
             attribute,
-            index_support::effective_avet(&base.schema, attribute),
+            metadata::effective_avet(&base.schema, attribute),
             true,
         ));
     }
     let changed = changed.into_values().collect::<Vec<_>>();
     let empty = BTreeMap::new();
     let mut history_edits =
-        index_support::history_edits(IndexOrder::Eavt, recent, &changed, &empty, &empty)?;
-    index_support::canonicalize_merge_edits(&mut history_edits, IndexOrder::Eavt);
+        prepare::history_edits(IndexOrder::Eavt, recent, &changed, &empty, &empty)?;
+    prepare::canonicalize_merge_edits(&mut history_edits, IndexOrder::Eavt);
     cache = TreeNodeSet::default();
     let history = tree(previous, true, IndexOrder::Eavt);
-    index_support::preload_merge_paths(io, history, &history_edits, &mut cache)?;
+    prepare::preload_merge_paths(io, history, &history_edits, &mut cache)?;
     let pairs =
-        crate::persistent_tree::discover_merge_no_history_pairs(history, &cache, &history_edits)?;
+        crate::index::tree::discover_merge_no_history_pairs(history, &cache, &history_edits)?;
     io.stats.no_history_pairs = pairs.len() as u64;
     let mut descriptor = previous.clone();
     descriptor.basis = snapshot.basis_t();
@@ -413,16 +417,11 @@ fn prepare_tail(
         let index = tree_index(history, order);
         let old = &previous.trees[index];
         let mut edits = if old.history {
-            let mut edits =
-                index_support::history_edits(old.order, recent, &changed, &empty, &empty)?;
+            let mut edits = prepare::history_edits(old.order, recent, &changed, &empty, &empty)?;
             for pair in &pairs {
                 if !(old.order == IndexOrder::Avet
                     && changed.iter().any(|c| c.0 == pair.retraction.attribute))
-                    && index_support::schema_index_member(
-                        &endpoint.schema,
-                        &pair.retraction,
-                        old.order,
-                    )?
+                    && metadata::schema_index_member(&endpoint.schema, &pair.retraction, old.order)?
                 {
                     edits.no_history_pairs.push(pair.clone());
                 }
@@ -430,7 +429,7 @@ fn prepare_tail(
             edits.no_history_attributes.clear();
             edits
         } else {
-            index_support::current_edits(
+            prepare::current_edits(
                 old.order,
                 &removals,
                 &insertions,
@@ -441,7 +440,7 @@ fn prepare_tail(
                 &empty,
             )?
         };
-        index_support::canonicalize_merge_edits(&mut edits, old.order);
+        prepare::canonicalize_merge_edits(&mut edits, old.order);
         Ok((index, edits))
     };
     let projections: Vec<_> = previous
@@ -451,7 +450,7 @@ fn prepare_tail(
         .collect();
     for group in projections.chunks(parallelism) {
         (io.control)()?;
-        let (prepared, workers, peak) = index_support::prepare_index_group(group, &prepare)?;
+        let (prepared, workers, peak) = prepare::prepare_index_group(group, &prepare)?;
         io.stats.preparation_workers = io.stats.preparation_workers.saturating_add(workers);
         io.stats.peak_preparation_workers = io.stats.peak_preparation_workers.max(peak);
         for (index, edits) in prepared {
@@ -512,7 +511,7 @@ fn advance_projection(
         .first()
         .ok_or_else(|| fault("Missing AVET work"))?
         .clone();
-    if index_support::effective_avet(schema, work.attribute) != work.adding
+    if metadata::effective_avet(schema, work.attribute) != work.adding
         || work.source != *tree(&descriptor, work.history, IndexOrder::Aevt)
     {
         return Err(fault("AVET work differs from frozen schema or source"));
@@ -521,7 +520,7 @@ fn advance_projection(
     let target = &descriptor.trees[index];
     let source = if work.clearing { target } else { &work.source };
     let mut cache = TreeNodeSet::default();
-    let chunk = index_support::tree_attribute_chunk(
+    let chunk = prepare::tree_attribute_chunk(
         io,
         source,
         work.attribute,
@@ -545,7 +544,7 @@ fn advance_projection(
     io.stats.projection_datoms = io.stats.projection_datoms.saturating_add(datoms);
     io.stats.input_datoms = io.stats.input_datoms.saturating_add(datoms);
     io.stats.projection_steps = io.stats.projection_steps.saturating_add(1);
-    index_support::canonicalize_merge_edits(&mut edits, IndexOrder::Avet);
+    prepare::canonicalize_merge_edits(&mut edits, IndexOrder::Avet);
     cache = TreeNodeSet::default();
     descriptor.trees[index] = io.merge(target, &edits, config, &mut cache)?;
     descriptor.fulltext = None;

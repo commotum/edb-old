@@ -148,6 +148,10 @@
       *ns*))
   ;; Persist a full pending-garbage leaf, extend its directory and root, then
   ;; publish the replacement root with a revision-checked reference update.
+  ;; ATOMIC-NOTE [observed] The leaf also records obsolete garbage-tree metadata.
+  ;; All three create results are awaited before the root revision CAS; conflict
+  ;; throws. This function does not retry against a newly observed root, nor does
+  ;; its caller make garbage recording part of the preceding log/index commit.
   (defn append-leaf
     ([cluster lookup leaf max_dir_size]
       (let [map__18360 (ensure-root-ref cluster)
@@ -241,6 +245,11 @@
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.garbage" "garbage-agent") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.garbage" "garbage-agent") (agent {}))
+  ;; ATOMIC-NOTE [observed] Callers supply superseded value IDs; this function
+  ;; records their marking time in garbage leaves. gc-leaf later selects marks
+  ;; older than a caller cutoff. This is not a traversal/count of all live roots.
+  ;; [inferred] Atomic's content-addressed reuse needs its separate ownership/
+  ;; protected-epoch protocol; copying this deletion path would omit that fence.
   (defn do-mark-garbage
     ([m cluster lookup ids max_leaf_size max_dir_size]
       (monitor/add-stat :GarbageSegments (java.lang.Integer/valueOf (int (count ids))))
@@ -304,6 +313,10 @@
               (if (contains? result__8600__auto__ :returned)
                 (:returned result__8600__auto__)
                 (throw (:threw result__8600__auto__))))
+            ;; ATOMIC-NOTE [observed] append-leaf failure above is logged/caught,
+            ;; yet this pending batch is removed. flush-garbage merely awaits
+            ;; the agent; it does not attest that all marks became durable.
+            ;; [unknown] Recovery of such marks outside these callers is unproven.
             (dissoc m cluster))
           (assoc m cluster cluster_garbage)))))
   (reset-meta!
@@ -552,6 +565,10 @@
       *ns*))
   ;; Reclaim recorded values strictly older than tstamp, pruning completed
   ;; garbage leaves and directories as their contents are exhausted.
+  ;; ATOMIC-NOTE [documented] Excision's Performance passage separates index/log
+  ;; removal from later gc-storage reclamation. [observed] This pass follows the
+  ;; recorded garbage tree, not ordinary current index/log roots. Its body does
+  ;; not establish Atomic's native all-object sweep or reader-grace semantics.
   (defn gc
     ([cluster tstamp progress]
       (let [root (gc-get-node cluster (cluster/val-key->uuid (:key (ensure-root-ref cluster))))
@@ -614,6 +631,10 @@
   (.setMeta (clojure.lang.RT/var "datomic.garbage" "collection-agent") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.garbage" "collection-agent") (agent nil))
   ;; Serialize a collection request on the process-wide collection agent.
+  ;; ATOMIC-NOTE [observed] update/run-admin-command returns :queued after this
+  ;; send-off, not after deletes. Exceptions alarm/log and end this attempt.
+  ;; gc tolerates already-missing garbage metadata when a later attempt repeats;
+  ;; tools.gc-db instead calls gc synchronously outside this process-local agent.
   (defn queue-gc
     ([cluster older_than]
       (send-off

@@ -221,7 +221,7 @@ impl PortableBackup {
             &manifest,
         )? {
             BackupPoint {
-                lineage_id: crate::storage::engine::identity_string(publication.identity),
+                lineage_id: crate::storage::catalog::identity_string(publication.identity),
                 log_generation: metadata.generation,
                 basis_t: publication.basis,
                 manifest_hash,
@@ -349,6 +349,10 @@ impl ObjectWriter for RepositoryCopy {
             self.reused += 1;
         }
         Ok(id)
+    }
+    fn flush_objects(&mut self) -> Result<(), SemanticError> {
+        // Repository puts sync new files/directories and authenticate reuse.
+        Ok(())
     }
 }
 pub(crate) fn read_object(directory: &Path, id: Digest) -> Result<Vec<u8>, SemanticError> {
@@ -479,7 +483,7 @@ fn point_header(
     }
     Ok((
         BackupPoint {
-            lineage_id: crate::storage::engine::identity_string(identity),
+            lineage_id: crate::storage::catalog::identity_string(identity),
             log_generation: generation,
             basis_t: basis,
             manifest_hash,
