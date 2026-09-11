@@ -1,230 +1,270 @@
-# Goal 0 — Understand Datomic, then rebuild Atomic from that understanding
+# Goal 0 — Learn from Datomic, simplify Atomic, complete the cutover
 
 ## Objective
 
 Make Atomic a readable, source-grounded, idiomatic Rust realization of Datomic's
-behavior, architecture and design principles—not merely a database that passes
-similar tests. First explain the recovered implementation in place, then connect
-the Datomic Pro documentation to the implementing source, then use that knowledge
-to cut over Atomic's code, component boundaries and user documentation completely.
+behavior, architecture and design principles. Preserve strong implementations,
+repair demonstrated gaps and unnecessary complexity, and organize the product
+so a human can follow a user promise through its rationale into the code.
 
-The intended reader is a human trying to understand, use and maintain the system.
-They should be able to follow a documented behavior through its Datomic rationale
-and implementation into the corresponding Rust component without rediscovering
-the architecture or decoding a flat collection of files.
+Deliver the requested inline source WHY commentary, passage-level Pro-doc
+traces, coherent shared/peer/transactor components, and chapter-organized user
+documentation. This is a full first-release cutover, not a demand to rewrite
+every implementation. Working behavior alone does not prove faithful design;
+a differently named Rust type alone does not prove a missing capability.
 
 ## Authority and constraints
 
-- `datomic_pro_docs/` governs documented behavior. `1.0.7705/` supplies the
-  implementation mechanisms, algorithms and responsibility boundaries to learn
-  from. Read both; do not use the existing Rust implementation as the default
-  architectural authority. Existing tests are evidence, not an immutable spec.
-- Prefer the recovered design unless a concrete Rust/platform constraint or
-  demonstrated benefit justifies an adaptation. Record the mechanism preserved,
-  the difference and its consequence. “Idiomatic Rust,” “PostgreSQL only,” and
-  passing tests are not sufficient explanations for architectural substitution.
-- Native Rust and PostgreSQL remain the product target. PostgreSQL is the sole
-  provider behind a small opaque-storage boundary, not the database policy
-  engine. No JVM execution/wire parity, other-provider project or clean-room
-  reconstruction process is required. Personal use is the user's objective.
-- This is a full first-release cutover. Public Rust APIs, paths, schemas and
-  durable formats may change. No old readers, migration/rollback converters,
-  compatibility re-exports, historical-executable matrix or permanent dual engine.
-  Update all current callers. Do not reset unrelated databases or erase reference
-  material; validate on explicitly disposable fresh databases.
-- Preserve useful current user capabilities and current-version correctness:
-  exact values, schema/identity, immutable database values, declarative serialized
-  transactions, history/time views, peer-local reads, durable acknowledgements,
-  receipt-first exact retries, recovery, failover and backup/restore. An Atomic
-  feature without a direct Datomic counterpart needs an explicit disposition,
-  not silent removal or automatic architectural veto power.
-- Keep source commentary visibly separate from recovered code and docstrings.
-  Preserve source bodies and original provenance records; use comments for the
-  added explanation. Keep the unannotated baseline recoverable in Git and record
-  its revision. Do not create another copied source tree or mislabel annotated
-  files as pristine artifact output.
-- Use proportionate permanent regressions and actual application/PostgreSQL
-  checks. Measure complete-path work when claiming a cost improvement. No test
-  count, line-count target, annotation word quota or arbitrary performance-parity
-  threshold substitutes for understanding and a working product.
+- datomic_pro_docs governs documented behavior. The recovered 1.0.7705 corpus
+  supplies architectural and algorithmic evidence. Study mechanisms and their
+  consumers, not just API names or artifact directory membership.
+- Prefer the source design unless a concrete Rust/platform constraint or
+  demonstrated benefit justifies adapting it. Explain the preserved invariants,
+  state/coordination boundaries, algorithmic costs and consequences. Neither
+  “idiomatic Rust,” “PostgreSQL only,” nor passing tests excuses substitution.
+- Existing Rust is evidence, not either the automatic architectural authority
+  or disposable work. Choose retain, move, adapt, replace or remove for each
+  component. Retention needs a source/contract comparison; replacement needs a
+  specific behavioral, architectural, complexity or measured-cost reason.
+- Native Rust/PostgreSQL only. PostgreSQL supplies opaque immutable storage and
+  conditional references; Rust owns database structures and policy. No JVM/wire
+  parity, other-backend project or reconstruction of a runnable JVM distribution.
+  Do not port an unused collection merely because its source is bundled.
+- Preserve current user capabilities and current-version correctness: exact
+  values, schema/identity, immutable values and history, declarative serialized
+  transactions, peer-local computation, EDN/application workflows, durable
+  acknowledgements, receipt-first exact retries, restart recovery, failover,
+  maintenance and backup/restore. Unsupported source evidence is not permission
+  to drop a documented core behavior. Atomic-specific features need explicit
+  disposition; do not silently remove them or add optional product features.
+- Full first-release cutover permits API, path and format changes and fresh
+  databases. No old-format readers, compatibility re-exports, upgrade/rollback
+  converters, historical-executable matrix or permanent dual implementation.
+  Completed component changes may land incrementally; update all current callers
+  and remove their superseded paths. Do not reset unrelated databases or erase
+  Datomic reference bodies/provenance. Use explicitly disposable live fixtures.
+- Separate mechanisms from policies and composition from packaging. A Clojure
+  namespace is not a Rust crate requirement. Use coherent modules; use a small
+  workspace where crates enforce actual dependency or application boundaries.
+  Shared mechanisms must not be copied into both peer and transactor packages.
+- Prefer sufficient existing building blocks to new bespoke machinery. Preserve
+  efficient structural sharing where it matters: wrapping a whole copied map
+  in Arc is not equivalent. Internal mutable cache bookkeeping can be appropriate
+  when immutable database values do not depend on preserving cache versions.
+- Verification must fit the change and current product. No test/line-count
+  quotas, annotation word quotas, historical compatibility obligations or
+  invented performance-parity targets. Retain useful independent regressions,
+  not tests that merely defend a replaced architecture.
 
-## Starting facts
+## Evidence at this rewrite
 
-- The reference has `peer/` and `transactor/` artifact trees, each with `src-clj/`,
-  `src-java/` and `source-manifests/`. These are recovered initializer-level
-  sources, not the authors' original tree; some dependency sources are exact.
-  Compiler scaffolding and erased names limit what can be inferred about intent.
-- Distribution membership is not exclusive component ownership. Shared Java
-  renderings are duplicated, and same-path Clojure files can differ. Compare
-  before deduplicating analysis; retain provenance for both artifacts.
-- The retained corpus is not a runnable Datomic distribution. Use an original
-  runtime as an additional oracle only if legitimately available and useful;
-  do not make rebuilding the JVM distribution a prerequisite for this port.
-- Atomic currently has one `atomic-core` crate, mostly flat `src/*.rs`, several
-  `#[path]` inclusions, and flat user docs. Existing opaque PostgreSQL storage
-  and prior repairs are useful work to evaluate, not proof of full fidelity.
-- Archived goals are historical evidence, not active instructions. This plan
-  owns the work. Only the scaffold has been created; no stage is yet complete.
+Baseline: 397f5668b36f00f8c07914d895575dfe67b8c562. Recheck against the
+execution checkout; this is a bounded assessment, not a whole-product verdict.
 
-## Learning and traceability contract
+- The corpus contains recovered Datomic implementations and exact bundled
+  library sources. peer/ and transactor/ are artifact-provenance boundaries,
+  not exclusive ownership boundaries. Compare copies before sharing annotations.
+- clojure/data/priority_map.clj is the exact data.priority-map library source.
+  Static callers include tools.analyzer.jvm.utils → core.memoize/lru →
+  core.cache/LRUCache → priority-map. No direct datomic namespace reference was
+  found. That does NOT establish “never used,” and static callers do not prove
+  a particular runtime path executes it. Datomic's own cache factories here
+  use Caffeine. Study dependency mechanisms where relevant; neither dismiss
+  them as uninteresting nor turn library presence into a feature requirement.
+- Real foundations already exist: src/shared_map.rs implements path-copied AVL
+  ownership; src/overlay_index.rs shares datoms across indexes; database-value
+  tests exercise long speculative chains, sibling sharing and reclamation.
+  src/tiered_assessor.rs is shared by memory, speculative and durable writes.
+  src/storage/schema.sql holds opaque objects/references; engine.rs resolves
+  matching receipts before fresh assessment. These are candidates to retain
+  after comparison, not automatic rewrite targets or proof of complete fidelity.
+- Demonstrated design debt: tree_cursor.rs, program_cache.rs and fulltext_store.rs
+  repeat map/deque recency bookkeeping. The tree-cache hit scans the deque under
+  a shared mutex. This establishes a cost shape and consolidation opportunity,
+  not measured application harm or a mandate to use a priority map.
+- One atomic-core crate, mostly flat source/docs and many path-attributed modules
+  make ownership harder to discover. Existing ObjectReader/ObjectWriter and
+  shared traversal boundaries are useful starting points. Folder moves alone
+  will not establish sound responsibility or dependency boundaries.
+- Latest bounded check: cargo test --offline --lib -- --test-threads=1 reported
+  420 passed and 13 failed in the sandbox. All 13 failures passed when the
+  affected local-transport and SSD-cache suites were rerun outside filesystem
+  ownership/socket restrictions (18 tests reported passed across those suites).
+  ATOMIC_POSTGRES_URL was unset: PostgreSQL-dependent cases returned early.
+  This is NOT fresh PostgreSQL, application, failover or backup acceptance.
+  docs/acceptance.md records earlier live results and limited local measurements;
+  do not silently promote those records into current verification.
+- User documentation still needs reconciliation: README's retained-handle
+  wording must agree with the current grace-based, no-reader-pin contract in
+  docs/read-values.md and the actual implementation.
 
-**Source coverage.** Account for every source file in both artifact trees. Walk
-each distinct Datomic implementation and annotate every major namespace, class,
-protocol, data structure and function. Explain purpose, callers/callees, data
-flow, invariants, ownership of mutable state, coordination, failure behavior and
-important cost/tradeoff decisions where relevant. Explain why the mechanism
-exists and why the obvious alternative would change the design—not a line-by-line
-English translation of syntax. Small helpers sharing one rationale may share a
-note with explicit symbol coverage.
+The product has substantial implementation substance but uneven architectural
+coherence. Neither “all missing features are resolved” nor “best-in-class
+replication” has been established. The stages below have not been executed.
 
-Interlace clearly marked `ATOMIC-NOTE` comments next to the relevant source.
-Separate **observed mechanism**, **documented rationale**, **inferred rationale**
-and **unknown**. Cite the evidence supporting a WHY; never invent the authors'
-thought process. Mark decompiler artifacts and reconstruction uncertainty.
-Reuse a canonical explanation for byte-identical copies/generated forwarding
-scaffolding, with explicit counterpart links. Classify bundled libraries and
-non-target backends and explain their role; inspect implementation details used
-by the port without re-porting or exhaustively explaining unrelated dependencies.
-No file disappears into an unrecorded “not relevant” bucket.
+## Source learning and traceability
 
-**Documentation coverage.** Walk every Pro-doc chapter. Give each important
-behavioral paragraph, rule, table entry and example a stable locator and a trace
-to the source that actually implements it: artifact/path, namespace/class and
-symbol, section/line range, and baseline revision or equivalent stable identity.
-Put clearly separated development trace notes beside the reference material,
-or in chapter-local companions linked from those passages when notes would swamp
-the text. Preserve the original wording and source URLs. A link to a namespace
-alone is insufficient when it leaves the implementing path unexplained.
+**Account for the corpus.** Keep one navigable atlas identifying every source
+file's origin, role and counterpart: Datomic implementation, exact dependency,
+recovered/generated scaffolding, or non-target integration. Inventory can be
+mechanical; substantive reasoning follows coherent components and their callers.
+No unexplained “irrelevant” bucket and no repeated analysis of identical copies.
 
-A trace can span multiple functions/components; do not force a one-to-one map.
-Distinguish implementation, delegation to a dependency, documentation newer than
-the recovered version, non-code operational guidance, explicitly non-target
-integration, and unresolved evidence. Missing source evidence is not permission
-to drop a documented core behavior. Explain and resolve consequential conflicts.
-Link each adopted contract onward to its Rust owner and focused acceptance case.
+**Explain the WHY in place.** For each distinct Datomic implementation, explain
+major namespaces/classes, protocols, structures and functions with marked
+ATOMIC-NOTE comments. Cover purpose, consumers, invariants, data flow, mutable
+state, coordination, failures and significant cost/tradeoff decisions. Group
+small helpers under a shared rationale where appropriate. Read relevant
+dependency and Java implementations when they carry the mechanism; do not require
+an essay or a replacement for every bundled helper.
 
-**Economy.** Keep one navigable corpus/trace index plus the annotations and
-chapter-local links, not competing audit reports and trackers. Reuse existing
-explanations after checking them. Start with one representative end-to-end path
-to calibrate useful depth, then process coherent components rather than repeatedly
-reading the whole repository. Source understanding and doc mapping precede the
-production redesign; annotations are maintained as the port reveals new facts.
+Distinguish observed mechanism, documented rationale, inferred rationale and
+unknown. Do not invent the authors' thought process or treat decompiler
+scaffolding as intentional source design. Preserve code bodies, docstrings,
+original attribution and provenance records. Record the unannotated revision;
+annotated files must not be represented as still-verbatim archive extracts.
+
+**Trace user promises precisely.** Cover every Pro-doc chapter's important
+behavioral paragraphs, rules, table entries and examples. Use a stable passage
+locator and implementing artifact/path + symbol + baseline/section or lines.
+Place clearly separate notes beside the reference text or use chapter-local
+companions linked from those passages. Preserve original wording and URLs.
+A namespace-only link is insufficient if the implementing path remains unclear.
+
+Traces may cross components or delegate to libraries. Distinguish implementation,
+version mismatch, operational guidance, non-target integration and unresolved
+evidence. Link adopted contracts onward to their Rust owners and focused checks.
+Treat a documented feature gap, architectural mismatch, optimization opportunity
+and packaging difference as different findings, with different remedies.
+
+**Work component-first.** Before changing a component, read/annotate its relevant
+source and callers, trace its documented contract, then decide its Rust owner
+and disposition. Complete that implementation and exercise its user-facing path.
+Unfinished study of unrelated components is not a global prohibition on useful
+code changes. Full corpus accounting, major-source explanations and important
+passage coverage remain final deliverables; update them throughout the cutover.
+Keep decisions in this plan and existing trace records, not competing reports.
 
 ## Ordered stages
 
-### 1. Establish the source atlas — pending
+### 1. Calibrate one end-to-end slice and component map — pending
 
-- **Outcome:** A trustworthy map of what source exists, what is duplicated or
-  generated, and how to read it without wasting work.
-- **Focus:** Record the baseline and file provenance; identify canonical shared
-  implementations and meaningful artifact differences. Pilot the annotation and
-  trace method on entity-map submission through expansion, durable publication
-  and a peer read. Expose current Rust correspondences without redesigning yet.
-- **Completion signal:** Every source file has a classification/counterpart;
-  the pilot has useful inline WHY notes and precise doc/source links, with
-  evidence versus inference visible. The next component to explain is clear.
+- **Outcome:** A source-backed route through the working product and a practical
+  target ownership map, without a whole-corpus annotation gate.
+- **Focus:** Verify provenance and inventory counterparts; pilot entity-map/EDN
+  submission through expansion, assessment, durable publication, report and peer
+  read. Annotate the actual mechanisms and map relevant doc passages. Compare
+  current Rust and name concrete retain/move/adapt/replace decisions. Establish
+  the shared/peer/transactor/provider dependency direction and user-doc layout.
+- **Completion signal:** A reader can follow that slice through source, docs and
+  Rust; strengths, real gaps and unknowns are distinguished. Target boundaries
+  and the next component change are justified by callers and contracts. Corpus
+  inventory exists; unrelated detailed annotation is not a prerequisite.
 
-### 2. Explain the recovered implementation — pending
+### 2. Reconcile shared values, structures and storage — pending
 
-- **Outcome:** An interlaced, human-readable explanation of Datomic's actual
-  component design and major algorithms.
-- **Focus:** Walk the distinct source component by component and follow the
-  important calls, not just filenames. Cover the information model, transaction
-  expansion/application, log/index trees, novelty merging, query/rules, Pull and
-  navigation, peer communication/caches, coordination, lifecycle and maintenance.
-  Study Java/support implementations when they carry the mechanism.
-- **Completion signal:** The atlas accounts for every file, major implementation
-  symbols have explanations or explicit shared-note links, and a reader can trace
-  writes, reads, indexing, recovery and maintenance through the source. Material
-  unknowns are named with their consequences rather than filled with guesses.
+- **Outcome:** Coherent shared foundations with small opaque-storage boundaries,
+  preserving useful existing mechanisms instead of recreating them by default.
+- **Focus:** Apply the component loop to values/schema/identity, persistent maps
+  and overlays, log/index trees, codecs, canonical object I/O and reference
+  primitives. Separate collection/traversal mechanisms from cache/maintenance
+  policy. Study relevant library designs, including priority-map composition,
+  without requiring that specific collection where consumers need something else.
+- **Completion signal:** Retained or repaired components have source/doc traces,
+  clear owners and updated callers. Current semantic/structural checks and real
+  PostgreSQL primitive/publication checks pass. Evidence supports selective
+  traversal and sharing; SQL does not acquire database-engine policy.
 
-### 3. Connect the Pro docs to source — pending
+### 3. Reconcile the transactor and lifecycle — pending
 
-- **Outcome:** A passage-level map of user promises to implementing mechanisms,
-  including functionality earlier audits overlooked.
-- **Focus:** Traverse `00_start_here` through `09_optional`, including API details,
-  examples and operational qualifications. Connect the docs to the annotated
-  source, reconcile version differences and identify current Atomic deviations.
-  Shared Java/Clojure API descriptions may share a semantic trace.
-- **Completion signal:** Every important passage has an implementation trace or
-  an explicit justified disposition. No relevant behavior remains silently
-  unmapped; unresolved core gaps and architectural departures are actionable.
+- **Outcome:** Readable serialized write processing and reliable operations over
+  the shared structures, with one authoritative transaction implementation.
+- **Focus:** Expansion/functions, identity resolution and validation, assessment,
+  log durability, exact receipts, acknowledgements, novelty/indexing publication,
+  writer fencing, recovery, retention, collection and excision. Compare state,
+  pipeline and failure boundaries with the source; remove redundant machinery
+  only after preserving its real contract.
+- **Completion signal:** Source-to-Rust traces explain write and maintenance
+  paths. Fresh-database transaction, ambiguous-outcome retry, restart, stale
+  writer/failover and maintenance cases pass using the actual service. Completed
+  indexing preserves subsequent novelty, and acknowledgements follow durability.
 
-### 4. Derive the native component architecture — pending
+### 4. Reconcile peer-local reads and computation — pending
 
-- **Outcome:** A concrete, source-justified replacement layout and dependency
-  direction, with a bounded cutover route for each current component.
-- **Focus:** Separate peer and transactor packages and organize shared model,
-  transaction, index/log, query, storage-provider and operational components into
-  coherent Rust modules. Use a small Cargo workspace where package boundaries
-  enforce real separation; do not create a crate per namespace. Shared Datomic
-  code becomes shared Rust code, not copied peer/transactor implementations.
-  Keep executables thin and peer reads independent of a runnable transactor.
-  Derive the exact layout from the source atlas, not the current filename prefixes.
-- **Completion signal:** The target tree and dependencies are recorded; every
-  existing capability/module has a keep/adapt/replace/remove destination and
-  source rationale. Native adaptations preserve the source mechanism or document
-  a concrete reason to differ. The docs chapter layout is also decided.
+- **Outcome:** A coherent peer library using shared immutable structures, with
+  source-grounded algorithms and an understandable cache/observation model.
+- **Focus:** Database values/time views, speculative branches, index/log cursors,
+  recent-plus-stored merging, Datalog/rules, Pull/entity navigation, fulltext,
+  caching and transaction observation. Address repeated cache bookkeeping based
+  on actual consumers. Keep query work independent of a running transactor.
+  Indexed/set-oriented leverage is not interchangeable with passing small scans.
+- **Completion signal:** Relevant documented examples and application reads pass;
+  held values, history, source composition and speculation preserve their
+  contracts. Cache changes preserve active reader ownership and have measured
+  complete-path costs, including contention/allocation where relevant.
 
-### 5. Cut over shared foundations and write processing — pending
+### 5. Finish application boundaries and chapter-organized docs — pending
 
-- **Outcome:** Shared data structures and the transactor implement the annotated
-  design in the new organization, over minimal PostgreSQL storage primitives.
-- **Focus:** Port or retain proven equivalents for values/schema/identity,
-  persistent structures, codecs, transaction expansion and validation, serialized
-  application, durability, receipts, publication, indexing, fencing and maintenance.
-  Translate Clojure mechanisms into Rust ownership/types/iterators/concurrency
-  while preserving their information flow and coordination boundaries. Remove
-  superseded implementations and their callers as each component takes over.
-- **Completion signal:** Source-to-Rust traces land on the new owners. Focused
-  semantics and real fresh-database write/retry/restart/failover/maintenance checks
-  pass, and inspected dependency/state flow matches the intended architecture.
-  Pure/speculative and durable paths share the appropriate underlying machinery.
+- **Outcome:** An end user can understand and use the organized product without
+  knowing its development history or piecing together internal types.
+- **Focus:** Compose peer/transactor/shared modules and justified crate boundaries;
+  keep executables thin. Reconcile typed APIs, EDN file/stdin workflows, native
+  computation, transports, reports/change consumers, administration and
+  backup/restore. Organize docs by the Pro hierarchy: 00_start_here, 01_tutorials,
+  02_core_concepts, 03_schema, 04_transactions, 05_query_and_pull, 06_indexes,
+  07_peer_api, 08_operations, 09_optional. Use native Rust API chapters rather
+  than JVM placeholders; separate development traces from user instructions.
+- **Completion signal:** Examples, CLI, rustdoc and README point to current
+  owners/chapters. A real PostgreSQL application exercises create/schema,
+  EDN and typed transactions, reads, reopen/retry and backup/restore. Reader
+  retention and other operational promises agree with code and checks. Peers do
+  not depend on transactor runtime ownership; shared code is not duplicated.
 
-### 6. Cut over peers, queries and application interfaces — pending
+### 6. Close source/doc coverage and remove superseded work — pending
 
-- **Outcome:** The application has a coherent native peer library with Datomic's
-  local computation model, backed by the same shared structures as the writer.
-- **Focus:** Port database values and time views, selective index/log reads,
-  novelty merging/caching, Datalog/rules, Pull/entity navigation, fulltext,
-  transactions/reports, EDN, native application functions and current transport
-  workflows. Preserve the source's algorithmic leverage and demand-driven work;
-  a nested full scan is not equivalent to an indexed/set-oriented algorithm just
-  because small examples agree. Remove replaced readers/evaluators/adapters.
-- **Completion signal:** Documented examples and current application workflows
-  run through the new peer/transactor organization. Held values, history,
-  speculation, source composition and exact retries remain correct. Complete-path
-  measurements test the claimed selective work and sharing, not isolated helpers.
+- **Outcome:** The requested source commentary and passage-level traceability are
+  complete, and no abandoned implementation remains behind the new organization.
+- **Focus:** Reconcile the atlas with both corpora and all Pro chapters; inspect
+  remaining distinct relevant code and missing promises, not already-explained
+  copies. Resolve consequential unknowns and version differences. Reopen owning
+  stages for discovered gaps. Remove obsolete code, dependencies, tests, fixtures
+  and flat docs; port independent useful regressions and update all callers.
+- **Completion signal:** Every source file is accounted for, major distinct
+  Datomic mechanisms have WHY explanations, and important passages have precise
+  traces or justified dispositions. Relevant gaps are resolved, not renamed
+  non-goals. One current implementation remains, with no compatibility aliases,
+  dead fallback path, misleading provenance or broken documentation links.
 
-### 7. Finish the documentation and full cutover — pending
+### 7. Establish integrated product acceptance — pending
 
-- **Outcome:** One understandable, working product and one current set of user
-  docs, with no abandoned implementation or unresolved core fidelity gap.
-- **Focus:** Rebuild `docs/` into the Pro docs' ordered chapter hierarchy:
-  `00_start_here`, `01_tutorials`, `02_core_concepts`, `03_schema`,
-  `04_transactions`, `05_query_and_pull`, `06_indexes`, `07_peer_api`,
-  `08_operations`, `09_optional`. Mirror meaningful subchapters; replace JVM API
-  guides with Rust equivalents and explain non-target integrations without fake
-  support or empty placeholder chapters. Separate development commentary from
-  user instructions. Update README/rustdoc/examples/CLI links and remove flat
-  superseded docs, dead code/dependencies, obsolete fixtures and test scaffolding.
-  Port useful behavioral regressions; discard tests that only defend the replaced
-  architecture. Do not retain old paths through compatibility aliases.
-- **Completion signal:** A human can follow docs → annotated Datomic source →
-  organized Rust implementation → working example/check. Fresh PostgreSQL-backed
-  workflows, recovery, exact retries, failover, backup/restore and relevant
-  semantic/algorithmic checks pass on the final tree. Structural review confirms
-  the source-derived boundaries, link checks pass, and no obsolete engine path
-  or unreported relevant gap remains. Reopen its owning stage for any failure.
+- **Outcome:** One source-grounded, maintainable, working native product with
+  an honest statement of verified behavior and operating limits.
+- **Focus:** Run proportionate final semantic, architectural and application
+  checks on the final tree. Exercise actual PostgreSQL durability, restart,
+  exact retries, failover, maintenance, backup/restore and transport security
+  where supported. Inspect dependencies and mutable-state boundaries, not just
+  directory names. Measure representative full write/read/indexing paths at
+  meaningful sizes before claiming scalability or an improvement.
+- **Completion signal:** A human can follow docs → annotated source → Rust owner
+  → working example/check. Current-version integrated workflows pass without
+  skipped prerequisites being counted as acceptance. Costs and limits are
+  explicit; all required coverage, cleanup and capability outcomes hold. Reopen
+  the owning stage for failures; do not create a corrective parent or silently
+  narrow completion.
 
-## Completion and continuation
+## Status and continuation
 
-Completion requires all seven outcomes: the source learning and traceability
-artifacts **and** the fully cut-over product. An annotated corpus, a prettier
-directory tree, a scaffold or a green test count alone is not completion.
+All stages are pending. This rewrite changes the strategy, not implementation
+status. Existing product strengths and prior results remain evidence to reuse
+after checking applicability; the product is not starting from zero.
 
-Current state: scaffold only. Begin Stage 1 by checking the reference READMEs and
-manifests, recording the source baseline, and choosing the canonical paths for
-the entity-map/write/read pilot. Leave unrelated worktree changes intact.
-Maintain a concise continuation note here with the active component, material
-findings, verified results and next action; do not append a session transcript.
+Next: execute Stage 1's entity-map/write/read pilot, using the existing manifests
+and known source paths. Settle component owners and the first concrete change;
+do not start another exhaustive repository-wide audit before doing that work.
+Keep one active stage/component and one integration owner. Replace this note at
+session boundaries with material decisions, checks actually run, remaining
+uncertainty and the next action. Archived goals are evidence only.
+
+Completion requires the entire product cutover AND the requested learning and
+traceability deliverables. An annotation campaign, folder reorganization,
+scaffold, passing test count or completed individual stage is not the finish line.

@@ -1,28 +1,31 @@
 ```text
-Rebuild Atomic as a source-grounded, idiomatic Rust realization of Datomic's
-behavior, architecture and principles using
+Complete Atomic's source-grounded Rust/PostgreSQL cutover using
 /home/jake/Developer/atomic/goal-0/0-plan.md and
 /home/jake/Developer/atomic/goal-0/0-loop.md.
 
-First explain the recovered 1.0.7705 implementation with inline WHY commentary,
-then trace important datomic_pro_docs passages to implementing source, then
-fully cut over Atomic into coherent peer, transactor and shared components with
-user docs organized like the Pro docs. Distinguish observed mechanisms,
-documented rationale, inference and unknowns. Account for every source file
-without repeating identical artifacts or porting compiler/dependency boilerplate.
-Learn from and preserve the source mechanisms, not just similar test outputs.
+Use datomic_pro_docs as semantic authority and 1.0.7705 as architectural evidence.
+Preserve strong existing implementations and current user capabilities; correct
+demonstrated behavioral gaps, architectural drift and unnecessary complexity.
+Do not equate library presence or a missing Rust type with a missing feature.
 
-Native Rust/PostgreSQL only. Full first-release cutover: no old formats,
-compatibility shims, migrations, rollback converters or permanent dual engine.
-Preserve user capabilities and current-version correctness, not existing code
-structure. Do not erase reference bodies/provenance or reset unrelated databases.
+Work component by component: read source and callers, annotate the WHY, trace
+relevant doc passages, compare Rust mechanisms, then retain/move/adapt/replace
+with evidence and verify the integrated result. Unrelated source study is not
+a blanket implementation gate. Full source accounting, major WHY explanations
+and important paragraph-level traces remain required final deliverables.
 
-Sync actual state, execute the first unfinished stage, and continue through all
-stages using best judgment. Keep the plan and source/doc/Rust traces current;
-remove superseded code, tests and docs as replacements take over. Use focused
-regressions, real PostgreSQL/application checks and measured complete-path costs.
-Avoid recursive scaffolds and duplicate process artifacts. Leave a concise
-continuation note when needed. Finish only when the learning artifacts and the
-full organized product, cleanup and integrated acceptance hold; report blockers
-and uncertainty plainly. A scaffold or completed stage is not the finish line.
+Organize shared mechanisms, peers and transactors around real responsibilities,
+with modules and justified crate boundaries; organize user docs like the Pro
+chapters. Full first-release cutover: no old-format compatibility, converters,
+aliases or permanent dual engine. Remove superseded code/tests/docs while
+retaining useful independent regressions. No JVM parity or other-store project.
+Do not erase reference bodies/provenance or reset unrelated databases.
+
+Sync actual state, execute the first unfinished stage and continue through all
+stages. Use focused checks, real PostgreSQL/application workflows, architectural
+inspection and measured complete-path costs. Skipped checks and prior reports
+are not fresh verification. Keep one active stage/component, update the plan and
+traces, and leave concise continuation notes. No recursive/corrective goals.
+Finish only when the learning deliverables, organized product, cleanup and full
+integrated acceptance hold; report blockers and uncertainty plainly.
 ```
