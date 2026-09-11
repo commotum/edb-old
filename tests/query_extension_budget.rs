@@ -344,11 +344,8 @@ fn native_postgres_deployed_extensions_share_query_work_at_captured_basis() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
     let writer = common::start_service(&postgres, &id);
     let report = writer
@@ -383,7 +380,7 @@ fn native_postgres_deployed_extensions_share_query_work_at_captured_basis() {
     );
     let hash = store.deploy_program_blob(&program).unwrap();
     drop(store);
-    let resolved = atomic_core::PostgresStore::connect(&postgres)
+    let resolved = common::TestStore::connect(&postgres)
         .unwrap()
         .resolve_program(hash)
         .unwrap();

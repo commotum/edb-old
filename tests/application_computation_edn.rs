@@ -213,11 +213,8 @@ fn portable_helper_program_is_durable_and_invokes_after_reopen() {
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "portable_function_program");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     store
         .create_database("portable-functions", Schema::new())
         .unwrap();
@@ -253,7 +250,7 @@ fn portable_helper_program_is_durable_and_invokes_after_reopen() {
     let connection = Connection::connect(&fixture.connection, "portable-functions", 8).unwrap();
     let database = connection.db();
     assert_eq!(database.basis_t(), basis);
-    let resolved = PostgresStore::connect(&fixture.connection)
+    let resolved = common::TestStore::connect(&fixture.connection)
         .unwrap()
         .resolve_program(hash)
         .unwrap();

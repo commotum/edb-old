@@ -2,7 +2,11 @@
 //! entities or persisted key changes. Oracles compare the intended value/attr
 //! relation independently of the virtual-boundary comparator and tree routing.
 use super::*;
+use crate::index::NormalizedIndexBoundary;
+use crate::recent::{EndpointProjection, RecentLimits};
+use crate::tree_cursor::{TreeBoundary, boundary_start_child, leaf_boundary_lower_bound};
 use crate::{Attribute, Cardinality, Schema, Value, ValueType};
+use crate::{IndexBoundary, IndexComponents};
 use bigdecimal::BigDecimal;
 use std::str::FromStr;
 

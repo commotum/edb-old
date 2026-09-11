@@ -1,8 +1,9 @@
+mod common;
 use atomic_core::persistent_tree::TreeConfig;
 use atomic_core::{
-    Attribute, BackgroundIndexingConfig, CapacityLimits, Cardinality, EntityRef, Keyword,
-    PostgresStore, Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp,
-    TxValue, Value, ValueType,
+    Attribute, BackgroundIndexingConfig, CapacityLimits, Cardinality, EntityRef, Keyword, Schema,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue, Value,
+    ValueType,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -82,10 +83,9 @@ fn production_writer_residency_is_bounded_by_recent_and_cache_tiers() {
     let Some(connection) = connection() else {
         return;
     };
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
+    common::install(&connection).unwrap();
     let database_id = unique("writer_residency_bounded");
-    let mut setup = PostgresStore::connect(&connection).unwrap();
+    let mut setup = common::TestStore::connect(&connection).unwrap();
     let initial_t = setup
         .create_database(&database_id, schema())
         .unwrap()
@@ -212,15 +212,6 @@ fn production_writer_residency_is_bounded_by_recent_and_cache_tiers() {
     assert!(after.last_native_sql_reads > 0);
     assert!(after.last_native_sql_read_bytes > 0);
     assert!(after.last_native_sql_reads < 128);
-    assert!(after.last_commitment_node_visits < 128);
-    assert!(after.last_commitment_sql_node_reads > 0);
-    assert!(after.last_commitment_sql_node_read_bytes > 0);
-    assert!(after.last_commitment_sql_node_writes > 0);
-    assert!(after.last_commitment_sql_node_write_bytes > 0);
-    assert_eq!(after.last_commitment_sql_coordinate_reads, 1);
-    assert!(after.last_commitment_sql_coordinate_read_bytes > 0);
-    assert_eq!(after.last_commitment_sql_coordinate_writes, 1);
-    assert!(after.last_commitment_sql_coordinate_write_bytes > 0);
     assert!(after.resident_schema_attributes > 0);
     assert!(after.resident_schema_estimated_bytes > 0);
     assert!(after.resident_ident_names > 0);

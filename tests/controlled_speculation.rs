@@ -7,10 +7,9 @@ mod common;
 use atomic_core::{
     Attribute, CallableRef, Cardinality, DB_ATTR_PREDS, DB_ENSURE, DB_ENTITY_ATTRS,
     DB_ENTITY_PREDS, DB_FN, DB_IDENT, DatabaseValue, EntityRef, ErrorCategory, Instruction,
-    Keyword, Peer, PostgresMigrator, PostgresStore, Program, ProgramCall, ProgramHash, ProgramKind,
-    Schema, SemanticError, ServiceTransactionReport, SpeculationLimits,
-    SpeculativeTransactionReport, Symbol, TransactionRequest, TransactionService, TxForm, TxOp,
-    TxValue, Value, ValueType,
+    Keyword, Peer, Program, ProgramCall, ProgramHash, ProgramKind, Schema, SemanticError,
+    ServiceTransactionReport, SpeculationLimits, SpeculativeTransactionReport, Symbol,
+    TransactionRequest, TransactionService, TxForm, TxOp, TxValue, Value, ValueType,
 };
 use postgres::{Client, NoTls};
 use std::sync::mpsc;
@@ -39,9 +38,10 @@ fn unique() -> String {
 struct Fixture {
     connection: String,
     database_id: String,
-    store: PostgresStore,
+    store: common::TestStore,
     service: TransactionService,
     peer: Peer,
+    _scope: common::PostgresFixture,
 }
 
 impl Fixture {
@@ -50,11 +50,10 @@ impl Fixture {
             eprintln!("SKIP controlled speculation: ATOMIC_POSTGRES_URL is unset");
             return None;
         };
+        let scope = common::PostgresFixture::new(&connection, "controlled_speculation");
+        let connection = scope.connection.clone();
         let database_id = unique();
-        PostgresMigrator::connect(&connection)
-            .unwrap()
-            .migrate()
-            .unwrap();
+        common::install(&connection).unwrap();
         let mut schema = Schema::new();
         for (attribute, name) in [(BALANCE, "balance"), (SNAPSHOT, "snapshot")] {
             schema
@@ -66,7 +65,7 @@ impl Fixture {
                 ))
                 .unwrap();
         }
-        let mut store = PostgresStore::connect(&connection).unwrap();
+        let mut store = common::TestStore::connect(&connection).unwrap();
         store.create_database(&database_id, schema).unwrap();
         let service = common::start_service(&connection, &database_id);
         let peer = Peer::connect(&connection, &database_id, 8).unwrap();
@@ -76,6 +75,7 @@ impl Fixture {
             store,
             service,
             peer,
+            _scope: scope,
         })
     }
 
@@ -336,8 +336,13 @@ fn native_controlled_generation_is_pure_same_before_and_validates_exact_after() 
     let mut transaction = client.transaction().unwrap();
     transaction
         .query_one(
-            "SELECT basis_t FROM atomic_heads WHERE database_id = $1 FOR UPDATE",
-            &[&fixture.database_id],
+            "SELECT revision FROM atomic_refs WHERE key = $1 FOR UPDATE",
+            &[&atomic_core::storage::BlockDatabase::resolve(
+                &atomic_core::PostgresConnectionConfig::plaintext(&fixture.connection),
+                &fixture.database_id,
+            )
+            .unwrap()
+            .reference_key()],
         )
         .unwrap();
     let (sender, receiver) = mpsc::channel();
@@ -396,7 +401,7 @@ fn native_predicate_activation_and_changed_bindings_match_durable_rules() {
         "missing-unused",
         &binding("unused", [0xa5; 32]),
         1_000,
-        "postgres/program-not-found",
+        "storage/missing-object",
     );
     let mut wrong = binding("wrong", transaction_hash);
     wrong.push(add(
@@ -493,11 +498,11 @@ fn native_missing_transitive_code_and_resource_rejections_do_not_publish() {
     let before = fixture.peer.db();
     let forms = binding("missing-child", missing_root);
     let pure = before.with_forms(&forms, 1_000).unwrap_err();
-    assert_eq!(pure.code, "postgres/program-not-found");
+    assert_eq!(pure.code, "storage/missing-object");
     let durable = fixture
         .transact("missing-child", &before, &forms, 1_000)
         .unwrap_err();
-    assert_eq!(durable.code, "postgres/program-ref-missing-program");
+    assert_eq!(durable.code, "storage/missing-object");
     assert_eq!(fixture.peer.sync().unwrap().basis_t(), before.basis_t());
 
     let child_hash = fixture.deploy(&snapshot());
@@ -676,30 +681,16 @@ fn speculative_code_closure_survives_chaining_cache_eviction_and_scoped_reclamat
             .unwrap()
             .db_after;
     }
-    let mut client = Client::connect(&fixture.connection, NoTls).unwrap();
-    let mut transaction = client.transaction().unwrap();
-    transaction
-        .query_one(
-            "SELECT set_config('atomic.tree_gc_active', 'v13', true)",
-            &[],
-        )
-        .unwrap();
-    for hash in [root_hash, leaf_hash] {
-        let references: i64 = transaction
-            .query_one(
-                "SELECT count(*) FROM atomic_program_generation_refs WHERE program_hash = $1",
-                &[&&hash[..]],
-            )
+    // Deliberate deletion of only this fixture's never-committed program roots.
+    // The speculative value's retained closure must not depend on provider I/O.
+    let config = atomic_core::PostgresConnectionConfig::plaintext(&fixture.connection);
+    assert_eq!(
+        atomic_core::storage::PgBlockStore::connect(&config)
             .unwrap()
-            .get(0);
-        assert_eq!(
-            references, 0,
-            "only this fixture's uncommitted code may be reclaimed"
-        );
-        let removed = transaction.execute("DELETE FROM atomic_programs WHERE program_hash = $1 AND NOT EXISTS (SELECT 1 FROM atomic_program_generation_refs WHERE program_hash = $1)", &[&&hash[..]]).unwrap();
-        assert_eq!(removed, 1);
-    }
-    transaction.commit().unwrap();
+            .remove_objects(&[root_hash, leaf_hash])
+            .unwrap(),
+        2
+    );
     for hash in [root_hash, leaf_hash] {
         let uncached = original
             .with_forms(
@@ -711,7 +702,7 @@ fn speculative_code_closure_survives_chaining_cache_eviction_and_scoped_reclamat
             )
             .unwrap_err();
         assert_eq!(
-            uncached.code, "postgres/program-not-found",
+            uncached.code, "storage/missing-object",
             "shared-cache eviction must be observed: {uncached:?}"
         );
     }

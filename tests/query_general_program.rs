@@ -476,11 +476,8 @@ fn postgres_general_program_persists_reopens_invokes_and_keeps_speculation_inert
     };
     let total = std::time::Instant::now();
     let fixture = common::PostgresFixture::new(&url, "general_program");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -620,7 +617,7 @@ fn postgres_general_program_persists_reopens_invokes_and_keeps_speculation_inert
             1024 * 1024,
         )
         .unwrap();
-    let mut reopened_store = PostgresStore::connect(&fixture.connection).unwrap();
+    let mut reopened_store = common::TestStore::connect(&fixture.connection).unwrap();
     assert_eq!(
         encode_program(&reopened_store.resolve_program(hash).unwrap()).unwrap(),
         expected_bytes

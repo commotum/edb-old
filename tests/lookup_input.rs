@@ -451,22 +451,19 @@ fn lookup_inputs_cross_native_socket_and_preserve_receipts_recovery_and_rejected
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
-    let before = store.recover(&id).unwrap();
+    let before = Database::new(schema()).unwrap();
     let expected_seed = before.with(&seed_ops(), 10).unwrap();
     let writer = common::start_service(&postgres, &id);
     let server =
         atomic_core::LocalTransactionServer::start(writer.client(), Default::default()).unwrap();
     let peer = atomic_core::Connection::connect(&postgres, &id, 4).unwrap();
-    // Keep a receipt encoded entirely in the pre-LookupInput grammar, then
+    // Keep a typed-operations receipt, then
     // retry it after committing new input shapes and reopening the writer.
     let seed_request =
-        atomic_core::TransactionRequest::new("legacy-seed", seed_ops()).with_tx_instant(10);
+        atomic_core::TransactionRequest::new("typed-seed", seed_ops()).with_tx_instant(10);
     let seeded = peer
         .transact_socket(
             server.endpoint(),
@@ -498,17 +495,14 @@ fn lookup_inputs_cross_native_socket_and_preserve_receipts_recovery_and_rejected
     assert_eq!(changed.tx_data, expected.tx_data);
     common::assert_same_information(&changed.db_after, &expected.db_after);
     common::assert_same_information(&old, &expected_seed.db_after);
-    let mut sql = postgres::Client::connect(&postgres, postgres::NoTls).unwrap();
-    let head = |sql: &mut postgres::Client| {
-        let row = sql
-            .query_one(
-                "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id = $1",
-                &[&id],
-            )
-            .unwrap();
-        (row.get::<_, i64>(0), row.get::<_, Vec<u8>>(1))
+    let head = || {
+        atomic_core::Connection::connect(&postgres, &id, 8)
+            .unwrap()
+            .db()
+            .snapshot_key()
+            .unwrap()
     };
-    let committed_head = head(&mut sql);
+    let committed_head = head();
     for (index, reference) in invalid_references().into_iter().enumerate() {
         let forms = vec![
             TxForm::Op(add(
@@ -542,7 +536,7 @@ fn lookup_inputs_cross_native_socket_and_preserve_receipts_recovery_and_rejected
             "case {index}"
         );
         assert_eq!(
-            head(&mut sql),
+            head(),
             committed_head,
             "rejected case {index} must not advance the durable head"
         );
@@ -557,7 +551,7 @@ fn lookup_inputs_cross_native_socket_and_preserve_receipts_recovery_and_rejected
         .transact_socket(server.endpoint(), deep_request, Duration::from_secs(15))
         .unwrap_err();
     assert_eq!(error.code, "transaction/input-depth");
-    assert_eq!(head(&mut sql), committed_head);
+    assert_eq!(head(), committed_head);
     common::assert_same_information(&peer.db(), &expected.db_after);
     assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(server);
@@ -580,6 +574,6 @@ fn lookup_inputs_cross_native_socket_and_preserve_receipts_recovery_and_rejected
         assert_eq!(report.tempids, original.tempids);
         common::assert_same_information(&report.db_before, &original.db_before);
         common::assert_same_information(&report.db_after, &original.db_after);
-        assert_eq!(head(&mut sql), committed_head);
+        assert_eq!(head(), committed_head);
     }
 }

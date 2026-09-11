@@ -3,11 +3,10 @@
 //! buffer residency, and reports one bounded workload rather than a speed SLA.
 use atomic_core::{
     Attribute, AttributeRef, Cardinality, DB_IDENT, DB_INSTALL_PARTITION, DB_PART_DB, DB_PART_TX,
-    Database, DatabaseValue, EntityMap, EntityRef, IndexBuildFault, IndexOrder, IndexPrefix,
-    Keyword, MapValue, OperationContext, OperationKind, Peer, PostgresIndexer, PostgresMigrator,
-    PostgresStore, Schema, TransactionRequest, TxForm, TxFunctions, TxOp, TxValue, USER_PARTITION,
-    Unique, Value, ValueType, eid_to_eidx, eid_to_part, implicit_part, implicit_part_id, make_eid,
-    partition_eid, t_to_tx,
+    Database, DatabaseValue, EntityMap, EntityRef, IndexOrder, IndexPrefix, Keyword, MapValue,
+    OperationContext, OperationKind, Peer, Schema, TransactionRequest, TxForm, TxFunctions, TxOp,
+    TxValue, USER_PARTITION, Unique, Value, ValueType, eid_to_eidx, eid_to_part, implicit_part,
+    implicit_part_id, make_eid, partition_eid, t_to_tx,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -423,13 +422,11 @@ fn native_partition_forms_survive_retries_retention_index_interruption_and_recov
     };
     let fixture = common::PostgresFixture::new(&connection, "partition_lifecycle");
     let connection = &fixture.connection;
-    PostgresMigrator::connect(connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(connection).unwrap();
     let database_id = "partition-lifecycle";
-    let mut store = PostgresStore::connect(connection).unwrap();
-    let mut eager = store.create_database(database_id, schema()).unwrap();
+    let mut store = common::TestStore::connect(connection).unwrap();
+    store.create_database(database_id, schema()).unwrap();
+    let mut eager = Database::new(schema()).unwrap();
     let service = common::start_service(connection, database_id);
     let peer = Peer::connect(connection, database_id, 32).unwrap();
     let original = peer.database_value();
@@ -555,29 +552,10 @@ fn native_partition_forms_survive_retries_retention_index_interruption_and_recov
     }
     service.shutdown();
 
-    // Deliberately interrupt immutable upload, not a process kill. The service
-    // is stopped first so its background indexer cannot win this test's race.
-    let mut indexer = PostgresIndexer::connect(connection, database_id)
-        .unwrap()
-        .with_segment_datoms(8)
-        .unwrap();
-    let before_publication = Peer::connect(connection, database_id, 0)
-        .unwrap()
-        .snapshot()
-        .durable_base_revision();
-    let interrupted = indexer
-        .consolidate_with_fault(IndexBuildFault::AfterSegments)
-        .unwrap_err();
-    assert_eq!(interrupted.code, "index/injected-failure");
-    assert_eq!(
-        Peer::connect(connection, database_id, 0)
-            .unwrap()
-            .snapshot()
-            .durable_base_revision(),
-        before_publication
-    );
+    // Interrupted preparation/publication is covered by storage_fault_replay.
+    // This fixture retains partition semantics and exact values across indexing.
     common::assert_same_information(&store.recover(database_id).unwrap(), &eager);
-    indexer.consolidate().unwrap();
+    common::consolidate(connection, database_id).unwrap();
     let restarted_peer = Peer::connect(connection, database_id, 0).unwrap();
     common::assert_same_information(&restarted_peer.database_value(), &eager);
     assert_allocations(&restarted_peer.database_value(), &allocation_ids);
@@ -682,14 +660,21 @@ fn postgres_tenant_locality_reports_native_cold_and_warm_work() {
     };
     let fixture = common::PostgresFixture::new(&connection, "partition_locality");
     let connection = &fixture.connection;
-    PostgresMigrator::connect(connection)
+    common::install(connection).unwrap();
+    let invalid_tree = atomic_core::persistent_tree::TreeConfig {
+        max_leaf_datoms: 0,
+        ..Default::default()
+    };
+    let invalid = atomic_core::PostgresOperator::connect(connection)
         .unwrap()
-        .migrate()
-        .unwrap();
+        .with_tree_config(invalid_tree)
+        .err()
+        .expect("operator accepted an invalid tree construction limit");
+    assert_eq!(invalid.code, "tree/invalid-config");
     let mut samples = Vec::new();
     for grouped in [false, true] {
         let database_id = if grouped { "grouped" } else { "interleaved" };
-        let mut store = PostgresStore::connect(connection).unwrap();
+        let mut store = common::TestStore::connect(connection).unwrap();
         let initial = store.create_database(database_id, schema()).unwrap();
         let service = common::start_service(connection, database_id);
         let mut ops = Vec::new();
@@ -723,15 +708,31 @@ fn postgres_tenant_locality_reports_native_cold_and_warm_work() {
             );
         }
         service.shutdown();
-        PostgresIndexer::connect(connection, database_id)
+        // Control the actual current tree builder: the default 4096-datom
+        // leaf fits this entire dataset and is already read during metadata
+        // capture, so it cannot witness cold tenant-local leaf access.
+        let entry = atomic_core::DatabaseCatalog::connect(connection)
             .unwrap()
-            .with_segment_datoms(32)
-            .unwrap()
-            .consolidate()
+            .resolve(database_id)
             .unwrap();
+        let tree = atomic_core::persistent_tree::TreeConfig {
+            max_leaf_datoms: 32,
+            ..Default::default()
+        };
+        let receipt = atomic_core::PostgresOperator::connect(connection)
+            .unwrap()
+            .with_tree_config(tree)
+            .unwrap()
+            .consolidate_database(&entry.database_id)
+            .unwrap();
+        assert_eq!(receipt.basis_t, report.basis_t);
         let peer = Peer::connect(connection, database_id, 128).unwrap();
+        assert_eq!(peer.durable_base_t(), report.basis_t);
+        assert_eq!(peer.recent_stats().datoms, 0);
         let cold = read_tenant(&peer, &entities);
         let warm = read_tenant(&peer, &entities);
+        cold.report(database_id, "cold");
+        warm.report(database_id, "warm");
         assert_eq!(cold.datoms, 64);
         assert_eq!(warm.datoms, cold.datoms);
         assert!(
@@ -744,8 +745,6 @@ fn postgres_tenant_locality_reports_native_cold_and_warm_work() {
             "authenticated RAM reads need no foreground pin SQL"
         );
         assert_eq!(peer.load_stats().compatibility_materializations, 0);
-        cold.report(database_id, "cold");
-        warm.report(database_id, "warm");
         eprintln!(
             "partition locality mode={database_id} tenants=8 entities_per_tenant=32 datoms_per_entity=2 leaf_datoms=32 peer_cache_entries=128 cache={:?}; PG/OS buffers not flushed; timings are samples, not a universal speed claim",
             peer.cache_stats()

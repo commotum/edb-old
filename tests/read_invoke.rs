@@ -3,9 +3,9 @@ mod common;
 use atomic_core::{
     Attribute, AttributeName, CallableRef, Cardinality, Connection, DB_FN, DB_IDENT, Database,
     EntityIdentifier, EntityRef, ErrorCategory, Instruction, InvokeControl, InvokeRole, Keyword,
-    PostgresConnectionConfig, PostgresMigrator, PostgresStore, Program, ProgramControl,
-    ProgramKind, ProgramOutput, QueryPattern, QueryTemplate, QueryTerm, RuntimeValue, Schema,
-    TransactionRequest, TransactionService, TxForm, TxOp, Unique, Value, ValueType,
+    PostgresConnectionConfig, Program, ProgramControl, ProgramKind, ProgramOutput, QueryPattern,
+    QueryTemplate, QueryTerm, RuntimeValue, Schema, TransactionRequest, TransactionService, TxForm,
+    TxOp, Unique, Value, ValueType,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -90,17 +90,14 @@ fn transact(
         .unwrap()
 }
 
-fn fixture(label: &str) -> Option<(common::PostgresFixture, PostgresStore)> {
+fn fixture(label: &str) -> Option<(common::PostgresFixture, common::TestStore)> {
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIPPED actual PostgreSQL invoke witness: ATOMIC_POSTGRES_URL unset");
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     store.create_database("invoke", schema()).unwrap();
     Some((fixture, store))
 }

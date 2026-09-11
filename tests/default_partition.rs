@@ -4,10 +4,9 @@ mod common;
 
 use atomic_core::{
     Attribute, CapacityLimits, Cardinality, Connection, DB_IDENT, DB_PART_DB, Database,
-    DatabaseValue, EntityRef, IndexOrder, Keyword, PostgresIndexer, PostgresMigrator,
-    PostgresStore, Schema, TransactionDefaults, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxOp, USER_PARTITION, Unique, Value, ValueType, eid_to_eidx,
-    eid_to_part, implicit_part, t_to_tx,
+    DatabaseValue, EntityRef, IndexOrder, Keyword, Schema, TransactionDefaults, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, USER_PARTITION, Unique, Value, ValueType,
+    eid_to_eidx, eid_to_part, implicit_part, t_to_tx,
 };
 use std::time::{Duration, Instant};
 
@@ -247,11 +246,8 @@ fn postgres_default_change_restart_and_invalid_name_never_reinterpret_a_saved_re
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "default_partition");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     let created = store.create_database("defaults", schema()).unwrap();
     let bootstrap = service(&fixture.connection, TransactionDefaults::default());
     let install = bootstrap
@@ -265,10 +261,7 @@ fn postgres_default_change_restart_and_invalid_name_never_reinterpret_a_saved_re
         )
         .unwrap();
     bootstrap.shutdown();
-    PostgresIndexer::connect(&fixture.connection, "defaults")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&fixture.connection, "defaults").unwrap();
     let orders = install
         .db_after
         .entid(&Keyword::new("part", "orders"))
@@ -294,10 +287,7 @@ fn postgres_default_change_restart_and_invalid_name_never_reinterpret_a_saved_re
     common::assert_same_information(&first.db_after, &preview.db_after);
     assert_allocations(&first.db_after, eid_to_eidx(orders).unwrap() as u32);
     writer.shutdown();
-    PostgresIndexer::connect(&fixture.connection, "defaults")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&fixture.connection, "defaults").unwrap();
 
     let writer = service(&fixture.connection, defaults("customers"));
     let replay = writer
@@ -386,10 +376,7 @@ fn postgres_default_change_restart_and_invalid_name_never_reinterpret_a_saved_re
         Some(customers)
     );
     writer.shutdown();
-    PostgresIndexer::connect(&fixture.connection, "defaults")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&fixture.connection, "defaults").unwrap();
     let writer = service(&fixture.connection, defaults("customers"));
     let replay = writer
         .client()

@@ -495,8 +495,6 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
 
     let mut ordered = ops.to_vec();
     ordered.sort_by(crate::transaction::compare_tx_op);
-    let partition_upgrade =
-        crate::vocabulary::is_exact_partition_upgrade_ops(base.schema(), &ordered);
     validate_tx_instant_forms(&ordered, tx_instant)?;
     let mut reader = Reader::new(base, limits);
     let (mut logical, allocation_start) =
@@ -516,9 +514,6 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
     let mut ensures = Vec::new();
     let mut touched = BTreeSet::new();
     for op in &ordered {
-        if partition_upgrade && crate::vocabulary::is_partition_upgrade_marker(op) {
-            continue;
-        }
         expand_op(
             &mut reader,
             op,
@@ -550,23 +545,7 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
     dedupe(&mut logical);
     validate_same_transaction(base.schema(), &logical)?;
 
-    if partition_upgrade {
-        for part in [crate::DB_PART_DB, crate::DB_PART_TX, crate::DB_PART_USER] {
-            logical.push(LogicalDatom {
-                entity: crate::DB_PART_DB,
-                attribute: crate::DB_INSTALL_PARTITION as u32,
-                value: Value::Ref(part),
-                added: true,
-            });
-        }
-        dedupe(&mut logical);
-    }
     let successor_schema = derive_successor_schema(&mut reader, &logical, tx)?;
-    crate::vocabulary::validate_fulltext_upgrade_transition(
-        base.schema(),
-        &successor_schema,
-        &ordered,
-    )?;
     validate_schema_transition(&mut reader, &successor_schema, &logical)?;
     validate_delta_successor(&mut reader, &successor_schema, &logical)?;
     validate_ensure_attributes(&mut reader, &logical, &ensures)?;
@@ -621,9 +600,6 @@ fn prepare_schema_information(
         .saturating_add(reader.base.schema().attribute_count() as u64);
     let mut candidate = reader.base.schema().clone();
     let mut changes = Vec::<(crate::Attribute, bool)>::new();
-    let exact_upgrade = is_exact_excision_bootstrap_ops(reader.base.schema(), ops)
-        || crate::vocabulary::is_exact_partition_upgrade_ops(reader.base.schema(), ops)
-        || crate::vocabulary::is_exact_fulltext_upgrade_ops(reader.base.schema(), ops);
 
     for op in ops {
         let (attribute, install) = match op {
@@ -645,7 +621,7 @@ fn prepare_schema_information(
             let reserved = supported_system_idents()
                 .iter()
                 .any(|(entity, _)| *entity == u64::from(attribute.id));
-            if reserved && !exact_upgrade {
+            if reserved {
                 return Err(SemanticError::incorrect(
                     "schema/reserved-system-entity",
                     format!(
@@ -740,26 +716,6 @@ fn prepare_schema_information(
     }
     validate_frontier(allocation_frontier)?;
     Ok((logical, allocation_frontier))
-}
-
-fn is_exact_excision_bootstrap_ops(schema: &Schema, ops: &[TxOp]) -> bool {
-    let ids = [
-        DB_EXCISE as u32,
-        crate::DB_EXCISE_ATTRS as u32,
-        DB_EXCISE_BEFORE_T as u32,
-        DB_EXCISE_BEFORE as u32,
-    ];
-    if ops.len() != ids.len() || ids.iter().any(|id| schema.attribute(*id).is_ok()) {
-        return false;
-    }
-    ids.iter().all(|id| {
-        let expected = supported_system_attributes()
-            .into_iter()
-            .find(|attribute| attribute.id == *id);
-        ops.iter().any(|op| {
-            matches!((op, &expected), (TxOp::InstallAttribute(actual), Some(expected)) if actual == expected)
-        })
-    })
 }
 
 fn synthesize_schema_hooks(
@@ -1577,16 +1533,15 @@ fn resolve_tempids(
         if existing_by_root.contains_key(&root) {
             continue;
         }
-        if let Some(partition) = policy.explicit_partition(name)? {
-            if partitions
+        if let Some(partition) = policy.explicit_partition(name)?
+            && partitions
                 .insert(root, partition)
                 .is_some_and(|previous| previous != partition)
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/partition-conflict",
-                    "unified tempids request distinct partitions",
-                ));
-            }
+        {
+            return Err(SemanticError::conflict(
+                "transaction/partition-conflict",
+                "unified tempids request distinct partitions",
+            ));
         }
     }
     let mut next = allocation_start;
@@ -2301,7 +2256,9 @@ fn validate_delta_successor(
             return Err(SemanticError::conflict(
                 "transaction/cardinality-one-conflict",
                 "resulting database has multiple cardinality-one values",
-            ));
+            )
+            .detail("entity", entity.to_string())
+            .detail("attribute", attribute.to_string()));
         }
     }
     let (unique_groups, _) = group_unique_deltas(logical, unique_indices);
@@ -3107,7 +3064,7 @@ mod tests {
     }
 
     #[test]
-    fn assessment_and_commitment_share_complete_exact_predecessor_reads() {
+    fn assessment_and_successor_validation_share_exact_predecessor_reads() {
         let initial = Database::new(schema()).unwrap();
         let seeded = initial.with(&add("one", 1), 10).unwrap().db_after;
         let entity = seeded
@@ -3129,16 +3086,13 @@ mod tests {
         )
         .unwrap();
         let after_assessment = context.snapshot().unwrap();
-        let changes = crate::persistent_commitment::exact_semantic_changes(
-            &assessed.db_before,
-            &assessed.tx_data,
-        )
-        .unwrap();
-        assert!(!changes.is_empty());
+        let values = assessed.db_before.values(entity, COUNT).unwrap();
+        assert_eq!(values, vec![Value::Long(1)]);
+        assert!(!assessed.tx_data.is_empty());
         let after_commitment = context.snapshot().unwrap();
         assert_eq!(
             after_commitment.source_datoms, after_assessment.source_datoms,
-            "commitment predecessor recovery must reuse assessor-completed prefixes"
+            "predecessor validation must reuse assessor-completed prefixes"
         );
         assert!(after_commitment.prefix_hits > after_assessment.prefix_hits);
         assert!(after_commitment.logical_datoms > after_assessment.logical_datoms);

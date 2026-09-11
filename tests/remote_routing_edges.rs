@@ -65,8 +65,7 @@ fn routed_known_commit_survives_peer_report_read_failure_and_exact_retry() {
         eprintln!("SKIP routing edge: isolated runtime role creation unavailable");
         return;
     };
-    let mut migrator = PostgresMigrator::connect(&fixture.admin_url).unwrap();
-    migrator.migrate().unwrap();
+    common::install(&fixture.admin_url).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -80,9 +79,12 @@ fn routed_known_commit_survives_peer_report_read_failure_and_exact_retry() {
         .unwrap()
         .create_if_absent("items", schema)
         .unwrap();
-    migrator
-        .grant_runtime_privileges(writer_role, peer_role)
-        .unwrap();
+    atomic_core::storage::PgBlockStore::connect(&PostgresConnectionConfig::plaintext(
+        &fixture.admin_url,
+    ))
+    .unwrap()
+    .grant_runtime_privileges(writer_role, peer_role)
+    .unwrap();
     let service = TransactionService::start(TransactionServiceConfig {
         connection: fixture.writer_url.clone(),
         database_id: "items".into(),
@@ -124,13 +126,11 @@ fn routed_known_commit_survives_peer_report_read_failure_and_exact_retry() {
 
     let mut admin = postgres::Client::connect(&fixture.admin_url, postgres::NoTls).unwrap();
     admin
-        .batch_execute(&format!(
-            "REVOKE SELECT ON atomic_tree_manifests,atomic_generation_transactions FROM {peer_role}"
-        ))
+        .batch_execute(&format!("REVOKE SELECT ON atomic_objects FROM {peer_role}"))
         .unwrap();
     let mut denied_peer = postgres::Client::connect(&fixture.peer_url, postgres::NoTls).unwrap();
     let denied = denied_peer
-        .query("SELECT 1 FROM atomic_tree_manifests LIMIT 1", &[])
+        .query("SELECT 1 FROM atomic_objects LIMIT 1", &[])
         .unwrap_err();
     assert_eq!(denied.code().map(|code| code.code()), Some("42501"));
     drop(denied_peer);
@@ -164,17 +164,15 @@ fn routed_known_commit_survives_peer_report_read_failure_and_exact_retry() {
         "a local report failure does not invalidate the successful route"
     );
     assert_eq!(
-        PostgresStore::connect(&fixture.admin_url)
+        common::TestStore::connect(&fixture.admin_url)
             .unwrap()
-            .database_status("items")
+            .recover("items")
             .unwrap()
-            .basis_t,
+            .basis_t(),
         committed.basis_t
     );
     admin
-        .batch_execute(&format!(
-            "GRANT SELECT ON atomic_tree_manifests,atomic_generation_transactions TO {peer_role}"
-        ))
+        .batch_execute(&format!("GRANT SELECT ON atomic_objects TO {peer_role}"))
         .unwrap();
     let retry = route.transact(request, Duration::from_secs(10)).unwrap();
     assert!(retry.replayed);

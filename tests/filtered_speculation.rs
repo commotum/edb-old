@@ -244,11 +244,8 @@ fn postgres_filtered_speculation_and_controlled_generation_commute_with_filters(
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
     let increment = store
         .deploy_program_blob(&Program {

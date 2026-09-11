@@ -2,7 +2,7 @@ mod common;
 
 use atomic_core::{
     Attribute, Cardinality, Database, Entity, EntityRef, Keyword, OperationContext, OperationKind,
-    Peer, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, TxOp, Value, ValueType,
+    Peer, Schema, TxOp, Value, ValueType,
 };
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -119,14 +119,11 @@ fn postgres_entity_identity_survives_connections_recovery_and_writer_shutdown_wi
     };
     let fixture = common::PostgresFixture::new(&url, "entity_identity");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    let mut store = PostgresStore::connect(url).unwrap();
+    common::install(url).unwrap();
+    let mut store = common::TestStore::connect(url).unwrap();
     let created = store.create_database("identity", schema()).unwrap();
     store.create_database("other", schema()).unwrap();
-    PostgresIndexer::connect(url, "other")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(url, "other").unwrap();
     let service = common::start_service(url, "identity");
     let first = common::transact(
         &service,
@@ -151,7 +148,6 @@ fn postgres_entity_identity_survives_connections_recovery_and_writer_shutdown_wi
     let recovered = store
         .recover("identity")
         .unwrap()
-        .database_value()
         .entity(id)
         .unwrap()
         .unwrap();
@@ -172,7 +168,7 @@ fn postgres_entity_identity_survives_connections_recovery_and_writer_shutdown_wi
     assert_eq!(speculative.db_after.entity(id).unwrap().unwrap(), before);
     assert!(before.identity().lineage_id().is_some());
     assert_eq!(
-        created.database_value().entity(1000).unwrap().unwrap(),
+        created.entity(1000).unwrap().unwrap(),
         first.db_after.entity(1000).unwrap().unwrap()
     );
 

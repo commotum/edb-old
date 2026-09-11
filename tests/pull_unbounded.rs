@@ -252,11 +252,8 @@ fn native_postgres_pull_is_deep_stack_safe_and_keeps_its_captured_value() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema(false)).unwrap();
     let writer = common::start_service(&postgres, &id);
     let length = 768;

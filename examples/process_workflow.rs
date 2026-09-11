@@ -2,7 +2,7 @@
 //! ATOMIC_POSTGRES_URL='host=... user=... dbname=...' cargo run --example process_workflow
 use atomic_core::{
     Attribute, AttributeName, AttributeRef, Cardinality, Connection, EntityMap, EntityRef, Keyword,
-    LocalTransactionServer, LocalTransportConfig, MapValue, PostgresMigrator, PostgresStore,
+    LocalTransactionServer, LocalTransportConfig, MapValue, PostgresConnectionConfig,
     PullAttribute, PullPattern, Schema, TransactionRequest, TransactionService,
     TransactionServiceConfig, TxForm, TxOp, Value, ValueType,
 };
@@ -101,8 +101,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::id(),
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
-    PostgresMigrator::connect(&postgres)?.migrate()?;
-    PostgresStore::connect(&postgres)?.create_database(&database, Schema::new())?;
+    let storage = PostgresConnectionConfig::plaintext(&postgres);
+    atomic_core::storage::PgBlockStore::install(&storage)?;
+    atomic_core::storage::BlockDatabase::create(&storage, &database, Schema::new())?;
     let binary = std::env::current_exe()?;
     let mut writer = WriterProcess(
         Command::new(&binary)

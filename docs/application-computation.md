@@ -59,8 +59,9 @@ when expanded decimal text would be unreasonable.
 The corresponding `clojure.core/` aliases are accepted for count/quot/subs/str;
 `clojure.string/` aliases are accepted for the three string predicates. This is
 explicit name mapping, not JVM lookup. Other qualified names remain explicit
-extensions. New portable function programs select query-template 4 / ABI 11;
-unchanged programs retain earlier canonical bytes and identities.
+extensions. Portable function programs select query-template 4 / ABI 11 in the
+current canonical codec. Simpler programs use its smaller feature grammars;
+this is not an old-database upgrade promise.
 
 ## Compiled Rust transaction deployments
 
@@ -133,6 +134,7 @@ load code; it sends ordinary data to the explicitly extended host. The stock
 transactor has an empty native registry. Restart the custom host with the same
 deployment for new calls; accepted retries retain their original results.
 
-Upgrade using the quiesced procedure in [operations](operations.md). Migration33
-is a compatibility fence for these new semantics, not a canonical-data rewrite
-or an online mixed-version writer protocol.
+This first release uses the current storage and program formats. Create a fresh
+database when development formats change; historical migrations and mixed-version
+writers are not supported. See [operations](operations.md) for current installation
+and recovery procedures.

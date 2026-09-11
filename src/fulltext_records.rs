@@ -2,12 +2,11 @@
 //! construction streams tokens into the external sorter; duplicate occurrence
 //! keys coalesce there. Text is stored once per historical assertion, not once
 //! per posting. Candidate TF/phrase positions are derived from that document.
+#[cfg(test)]
+use crate::DatabaseValue;
 use crate::fulltext_analysis::next_token;
 use crate::fulltext_store::FulltextRecord;
-use crate::{
-    DatabaseValue, DatabaseValuePrefixCursor, Datom, ErrorCategory, FulltextReadStats,
-    NativeFulltextReader, Schema, SemanticError, Value, sha256,
-};
+use crate::{Datom, ErrorCategory, FulltextReadStats, Schema, SemanticError, Value, sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 pub(super) type DocId = [u8; 48];
@@ -118,10 +117,15 @@ struct PendingDocument {
     offset: usize,
     position: u32,
 }
+type RecordDatoms<'a> = Box<dyn Iterator<Item = Result<Datom, SemanticError>> + 'a>;
+type ReadRecord<'a> = Box<
+    dyn FnMut(&[u8]) -> Result<(Option<FulltextRecord>, FulltextReadStats), SemanticError> + 'a,
+>;
+
 pub(crate) struct Records<'a> {
-    db: &'a DatabaseValue,
+    cursor: Box<dyn FnMut(u32) -> Result<RecordDatoms<'a>, SemanticError> + 'a>,
     attributes: VecDeque<u32>,
-    active: Option<(u32, DatabaseValuePrefixCursor<'a>)>,
+    active: Option<(u32, RecordDatoms<'a>)>,
     document: Option<PendingDocument>,
     documents: u64,
     total_length: u64,
@@ -198,7 +202,7 @@ impl Records<'_> {
             let Some(attribute) = self.attributes.pop_front() else {
                 return Ok(None);
             };
-            self.active = Some((attribute, self.db.fulltext_history_cursor(attribute)?));
+            self.active = Some((attribute, (self.cursor)(attribute)?));
         }
     }
 }
@@ -221,11 +225,20 @@ impl Iterator for Records<'_> {
 
 /// Caller owns an authenticated, unfiltered native source and retains its pin
 /// throughout building. No full database or expanded posting list is collected.
+#[cfg(test)]
 pub(crate) fn fulltext_records(db: &DatabaseValue) -> Result<Records<'_>, SemanticError> {
-    Ok(Records {
-        db,
-        attributes: db
-            .schema()
+    Ok(records_from(db.schema(), move |attribute| {
+        Ok(Box::new(db.fulltext_history_cursor(attribute)?))
+    }))
+}
+
+pub(crate) fn records_from<'a>(
+    schema: &Schema,
+    cursor: impl FnMut(u32) -> Result<RecordDatoms<'a>, SemanticError> + 'a,
+) -> Records<'a> {
+    Records {
+        cursor: Box::new(cursor),
+        attributes: schema
             .attributes()
             .filter(|a| a.fulltext)
             .map(|a| a.id)
@@ -237,7 +250,7 @@ pub(crate) fn fulltext_records(db: &DatabaseValue) -> Result<Records<'_>, Semant
         failed: false,
         stats: DeltaRecordStats::default(),
         datoms_examined: 0,
-    })
+    }
 }
 
 /// Only logical assertion changes reach the analyzer. Retractions are history
@@ -272,13 +285,12 @@ impl Iterator for EmptyFulltextCorpus<'_> {
     }
 }
 
-pub(crate) fn empty_fulltext_corpus<'a>(
+pub(crate) fn empty_corpus_from<'a>(
     schema: &'a Schema,
-    predecessor: &NativeFulltextReader,
+    record_count: u64,
+    read: impl FnMut(&[u8]) -> Result<(Option<FulltextRecord>, FulltextReadStats), SemanticError>,
 ) -> Result<(Option<EmptyFulltextCorpus<'a>>, DeltaRecordStats), SemanticError> {
-    let (empty, work) = verified_empty_corpus(schema, predecessor.record_count(), |key| {
-        predecessor.get_with_stats(key)
-    })?;
+    let (empty, work) = verified_empty_corpus(schema, record_count, read)?;
     Ok((
         empty.then(|| EmptyFulltextCorpus {
             attributes: Box::new(schema.attributes().filter(|a| a.fulltext).map(|a| a.id)),
@@ -322,7 +334,7 @@ fn verified_empty_corpus(
 pub(crate) struct DeltaRecords<'a> {
     changes: Box<dyn Iterator<Item = Result<(Datom, bool), SemanticError>> + 'a>,
     schema: &'a Schema,
-    predecessor: &'a NativeFulltextReader,
+    read: ReadRecord<'a>,
     new_attributes: BTreeSet<u32>,
     counts: BTreeMap<u32, (u64, u64)>,
     document: Option<(PendingDocument, bool)>,
@@ -332,16 +344,17 @@ pub(crate) struct DeltaRecords<'a> {
 }
 
 impl<'a> DeltaRecords<'a> {
-    pub(crate) fn new(
+    pub(crate) fn from_reader(
         changes: impl Iterator<Item = Result<(Datom, bool), SemanticError>> + 'a,
         schema: &'a Schema,
-        predecessor: &'a NativeFulltextReader,
+        read: impl FnMut(&[u8]) -> Result<(Option<FulltextRecord>, FulltextReadStats), SemanticError>
+        + 'a,
         new_attributes: BTreeSet<u32>,
     ) -> Self {
         Self {
             changes: Box::new(changes),
             schema,
-            predecessor,
+            read: Box::new(read),
             counts: new_attributes.iter().map(|a| (*a, (0, 0))).collect(),
             new_attributes,
             document: None,
@@ -358,7 +371,7 @@ impl<'a> DeltaRecords<'a> {
         insert: bool,
     ) -> Result<(), SemanticError> {
         if !self.counts.contains_key(&attribute) {
-            let (record, reads) = self.predecessor.get_with_stats(&stats_key(attribute))?;
+            let (record, reads) = (self.read)(&stats_key(attribute))?;
             self.stats.statistics_reads += 1;
             self.stats.statistics_read_bytes += reads.block_bytes;
             let record = record.ok_or_else(|| corrupt("predecessor lacks corpus statistics"))?;

@@ -7,9 +7,10 @@ Reusing an old name creates a different database with a new storage ID and linea
 
 ## Provision and rename
 
-Use the catalog-owner PostgreSQL credentials for mutations; ordinary writer and
-peer roles cannot rename or delete databases. The usual explicit PostgreSQL/TLS
-configuration applies. Listing and resolution use read-only privileges.
+Treat catalog mutations as administrative engine operations and restrict access
+to the corresponding credentials and APIs. The generic PostgreSQL object/ref
+provider is not a feature-specific SQL authorization engine. The usual explicit
+PostgreSQL/TLS configuration applies; listing and resolution do not mutate names.
 
 ```sh
 atomic create --database customers
@@ -34,15 +35,11 @@ to open `customers` fails until that name is deliberately created again.
 Listings are keyset-paginated: `--after` is exclusive, default limit 1000, maximum
 4096. A full page does not prove another page exists; continue from its last name.
 For `--retired`, the cursor is the last storage ID, since there is no active name.
-An unfinished restore reserves a visible name even before its first readable
-database value exists. Listing is not a readiness check. Create returns `EXISTS`
-for that reservation; operators can retire it, and a late restore publication
-must then fail instead of reviving it.
 
 Rust applications use `DatabaseCatalog::{connect_configured,create_if_absent,
 resolve,list,rename_checked,retire_checked}`. `CreateDatabaseResult` distinguishes
-creation from an existing entry without recovering all data. Existing strict
-`PostgresStore::create_database` remains available; its return type is unchanged.
+creation from an existing entry without recovering all data. The lower-level
+`storage::BlockDatabase::create` uses the same immutable-root publication protocol.
 User-facing `Connection`/`Peer` and service startup names resolve once. Low-level
 storage IDs and exact snapshot-reference routes are not public-name aliases.
 Do not feed `connection.identity().database_id()` back into a named connect after
@@ -63,7 +60,13 @@ readable: deletion is not mutation of a value your application already holds.
 Retirement does not immediately erase stored facts or invalidate completed portable
 backups. Release old values/connections before expecting reclamation to proceed.
 These are live storage pins, not a promise of permanent availability for offline
-handles. Connection/server loss can release them; choose retention accordingly.
+handles. A healthy reader session does not expire for being old or idle. After
+connection/server loss, a collector must acquire its exclusive liveness lock and
+explicitly revoke the session; pins remain for five minutes after revocation.
+A revoked reader cannot resurrect its old session. Reopen through the current
+authorized identity, which rejects retirement and old excision generations.
+Normal last-value/cursor Drop queues bounded cleanup without performing SQL on
+the dropping thread. Pin-release events are folded in a later collection cycle.
 
 Storage reclamation is a separate owner operation against an exact retired storage
 ID and lineage. Supply the physical PostgreSQL database and catalog schema as an
@@ -77,27 +80,43 @@ atomic gc-deleted --storage-id ID --lineage UUID --postgres-database atomic \
   --catalog-schema public --older-than-seconds 2592000 --apply --batches 10
 ```
 
-Preview changes no database rows. Apply makes bounded, resumable progress and
-reports its phase, selected/removed/inserted/updated rows, immutable objects read,
-pin checks and completion. Each batch touches at most 512 data/frontier rows,
-plus fixed progress bookkeeping. This is not a bound on all examined metadata,
-SQL execution time or process memory. Discovery reads one immutable object at a
-time; legacy segment sharing may require checking all remaining legacy manifests.
-Live reader/backup/build pins can
-prevent progress; that is protection, not a successful reclamation. Retry the same
-identity after releasing them. Shared immutable content still referenced by another
-database is retained. Issued-identity tombstones prevent historical route reuse.
+Preview is read-only and reports provider metadata plus the persisted collector
+checkpoint. Apply validates the exact retired identity, then advances the same
+catalog-wide Rust collector as ordinary `gc`; it is not a separate SQL teardown
+pipeline. One operator call advances at most 4,096 graph/metadata/object steps.
+Reports include the phase, ownership steps, objects examined/removed and whether
+the sealed cycle completed. These are work counters, not SQL row counts, elapsed
+time bounds or measured peak memory. A legal individual object can be up to
+64 MiB. The CLI defaults to one apply call; repeat it or choose an explicit
+`--batches` count when `cycle_complete=false`.
 
-Completion means the retired database's attributable metadata and exclusive
-reachable objects have been collected. It does not certify erasure of every
-historical physical byte: obsolete objects already detached from their owner by
-earlier maintenance remain the responsibility of ordinary catalog-wide `gc`.
-Neither command erases external backups, PostgreSQL backups/WAL or replicas.
-Incomplete shared-tree reachability evidence causes a reported failure to progress,
-not speculative deletion; repair or finish the corresponding maintenance first.
+`cycle_complete=true` is not a claim that this database's exclusive bytes are all
+gone or that global storage is quiescent. Held values, shared content, outstanding
+ownership changes and the chosen age can retain objects. Pin release and old
+read-index authorization pruning can add work for the next cycle. Retirement
+removes the publication and fences its writer and pending excision work in one
+guarded change; issued-identity tombstones prevent old-route reuse.
 
-This is not excision of selected facts and not `DROP SCHEMA`. Ordinary `gc` collects
-obsolete structures in a catalog; `gc-deleted` dismantles one retired database.
+The minimum age applies to previously published objects after their last owner
+is retired, not their original upload date. Never-published abandoned uploads
+fenced by a later protection epoch have no retirement-age promise. Live owners
+and active protected uploads remain protected. Missing or corrupt ownership
+evidence fails closed rather than authorizing speculative deletion. Neither
+command erases external backups, PostgreSQL backups/WAL, replicas or copied
+process memory. See [operations](operations.md#retirement-age-and-reader-protection)
+for reader revocation, pacing and checkpoint details.
+
+This is not excision of selected facts and not `DROP SCHEMA`. Both `gc` and
+`gc-deleted` use the shared collector; the latter additionally checks the retired
+target and lineage. Historical SQL-phase timings do not describe this collector.
+
+### Backup/restore integration notes
+
+An unfinished restore reserves a visible name even before
+its first readable database value exists. Listing is not a readiness check.
+Create returns `EXISTS` for that reservation; operators can retire it, and a late
+restore publication must fail instead of reviving it.
+
 Completed backups remain independently verifiable. Restore retains canonical
 lineage. Restoring a retired lineage into the same catalog requires finishing its
 reclamation first, or choosing another catalog. After reclamation, restore allocates
@@ -106,7 +125,9 @@ routes remain retired. See the restore checks in [admin.md](admin.md).
 
 ## Catalog initialization
 
-Run `atomic migrate` on a fresh PostgreSQL catalog to install the single current
-schema baseline, including the database name catalog. Historical schema upgrades
-are unsupported; catalogs initialized by earlier releases require a fresh catalog.
-Runtime processes require the current schema version before opening a database.
+The block provider installs into a fresh PostgreSQL namespace through
+`storage::PgBlockStore::install(&config)`. Catalog identities, public names,
+publication roots and maintenance checkpoints use its opaque object/ref protocol;
+there are no separate lifecycle tables or triggers. Existing unrelated schemas
+are not overwritten or adopted. Historical schema upgrades are unsupported.
+Runtime opens validate the installed provider and perform no schema DDL.

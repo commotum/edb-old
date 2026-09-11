@@ -1,8 +1,9 @@
 //! Direct, selective backup reads after the PostgreSQL source has disappeared.
 mod common;
+use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions, PgBlockStore};
 use atomic_core::*;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -20,12 +21,15 @@ fn schema() -> Schema {
     score.indexed = true;
     schema.install(score).unwrap();
     schema
-        .install(Attribute::new(
-            LABEL,
-            Keyword::new("item", "label"),
-            ValueType::String,
-            Cardinality::One,
-        ))
+        .install(
+            Attribute::new(
+                LABEL,
+                Keyword::new("item", "label"),
+                ValueType::String,
+                Cardinality::One,
+            )
+            .fulltext(),
+        )
         .unwrap();
     schema
 }
@@ -110,14 +114,21 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         let setup = Instant::now();
         let fixture = common::PostgresFixture::new(&pg, "backup_reads");
         let connection = fixture.connection.clone();
-        PostgresMigrator::connect(&connection)
-            .unwrap()
-            .migrate()
-            .unwrap();
-        let mut store = PostgresStore::connect(&connection).unwrap();
-        let created = store.create_database("offline", schema()).unwrap();
-        let service = common::start_service(&connection, "offline");
-        let operations = (0..size)
+        let config = PostgresConnectionConfig::plaintext(&connection);
+        PgBlockStore::install(&config).unwrap();
+        let created = BlockDatabase::create(&config, "offline", schema()).unwrap();
+        // No service/index worker runs: backup must prepare its covering read
+        // value locally from a genuinely unindexed recent tail.
+        let mut writer = BlockTransactor::claim(
+            &config,
+            created,
+            BlockWriterOptions {
+                lease_duration: std::time::Duration::from_secs(120),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut operations = (0..size)
             .flat_map(|i| {
                 [
                     add(
@@ -133,16 +144,35 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
                 ]
             })
             .collect::<Vec<_>>();
+        let program = Program {
+            kind: ProgramKind::Query,
+            arity: 1,
+            instructions: vec![
+                Instruction::PushArgument(0),
+                Instruction::EmitRow(1),
+                Instruction::Return,
+            ],
+        };
+        let program_hash = PgBlockStore::connect(&config)
+            .unwrap()
+            .put(&encode_program(&program).unwrap())
+            .unwrap();
+        operations.extend([
+            add(
+                EntityRef::Temp("function".into()),
+                DB_IDENT as u32,
+                Value::Keyword(Keyword::new("offline", "identity")),
+            ),
+            add(
+                EntityRef::Temp("function".into()),
+                DB_FN as u32,
+                Value::Function(program_hash),
+            ),
+        ]);
         // The large fixture is setup for a read-selectivity check, not a
         // thirty-second transaction-latency assertion in unoptimized builds.
-        let first = service
-            .client()
-            .transact(
-                TransactionRequest::new("seed", operations)
-                    .comparing_basis(created.basis_t())
-                    .with_tx_instant(1000),
-                std::time::Duration::from_secs(120),
-            )
+        let first = writer
+            .transact(&TransactionRequest::new("seed", operations).with_tx_instant(1000))
             .unwrap();
         let target_index = size / 2;
         let target = first.tempids[&format!("e{target_index}")];
@@ -186,17 +216,20 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         }
         let mut backup = PortableBackup::connect(&connection).unwrap();
         let first_point = backup.backup_database("offline", &backup_dir).unwrap();
-        let second = common::transact(
-            &service,
-            "edit",
-            first.basis_t,
-            &[add(
-                EntityRef::Id(target),
-                LABEL,
-                Value::String("changed".into()),
-            )],
-            2000,
-        );
+        let second = writer
+            .transact(
+                &TransactionRequest::new(
+                    "edit",
+                    vec![add(
+                        EntityRef::Id(target),
+                        LABEL,
+                        Value::String("changed".into()),
+                    )],
+                )
+                .comparing_basis(first.basis_t)
+                .with_tx_instant(2000),
+            )
+            .unwrap();
         let second_point = backup.backup_database("offline", &backup_dir).unwrap();
         let expected_query = second
             .db_after
@@ -216,8 +249,8 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         let expected_logs = [first.tx_data.clone(), second.tx_data.clone()];
         let first_t = first.basis_t;
         let second_t = second.basis_t;
-        service.shutdown();
-        drop((first, second, created, store, backup));
+        writer.release().unwrap();
+        drop((first, second, backup));
         // All source relations are actually gone. An online reconnect or
         // compatibility materialization cannot satisfy any following read.
         drop(fixture);
@@ -227,6 +260,10 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         let offline = BackupConnection::open_point(&backup_dir, &second_point).unwrap();
         let opened = offline.read_stats();
         let db = offline.db();
+        assert!(
+            db.snapshot_reference().is_err(),
+            "file values cannot impersonate live publication authority"
+        );
         assert_eq!(db.basis_t(), second_t);
         let result = db
             .query(&query(target_index as i64), &[], &QueryControl::default())
@@ -264,6 +301,28 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
 
         let offline = BackupConnection::open_point(&backup_dir, &second_point).unwrap();
         let db = offline.db();
+        let ProgramOutput::Query(program_rows) = db
+            .invoke(
+                Keyword::new("offline", "identity"),
+                &[RuntimeValue::Scalar(Value::Long(37))],
+                InvokeControl::default(),
+            )
+            .unwrap()
+        else {
+            panic!("native query output expected")
+        };
+        assert_eq!(program_rows, vec![vec![Value::Long(37)]]);
+        let matches = db
+            .fulltext(LABEL, "changed", &FulltextOptions::default())
+            .unwrap();
+        assert_eq!(
+            matches
+                .hits
+                .iter()
+                .map(|hit| hit.entity)
+                .collect::<Vec<_>>(),
+            vec![target]
+        );
 
         if size == 64 {
             let queried = offline_cli(
@@ -367,12 +426,20 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
             vec![Value::String(format!("row-{target_index}"))]
         );
         let log_before = offline.read_stats();
+        assert_eq!(db.log_value().unwrap().basis_t(), second_t);
         let transactions = offline
             .log()
             .tx_range(Some(TimePoint::T(first_t)), None)
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
+        let mut sampled_log = offline
+            .log()
+            .tx_range(Some(TimePoint::T(second_t)), None)
+            .unwrap();
+        assert!(sampled_log.next().unwrap().is_ok());
+        assert_eq!(sampled_log.stats().postgres_payload_bytes_read, 0);
+        assert!(sampled_log.stats().payload_bytes_read > 0);
         assert_eq!(
             transactions.iter().map(|t| t.t).collect::<Vec<_>>(),
             vec![first_t, second_t]
@@ -418,22 +485,37 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
                     continue;
                 }
                 let bytes = fs::read(&path).unwrap();
-                let hash = sha256(&bytes);
+                // Repository files use the provider's physical gzip envelope;
+                // locate canonical leaves without changing the public API.
+                // Keep the physical bytes below for corruption and restoration.
+                let canonical = if bytes.starts_with(b"ATOMICBL") {
+                    assert_eq!(&bytes[8..10], &[1, 1]);
+                    let expected = u64::from_be_bytes(bytes[10..18].try_into().unwrap());
+                    assert!(expected <= 64 * 1024 * 1024);
+                    let mut canonical = Vec::new();
+                    flate2::read::GzDecoder::new(&bytes[26..])
+                        .take(expected + 1)
+                        .read_to_end(&mut canonical)
+                        .unwrap();
+                    assert_eq!(canonical.len() as u64, expected);
+                    canonical
+                } else {
+                    bytes.clone()
+                };
+                let hash = sha256(&canonical);
                 if let Ok(atomic_core::persistent_tree::TreeNode::Leaf(leaf)) =
-                    atomic_core::persistent_tree::decode_tree_node(&hash, &bytes)
+                    atomic_core::persistent_tree::decode_tree_node(&hash, &canonical)
+                    && leaf.order == IndexOrder::Eavt
+                    && !leaf.history
+                    && (0..leaf.len()).any(|i| {
+                        let datom = leaf.datom(i).unwrap();
+                        datom.entity == target
+                            && datom.attribute == LABEL
+                            && datom.value == Value::String("changed".into())
+                    })
                 {
-                    if leaf.order == IndexOrder::Eavt
-                        && !leaf.history
-                        && (0..leaf.len()).any(|i| {
-                            let datom = leaf.datom(i).unwrap();
-                            datom.entity == target
-                                && datom.attribute == LABEL
-                                && datom.value == Value::String("changed".into())
-                        })
-                    {
-                        selected_leaf = Some((path, bytes));
-                        break;
-                    }
+                    selected_leaf = Some((path, bytes));
+                    break;
                 }
             }
             let (path, bytes) = selected_leaf.expect("selected data leaf exists");

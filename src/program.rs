@@ -680,15 +680,6 @@ impl ProgramLimits {
             cancelled: None,
         }
     }
-
-    pub(crate) fn is_valid(self) -> bool {
-        self.max_stack > 0
-            && self.max_value_bytes > 0
-            && self.max_collection_items > 0
-            && self.max_forms > 0
-            && self.max_output > 0
-            && self.max_calls > 0
-    }
 }
 
 impl Default for ProgramControl<'_> {

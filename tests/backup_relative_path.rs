@@ -1,10 +1,11 @@
 #![cfg(unix)]
 mod common;
 
+use atomic_core::storage::{BlockDatabase, PgBlockStore};
 use atomic_core::{
     Attribute, BackupConnection, BackupReadConfig, Cardinality, EntityRef, ErrorCategory,
-    IndexTransaction, Keyword, PortableBackup, PostgresIndexer, PostgresMigrator, PostgresStore,
-    Schema, TimePoint, TxOp, Value, ValueType,
+    IndexTransaction, Keyword, PortableBackup, PostgresConnectionConfig, Schema, TimePoint, TxOp,
+    Value, ValueType,
 };
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::process::Command;
@@ -24,12 +25,12 @@ fn child_reads() {
     // bypass operator-private directory admission.
     symlink("repository", "repository-link").unwrap();
     let error = BackupConnection::open("repository-link").err().unwrap();
-    assert_eq!(error.category, ErrorCategory::Forbidden);
-    assert_eq!(error.code, "backup/directory");
+    assert_eq!(error.category, ErrorCategory::Fault);
+    assert_eq!(error.code, "backup/directory-type");
     std::fs::create_dir("public-repository").unwrap();
-    std::fs::set_permissions("public-repository", std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions("public-repository", std::fs::Permissions::from_mode(0o777)).unwrap();
     let error = BackupConnection::open("public-repository").err().unwrap();
-    assert_eq!(error.category, ErrorCategory::Forbidden);
+    assert_eq!(error.category, ErrorCategory::Fault);
     assert_eq!(error.code, "backup/directory-permissions");
 
     let connection = BackupConnection::open_configured(
@@ -97,10 +98,8 @@ fn relative_backup_cold_reads_survive_working_directory_change() {
     };
     let start = Instant::now();
     let fixture = common::PostgresFixture::new(&url, "backup_relative_path");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    PgBlockStore::install(&config).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -110,15 +109,12 @@ fn relative_backup_cold_reads_survive_working_directory_change() {
             Cardinality::One,
         ))
         .unwrap();
-    let created = PostgresStore::connect(&fixture.connection)
-        .unwrap()
-        .create_database("relative", schema)
-        .unwrap();
+    let created = BlockDatabase::create(&config, "relative", schema).unwrap();
     let service = common::start_service(&fixture.connection, "relative");
     let report = common::transact(
         &service,
         "seed",
-        created.basis_t(),
+        1,
         &[TxOp::Add {
             entity: EntityRef::Temp("item".into()),
             attribute: 1000,
@@ -129,10 +125,6 @@ fn relative_backup_cold_reads_survive_working_directory_change() {
     let entity = report.tempids["item"];
     let basis = report.basis_t;
     service.shutdown();
-    PostgresIndexer::connect(&fixture.connection, "relative")
-        .unwrap()
-        .consolidate()
-        .unwrap();
     let directory = tempfile::tempdir().unwrap();
     let repository = directory.path().join("repository");
     PortableBackup::connect(&fixture.connection)

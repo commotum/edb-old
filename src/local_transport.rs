@@ -736,7 +736,7 @@ fn unknown(error: io::Error) -> SemanticError {
 mod tests {
     use super::*;
     use crate::{
-        Attribute, Cardinality, EntityRef, Keyword, PostgresMigrator, PostgresStore, Schema,
+        Attribute, Cardinality, EntityRef, Keyword, PostgresConnectionConfig, Schema,
         TransactionService, TransactionServiceConfig, TxOp, Value, ValueType,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -948,10 +948,8 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        PostgresMigrator::connect(&postgres)
-            .unwrap()
-            .migrate()
-            .unwrap();
+        let storage = PostgresConnectionConfig::plaintext(&postgres);
+        crate::storage::PgBlockStore::install(&storage).unwrap();
         let mut schema = Schema::new();
         schema
             .install(Attribute::new(
@@ -961,10 +959,7 @@ mod tests {
                 Cardinality::One,
             ))
             .unwrap();
-        PostgresStore::connect(&postgres)
-            .unwrap()
-            .create_database(&database, schema)
-            .unwrap();
+        crate::storage::BlockDatabase::create(&storage, &database, schema).unwrap();
         let writer = TransactionService::start(TransactionServiceConfig {
             connection: postgres.clone(),
             database_id: database.clone(),
@@ -1088,7 +1083,7 @@ mod tests {
         assert_eq!(outcome.basis_t, committed.basis_t);
         assert_eq!(outcome.tx_hash, committed.tx_hash);
         let error = outcome.report.unwrap_err();
-        assert_eq!(error.code, "peer/exact-manifest-absent");
+        assert_eq!(error.code, "storage/missing-object");
         assert_eq!(
             connection
                 .sync_to(outcome.basis_t, Duration::from_secs(10))

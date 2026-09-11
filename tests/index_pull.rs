@@ -401,11 +401,8 @@ fn postgres_native_index_pull_is_lazy_and_retains_old_and_temporal_values() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    atomic_core::PostgresStore::connect(&postgres)
+    common::install(&postgres).unwrap();
+    common::TestStore::connect(&postgres)
         .unwrap()
         .create_database(&id, schema())
         .unwrap();
@@ -417,10 +414,7 @@ fn postgres_native_index_pull_is_lazy_and_retains_old_and_temporal_values() {
             Duration::from_secs(20),
         )
         .unwrap();
-    atomic_core::PostgresIndexer::connect(&postgres, &id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&postgres, &id).unwrap();
     let peer = atomic_core::Peer::connect(&postgres, &id, 0).unwrap();
     let database = peer.db();
     let projected = Arc::new(AtomicUsize::new(0));

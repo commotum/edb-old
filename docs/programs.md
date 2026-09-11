@@ -1,13 +1,13 @@
 # Persisted native queries
 
-`QueryTemplate::new` remains the original version-1 conjunctive query format.
-Its bytes, hashes and existing request meaning are unchanged. Use
-`QueryTemplate::native(query, input_arguments, sources)` for version 2: it embeds
-the ordinary Rust `Query` AST; baseline version-2 templates use program ABI 7.
-New general query literals and wide relation patterns select template version 3 /
-ABI 10. Portable data/string helpers select template 4 / ABI 11. Unchanged
-programs keep their existing bytes and version requirements.
-Existing ABI 4/5/6 programs remain readable.
+`QueryTemplate::new` constructs the compact conjunctive query format. Use
+`QueryTemplate::native(query, input_arguments, sources)` to embed the ordinary
+Rust `Query` AST. The current canonical encoder selects a grammar from the
+program's features: compact forms, dual predicates, symbolic lookup inputs,
+native queries, partitions, fulltext, general query data or portable helpers.
+These are current format variants, not a historical upgrade reader. The same
+program has deterministic canonical bytes and identity; future development
+formats may require fresh databases.
 
 For example, this query program returns entity/value rows above a threshold;
 the attribute itself is a program argument, not a fixed schema assumption:
@@ -52,7 +52,14 @@ fn selector() -> Result<Program, SemanticError> {
 
 Invoke it with `ProgramRuntime::execute_query` and one captured `&DatabaseValue`,
 passing an attribute ref/ident and the threshold. Deploying the same artifact
-uses `PostgresStore::deploy_program_blob`. Transaction-kind programs can consume
+uses `PostgresOperator::deploy_program(&program)`. Keep the returned
+`ProgramDeployment` alive until a transaction has committed a `Value::Function`
+binding using its `hash()`. This protects the immutable program and its transitive
+dependencies from collection during deployment. Hold dependency deployment handles
+while deploying a program that refers to them. Once bound, database roots retain
+the code; release or drop the deployment handle. Unbound abandoned deployments
+can then be reclaimed. Missing dependencies fail rather than publishing broken
+code. Transaction-kind programs can consume
 the query result using ordinary VM instructions and emit transaction forms;
 they still run against the transaction's immutable db-before. Deployment does
 not install a function binding: ordinary `:db/ident` and `:db/fn` assertions do.

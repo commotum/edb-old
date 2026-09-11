@@ -206,11 +206,8 @@ fn postgres_receipt_stats_and_bounded_sink_correlate_without_replaying_functions
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "transaction_diagnostics");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    PostgresStore::connect(&fixture.connection)
+    common::install(&fixture.connection).unwrap();
+    common::TestStore::connect(&fixture.connection)
         .unwrap()
         .create_database("diagnostics", schema())
         .unwrap();

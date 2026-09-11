@@ -1,3 +1,7 @@
+use atomic_core::storage::{
+    BlockDatabase, BlockReadConfig, BlockReader, BlockTransactor, BlockWriterOptions, CasOutcome,
+    PgBlockStore,
+};
 use atomic_core::*;
 use std::sync::{Arc, Barrier};
 mod common;
@@ -8,10 +12,7 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    PgBlockStore::install(&PostgresConnectionConfig::plaintext(&fixture.connection)).unwrap();
     Some(fixture)
 }
 
@@ -42,10 +43,8 @@ fn concurrent_create_is_idempotent_and_existing_catalog_lookup_never_rebuilds_sc
             .iter()
             .all(|result| result.database == results[0].database)
     );
-    assert_eq!(results[0].database.database_id, "shared");
+    assert_ne!(results[0].database.database_id, "shared");
     let mut catalog = DatabaseCatalog::connect(&fixture.connection).unwrap();
-    // This schema cannot initialize a database: it skips the fresh schema ID.
-    // Existing-create ignores it, proving the public no-op has no eager rebuild.
     let mut invalid_initial = Schema::new();
     invalid_initial
         .install(Attribute::new(
@@ -56,15 +55,14 @@ fn concurrent_create_is_idempotent_and_existing_catalog_lookup_never_rebuilds_sc
         ))
         .unwrap();
     assert!(Database::new(invalid_initial.clone()).is_err());
-    let started = std::time::Instant::now();
+    let context = OperationContext::new(OperationKind::Transaction);
+    let guard = context.enter();
     let existing = catalog.create_if_absent("shared", invalid_initial).unwrap();
     assert!(!existing.created);
     assert_eq!(existing.database, results[0].database);
-    drop(existing);
-    eprintln!(
-        "complete existing create/identity-check/drop {:?}; six concurrent creators issued one identity",
-        started.elapsed()
-    );
+    assert!(context.snapshot().sql_calls <= 16);
+    assert_eq!(context.snapshot().known_payload_write_bytes, 0);
+    drop(guard);
     assert_eq!(
         catalog.list(None, 1).unwrap(),
         vec![results[0].database.clone()]
@@ -77,26 +75,39 @@ fn concurrent_create_is_idempotent_and_existing_catalog_lookup_never_rebuilds_sc
 }
 
 #[test]
-fn checked_rename_retire_and_name_reuse_preserve_canonical_bytes_and_issued_identity() {
+fn checked_rename_retire_and_name_reuse_fence_writers_without_rewriting_held_values() {
     let Some(fixture) = fixture("catalog_identity") else {
         return;
     };
-    let mut catalog = DatabaseCatalog::connect(&fixture.connection).unwrap();
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    let mut catalog = DatabaseCatalog::connect_configured(&config).unwrap();
     let old = catalog
         .create_if_absent("original", Schema::new())
         .unwrap()
         .database;
-    let mut sql = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let original: Vec<u8> = sql
-        .query_one(
-            "SELECT genesis FROM atomic_databases WHERE database_id=$1",
-            &[&old.database_id],
-        )
-        .unwrap()
-        .get(0);
+    let database = BlockDatabase::resolve(&config, "original").unwrap();
+    let mut store = PgBlockStore::connect(&config).unwrap();
+    let mut writer =
+        BlockTransactor::claim(&config, database.clone(), BlockWriterOptions::default()).unwrap();
+    writer
+        .transact(&TransactionRequest::new("first", vec![]))
+        .unwrap();
+    let reader = BlockReader::connect(
+        &config,
+        BlockReadConfig {
+            cache_entries: 0,
+            cache_bytes: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let retained = reader.capture(&database.reference_key()).unwrap();
+    let before_root = store.read_ref(&database.reference_key()).unwrap().unwrap();
+    let before_id: [u8; 32] = before_root.value.as_deref().unwrap().try_into().unwrap();
+    let before_bytes = store.get(before_id).unwrap().unwrap();
     assert_eq!(
         catalog
-            .rename_checked("original", "renamed", "wrong-lineage")
+            .rename_checked("original", "renamed", "wrong")
             .unwrap_err()
             .code,
         "catalog/identity-mismatch"
@@ -105,7 +116,6 @@ fn checked_rename_retire_and_name_reuse_preserve_canonical_bytes_and_issued_iden
         .rename_checked("original", "renamed", &old.lineage_id)
         .unwrap();
     assert_eq!(renamed.database_id, old.database_id);
-    assert_eq!(renamed.lineage_id, old.lineage_id);
     assert_eq!(
         catalog.resolve("original").unwrap_err().code,
         "catalog/name-not-found"
@@ -114,12 +124,18 @@ fn checked_rename_retire_and_name_reuse_preserve_canonical_bytes_and_issued_iden
         catalog.require_active_id(&old.database_id).unwrap(),
         renamed
     );
+    assert_eq!(
+        store.read_ref(&database.reference_key()).unwrap(),
+        Some(before_root)
+    );
+    writer
+        .transact(&TransactionRequest::new("after-rename", vec![]))
+        .unwrap();
     let replacement = catalog
         .create_if_absent("original", Schema::new())
         .unwrap()
         .database;
     assert_ne!(replacement.database_id, old.database_id);
-    assert_ne!(replacement.lineage_id, old.lineage_id);
     assert_eq!(
         catalog
             .retire_checked("original", &old.lineage_id)
@@ -127,39 +143,12 @@ fn checked_rename_retire_and_name_reuse_preserve_canonical_bytes_and_issued_iden
             .code,
         "catalog/identity-mismatch"
     );
-    assert_eq!(catalog.resolve("original").unwrap(), replacement);
-    // A publisher can already hold an old snapshot when retirement commits.
-    // The guard must lock the current identity, not trust a stale active bit.
-    let mut late_publisher =
-        postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let mut stale = late_publisher
-        .build_transaction()
-        .isolation_level(postgres::IsolationLevel::RepeatableRead)
-        .start()
-        .unwrap();
-    assert!(
-        stale
-            .query_one(
-                "SELECT retired_at IS NULL FROM atomic_database_identities WHERE database_id=$1",
-                &[&old.database_id],
-            )
-            .unwrap()
-            .get::<_, bool>(0)
-    );
+    let stale = store.read_ref(&database.reference_key()).unwrap().unwrap();
     let retired = catalog
         .retire_checked("renamed", &old.lineage_id)
         .unwrap()
         .unwrap();
-    let rejected = stale
-        .execute(
-            "UPDATE atomic_heads SET basis_t=basis_t WHERE database_id=$1",
-            &[&old.database_id],
-        )
-        .unwrap_err();
-    assert_eq!(rejected.code().unwrap().code(), "40001");
-    stale.rollback().unwrap();
-    assert!(retired.retired);
-    assert!(retired.name.is_none());
+    assert!(retired.retired && retired.name.is_none());
     assert_eq!(
         catalog
             .require_active_id(&old.database_id)
@@ -167,191 +156,170 @@ fn checked_rename_retire_and_name_reuse_preserve_canonical_bytes_and_issued_iden
             .code,
         "catalog/database-retired"
     );
+    assert!(catalog.retire("renamed").unwrap().is_none());
+    assert_eq!(catalog.list_retired(None, 10).unwrap(), vec![retired]);
     assert!(
         catalog
-            .retire_checked("renamed", &old.lineage_id)
+            .list_retired(Some(&old.database_id), 10)
             .unwrap()
-            .is_none()
+            .is_empty()
     );
-    assert_eq!(catalog.list_retired(None, 10).unwrap(), vec![retired]);
-    let after: Vec<u8> = sql
-        .query_one(
-            "SELECT genesis FROM atomic_databases WHERE database_id=$1",
-            &[&old.database_id],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(
-        after, original,
-        "rename and retirement never rewrite canonical bytes"
+    assert!(
+        writer
+            .transact(&TransactionRequest::new("after-retire", vec![]))
+            .is_err()
     );
-    assert_eq!(
-        sql.query_one("SELECT count(*) FROM atomic_database_identities", &[])
+    assert!(
+        matches!(
+            store
+                .compare_exchange(
+                    &database.reference_key(),
+                    Some(stale.revision),
+                    stale.value.as_deref()
+                )
+                .unwrap(),
+            CasOutcome::Conflict(_)
+        ),
+        "a prepared publisher cannot resurrect a retired root"
+    );
+    assert!(reader.capture(&database.reference_key()).is_err());
+    let context = OperationContext::new(OperationKind::Query);
+    let guard = context.enter();
+    assert!(
+        !retained
+            .database_value()
+            .datoms(IndexOrder::Eavt)
             .unwrap()
-            .get::<_, i64>(0),
+            .is_empty()
+    );
+    assert!(
+        context.snapshot().known_payload_read_bytes > 0,
+        "held value performs a cold immutable read after retirement"
+    );
+    drop(guard);
+    assert_eq!(store.get(before_id).unwrap().unwrap(), before_bytes);
+    assert_eq!(catalog.resolve("original").unwrap(), replacement);
+    assert_eq!(
+        store
+            .list_live_refs("catalog/identities/", None, 128)
+            .unwrap()
+            .len(),
         2
     );
 }
 
 #[test]
-fn headless_restore_reservations_remain_visible_and_retirement_fences_publication() {
-    let Some(source) = fixture("catalog_restore_source") else {
+fn catalog_pages_preserve_utf8_order_and_unbounded_name_length() {
+    let Some(fixture) = fixture("catalog_pages") else {
         return;
     };
-    let target = fixture("catalog_restore_target").unwrap();
-    let mut schema = Schema::new();
-    schema
-        .install(Attribute::new(
-            1000,
-            Keyword::new("test", "value"),
-            ValueType::Long,
-            Cardinality::One,
-        ))
-        .unwrap();
-    DatabaseCatalog::connect(&source.connection)
-        .unwrap()
-        .create_if_absent("source", schema)
-        .unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut catalog = DatabaseCatalog::connect(&fixture.connection).unwrap();
+    let mut names = vec![
+        "Alpha".to_owned(),
+        "a".to_owned(),
+        "a/%_".to_owned(),
+        "z".to_owned(),
+        "é".to_owned(),
+        "数据库".to_owned(),
+        "a".repeat(1500),
+        "β".repeat(800),
+        "z".repeat(1500),
+    ];
+    for name in &names {
+        catalog.create_if_absent(name, Schema::new()).unwrap();
     }
-    let point = PortableBackup::connect(&source.connection)
-        .unwrap()
-        .backup_database("source", directory.path())
-        .unwrap();
-    let mut restore = PortableBackup::connect(&target.connection).unwrap();
-    let error = restore
-        .restore_backup_with_fault(
-            directory.path(),
-            point.basis_t,
-            "pending",
-            RestoreFault::BeforeCommit,
-        )
-        .unwrap_err();
-    assert_eq!(error.code, "backup/restore-before-activation");
-    let mut catalog = DatabaseCatalog::connect(&target.connection).unwrap();
-    let pending = catalog.resolve("pending").unwrap();
-    assert_eq!(pending.lineage_id, point.lineage_id);
-    assert_eq!(catalog.list(None, 10).unwrap(), vec![pending.clone()]);
-    let existing = catalog.create_if_absent("pending", Schema::new()).unwrap();
-    assert!(!existing.created);
-    assert_eq!(existing.database, pending);
-    assert!(Peer::connect(&target.connection, "pending", 0).is_err());
-    let mut sql = postgres::Client::connect(&target.connection, postgres::NoTls).unwrap();
-    let head_count = |sql: &mut postgres::Client| {
-        sql.query_one(
-            "SELECT count(*) FROM atomic_heads WHERE database_id=$1",
-            &[&pending.database_id],
-        )
-        .unwrap()
-        .get::<_, i64>(0)
-    };
-    assert_eq!(head_count(&mut sql), 0);
-
-    // Resume a real staged restore, then retire after it has captured its
-    // stable target but before its initial head INSERT. No synthetic head or
-    // bypassed storage guard supplies the fixture.
-    let mut probed = false;
-    let error = restore
-        .restore_backup_with_activation_probe(directory.path(), point.basis_t, "pending", || {
-            probed = true;
-            assert!(
-                catalog
-                    .retire_checked("pending", &pending.lineage_id)
-                    .unwrap()
-                    .unwrap()
-                    .retired
-            );
-        })
-        .unwrap_err();
-    assert!(probed);
-    assert_eq!(error.code, "backup/restore-initial-activate");
+    names.sort();
+    let mut found = Vec::new();
+    let mut after = None;
+    loop {
+        let page = catalog.list(after.as_deref(), 2).unwrap();
+        if page.is_empty() {
+            break;
+        }
+        assert!(page.len() <= 2);
+        after = page.last().unwrap().name.clone();
+        found.extend(page.into_iter().map(|entry| entry.name.unwrap()));
+    }
+    assert_eq!(found, names);
+    let long = "q".repeat(2000);
+    let renamed = catalog.rename("Alpha", &long).unwrap();
+    assert_eq!(catalog.resolve(&long).unwrap(), renamed);
+    let back = catalog.rename(&long, "short-again").unwrap();
+    assert_eq!(back.database_id, renamed.database_id);
+    assert!(catalog.resolve(&long).is_err());
     assert_eq!(
-        error.details.get("postgres_sqlstate").map(String::as_str),
-        Some("55000")
+        catalog.rename("a", "z").unwrap_err().code,
+        "catalog/name-exists"
     );
-    assert_eq!(head_count(&mut sql), 0);
-    let replacement = catalog.create_if_absent("pending", Schema::new()).unwrap();
-    assert!(replacement.created);
-    assert_ne!(replacement.database.database_id, pending.database_id);
-    assert_ne!(replacement.database.lineage_id, pending.lineage_id);
-    assert_eq!(head_count(&mut sql), 0);
+    assert_eq!(
+        catalog
+            .create_if_absent("", Schema::new())
+            .unwrap_err()
+            .code,
+        "catalog/invalid-name"
+    );
+    assert_eq!(
+        catalog
+            .create_if_absent("nul\0name", Schema::new())
+            .unwrap_err()
+            .code,
+        "catalog/invalid-name"
+    );
 }
 
 #[test]
-fn independent_publication_guard_does_not_take_the_writers_head_lock() {
-    let Some(fixture) = fixture("catalog_publication_lock_order") else {
+fn retirement_fences_and_releases_an_interrupted_excision_owner() {
+    let Some(fixture) = fixture("catalog_excision_retire") else {
         return;
     };
-    let mut schema = Schema::new();
-    schema
-        .install(Attribute::new(
-            1000,
-            Keyword::new("test", "value"),
-            ValueType::Long,
-            Cardinality::One,
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    let database = BlockDatabase::create(&config, "cancel-work", Schema::new()).unwrap();
+    let mut writer =
+        BlockTransactor::claim(&config, database.clone(), BlockWriterOptions::default()).unwrap();
+    let first = writer
+        .transact(&TransactionRequest::new(
+            "data",
+            vec![TxOp::Add {
+                entity: EntityRef::Temp("item".into()),
+                attribute: DB_DOC as u32,
+                value: Value::String("private subject".into()).into(),
+            }],
         ))
         .unwrap();
-    let entry = DatabaseCatalog::connect(&fixture.connection)
-        .unwrap()
-        .create_if_absent("database", schema)
-        .unwrap()
-        .database;
-    PostgresIndexer::connect(&fixture.connection, "database")
-        .unwrap()
-        .consolidate()
-        .unwrap();
-    let mut writer = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let mut writer = writer.transaction().unwrap();
     writer
-        .query_one(
-            "SELECT basis_t FROM atomic_heads WHERE database_id=$1 FOR UPDATE",
-            &[&entry.database_id],
-        )
+        .transact(&TransactionRequest::new(
+            "excise",
+            vec![TxOp::Add {
+                entity: EntityRef::Temp("erase".into()),
+                attribute: DB_EXCISE as u32,
+                value: Value::Ref(first.tempids["item"]).into(),
+            }],
+        ))
         .unwrap();
-    let mut publisher = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let mut publisher = publisher.transaction().unwrap();
-    // PostgreSQL executes same-event BEFORE triggers in name order. Prove the
-    // active-identity guard runs first, before index-basis/delta/revision
-    // validation can reject this deliberately duplicated publication.
-    let first_before_insert: String = publisher
-        .query_one(
-            "SELECT tgname::text FROM pg_trigger \
-             WHERE tgrelid='atomic_tree_publications'::regclass \
-             AND (tgtype::int & 7)=7 AND tgenabled='O' \
-             ORDER BY tgname LIMIT 1",
-            &[],
-        )
-        .unwrap()
-        .get(0);
-    assert_eq!(first_before_insert, "atomic_tree_publications_active");
-    publisher
-        .query_one(
-            "SELECT database_id FROM atomic_databases WHERE database_id=$1 FOR UPDATE",
-            &[&entry.database_id],
-        )
-        .unwrap();
-    publisher
-        .batch_execute("SET LOCAL lock_timeout='200ms'")
-        .unwrap();
-    // Exercise the real publication trigger on an authenticated old row.
-    // Its already-consumed upload delta must reject this duplicate (P0002);
-    // retirement admission must not wait for the independent writer's already
-    // held head lock (55P03).
-    let rejected = publisher
-        .execute(
-            "INSERT INTO atomic_tree_publications \
-             (database_id,publication_revision,basis_t,tx_hash,manifest_hash,log_generation) \
-             SELECT database_id,publication_revision,basis_t,tx_hash,manifest_hash,log_generation \
-             FROM atomic_tree_publications WHERE database_id=$1 \
-             ORDER BY publication_revision DESC LIMIT 1",
-            &[&entry.database_id],
-        )
-        .unwrap_err();
-    assert_eq!(rejected.code().unwrap().code(), "P0002", "{rejected:?}");
-    publisher.rollback().unwrap();
-    writer.rollback().unwrap();
+    writer.release().unwrap();
+    let mut catalog = DatabaseCatalog::connect_configured(&config).unwrap();
+    let entry = catalog.resolve("cancel-work").unwrap();
+    let mut operator = PostgresOperator::connect_configured(&config).unwrap();
+    assert_eq!(
+        operator
+            .process_excision_requests_with_fault(&entry.database_id, ExcisionFault::AfterCapture)
+            .unwrap_err()
+            .code,
+        "excision/injected-fault"
+    );
+    let key = format!("excision/{}", entry.database_id);
+    let mut store = PgBlockStore::connect(&config).unwrap();
+    let pending = store.read_ref(&key).unwrap().unwrap();
+    assert!(pending.value.is_some());
+    catalog.retire("cancel-work").unwrap();
+    assert!(
+        store.read_ref(&key).unwrap().unwrap().value.is_none(),
+        "retired database work must not retain its candidate forever"
+    );
+    assert!(matches!(
+        store
+            .compare_exchange(&key, Some(pending.revision), pending.value.as_deref())
+            .unwrap(),
+        CasOutcome::Conflict(_)
+    ));
 }

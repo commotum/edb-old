@@ -1,52 +1,71 @@
 # Persistent native log cache
 
 `PostgresConnectionConfig::with_ssd_cache` enables the same disposable local
-cache for native tree nodes and transaction-log payloads. `Peer::log()` and its
-`tx_range` / `tx_data` reads need no separate cache configuration. The directory
-can reside on any supported local filesystem; SSD hardware is not required.
+cache for immutable tree, log and other scoped read objects. `Peer::log()` and
+its `tx_range`/`tx_data` reads need no separate cache configuration. SSD
+hardware is not required; use a supported private local filesystem.
 
-A restarted peer can reuse canonical transaction payloads without transferring
-them from PostgreSQL again. It still establishes root/generation retention,
-checks the database lineage, and reads authoritative transaction membership and
-request metadata. The cached payload is hash-checked, decoded, and validated
-against that metadata using the same authenticator as uncached recovery. The
-captured endpoint must also match. Cache possession is not read authorization,
-an offline database, or an independent source of truth.
+A captured log owns its immutable endpoint and reader protection. Transaction
+membership is authenticated through that root's pages and links, not through
+mutable SQL transaction rows or cache filenames. A new peer still opens through
+PostgreSQL authority, but a warm retained log can read entirely from authenticated
+local objects. Cache possession is neither authorization nor an offline database.
 
-The cache is namespaced by access configuration, lineage, physical excision
-generation and log format. A new generation never reads the previous
-generation's cached log. Already retained immutable log values may continue
-reading their original generation. `Peer::purge_ssd_generation` removes both
-recognized node and log entries for that generation; it does not erase held
-values, backups, other cache directories, or filesystem remnants. Reading a
-still-retained old value after purge may populate its cache again.
+The namespace includes access configuration, lineage, excision generation and
+format. New generations cannot read old-generation entries by accident.
+Already-held old values may continue reading their original graph.
+`Peer::purge_ssd_generation` removes recognized entries in that cache namespace;
+it does not erase held values, backups, other cache directories or filesystem
+remnants. A retained old value can populate its cache again after a purge.
 
 Corrupt, unavailable, disabled or capacity-rejected cache entries fall back to
-PostgreSQL. The existing entry/physical-byte limits cover node and log entries
-together. Transaction payloads larger than the cache's block codec allowance
-remain readable but are not cached. No transaction encoding or durable receipt
-changes are involved.
+PostgreSQL. An authoritative object that also fails authentication is an error,
+not an empty transaction. Entry/physical-byte limits apply to all objects in the
+shared directory together. Cache admission is per object; a chunked transaction
+can have a mixture of cached and uncached objects.
 
-Log traversal still holds at most one codec-bounded transaction at a time,
-apart from the captured snapshot and caller-retained results. The cache codec
-may simultaneously hold encoded and decoded buffers for that transaction;
-cache limits are residency limits, not process RSS guarantees. Cold reads add
-a payload-fetch statement after their metadata lookup. Warm reads reduce
-payload transfer, not all SQL or authentication work.
+Log traversal keeps at most one decoded transaction at a time beyond the
+captured snapshot and caller-retained results. Immutable navigation and decoding
+have format bounds, but a large transaction still requires correspondingly
+large memory. Physical and canonical buffers can coexist. Cache limits are
+accounted residency, not an RSS ceiling or total query budget. Integer-bounded
+cursor construction performs no payload reads; instant bounds may consult the
+captured transaction-time index.
 
-`LogCursorStats::payload_bytes_read` counts successful canonical payload bytes
-from either tier. `postgres_payload_bytes_read` isolates payload bytes fetched
-from PostgreSQL, while `cache_hits` counts successfully authenticated cached
-transactions. Metadata bytes/calls remain visible in `OperationContext` SQL
-statistics. `Peer::ssd_cache_stats` reports shared persistent-cache physical
-I/O, admission, corruption and residency. One transaction may be too large to
-cache even though its ordinary log read is valid.
+## Counters
 
-The focused `native_log_cache` PostgreSQL test uses 12 noHistory updates with
-the RAM node cache disabled and a 128-entry / 8 MiB persistent allowance. One
-local run read 1,132,927 canonical payload bytes: cold SQL returned 1,136,343
-field bytes, versus 3,416 metadata bytes and zero PostgreSQL payload bytes for
-both warm and reopened scans. Cold scan time was 39.8 ms, warm 17.4 ms, and
-reopen plus scan/checks 72.6 ms. Complete setup, reads, validation, result drop
-and disposable fixture cleanup took 1.91 s. These are host-specific observations,
-not a throughput or hardware claim; PostgreSQL and OS caches were not flushed.
+`LogCursorStats::payload_bytes_read` counts successfully decoded transaction
+bytes: the entry header and canonical datoms.
+`postgres_payload_bytes_read` counts actual canonical bytes fetched from
+PostgreSQL for the record lookup, including navigation pages and entry/chunk
+envelopes. These counters have different scopes and need not be equal on a cold
+read. They are not compressed physical bytes or wire traffic.
+
+`cache_hits` counts a transaction only when every immutable object read for its
+lookup came from SSD. A mixed hit/miss lookup is not a complete hit, but still
+reports only the PostgreSQL bytes actually fetched. Failed lookups increment
+`range_reads` without adding successful payload/transaction counts.
+Repository-backed offline reads report neither PostgreSQL bytes nor SSD hits;
+their file I/O is not mislabeled as a live cache.
+
+Use `OperationContext` for actual SQL calls/result-cell bytes and
+`Peer::ssd_cache_stats()` for shared persistent-cache physical I/O, corruption,
+admission and residency. Those broader observations may include work outside one
+log cursor. Warm reads can eliminate all lookup SQL when all required objects
+fit, not just the transaction payload transfer.
+
+## Measuring the benefit
+
+Use a fresh private cache and one unchanged captured log. Measure cold iteration,
+repeat iteration and a new-peer reopen separately, consume/check the same data,
+then include result drop and cleanup in the complete-path timer. Record cache
+limits, source size, SQL/cache counters and PostgreSQL/OS cache conditions.
+A cache-disabled or oversized-object run is a useful comparison, not an error
+to hide by silently raising capacity.
+
+[native_log_cache.rs](../tests/native_log_cache.rs) exercises persistent reuse,
+corruption fallback and generation separation; [block_native_log.rs](../tests/block_native_log.rs)
+covers captured current log semantics, ranges and authentication. No historical
+relational-cache timing is a performance claim for this implementation.
+See [application cache configuration](application.md#optional-local-ssd-cache-and-compressed-blocks)
+and [offline backup reads](backup-reads.md).

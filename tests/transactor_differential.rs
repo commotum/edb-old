@@ -1,7 +1,7 @@
 use atomic_core::{
-    Attribute, Cardinality, Database, EntityRef, Keyword, PostgresMigrator, PostgresStore, Schema,
-    ServiceTransactionReport, TransactionRequest, TransactionService, TransactionServiceConfig,
-    TxOp, TxValue, Unique, Value, ValueType,
+    Attribute, Cardinality, Database, EntityRef, Keyword, Schema, ServiceTransactionReport,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue, Unique, Value,
+    ValueType,
 };
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -473,12 +473,10 @@ fn production_writer_matches_the_pure_kernel_across_transactions_and_restart() {
         return;
     };
     let database_id = unique_name("transactor_differential");
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
-    let mut oracle = store.create_database(&database_id, schema()).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
+    store.create_database(&database_id, schema()).unwrap();
+    let mut oracle = Database::new(schema()).unwrap();
     drop(store);
 
     let service = TransactionService::start(config(&connection, &database_id)).unwrap();
@@ -629,7 +627,7 @@ fn production_writer_matches_the_pure_kernel_across_transactions_and_restart() {
     );
     service.shutdown();
 
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let recovered = store.recover(&database_id).unwrap();
     common::assert_same_information(&recovered, &oracle);
     assert_eq!(
@@ -677,12 +675,10 @@ fn generated_production_transactions_match_the_pure_kernel() {
         trace_path
     );
     let database_id = unique_name("generated_transactor_differential");
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
-    let mut oracle = store.create_database(&database_id, schema()).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
+    store.create_database(&database_id, schema()).unwrap();
+    let mut oracle = Database::new(schema()).unwrap();
     drop(store);
 
     let mut service = TransactionService::start(config(&connection, &database_id)).unwrap();
@@ -929,7 +925,7 @@ fn generated_production_transactions_match_the_pure_kernel() {
     // One linear full-state comparison avoids an O(N^2) test while proving
     // that matching reports compose into the same current and historical
     // information in every index order after durable recovery.
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let recovered = store.recover(&database_id).unwrap();
     common::assert_same_information(&recovered, &oracle);
     eprintln!(

@@ -589,8 +589,8 @@ fn native_stored_fulltext_query_and_transaction_survive_replay_and_restart() {
     };
     let fixture = common::PostgresFixture::new(&url, "fulltext_query_program");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    let mut store = PostgresStore::connect(url).unwrap();
+    common::install(url).unwrap();
+    let mut store = common::TestStore::connect(url).unwrap();
     let created = store.create_database("search", schema(true)).unwrap();
     let query_program = program(query(true));
     let query_hash = store.deploy_program_blob(&query_program).unwrap();
@@ -730,7 +730,7 @@ fn native_stored_fulltext_query_and_transaction_survive_replay_and_restart() {
     assert_eq!(retried.tx_hash, committed.tx_hash);
     writer.shutdown();
     drop(store);
-    let mut store = PostgresStore::connect(url).unwrap();
+    let mut store = common::TestStore::connect(url).unwrap();
     let restored = store.resolve_program(query_hash).unwrap();
     assert_eq!(
         encode_program(&restored).unwrap(),

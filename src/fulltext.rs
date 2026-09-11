@@ -8,9 +8,15 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
+#[path = "fulltext_reader.rs"]
+mod reader;
+pub use reader::NativeFulltextReader;
+#[path = "fulltext_difference.rs"]
+mod difference;
+pub(crate) use difference::{HistoryDifference, HistorySource};
 #[path = "fulltext_records.rs"]
 mod records;
-pub(crate) use records::{DeltaRecords, empty_fulltext_corpus, fulltext_records};
+pub(crate) use records::{DeltaRecords, empty_corpus_from, records_from};
 
 #[derive(Clone, Debug)]
 pub struct FulltextOptions {
@@ -48,8 +54,8 @@ pub struct FulltextHit {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FulltextStats {
     pub work: u64,
-    /// Authenticated search-page bytes fetched from PostgreSQL; eager fixtures
-    /// have no such I/O. Distinct from cumulative allocation admission below.
+    /// Authenticated search-page bytes fetched from the object source; eager
+    /// values have no such I/O. Distinct from allocation admission below.
     pub read_bytes: u64,
     pub admitted_bytes: u64,
     pub index_basis_t: u64,
@@ -187,11 +193,10 @@ impl DatabaseValue {
         }
         // A native value must never silently materialize its entire database
         // when the eventual durable sidecar is not yet available.
-        if let Some(snapshot) = self.fulltext_native_snapshot() {
-            // A new speculative attribute may have no committed search source.
-            // Only its explicit local delta is searched in that case.
+        if let Some(snapshot) = self.block_snapshot() {
             let reader = if snapshot
-                .schema()
+                .base_metadata()
+                .schema
                 .attribute(attribute)
                 .is_ok_and(|a| a.fulltext)
             {
@@ -199,7 +204,14 @@ impl DatabaseValue {
             } else {
                 None
             };
-            return self.search_native(attribute, &query, reader.as_ref(), &mut budget);
+            let mut report = self.search_native(attribute, &query, reader.as_ref(), &mut budget)?;
+            if reader.is_none() {
+                // A recently installed attribute has no indexed corpus yet;
+                // searching only a speculative delta must not claim coverage
+                // of the committed recent tail.
+                report.stats.index_basis_t = snapshot.index_descriptor().basis;
+            }
+            return Ok(report);
         }
         let mut docs = Vec::new();
         for datom in self.fulltext_history_cursor(attribute)? {
@@ -476,13 +488,12 @@ fn effective_terms(query: &CompiledSearch) -> Vec<&SearchTerm> {
     // do not compare every query term to every other term.
     let mut prefixes = BTreeSet::<&str>::new();
     for term in &query.terms {
-        if let SearchTerm::Prefix(prefix) = term {
-            if !prefixes
+        if let SearchTerm::Prefix(prefix) = term
+            && !prefixes
                 .last()
                 .is_some_and(|previous| prefix.starts_with(previous))
-            {
-                prefixes.insert(prefix);
-            }
+        {
+            prefixes.insert(prefix);
         }
     }
     query

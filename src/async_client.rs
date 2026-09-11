@@ -2,7 +2,7 @@
 //! Native results returned to callers retain their synchronous methods and
 //! final-drop behavior. Abandoned facade-owned resources are cleaned on workers.
 #[path = "async_executor.rs"]
-mod executor;
+pub(crate) mod executor;
 #[path = "async_stream.rs"]
 mod stream;
 pub use executor::{AsyncConfig, AsyncExecutor, AsyncOperation, AsyncStats};

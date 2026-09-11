@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+pub mod blocks;
+#[allow(unused_imports)] // Each integration target uses a different fixture subset.
+pub use blocks::{TestStore, consolidate, install};
+
 #[cfg(unix)]
 pub mod product_support;
 
@@ -16,6 +20,18 @@ use std::sync::{
 use std::time::Duration;
 
 static NEXT_HOLDER: AtomicU64 = AtomicU64::new(1);
+
+/// Repository fixtures must meet the same private-directory admission as users;
+/// never depend on the invoking shell's umask or temporary-directory defaults.
+pub fn private_directory() -> tempfile::TempDir {
+    let directory = tempfile::tempdir().unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    directory
+}
 
 /// Disposable schema-scoped PostgreSQL fixture. Fault tests must not mutate
 /// shared catalogs or invoke global reclamation against unrelated databases.
@@ -182,8 +198,7 @@ pub fn with_replica_triggers_disabled<T>(
 
 /// Start the same database-bound transactor used by application callers.
 ///
-/// PostgreSQL fixtures use this instead of reaching through `PostgresStore`
-/// to its crate-internal publication primitive.
+/// PostgreSQL fixtures use this instead of bypassing the database's sole writer.
 pub fn start_service(connection: &str, database_id: &str) -> TransactionService {
     start_service_with_limits(connection, database_id, CapacityLimits::default())
 }

@@ -211,16 +211,13 @@ fn native_speculation_never_advances_postgres_or_materializes_the_database() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
     let writer = common::start_service(&postgres, &id);
     let peer = atomic_core::Connection::connect(&postgres, &id, 4).unwrap();
     let before = peer.db();
-    let eager = store.recover(&id).unwrap();
+    let eager = Database::new(schema()).unwrap();
     exercise(eager, before.clone());
     assert_eq!(peer.sync().unwrap().basis_t(), before.basis_t());
     assert_eq!(store.recover(&id).unwrap().basis_t(), before.basis_t());

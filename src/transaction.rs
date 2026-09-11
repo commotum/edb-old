@@ -1003,124 +1003,10 @@ impl DatabaseValue {
         limits: SpeculationLimits,
         options: &crate::TransactionExecutionOptions,
     ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
-        use crate::database_value::TransactionReadContext;
-        use crate::postgres::program_bindings::{
-            expand_submission_forms_with_native, persisted_predicates_with_native,
-            transaction_program_roots, validate_successor_program_bindings_with_native,
-            visit_program_closure,
-        };
-        use std::sync::Mutex;
-        validate_forms_input(forms)?;
-        if limits.max_operations == 0
-            || limits.max_read_datoms == 0
-            || limits.max_read_bytes == 0
-            || limits.max_program_dependencies == 0
-            || limits.max_program_bytes == 0
-        {
-            return Err(SemanticError::incorrect(
-                "transaction/invalid-speculation-capacity",
-                "speculative operation, read and code dependency limits must be positive",
-            ));
-        }
-        let context = Arc::new(TransactionReadContext::new(
-            limits.max_read_datoms,
-            limits.max_read_bytes,
-        ));
-        let before = self
-            .speculation_base()?
-            .with_transaction_read_context(Arc::clone(&context));
-        let budget = Arc::new(Mutex::new(crate::ProgramBudget::new(
-            limits.program.control(),
-        )?));
-        let mut retained = BTreeMap::new();
-        let mut program_bytes = 0usize;
-        let mut resolve = |hash| {
-            if let Some(program) = retained.get(&hash) {
-                return Ok(Arc::clone(program));
-            }
-            if retained.len() >= limits.max_program_dependencies {
-                return Err(SemanticError::new(
-                    crate::ErrorCategory::Busy,
-                    "transaction/program-dependency-capacity",
-                    "speculative attempt exceeds its immutable code dependency count",
-                ));
-            }
-            let program = self.resolve_program(hash)?;
-            // Same canonical-payload + fixed-overhead proxy as the durable
-            // program cache. At most one bounded blob is decoded before the
-            // byte limit rejects it; dependency traversal never escapes this
-            // resolver, including dormant fixed calls in newly bound code.
-            let weight = crate::encode_program(program.program())?
-                .len()
-                .saturating_add(1_024 + std::mem::size_of::<crate::ProgramHash>());
-            program_bytes = program_bytes
-                .checked_add(weight)
-                .filter(|bytes| *bytes <= limits.max_program_bytes)
-                .ok_or_else(|| {
-                    SemanticError::new(
-                        crate::ErrorCategory::Busy,
-                        "transaction/program-dependency-capacity",
-                        "speculative attempt exceeds its immutable code byte allowance",
-                    )
-                })?;
-            retained.insert(hash, Arc::clone(&program));
-            Ok(program)
-        };
-        let expanded = {
-            let mut budget = budget.lock().map_err(|_| {
-                SemanticError::new(
-                    crate::ErrorCategory::Fault,
-                    "program/budget-poisoned",
-                    "speculation budget mutex poisoned",
-                )
-            })?;
-            expand_submission_forms_with_native(
-                &mut resolve,
-                &before,
-                forms,
-                &mut budget,
-                &options.native,
-            )?
-        };
-        let ops = before.normalize_persisted_forms_with_limit(&expanded, limits.max_operations)?;
-        let remaining = context.remaining()?;
-        let assessed = crate::tiered_assessor::assess_tiered_with_remaining_limits_and_defaults(
-            &before,
-            &ops,
-            tx_instant,
-            crate::tiered_assessor::AssessmentLimits {
-                max_read_datoms: remaining.datoms,
-                max_read_bytes: remaining.retained_bytes,
-            },
-            &options.defaults,
-        )?;
-        validate_successor_program_bindings_with_native(
-            &mut resolve,
-            &assessed.db_before,
-            &assessed.db_after,
-            &assessed.tx_data,
-            &options.native,
-        )?;
-        let functions = persisted_predicates_with_native(
-            &mut resolve,
-            &assessed.db_before,
-            &assessed.predicate_requirements()?,
-            Arc::clone(&budget),
-            &options.native,
-        )?;
-        assessed.validate_exact(Some(&functions))?;
-        visit_program_closure(
-            &mut resolve,
-            transaction_program_roots(&assessed.tx_data),
-            &mut |_, _| {},
-        )?;
+        let assessed = assess_forms(self, forms, tx_instant, limits, options)?;
         Ok(crate::SpeculativeTransactionReport {
             db_before: self.clone(),
-            db_after: assessed
-                .db_after
-                .without_transaction_read_context()
-                .retain_programs(retained)
-                .with_speculation_view(self),
+            db_after: assessed.db_after.with_speculation_view(self),
             tx_data: assessed.tx_data,
             tempids: assessed.tempids,
         })
@@ -1136,6 +1022,267 @@ impl DatabaseValue {
         max_primitive_ops: usize,
     ) -> Result<Vec<TxOp>, SemanticError> {
         normalize_forms_against(NormalizerRead::Exact(self), forms, None, max_primitive_ops)
+    }
+}
+
+/// Receipt-free outcome of the shared selective semantic pipeline. These are
+/// proposed values, not durable publication acknowledgements. Attempt-local
+/// memo/observer state is stripped before this handoff.
+pub(crate) struct ValidatedTransaction {
+    pub(crate) db_before: DatabaseValue,
+    pub(crate) db_after: DatabaseValue,
+    pub(crate) basis_t: u64,
+    pub(crate) eidx_frontier: u64,
+    pub(crate) tx_data: Vec<crate::Datom>,
+    pub(crate) tempids: BTreeMap<String, u64>,
+    pub(crate) read_work: crate::database_value::TransactionReadWork,
+    pub(crate) assessment_work: crate::tiered_assessor::AssessmentReadWork,
+    /// Resolved fixed dependency closure. Publication must protect any newly
+    /// referenced objects even when their immutable bytes already exist.
+    pub(crate) retained_programs: crate::program_bindings::ResolvedPrograms,
+}
+
+/// Assess transaction forms against one immutable db-before, without acquiring
+/// writer authority, looking up receipts, or publishing anything. A durable
+/// caller must resolve an existing receipt and check current authority before
+/// entering this fresh-work path, then separately protect/publish the outcome.
+/// Public speculation restores caller views only after this exact validation.
+pub(crate) fn assess_forms(
+    base: &DatabaseValue,
+    forms: &[TxForm],
+    tx_instant: i64,
+    limits: SpeculationLimits,
+    options: &crate::TransactionExecutionOptions,
+) -> Result<ValidatedTransaction, SemanticError> {
+    assess_forms_with_clock(base, forms, TxClock::Fixed(tx_instant), limits, options)
+}
+
+/// Durable admission selects the transaction clock only after functions and
+/// maps have produced normalized operations. Expansion still runs exactly once.
+pub(crate) fn assess_durable_forms(
+    base: &DatabaseValue,
+    forms: &[TxForm],
+    server_now: i64,
+    option_override: Option<i64>,
+    limits: SpeculationLimits,
+    options: &crate::TransactionExecutionOptions,
+) -> Result<ValidatedTransaction, SemanticError> {
+    assess_forms_with_clock(
+        base,
+        forms,
+        TxClock::Durable {
+            server_now,
+            option_override,
+        },
+        limits,
+        options,
+    )
+}
+
+enum TxClock {
+    Fixed(i64),
+    Durable {
+        server_now: i64,
+        option_override: Option<i64>,
+    },
+}
+
+fn assess_forms_with_clock(
+    base: &DatabaseValue,
+    forms: &[TxForm],
+    clock: TxClock,
+    limits: SpeculationLimits,
+    options: &crate::TransactionExecutionOptions,
+) -> Result<ValidatedTransaction, SemanticError> {
+    use crate::database_value::TransactionReadContext;
+    use crate::program_bindings::{
+        expand_submission_forms_with_native, persisted_predicates_with_native,
+        transaction_program_roots, validate_successor_program_bindings_with_native,
+        visit_program_closure,
+    };
+    use std::sync::Mutex;
+    validate_forms_input(forms)?;
+    if limits.max_operations == 0
+        || limits.max_read_datoms == 0
+        || limits.max_read_bytes == 0
+        || limits.max_program_dependencies == 0
+        || limits.max_program_bytes == 0
+    {
+        return Err(SemanticError::incorrect(
+            "transaction/invalid-speculation-capacity",
+            "speculative operation, read and code dependency limits must be positive",
+        ));
+    }
+    let context = Arc::new(TransactionReadContext::new(
+        limits.max_read_datoms,
+        limits.max_read_bytes,
+    ));
+    let before = base
+        .speculation_base()?
+        .with_transaction_read_context(Arc::clone(&context));
+    let budget = Arc::new(Mutex::new(crate::ProgramBudget::new(
+        limits.program.control(),
+    )?));
+    let mut retained = BTreeMap::new();
+    let mut program_bytes = 0usize;
+    let mut resolve = |hash| {
+        if let Some(program) = retained.get(&hash) {
+            return Ok(Arc::clone(program));
+        }
+        if retained.len() >= limits.max_program_dependencies {
+            return Err(SemanticError::new(
+                crate::ErrorCategory::Busy,
+                "transaction/program-dependency-capacity",
+                "speculative attempt exceeds its immutable code dependency count",
+            ));
+        }
+        let program = base.resolve_program(hash)?;
+        // Same canonical-payload + fixed-overhead proxy as the durable
+        // program cache. At most one bounded blob is decoded before the
+        // byte limit rejects it; dependency traversal never escapes this
+        // resolver, including dormant fixed calls in newly bound code.
+        let weight = crate::encode_program(program.program())?
+            .len()
+            .saturating_add(1_024 + std::mem::size_of::<crate::ProgramHash>());
+        program_bytes = program_bytes
+            .checked_add(weight)
+            .filter(|bytes| *bytes <= limits.max_program_bytes)
+            .ok_or_else(|| {
+                SemanticError::new(
+                    crate::ErrorCategory::Busy,
+                    "transaction/program-dependency-capacity",
+                    "speculative attempt exceeds its immutable code byte allowance",
+                )
+            })?;
+        retained.insert(hash, Arc::clone(&program));
+        Ok(program)
+    };
+    let operation = crate::OperationContext::current_or_process();
+    let expansion_phase = operation.phase(crate::OperationKind::TransactionExpansion);
+    let expanded = {
+        let mut budget = budget.lock().map_err(|_| {
+            SemanticError::new(
+                crate::ErrorCategory::Fault,
+                "program/budget-poisoned",
+                "speculation budget mutex poisoned",
+            )
+        })?;
+        expand_submission_forms_with_native(
+            &mut resolve,
+            &before,
+            forms,
+            &mut budget,
+            &options.native,
+        )?
+    };
+    let ops = before.normalize_persisted_forms_with_limit(&expanded, limits.max_operations)?;
+    drop(expansion_phase);
+    let _assessment_phase = operation.phase(crate::OperationKind::TransactionAssessment);
+    let tx_instant = match clock {
+        TxClock::Fixed(instant) => instant,
+        TxClock::Durable {
+            server_now,
+            option_override,
+        } => select_tx_instant(&before, server_now, option_override, &ops)?,
+    };
+    let remaining = context.remaining()?;
+    let assessed = crate::tiered_assessor::assess_tiered_with_remaining_limits_and_defaults(
+        &before,
+        &ops,
+        tx_instant,
+        crate::tiered_assessor::AssessmentLimits {
+            max_read_datoms: remaining.datoms,
+            max_read_bytes: remaining.retained_bytes,
+        },
+        &options.defaults,
+    )?;
+    validate_successor_program_bindings_with_native(
+        &mut resolve,
+        &assessed.db_before,
+        &assessed.db_after,
+        &assessed.tx_data,
+        &options.native,
+    )?;
+    let functions = persisted_predicates_with_native(
+        &mut resolve,
+        &assessed.db_before,
+        &assessed.predicate_requirements()?,
+        Arc::clone(&budget),
+        &options.native,
+    )?;
+    assessed.validate_exact(Some(&functions))?;
+    visit_program_closure(
+        &mut resolve,
+        transaction_program_roots(&assessed.tx_data),
+        &mut |_, _| {},
+    )?;
+    Ok(ValidatedTransaction {
+        db_before: assessed.db_before.without_transaction_read_context(),
+        db_after: assessed
+            .db_after
+            .without_transaction_read_context()
+            .retain_programs(retained.clone()),
+        basis_t: assessed.basis_t,
+        eidx_frontier: assessed.eidx_frontier,
+        tx_data: assessed.tx_data,
+        tempids: assessed.tempids,
+        read_work: context.snapshot()?,
+        assessment_work: assessed.read_work,
+        retained_programs: retained,
+    })
+}
+
+/// Clock policy shared by durable backends; this consumes normalized operations
+/// rather than raw forms so generated and map-form assertions have one meaning.
+pub(crate) fn select_tx_instant(
+    db_before: &DatabaseValue,
+    server_now: i64,
+    option_override: Option<i64>,
+    ops: &[TxOp],
+) -> Result<i64, SemanticError> {
+    let mut data_override = None;
+    for op in ops {
+        if let TxOp::Add {
+            entity: EntityRef::Tx,
+            attribute,
+            value: TxValue::Scalar(Value::Instant(instant)),
+        } = op
+            && *attribute == crate::DB_TX_INSTANT as u32
+            && data_override.replace(*instant).is_some()
+        {
+            return Err(SemanticError::incorrect(
+                "transaction/multiple-tx-instants",
+                ":db/txInstant may be specified only once",
+            ));
+        }
+    }
+    let explicit = match (option_override, data_override) {
+        (Some(left), Some(right)) if left != right => {
+            return Err(SemanticError::incorrect(
+                "transaction/tx-instant-mismatch",
+                "transaction option and transaction data specify different instants",
+            ));
+        }
+        (Some(instant), _) | (_, Some(instant)) => Some(instant),
+        (None, None) => None,
+    };
+    let previous = db_before.last_tx_instant()?;
+    if let Some(instant) = explicit {
+        if instant > server_now {
+            return Err(SemanticError::incorrect(
+                "transaction/future-tx-instant",
+                format!("transaction instant {instant} exceeds transactor clock {server_now}"),
+            ));
+        }
+        if previous.is_some_and(|basis| instant < basis) {
+            return Err(SemanticError::incorrect(
+                "transaction/past-tx-instant",
+                format!("transaction instant {instant} precedes basis instant {previous:?}"),
+            ));
+        }
+        Ok(instant)
+    } else {
+        Ok(previous.map_or(server_now, |basis| basis.max(server_now)))
     }
 }
 
@@ -1641,16 +1788,14 @@ impl Normalizer<'_> {
                     // The source's map expander gives nested component maps
                     // affinity with their owner. Ordinary primitive ref edges
                     // deliberately do not acquire this authoring policy.
-                    if component {
-                        if let EntityRef::Temp(tempid) = &child {
-                            self.push(
-                                TxOp::MatchPartition {
-                                    tempid: tempid.clone(),
-                                    entity: owner.clone(),
-                                },
-                                output,
-                            )?;
-                        }
+                    if component && let EntityRef::Temp(tempid) = &child {
+                        self.push(
+                            TxOp::MatchPartition {
+                                tempid: tempid.clone(),
+                                entity: owner.clone(),
+                            },
+                            output,
+                        )?;
                     }
                     self.push(
                         TxOp::Add {
@@ -1725,6 +1870,300 @@ mod tests {
 
     fn scalar(value: Value) -> MapValue {
         MapValue::Value(TxValue::Scalar(value))
+    }
+
+    #[test]
+    fn durable_clock_policy_preserves_explicit_errors_and_monotone_default() {
+        let base = Database::bootstrap()
+            .unwrap()
+            .with(&[], 100)
+            .unwrap()
+            .db_after
+            .database_value();
+        let add = |instant| TxOp::Add {
+            entity: EntityRef::Tx,
+            attribute: crate::DB_TX_INSTANT as u32,
+            value: Value::Instant(instant).into(),
+        };
+        assert_eq!(select_tx_instant(&base, 90, None, &[]).unwrap(), 100);
+        assert_eq!(select_tx_instant(&base, 200, None, &[]).unwrap(), 200);
+        assert_eq!(
+            select_tx_instant(&base, 200, None, &[add(150)]).unwrap(),
+            150
+        );
+        assert_eq!(
+            select_tx_instant(&base, 200, Some(150), &[add(150)]).unwrap(),
+            150
+        );
+        assert_eq!(select_tx_instant(&base, 200, Some(100), &[]).unwrap(), 100);
+        for (now, option, ops, code) in [
+            (
+                200,
+                None,
+                vec![add(150), add(150)],
+                "transaction/multiple-tx-instants",
+            ),
+            (
+                200,
+                Some(160),
+                vec![add(150)],
+                "transaction/tx-instant-mismatch",
+            ),
+            (200, None, vec![add(201)], "transaction/future-tx-instant"),
+            (200, Some(99), vec![], "transaction/past-tx-instant"),
+        ] {
+            assert_eq!(
+                select_tx_instant(&base, now, option, &ops)
+                    .unwrap_err()
+                    .code,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn durable_clock_selects_normalized_maps_without_changing_speculation() {
+        let base = Database::bootstrap().unwrap().database_value();
+        let forms = [TxForm::EntityMap(EntityMap {
+            id: Some(EntityRef::Tx),
+            attributes: vec![(
+                AttributeRef::Ident(Keyword::new("db", "txInstant")),
+                scalar(Value::Instant(150)),
+            )],
+        })];
+        let options = crate::TransactionExecutionOptions::default();
+        let assessed = assess_durable_forms(
+            &base,
+            &forms,
+            200,
+            None,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(assessed.db_after.last_tx_instant().unwrap(), Some(150));
+        assert!(
+            assessed
+                .tx_data
+                .iter()
+                .any(|d| d.attribute == crate::DB_TX_INSTANT as u32
+                    && d.value == Value::Instant(150))
+        );
+        let error = assess_forms(&base, &forms, 200, SpeculationLimits::default(), &options)
+            .err()
+            .unwrap();
+        assert_eq!(error.code, "transaction/tx-instant-mismatch");
+        assert_eq!(
+            assess_forms(&base, &forms, 150, SpeculationLimits::default(), &options)
+                .unwrap()
+                .tx_data,
+            assessed.tx_data
+        );
+    }
+
+    #[test]
+    fn durable_clock_expands_generated_instant_once_even_when_rejected() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&invoked);
+        let name = crate::Symbol::new("test.clock.v1", "select");
+        let mut registry = crate::NativeRegistry::builder();
+        registry
+            .transaction(name.clone(), move |_, _, control| {
+                control.check(1)?;
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(vec![TxForm::EntityMap(EntityMap {
+                    id: Some(EntityRef::Tx),
+                    attributes: vec![(
+                        AttributeRef::Ident(Keyword::new("db", "txInstant")),
+                        scalar(Value::Instant(150)),
+                    )],
+                })])
+            })
+            .unwrap();
+        let options = crate::TransactionExecutionOptions {
+            native: registry.build(),
+            ..Default::default()
+        };
+        let base = Database::bootstrap().unwrap().database_value();
+        let forms = [TxForm::ProgramCall(ProgramCall {
+            function: CallableRef::Local(name),
+            arguments: vec![],
+        })];
+        let assessed = assess_durable_forms(
+            &base,
+            &forms,
+            200,
+            None,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(assessed.db_after.last_tx_instant().unwrap(), Some(150));
+        assert_eq!(invoked.load(Ordering::SeqCst), 1);
+        let error = assess_durable_forms(
+            &base,
+            &forms,
+            200,
+            Some(160),
+            SpeculationLimits::default(),
+            &options,
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error.code, "transaction/tx-instant-mismatch");
+        assert_eq!(invoked.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn shared_assessment_strips_attempt_state_and_speculation_reapplies_views() {
+        let mut schema = crate::Schema::new();
+        schema
+            .install(Attribute::new(
+                KEY,
+                Keyword::new("item", "value"),
+                ValueType::Long,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let seeded = Database::new(schema)
+            .unwrap()
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Temp("item".into()),
+                    attribute: KEY,
+                    value: Value::Long(1).into(),
+                }],
+                10,
+            )
+            .unwrap();
+        let entity = seeded.tempids["item"];
+        let base = seeded.db_after.database_value();
+        let filtered = base.clone().as_of(0).filter(|_, _| false);
+        let forms = [TxForm::Op(TxOp::Add {
+            entity: EntityRef::Id(entity),
+            attribute: KEY,
+            value: Value::Long(2).into(),
+        })];
+        let options = crate::TransactionExecutionOptions::default();
+        let assessed = assess_forms(
+            &filtered,
+            &forms,
+            20,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap();
+        assert_eq!(
+            assessed.db_before.values(entity, KEY).unwrap(),
+            vec![Value::Long(1)]
+        );
+        assert_eq!(
+            assessed.db_after.values(entity, KEY).unwrap(),
+            vec![Value::Long(2)]
+        );
+        assert!(assessed.db_before.transaction_read_context().is_none());
+        assert!(assessed.db_after.transaction_read_context().is_none());
+        assert!(!assessed.db_after.is_filtered());
+        assert_eq!(assessed.db_after.as_of_t(), None);
+        assert!(assessed.read_work.logical_datoms > 0);
+        assert!(assessed.read_work.prefix_misses > 0);
+        assert!(assessed.assessment_work.prefixes > 0);
+        assert_eq!(assessed.basis_t, base.basis_t() + 1);
+        assert_eq!(assessed.eidx_frontier, assessed.db_after.eidx_frontier());
+        assert!(assessed.retained_programs.is_empty());
+
+        let speculative = filtered
+            .with_forms_with_execution_options(&forms, 20, SpeculationLimits::default(), &options)
+            .unwrap();
+        assert_eq!(speculative.tx_data, assessed.tx_data);
+        assert_eq!(speculative.tempids, assessed.tempids);
+        assert!(speculative.db_before.is_filtered());
+        assert!(speculative.db_after.is_filtered());
+        assert_eq!(speculative.db_after.as_of_t(), Some(0));
+        assert!(
+            speculative
+                .db_after
+                .datoms(crate::IndexOrder::Eavt)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(base.values(entity, KEY).unwrap(), vec![Value::Long(1)]);
+        let error = assess_forms(
+            &base.history(),
+            &forms,
+            20,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .err()
+        .expect("history must remain nontransactable");
+        assert_eq!(error.code, "transaction/history-with");
+    }
+
+    #[test]
+    fn shared_assessment_returns_dormant_program_closure_for_publication_protection() {
+        use crate::program::ValidatedProgram;
+        use crate::{Instruction, Program, ProgramKind};
+        let leaf = Program {
+            kind: ProgramKind::Transaction,
+            arity: 0,
+            instructions: vec![Instruction::Return],
+        };
+        let leaf_hash = crate::program_hash(&leaf).unwrap();
+        let root = Program {
+            kind: ProgramKind::Transaction,
+            arity: 0,
+            instructions: vec![
+                Instruction::PushConstant(Value::Function(leaf_hash)),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+        };
+        let root_hash = crate::program_hash(&root).unwrap();
+        let programs = BTreeMap::from([
+            (leaf_hash, Arc::new(ValidatedProgram::from_canonical(leaf))),
+            (root_hash, Arc::new(ValidatedProgram::from_canonical(root))),
+        ]);
+        let base = Database::bootstrap()
+            .unwrap()
+            .database_value()
+            .retain_programs(programs);
+        let forms = [
+            TxForm::Op(TxOp::Add {
+                entity: EntityRef::Temp("code".into()),
+                attribute: crate::DB_IDENT as u32,
+                value: Value::Keyword(Keyword::new("test", "code")).into(),
+            }),
+            TxForm::Op(TxOp::Add {
+                entity: EntityRef::Temp("code".into()),
+                attribute: crate::DB_FN as u32,
+                value: Value::Function(root_hash).into(),
+            }),
+        ];
+        let assessed = assess_forms(
+            &base,
+            &forms,
+            10,
+            SpeculationLimits::default(),
+            &crate::TransactionExecutionOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            assessed
+                .retained_programs
+                .keys()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([root_hash, leaf_hash])
+        );
+        for hash in [root_hash, leaf_hash] {
+            assert!(Arc::ptr_eq(
+                &assessed.retained_programs[&hash],
+                &assessed.db_after.resolve_program(hash).unwrap()
+            ));
+        }
+        assert!(assessed.db_after.transaction_read_context().is_none());
     }
 
     #[test]

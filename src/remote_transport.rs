@@ -4,7 +4,8 @@ use crate::encoding::{
     WireOutcome, decode_submission, decode_submission_outcome, encode_submission,
     encode_submission_outcome,
 };
-use crate::postgres::{TransactorLease, postgres_error, verify_schema_compatibility};
+use crate::runtime::TransactorLease;
+use crate::storage::{BatchOutcome, PgBlockStore, RefChange, RefCondition};
 use crate::{
     CommittedTransaction, Connection, DatabaseIdentity, Digest, ErrorCategory,
     PostgresConnectionConfig, SemanticError, TransactionClient, TransactionHints,
@@ -351,20 +352,43 @@ impl RemoteTransactionServer {
                 "writer endpoint is not available",
             ));
         }
-        let mut sql = connection.connect_for("remote/register-connect")?;
-        verify_schema_compatibility(&mut sql)?;
-        // Transport discovery and handshakes always carry the captured stable
-        // identity; public names are resolved only when a Connection is made.
-        crate::database_catalog::require_active_id_in(&mut sql, self.identity.database_id())?;
-        sql.execute("INSERT INTO atomic_remote_writer_endpoints(database_id,lineage_id,holder_id,lease_epoch,instance_id,network_address,tls_server_name,protocol_version) VALUES($1,$2,$3,$4,$5,$6,$7,1) ON CONFLICT(database_id) DO UPDATE SET lineage_id=EXCLUDED.lineage_id,holder_id=EXCLUDED.holder_id,lease_epoch=EXCLUDED.lease_epoch,instance_id=EXCLUDED.instance_id,network_address=EXCLUDED.network_address,tls_server_name=EXCLUDED.tls_server_name,protocol_version=EXCLUDED.protocol_version", &[&self.identity.database_id(),&self.identity.lineage_id(),&self.lease.holder_id,&sql_epoch(self.lease.epoch)?,&&self.instance_id[..],&address.to_string(),&tls_server_name]).map_err(|e|postgres_error("remote/register",e))?;
-        Ok(RemoteWriterEndpoint {
+        let endpoint = RemoteWriterEndpoint {
             identity: self.identity.clone(),
             address,
             tls_server_name: tls_server_name.into(),
             holder_id: self.lease.holder_id.clone(),
             lease_epoch: self.lease.epoch,
             instance_id: self.instance_id,
-        })
+        };
+        let encoded = encode_endpoint(&endpoint)?;
+        let key = endpoint_key(&self.identity);
+        let mut store = PgBlockStore::connect(connection)?;
+        for _ in 0..3 {
+            let mut guards = crate::storage::engine::writer_endpoint_guards(
+                &mut store,
+                &self.identity,
+                self.lease.epoch,
+            )?;
+            let previous = store.read_ref(&key)?;
+            guards.push(RefCondition {
+                key: key.clone(),
+                expected: previous.as_ref().map(|reference| reference.revision),
+            });
+            match store.compare_exchange_many(
+                &guards,
+                &[RefChange {
+                    key: key.clone(),
+                    value: Some(encoded.clone()),
+                }],
+            )? {
+                BatchOutcome::Applied(_) => return Ok(endpoint),
+                BatchOutcome::Conflict(_) => std::thread::yield_now(),
+            }
+        }
+        Err(SemanticError::conflict(
+            "remote/registration-conflict",
+            "Writer authority changed during endpoint registration",
+        ))
     }
 }
 impl Drop for RemoteTransactionServer {
@@ -381,37 +405,45 @@ impl Connection {
         &self,
         connection: &PostgresConnectionConfig,
     ) -> Result<RemoteWriterEndpoint, SemanticError> {
-        let mut sql = connection.connect_for("remote/discover-connect")?;
-        verify_schema_compatibility(&mut sql)?;
-        crate::database_catalog::require_active_id_in(&mut sql, self.identity().database_id())?;
-        let row=sql.query_opt("SELECT holder_id,lease_epoch,instance_id,network_address,tls_server_name,protocol_version FROM atomic_discover_remote_writer($1,$2)", &[&self.identity().database_id(),&self.identity().lineage_id()]).map_err(|e|postgres_error("remote/discover",e))?
-            .ok_or_else(||SemanticError::new(ErrorCategory::Unavailable,"remote/no-writer","no published remote endpoint has a current lease for this database lineage"))?;
-        let address: SocketAddr = row.get::<_, String>(3).parse().map_err(|_| {
-            invalid(
-                "remote/discovery",
-                "discovered address is not a numeric TCP socket address",
-            )
-        })?;
-        let name: String = row.get(4);
-        validate_route(address, &name)?;
-        if row.get::<_, i32>(5) != PROTOCOL as i32 {
-            return Err(invalid(
-                "remote/version",
-                "discovered protocol version is unsupported",
+        // Retirement is a permanent route decision, not a temporarily absent
+        // transactor. Check it before the endpoint tombstone and never follow
+        // a reused human name to a different database.
+        let entry = crate::DatabaseCatalog::connect_configured(connection)?
+            .require_active_id(self.identity().database_id())?;
+        if entry.lineage_id != self.identity().lineage_id() {
+            return Err(SemanticError::conflict(
+                "remote/database-identity",
+                "Captured route no longer names the expected lineage",
             ));
         }
-        Ok(RemoteWriterEndpoint {
-            identity: self.identity().clone(),
-            address,
-            tls_server_name: name,
-            holder_id: row.get(0),
-            lease_epoch: u64::try_from(row.get::<_, i64>(1))
-                .map_err(|_| invalid("remote/discovery", "invalid lease epoch"))?,
-            instance_id: row
-                .get::<_, Vec<u8>>(2)
-                .try_into()
-                .map_err(|_| invalid("remote/discovery", "invalid endpoint instance"))?,
-        })
+        let mut store = PgBlockStore::connect(connection)?;
+        let value = store
+            .read_ref(&endpoint_key(self.identity()))?
+            .and_then(|reference| reference.value)
+            .ok_or_else(no_writer)?;
+        let endpoint = decode_endpoint(&value)?;
+        if endpoint.identity != *self.identity() {
+            return Err(invalid(
+                "remote/discovery",
+                "Endpoint identity differs from its captured route",
+            ));
+        }
+        crate::storage::engine::writer_endpoint_guards(
+            &mut store,
+            self.identity(),
+            endpoint.lease_epoch,
+        )
+        .map_err(|error| {
+            if matches!(
+                error.category,
+                ErrorCategory::Conflict | ErrorCategory::NotFound | ErrorCategory::Unavailable
+            ) {
+                no_writer()
+            } else {
+                error
+            }
+        })?;
+        Ok(endpoint)
     }
     pub fn transact_remote(
         &self,
@@ -696,9 +728,112 @@ fn tls_error(_: native_tls::Error) -> SemanticError {
         "TLS identity or trust configuration is invalid",
     )
 }
-fn sql_epoch(epoch: u64) -> Result<i64, SemanticError> {
-    i64::try_from(epoch)
-        .map_err(|_| invalid("remote/lease-epoch", "lease epoch exceeds PostgreSQL range"))
+const ENDPOINT_MAGIC: &[u8; 5] = b"ATRE\x01";
+const MAX_ENDPOINT_NAME: usize = 64 * 1024;
+const MAX_ENDPOINT_BYTES: usize = 5 + 4 + 8 + 32 + 5 * (4 + MAX_ENDPOINT_NAME);
+
+fn endpoint_key(identity: &DatabaseIdentity) -> String {
+    format!("remote-writers/{}", identity.database_id())
+}
+
+fn no_writer() -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Unavailable,
+        "remote/no-writer",
+        "No published endpoint has a current writer lease for this database",
+    )
+}
+
+fn encode_endpoint(endpoint: &RemoteWriterEndpoint) -> Result<Vec<u8>, SemanticError> {
+    validate_route(endpoint.address, &endpoint.tls_server_name)?;
+    let address = endpoint.address.to_string();
+    let fields = [
+        endpoint.identity.database_id(),
+        endpoint.identity.lineage_id(),
+        endpoint.holder_id.as_str(),
+        address.as_str(),
+        endpoint.tls_server_name.as_str(),
+    ];
+    if fields.iter().any(|field| field.len() > MAX_ENDPOINT_NAME) {
+        return Err(invalid(
+            "remote/identity-capacity",
+            "Endpoint identity metadata exceeds capacity",
+        ));
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(ENDPOINT_MAGIC);
+    bytes.extend_from_slice(&PROTOCOL.to_be_bytes());
+    bytes.extend_from_slice(&endpoint.lease_epoch.to_be_bytes());
+    bytes.extend_from_slice(&endpoint.instance_id);
+    for field in fields {
+        bytes.extend_from_slice(&(field.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(field.as_bytes());
+    }
+    Ok(bytes)
+}
+
+fn decode_endpoint(bytes: &[u8]) -> Result<RemoteWriterEndpoint, SemanticError> {
+    fn take<'a>(bytes: &mut &'a [u8], n: usize) -> Result<&'a [u8], SemanticError> {
+        if n > bytes.len() {
+            return Err(invalid("remote/discovery", "Truncated endpoint descriptor"));
+        }
+        let (head, tail) = bytes.split_at(n);
+        *bytes = tail;
+        Ok(head)
+    }
+    fn field<'a>(bytes: &mut &'a [u8]) -> Result<&'a str, SemanticError> {
+        let n = u32::from_be_bytes(take(bytes, 4)?.try_into().unwrap()) as usize;
+        if n > MAX_ENDPOINT_NAME {
+            return Err(invalid(
+                "remote/discovery",
+                "Endpoint field exceeds capacity",
+            ));
+        }
+        std::str::from_utf8(take(bytes, n)?)
+            .map_err(|_| invalid("remote/discovery", "Endpoint field is not UTF-8"))
+    }
+    if bytes.len() > MAX_ENDPOINT_BYTES {
+        return Err(invalid(
+            "remote/discovery",
+            "Endpoint descriptor exceeds capacity",
+        ));
+    }
+    let mut bytes = bytes;
+    if take(&mut bytes, ENDPOINT_MAGIC.len())? != ENDPOINT_MAGIC
+        || u32::from_be_bytes(take(&mut bytes, 4)?.try_into().unwrap()) != PROTOCOL
+    {
+        return Err(invalid(
+            "remote/version",
+            "Endpoint descriptor version is unsupported",
+        ));
+    }
+    let lease_epoch = u64::from_be_bytes(take(&mut bytes, 8)?.try_into().unwrap());
+    let instance_id = take(&mut bytes, 32)?.try_into().unwrap();
+    let database = field(&mut bytes)?;
+    let lineage = field(&mut bytes)?;
+    let holder = field(&mut bytes)?;
+    let address = field(&mut bytes)?.parse().map_err(|_| {
+        invalid(
+            "remote/discovery",
+            "Endpoint address is not a numeric TCP socket address",
+        )
+    })?;
+    let name = field(&mut bytes)?;
+    if !bytes.is_empty() || lease_epoch == 0 {
+        return Err(invalid(
+            "remote/discovery",
+            "Invalid endpoint framing or epoch",
+        ));
+    }
+    validate_route(address, name)?;
+    Ok(RemoteWriterEndpoint {
+        identity: DatabaseIdentity::new(database, lineage),
+        address,
+        tls_server_name: name.into(),
+        holder_id: holder.into(),
+        lease_epoch,
+        instance_id,
+    })
 }
 fn validate_route(address: SocketAddr, name: &str) -> Result<(), SemanticError> {
     if address.port() == 0
@@ -760,5 +895,37 @@ fn validate_hello(bytes: &[u8], endpoint: &RemoteWriterEndpoint) -> Result<(), S
         ))
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod endpoint_codec_tests {
+    use super::*;
+
+    #[test]
+    fn endpoint_descriptor_is_bounded_versioned_and_preserves_the_tls_identity() {
+        let endpoint = RemoteWriterEndpoint {
+            identity: DatabaseIdentity::new(
+                "01990000-0000-7000-8000-000000000001",
+                "01990000-0000-7000-8000-000000000001",
+            ),
+            address: "127.0.0.1:4801".parse().unwrap(),
+            tls_server_name: "localhost".into(),
+            holder_id: "holder".into(),
+            lease_epoch: 3,
+            instance_id: [7; 32],
+        };
+        let bytes = encode_endpoint(&endpoint).unwrap();
+        assert_eq!(decode_endpoint(&bytes).unwrap(), endpoint);
+        for n in [0, 4, bytes.len() - 1] {
+            assert!(decode_endpoint(&bytes[..n]).is_err());
+        }
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert!(decode_endpoint(&trailing).is_err());
+        let mut version = bytes;
+        version[4] = 2;
+        assert!(decode_endpoint(&version).is_err());
+        assert!(decode_endpoint(&vec![0; MAX_ENDPOINT_BYTES + 1]).is_err());
     }
 }

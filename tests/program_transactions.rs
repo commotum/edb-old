@@ -3,9 +3,9 @@ mod common;
 use atomic_core::{
     Attribute, CallableRef, Cardinality, DB_ATTR_PREDS, DB_ENSURE, DB_ENTITY_ATTRS,
     DB_ENTITY_PREDS, DB_FN, DB_IDENT, EntityRef, ErrorCategory, IndexOrder, Instruction, Keyword,
-    PostgresStore, Program, ProgramCall, ProgramHash, ProgramKind, Schema, SemanticError,
+    Program, ProgramCall, ProgramHash, ProgramKind, Schema, SemanticError,
     ServiceTransactionReport, Symbol, TransactionRequest, TransactionService, TxForm, TxOp,
-    TxValue, USER_PARTITION, Value, ValueType, View, make_eid,
+    TxValue, USER_PARTITION, Value, ValueType, make_eid,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,8 +13,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 const BALANCE: u32 = 1_000;
 const SNAPSHOT: u32 = 1_001;
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+fn connection() -> Option<common::PostgresFixture> {
+    std::env::var("ATOMIC_POSTGRES_URL")
+        .ok()
+        .map(|url| common::PostgresFixture::new(&url, "current_semantics"))
 }
 
 fn user(eidx: u64) -> u64 {
@@ -150,13 +152,13 @@ fn ordered_balance_predicate() -> Program {
 
 #[test]
 fn persisted_entity_spec_predicate_validates_complete_db_after_via_service() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("entity_spec_predicate");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -285,13 +287,13 @@ fn persisted_entity_spec_predicate_validates_complete_db_after_via_service() {
 
 #[test]
 fn persisted_functions_compose_on_db_before_and_predicates_guard_commit() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("program_tx");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -388,7 +390,7 @@ fn persisted_functions_compose_on_db_before_and_predicates_guard_commit() {
     assert_eq!(error.details["pred_return"], "Scalar(Bool(false))");
     service.shutdown();
 
-    let mut restarted = PostgresStore::connect(&connection).unwrap();
+    let mut restarted = common::TestStore::connect(&connection).unwrap();
     assert_eq!(
         restarted.recover(&database_id).unwrap().basis_t(),
         composed.basis_t
@@ -397,13 +399,13 @@ fn persisted_functions_compose_on_db_before_and_predicates_guard_commit() {
 
 #[test]
 fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("program_retry");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -564,24 +566,25 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
         (ErrorCategory::Conflict, "postgres/idempotency-key-reused")
     );
 
-    let original = atomic_core::encode_program(&v2_program).unwrap();
     service.shutdown();
-    let mut historical_store = PostgresStore::connect(&connection).unwrap();
+    let mut historical_store = common::TestStore::connect(&connection).unwrap();
     let as_of_install = historical_store
         .recover_basis(&database_id, installed.basis_t)
         .unwrap();
-    let selected = match as_of_install.values(function_eid, DB_FN as u32).as_slice() {
+    let selected = match as_of_install
+        .values(function_eid, DB_FN as u32)
+        .unwrap()
+        .as_slice()
+    {
         [Value::Function(hash)] => *hash,
         value => panic!("unexpected historical function binding: {value:?}"),
     };
     assert_eq!(selected, v1);
-    let historical_program = historical_store.resolve_program(selected).unwrap();
-    let atomic_core::ProgramOutput::Transaction(forms) = atomic_core::ProgramRuntime
-        .execute(
-            &historical_program,
-            &as_of_install,
-            &[Value::Ref(user(42)), Value::Long(33)],
-            atomic_core::ProgramControl::default(),
+    let atomic_core::ProgramOutput::Transaction(forms) = as_of_install
+        .invoke(
+            atomic_core::EntityIdentifier::Id(function_eid),
+            &[Value::Ref(user(42)).into(), Value::Long(33).into()],
+            atomic_core::InvokeControl::default(),
         )
         .unwrap()
     else {
@@ -596,40 +599,55 @@ fn temporal_function_rebinding_uses_db_before_and_exact_retry_is_stable() {
         })] if *entity == user(42)
     ));
     let mut client = Client::connect(&connection, NoTls).unwrap();
-    common::with_replica_triggers_disabled(&mut client, |client| {
-        client.execute(
-            "UPDATE atomic_programs SET payload = decode('00', 'hex') WHERE program_hash = $1",
+    let original: Vec<u8> = client
+        .query_one(
+            "SELECT payload FROM atomic_objects WHERE id=$1",
             &[&&v2[..]],
         )
-    })
-    .unwrap();
-    let mut restarted = PostgresStore::connect(&connection).unwrap();
+        .unwrap()
+        .get(0);
+    client
+        .execute(
+            "UPDATE atomic_objects SET payload=decode('00','hex') WHERE id=$1",
+            &[&&v2[..]],
+        )
+        .unwrap();
+    let mut restarted = common::TestStore::connect(&connection).unwrap();
     let recovered = restarted.recover(&database_id).unwrap();
     assert_eq!(recovered.basis_t(), after_rebind.basis_t);
-    assert_eq!(recovered.values(user(42), BALANCE), vec![&Value::Long(7)]);
     assert_eq!(
-        recovered.values(function_eid, DB_FN as u32),
-        vec![&Value::Function(v2)]
+        recovered.values(user(42), BALANCE).unwrap(),
+        vec![Value::Long(7)]
     );
-    assert!(!recovered.datoms(View::History, IndexOrder::Eavt).is_empty());
-    common::with_replica_triggers_disabled(&mut client, |client| {
-        client.execute(
-            "UPDATE atomic_programs SET payload = $2 WHERE program_hash = $1",
+    assert_eq!(
+        recovered.values(function_eid, DB_FN as u32).unwrap(),
+        vec![Value::Function(v2)]
+    );
+    assert!(
+        !recovered
+            .clone()
+            .history()
+            .collect_datoms(IndexOrder::Eavt)
+            .unwrap()
+            .is_empty()
+    );
+    client
+        .execute(
+            "UPDATE atomic_objects SET payload=$2 WHERE id=$1",
             &[&&v2[..], &&original[..]],
         )
-    })
-    .unwrap();
+        .unwrap();
 }
 
 #[test]
 fn database_function_without_an_ident_is_callable_by_eid() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("eid_function");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -670,13 +688,13 @@ fn database_function_without_an_ident_is_callable_by_eid() {
 
 #[test]
 fn persisted_predicates_are_resolved_only_for_assessed_assertions() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("lazy_predicate");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();
@@ -776,21 +794,15 @@ fn persisted_predicates_are_resolved_only_for_assessed_assertions() {
     );
     service.shutdown();
 
-    // Model an unavailable/corrupt deployment artifact. The append-only
-    // catalog trigger is bypassed only by this fault-injection session.
-    let mut client = Client::connect(&connection, NoTls).unwrap();
-    common::with_replica_triggers_disabled(&mut client, |client| {
-        client.execute(
-            "DELETE FROM atomic_programs WHERE program_hash = $1",
-            &[&&positive_hash[..]],
-        )?;
-        client.execute(
-            "DELETE FROM atomic_programs WHERE program_hash = $1",
-            &[&&entity_hash[..]],
-        )
-    })
-    .unwrap();
-    drop(client);
+    // Explicit provider fault: ordinary captures do not resolve unrelated code.
+    let config = atomic_core::PostgresConnectionConfig::plaintext(&connection);
+    assert_eq!(
+        atomic_core::storage::PgBlockStore::connect(&config)
+            .unwrap()
+            .remove_objects(&[positive_hash, entity_hash])
+            .unwrap(),
+        2
+    );
 
     let restarted = common::start_service(&connection, &database_id);
     let unrelated = common::transact(
@@ -846,7 +858,7 @@ fn persisted_predicates_are_resolved_only_for_assessed_assertions() {
     .unwrap_err();
     assert_eq!(
         (entity_error.category, entity_error.code),
-        (ErrorCategory::NotFound, "postgres/program-not-found")
+        (ErrorCategory::Fault, "storage/missing-object")
     );
     let error = common::try_transact(
         &restarted,
@@ -862,20 +874,20 @@ fn persisted_predicates_are_resolved_only_for_assessed_assertions() {
     .unwrap_err();
     assert_eq!(
         (error.category, error.code),
-        (ErrorCategory::NotFound, "postgres/program-not-found")
+        (ErrorCategory::Fault, "storage/missing-object")
     );
     restarted.shutdown();
 }
 
 #[test]
 fn broken_or_wrong_role_predicate_bindings_fail_their_source_transaction() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("predicate_binding_validation");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store
         .create_database(&database_id, schema_without_predicates())
         .unwrap();

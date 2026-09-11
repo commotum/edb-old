@@ -1,8 +1,8 @@
 use atomic_core::{
     Attribute, Binding, Cardinality, Clause, EntityRef, ErrorCategory, FindElement, FindSpec,
-    Function, InputSpec, Instruction, Keyword, PostgresStore, Program, ProgramKind, Query,
-    QueryControl, QueryExtensions, QueryInput, QueryResult, QueryValue, Schema, Term, TxOp,
-    TxValue, USER_PARTITION, Value, ValueType, Variable, make_eid,
+    Function, InputSpec, Instruction, Keyword, Program, ProgramKind, Query, QueryControl,
+    QueryExtensions, QueryInput, QueryResult, QueryValue, Schema, Term, TxOp, TxValue,
+    USER_PARTITION, Value, ValueType, Variable, make_eid,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -152,9 +152,8 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
     let fixture = common::PostgresFixture::new(&connection, "query_extensions");
     let connection = fixture.connection.clone();
     let database_id = unique("query_program");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     let committed = common::transact(
@@ -185,7 +184,7 @@ fn persisted_query_program_is_exact_snapshot_local_and_cancelled_by_parent() {
     let hash = store.deploy_program_blob(&program).unwrap();
     drop(store);
 
-    let mut restarted = PostgresStore::connect(&connection).unwrap();
+    let mut restarted = common::TestStore::connect(&connection).unwrap();
     let resolved = restarted.resolve_program(hash).unwrap();
     let old = Arc::new(committed.db_after);
     let mut extensions = QueryExtensions::new();

@@ -736,7 +736,7 @@ fn log_functions_join_provenance_and_keep_captured_basis_on_actual_postgres() {
     };
     let fixture = common::PostgresFixture::new(&url, "query_runtime_sources");
     let url = fixture.connection.clone();
-    PostgresMigrator::connect(&url).unwrap().migrate().unwrap();
+    common::install(&url).unwrap();
     let id = format!(
         "query_log_{}_{}",
         std::process::id(),
@@ -755,7 +755,7 @@ fn log_functions_join_provenance_and_keep_captured_basis_on_actual_postgres() {
     score.indexed = true;
     score.no_history = true;
     log_schema.install(score).unwrap();
-    PostgresStore::connect(&url)
+    common::TestStore::connect(&url)
         .unwrap()
         .create_database(&id, log_schema)
         .unwrap();
@@ -789,10 +789,7 @@ fn log_functions_join_provenance_and_keep_captured_basis_on_actual_postgres() {
     connection
         .sync_to(third.basis_t, Duration::from_secs(30))
         .unwrap();
-    PostgresIndexer::connect(&url, &id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&url, &id).unwrap();
     connection
         .sync_index(third.basis_t, Duration::from_secs(30))
         .unwrap();

@@ -10,10 +10,10 @@ Retain the point's lineage, generation, basis and manifest hash when sharing it.
 An online `SnapshotReference` is not a backup locator.
 
 The values use the existing query, Pull, entity, history/time-view, local `with`,
-program-resolution and log APIs. Speculation never changes the backup. Physical
-AVET readiness remains a property of the captured value. Fulltext uses the
-existing local scan implementation when a native search accelerator is absent;
-do not assume indexed search costs for that path.
+program-resolution and log APIs. Speculation never changes the backup. The
+repository-backed block snapshot uses the same selective index, fulltext and
+native-program readers as live peers. It has no live catalog route, writer
+authority or database pin, and cannot create an online `SnapshotReference`.
 
 The stock executable accepts the same EDN commands without PostgreSQL credentials:
 
@@ -31,22 +31,18 @@ omit `:log` for a database source, or both coordinates for the latest point.
 
 ## Cost and integrity
 
-Backup envelope5 includes an exact immutable read index and a sparse transaction
-lookup, published before the backup root. Capture reuses a complete native index
-when available. If indexing lags, capture performs a streaming full-index pass:
-completed encoded nodes are written promptly, with active leaf/boundary data and
-routing references retained. This can make capture more expensive; it does not
-move a hidden full restore into the reader. Log lookup updates reuse old tree
-paths. Nothing changes PostgreSQL canonical data.
+The current manifest retains the canonical publication and a separate exact
+covering read value. Both use the live engine's object formats. Capture folds
+any recent tail and completes pending AVET projections through the shared index
+preparer, writing new objects only into the repository. The canonical
+publication and exact receipts are unchanged. Fulltext attachments use the same
+builder; log seeks use authenticated page/skip links rather than a second
+backup-specific log index. Preparation adds capture-time work and can retain
+the admitted tail; ordinary offline opening does not replay it.
 
-A fresh database can be backed up immediately after `atomic create`, without
-starting a transactor or publishing indexes first. When usable derived indexes
-are absent or damaged, capture reconstructs from the copied canonical log using
-the existing semantic verifier and writes the exact read index into the backup.
-This recovery path is eager and costs memory proportional to the recovered
-database/log; it neither repairs the source nor adds replay to offline opening.
-Required receipt-base and program objects must still be available; missing
-canonical provenance is an error, not permission to drop exact-retry semantics.
+A fresh database can be backed up immediately after `atomic create`, including
+an empty basis. Required canonical, receipt-base and program objects must be
+available; missing provenance is an error, not permission to drop exact retries.
 
 Opening reads root and schema/ident metadata; data leaves and log payloads are
 loaded on demand and authenticated against their immutable references. Missing
@@ -62,19 +58,18 @@ and OS block traffic are not included. Complete-path wall time includes them.
 `cache_stats()` reports retained cache bytes, hits and evictions.
 
 Repository file sizes and envelope lengths are checked before body allocation
-against the existing format limits, independently of the cache budget. Reads
-cannot follow a growing file beyond its admitted length. Formats without a
-codec-wide size ceiling are authenticated with bounded scratch space before
-allocation, rather than imposing a new limit on valid receipt data. This can
-require a second file pass; these physical file passes are not cache statistics.
-Valid large datoms remain readable even with a smaller or disabled node cache.
+against current format limits, independently of the cache budget. Current
+objects have a 64 MiB physical and decoded size ceiling. A single admitted read
+cannot follow a growing file beyond its accepted length; authentication and
+format decoding then validate the canonical bytes. Valid objects remain
+readable with a smaller or disabled node cache.
 
-At64 and8192 entities, the optimized PostgreSQL-created fixture read16 immutable
-objects to open, then2 more for a three-result query; examined datoms were4 at
-both sizes. Object bytes through that query were39,063 and571,060, and cache
-residency126,958 and1,985,947 bytes. Open+two queries+consume/drop took2.14 and
-11.19ms on the test host. This is selective access, not a constant-memory or
-constant-latency claim; default leaves grow up to their normal limits.
+`tests/backup_reads.rs` measures capture and open/query/consume/drop separately
+at 64 and 8192 entities. It also removes the source schema before exercising
+offline fulltext, native programs, history, speculation and log reads. Current
+block-format measurements are recorded after running that fixture; older
+relational-backup timings do not describe this implementation. Selective access
+does not imply constant memory or latency; normal leaf size limits still apply.
 
 These development backups are not a cross-version compatibility promise. Create
 a current-version backup from a supported database; unsupported versions fail

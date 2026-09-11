@@ -15,6 +15,19 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+/// Only compile-time fixture labels may bypass the normal error redaction.
+#[derive(Debug)]
+struct FixtureFailure(&'static str);
+
+impl std::fmt::Display for FixtureFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl std::error::Error for FixtureFailure {}
+
 const PROJECT: u32 = 1_000;
 const HOURS: u32 = 1_001;
 const OWNER: u32 = 1_002;
@@ -261,7 +274,7 @@ fn require(condition: bool, message: &'static str) -> Result<()> {
     if condition {
         Ok(())
     } else {
-        Err(message.into())
+        Err(Box::new(FixtureFailure(message)))
     }
 }
 
@@ -921,9 +934,9 @@ fn fulltext_workflow(connection: &Connection, endpoint: &AppEndpoint) -> Result<
         "fulltext data retry changed exact report",
     )?;
 
-    // This separate app has no maintenance credentials. The operator's small
-    // fixture threshold schedules background indexing; sync_index alone does
-    // not promise that the optional search sidecar has already been published.
+    // This separate app has no maintenance credentials. The small fixture
+    // threshold schedules the coherent index/search job; query the captured
+    // value returned after its canonical basis has caught up.
     let database = connection.sync_index(committed.basis_t, WAIT)?;
     let report = await_fulltext(&database)?;
     require(
@@ -1233,6 +1246,7 @@ fn run() -> Result<()> {
 
     // Other workflow reads can evict this old value's selected nodes. Record
     // one explicit rewarm separately; neither enlarge the cache nor hide its I/O.
+    let cache_before_warmup = connection.cache_stats();
     let warmup_context = application_context.child(OperationKind::Query);
     let warmup_started = Instant::now();
     {
@@ -1241,6 +1255,7 @@ fn run() -> Result<()> {
     }
     let warmup_us = warmup_started.elapsed().as_micros();
     let warmup_sql = warmup_context.snapshot();
+    let cache_after_warmup = connection.cache_stats();
     let loop_started = Instant::now();
     let query_context = application_context.child_named(
         OperationKind::Query,
@@ -1257,11 +1272,23 @@ fn run() -> Result<()> {
     }
     let calculation_loop_us = loop_started.elapsed().as_micros();
     let query_sql = query_context.snapshot();
+    let cache_after_loop = connection.cache_stats();
     require(
         !query_sql.reads.indexes.is_empty(),
         "named diagnostics omitted index work",
     )?;
     println!("DIAGNOSTICS_OK named=true reads=true immutable_basis=true");
+    println!(
+        "QUERY_WARMUP calculations=1 elapsed_us={} sql_calls={} errors={} result_cell_bytes={}",
+        warmup_us, warmup_sql.sql_calls, warmup_sql.errors, warmup_sql.result_cell_bytes
+    );
+    println!(
+        "QUERY_SQL sql_calls={} errors={} result_cell_bytes={}",
+        query_sql.sql_calls, query_sql.errors, query_sql.result_cell_bytes
+    );
+    println!(
+        "QUERY_CACHE before_warmup={cache_before_warmup:?} after_warmup={cache_after_warmup:?} after_loop={cache_after_loop:?}"
+    );
     require(
         query_sql.sql_calls == 0 && query_sql.errors == 0 && query_sql.result_cell_bytes == 0,
         "warmed fixture calculation performed PostgreSQL I/O",
@@ -1303,14 +1330,6 @@ fn run() -> Result<()> {
         "BLOCK_IO {:?} SSD_CACHE {:?}",
         connection.node_block_read_stats(),
         connection.ssd_cache_stats()
-    );
-    println!(
-        "QUERY_WARMUP calculations=1 elapsed_us={} sql_calls={} errors={} result_cell_bytes={}",
-        warmup_us, warmup_sql.sql_calls, warmup_sql.errors, warmup_sql.result_cell_bytes
-    );
-    println!(
-        "QUERY_SQL sql_calls={} errors={} result_cell_bytes={}",
-        query_sql.sql_calls, query_sql.errors, query_sql.result_cell_bytes
     );
     println!(
         "APPLICATION_SQL sql_calls={} errors={} result_cell_bytes={}",
@@ -1365,11 +1384,30 @@ fn main() {
                     _ => {}
                 }
             }
+        } else if let Some(error) = error.downcast_ref::<FixtureFailure>() {
+            // This type contains a static assertion label only, never request
+            // values, paths, credentials, or arbitrary provider messages.
+            eprintln!("application fixture failed: {error}");
         } else {
             eprintln!(
                 "application failed; check arguments, endpoint and documented fixture contract"
             );
         }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_failures_preserve_only_the_static_diagnostic_label() {
+        let error = require(false, "fixture invariant failed").unwrap_err();
+        let failure = error.downcast_ref::<FixtureFailure>().unwrap();
+        assert_eq!(failure.to_string(), "fixture invariant failed");
+        let other: Box<dyn std::error::Error> = "arbitrary input".into();
+        assert!(other.downcast_ref::<FixtureFailure>().is_none());
+        assert!(require(true, "unused fixture label").is_ok());
     }
 }

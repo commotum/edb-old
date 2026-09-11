@@ -230,6 +230,8 @@ impl Connection {
         )
     }
 
+    // Assemble the captured peer and its optional service/observation ownership in one place.
+    #[allow(clippy::too_many_arguments)]
     fn from_peer(
         peer: Peer,
         connection: PostgresConnectionConfig,
@@ -294,10 +296,8 @@ impl Connection {
                                 needs_catchup = true;
                             }
                         }
-                    } else {
-                        if stopped.recv_timeout(Duration::from_millis(25)).is_ok() {
-                            break;
-                        }
+                    } else if stopped.recv_timeout(Duration::from_millis(25)).is_ok() {
+                        break;
                     }
                     if needs_catchup || Instant::now() >= refresh_at {
                         let result = follower
@@ -753,17 +753,41 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        crate::PostgresMigrator::connect(&postgres)
-            .unwrap()
-            .migrate()
+        let schema = format!("block_observer_{:032x}", crate::uuid_v7().unwrap());
+        let mut admin = postgres::Client::connect(&postgres, postgres::NoTls).unwrap();
+        admin
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
             .unwrap();
-        crate::PostgresStore::connect(&postgres)
-            .unwrap()
-            .create_database(&id, crate::Schema::new())
-            .unwrap();
+        struct Fixture {
+            admin: postgres::Client,
+            schema: String,
+        }
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = self
+                    .admin
+                    .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema));
+            }
+        }
+        let _fixture = Fixture {
+            admin,
+            schema: schema.clone(),
+        };
+        let scoped = if postgres.starts_with("postgres://") || postgres.starts_with("postgresql://")
+        {
+            format!(
+                "{postgres}{}options=-csearch_path%3D{schema}%2Cpg_catalog",
+                if postgres.contains('?') { '&' } else { '?' }
+            )
+        } else {
+            format!("{postgres} options='-csearch_path={schema},pg_catalog'")
+        };
+        let config = PostgresConnectionConfig::plaintext(&scoped);
+        crate::storage::PgBlockStore::install(&config).unwrap();
+        crate::storage::BlockDatabase::create(&config, &id, crate::Schema::new()).unwrap();
         let connection = Connection::start(
             TransactionServiceConfig {
-                connection: postgres,
+                connection: scoped,
                 database_id: id.clone(),
                 holder_id: id,
                 lease_duration: Duration::from_secs(5),

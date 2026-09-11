@@ -1,7 +1,7 @@
 //! Direct invocation of immutable, authenticated native database functions.
 
 use crate::database_value::TransactionReadContext;
-use crate::postgres::program_bindings::database_program_hash_with_control;
+use crate::program_bindings::database_program_hash_with_control;
 use crate::{
     DatabaseValue, EntityIdentifier, ErrorCategory, ProgramBudget, ProgramControl, ProgramKind,
     ProgramOutput, ProgramRuntime, RuntimeValue, SemanticError, Value,

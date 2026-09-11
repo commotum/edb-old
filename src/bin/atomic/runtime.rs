@@ -98,6 +98,7 @@ pub(super) fn run(
             max_workers: args.size("--hint-workers", 1)?,
         },
         index_preparation_parallelism: args.size("--index-workers", 1)?,
+        fulltext_build_limits: Default::default(),
         telemetry: emitter.is_enabled().then(|| emitter.clone()),
         indexing: index,
         execution: TransactionExecutionOptions {

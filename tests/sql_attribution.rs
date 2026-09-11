@@ -454,18 +454,17 @@ fn postgres_stream_errors_are_counted_even_after_query_creation() {
     let context = OperationContext::new(OperationKind::Query);
     {
         let _scope = context.enter();
-        match client.query_raw(
+        if let Ok(mut rows) = client.query_raw(
             "SELECT n / (3 - n) FROM generate_series(1, 3) n",
             std::iter::empty::<&(dyn ToSql + Sync)>(),
         ) {
-            Ok(mut rows) => loop {
+            loop {
                 match rows.next() {
                     Ok(Some(_)) => {}
                     Ok(None) => panic!("division by zero must fail"),
                     Err(_) => break,
                 }
-            },
-            Err(_) => {}
+            }
         }
     }
     let stats = context.snapshot();

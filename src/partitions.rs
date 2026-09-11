@@ -437,20 +437,6 @@ mod tests {
             .unwrap()
             .validate_invariants()
             .unwrap();
-        let lineage = crate::log_generation::LineageTransactionContent::from_transaction(
-            "01234567-89ab-4def-8123-456789abcdef",
-            before.eidx_frontier(),
-            &transaction,
-        )
-        .unwrap();
-        let decoded =
-            crate::log_generation::LineageTransactionContent::decode(&lineage.encode().unwrap())
-                .unwrap();
-        before
-            .apply_committed(&decoded.to_transaction([0; 32]))
-            .unwrap()
-            .validate_invariants()
-            .unwrap();
 
         let mut duplicate = transaction.clone();
         duplicate.tempids.insert(

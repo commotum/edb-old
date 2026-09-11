@@ -1,9 +1,8 @@
 mod common;
 use atomic_core::{
     Attribute, Cardinality, Database, EntityRef, HintLimits, HintPrefetchOptions, IndexPrefix,
-    Keyword, OperationContext, OperationKind, Peer, PostgresIndexer, PostgresMigrator,
-    PostgresStore, ReadHint, Schema, SpeculationLimits, TransactionHints, TransactionRequest,
-    TxForm, TxOp, Value, ValueType,
+    Keyword, OperationContext, OperationKind, Peer, ReadHint, Schema, SpeculationLimits,
+    TransactionHints, TransactionRequest, TxForm, TxOp, Value, ValueType,
 };
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
@@ -94,8 +93,8 @@ fn postgres_advisory_hints_preserve_identity_retries_staleness_alteration_and_ca
     };
     let fixture = common::PostgresFixture::new(&url, "hint_semantics");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    let created = PostgresStore::connect(url)
+    common::install(url).unwrap();
+    let created = common::TestStore::connect(url)
         .unwrap()
         .create_database("hints", schema())
         .unwrap();
@@ -109,10 +108,7 @@ fn postgres_advisory_hints_preserve_identity_retries_staleness_alteration_and_ca
     );
     let eid = first.tempids["item"];
     service.shutdown();
-    PostgresIndexer::connect(url, "hints")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(url, "hints").unwrap();
     let peer = Peer::connect(url, "hints", 8).unwrap();
     let before = peer.db();
     let origin = before.snapshot_reference().unwrap();
@@ -248,7 +244,7 @@ fn postgres_advisory_hints_preserve_identity_retries_staleness_alteration_and_ca
         latest.basis_t
     );
 
-    PostgresStore::connect(url)
+    common::TestStore::connect(url)
         .unwrap()
         .create_database("other", schema())
         .unwrap();
@@ -289,18 +285,79 @@ fn postgres_advisory_hints_preserve_identity_retries_staleness_alteration_and_ca
 
 #[test]
 fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
+    use atomic_core::{
+        CallableRef, ErrorCategory, NativeRegistry, PostgresConnectionConfig, ProgramCall,
+        SemanticError, ServiceOptions, Symbol, TransactionExecutionOptions, TransactionService,
+        TransactionServiceConfig,
+    };
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIP: ATOMIC_POSTGRES_URL required for blocked advisory witness");
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "hint_blocked");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    let created = PostgresStore::connect(url)
+    common::install(url).unwrap();
+    let created = common::TestStore::connect(url)
         .unwrap()
         .create_database("blocked", schema())
         .unwrap();
-    let service = common::start_service(url, "blocked");
+    let (entered, started_authority) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let released = std::sync::Mutex::new(released);
+    let function = Symbol::new("hint.fixture.v1", "pause-authority");
+    let mut registry = NativeRegistry::builder();
+    registry
+        .transaction(function.clone(), move |_, _, control| {
+            control.check(1)?;
+            entered.try_send(()).map_err(|_| {
+                SemanticError::new(
+                    ErrorCategory::Interrupted,
+                    "test/hint-authority-entry",
+                    "Fixture authority entry could not be observed",
+                )
+            })?;
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|_| {
+                    SemanticError::new(
+                        ErrorCategory::Interrupted,
+                        "test/hint-authority-release",
+                        "Fixture authority was not released",
+                    )
+                })?;
+            control.check(1)?;
+            Ok(Vec::new())
+        })
+        .unwrap();
+    let service = TransactionService::start_configured_with_options(
+        TransactionServiceConfig {
+            connection: url.clone(),
+            database_id: "blocked".into(),
+            holder_id: "hint-fixture".into(),
+            lease_duration: Duration::from_secs(30),
+            renew_interval: Duration::from_millis(100),
+            queue_capacity: 32,
+            capacity_limits: Default::default(),
+        },
+        PostgresConnectionConfig::plaintext(url),
+        ServiceOptions {
+            execution: TransactionExecutionOptions {
+                native: registry.build(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // On failure, disconnect the bounded callback before service Drop joins
+    // its worker. No authority row lock may stall pre-dispatch lease renewal.
+    let release_authority = release;
+    let pause_authority = ProgramCall {
+        function: CallableRef::Local(function),
+        arguments: vec![],
+    };
     let seed = common::transact(
         &service,
         "seed",
@@ -334,29 +391,25 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
     control
         .query_one("SELECT pg_advisory_lock($1)", &[&key])
         .unwrap();
-    // Scoped fixture injection: only the separately timeout-configured hint
-    // session blocks during new-pin setup. Existing writer sessions keep their
-    // original function behavior. This is not a driver cancellation witness.
-    control.batch_execute(&format!(r#"
-        ALTER FUNCTION atomic_log_generation_pin_key(text,bigint)
-            RENAME TO atomic_test_original_pin_key;
-        CREATE FUNCTION atomic_log_generation_pin_key(candidate_database_id text, candidate_generation bigint)
-        RETURNS bigint LANGUAGE plpgsql SET search_path FROM CURRENT AS $body$
+    // Fixture-only scheduling gate on the generic provider. It affects only
+    // the independent hint session, identified by its one-second SQL timeout.
+    // Product installation has no functions or triggers.
+    control
+        .batch_execute(&format!(
+            r#"
+        CREATE FUNCTION atomic_test_block_hint() RETURNS trigger LANGUAGE plpgsql AS $body$
         BEGIN
-            IF current_setting('statement_timeout') = '1s' THEN
+            IF current_setting('statement_timeout') = '1s' AND NEW.key LIKE 'sessions/read/%' THEN
                 PERFORM pg_advisory_lock({key});
                 PERFORM pg_advisory_unlock({key});
             END IF;
-            RETURN atomic_test_original_pin_key(candidate_database_id, candidate_generation);
+            RETURN NEW;
         END $body$;
-    "#)).unwrap();
-    let mut authority_gate = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    let mut gate = authority_gate.transaction().unwrap();
-    gate.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id='blocked' FOR UPDATE",
-        &[],
-    )
-    .unwrap();
+        CREATE TRIGGER atomic_test_hint_gate BEFORE INSERT ON atomic_refs
+        FOR EACH ROW EXECUTE FUNCTION atomic_test_block_hint();
+    "#
+        ))
+        .unwrap();
     let options = HintPrefetchOptions {
         timeout: Duration::from_secs(1),
         ..Default::default()
@@ -365,10 +418,14 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         .client()
         .submit_with_hints(
             TransactionRequest::new("while-hint-blocks", vec![add(EntityRef::Id(eid), 2)])
-                .with_tx_instant(2000),
+                .with_tx_instant(2000)
+                .calling(pause_authority.clone()),
             hints.clone(),
             options.clone(),
         )
+        .unwrap();
+    started_authority
+        .recv_timeout(Duration::from_secs(3))
         .unwrap();
     let wait = Instant::now();
     loop {
@@ -385,7 +442,7 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         );
         std::thread::sleep(Duration::from_millis(2));
     }
-    gate.commit().unwrap();
+    release_authority.send(()).unwrap();
     let started = Instant::now();
     let report = ticket.wait(Duration::from_secs(3)).unwrap();
     assert_eq!(
@@ -421,19 +478,14 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         "cancellation must prevent reads after blocked setup returns"
     );
     assert!(finished.canceled_or_limited);
-    // Test-only authority gate lets prefetch finish before cancellation. A
+    // The callback gate lets prefetch finish before cancellation. A
     // one-byte budget permits one in-flight datom, never another cursor read.
-    let mut gate = authority_gate.transaction().unwrap();
-    gate.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id='blocked' FOR UPDATE",
-        &[],
-    )
-    .unwrap();
     let (ticket, one_byte) = service
         .client()
         .submit_with_hints(
             TransactionRequest::new("one-byte-hint", vec![add(EntityRef::Id(eid), 4)])
-                .with_tx_instant(4000),
+                .with_tx_instant(4000)
+                .calling(pause_authority),
             hints,
             HintPrefetchOptions {
                 max_read_bytes: 1,
@@ -441,11 +493,10 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
             },
         )
         .unwrap();
-    let wait = Instant::now();
-    while one_byte.snapshot().attempts == 0 {
-        assert!(wait.elapsed() < Duration::from_secs(3));
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    started_authority
+        .recv_timeout(Duration::from_secs(3))
+        .unwrap();
+    assert_eq!(one_byte.snapshot().attempts, 1);
     let byte_stats = completed(&one_byte);
     assert_eq!(byte_stats.datoms, 1);
     assert!(byte_stats.retained_read_bytes > 1);
@@ -454,7 +505,7 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         byte_stats.max_inflight_datom_bytes
     );
     assert!(byte_stats.canceled_or_limited);
-    gate.commit().unwrap();
+    release_authority.send(()).unwrap();
     ticket.wait(Duration::from_secs(3)).unwrap();
     service.shutdown();
     eprintln!(
@@ -473,8 +524,8 @@ fn postgres_hint_cold_warm_costs() {
     for mode in ["absent", "hinted"] {
         let fixture = common::PostgresFixture::new(&url, "hint_costs");
         let url = &fixture.connection;
-        PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-        let created = PostgresStore::connect(url)
+        common::install(url).unwrap();
+        let created = common::TestStore::connect(url)
             .unwrap()
             .create_database("costs", schema())
             .unwrap();
@@ -490,12 +541,7 @@ fn postgres_hint_cold_warm_costs() {
         );
         let eids = first.tempids.values().copied().collect::<Vec<_>>();
         service.shutdown();
-        PostgresIndexer::connect(url, "costs")
-            .unwrap()
-            .with_segment_datoms(8)
-            .unwrap()
-            .consolidate()
-            .unwrap();
+        common::consolidate(url, "costs").unwrap();
         let peer = Peer::connect(url, "costs", 256).unwrap();
         let mut value = peer.db();
         let service = common::start_service(url, "costs");

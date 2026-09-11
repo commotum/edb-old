@@ -1,8 +1,8 @@
+mod common;
 use atomic_core::{
     Attribute, Cardinality, ChangeConsumer, ChangeConsumerConfig, Connection, EntityRef,
-    ErrorCategory, Keyword, Peer, PostgresConnectionConfig, PostgresMigrator, PostgresStore,
-    Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue, Value,
-    ValueType,
+    ErrorCategory, Keyword, Peer, PostgresConnectionConfig, Schema, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, TxValue, Value, ValueType,
 };
 use std::fs;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -86,7 +86,7 @@ fn tls_configuration_fails_closed_and_redacts_connection_secrets() {
 ///
 /// With either environment variable absent this is a skip, not TLS evidence.
 #[test]
-fn required_tls_covers_migrator_writer_indexer_peer_listener_and_consumer() {
+fn required_tls_covers_store_writer_indexer_peer_listener_and_consumer() {
     let (Ok(connection), Ok(root_path)) = (
         std::env::var("ATOMIC_POSTGRES_TLS_URL"),
         std::env::var("ATOMIC_POSTGRES_TLS_ROOT_CERT"),
@@ -132,10 +132,9 @@ fn required_tls_covers_migrator_writer_indexer_peer_listener_and_consumer() {
             .is_err()
     );
 
-    let mut migrator = PostgresMigrator::connect_configured(&tls).unwrap();
-    migrator.migrate().unwrap();
+    atomic_core::storage::PgBlockStore::install(&tls).unwrap();
     let database_id = unique("tls_runtime");
-    let created = PostgresStore::connect_configured(&tls)
+    let created = common::TestStore::connect_configured(&tls)
         .unwrap()
         .create_database(&database_id, schema())
         .unwrap();
@@ -168,7 +167,24 @@ fn required_tls_covers_migrator_writer_indexer_peer_listener_and_consumer() {
         let event = consumer.next(Duration::ZERO).unwrap().unwrap();
         consumer.acknowledge(&event.checkpoint).unwrap();
     }
-    let channel:String=probe.query_one("SELECT 'atomic_n_' || md5(n.nspname || ':' || $1::text) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid='atomic_heads'::regclass", &[&database_id]).unwrap().get(0);
+    let entry = atomic_core::DatabaseCatalog::connect_configured(&tls)
+        .unwrap()
+        .resolve(&database_id)
+        .unwrap();
+    let namespace = atomic_core::storage::PgBlockStore::connect(&tls)
+        .unwrap()
+        .namespace()
+        .to_owned();
+    let mut channel_input = namespace.into_bytes();
+    channel_input.push(0);
+    channel_input.extend_from_slice(format!("databases/{}", entry.database_id).as_bytes());
+    let channel = format!(
+        "atomic_r_{}",
+        atomic_core::sha256(&channel_input)[..24]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    );
     let listen = format!("LISTEN {channel}");
     let deadline = Instant::now() + Duration::from_secs(5);
     let listener_versions = loop {
@@ -238,6 +254,14 @@ fn required_tls_covers_migrator_writer_indexer_peer_listener_and_consumer() {
     assert_eq!(event.transaction.data, report.tx_data);
     assert!(consumer.stats().notices > 0);
     consumer.acknowledge(&event.checkpoint).unwrap();
+    let target = service.client().request_index().unwrap().target_t;
+    assert!(
+        observer
+            .sync_index(target, Duration::from_secs(10))
+            .unwrap()
+            .basis_t()
+            >= report.basis_t
+    );
     let deadline = Instant::now() + Duration::from_secs(3);
     while observer.db().basis_t() < report.basis_t {
         assert!(

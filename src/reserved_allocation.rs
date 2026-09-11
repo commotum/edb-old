@@ -23,8 +23,7 @@ impl ReservedAllocation {
         }
     }
 
-    /// Reconstitute an authenticated checkpoint. A missing legacy checkpoint
-    /// must be reconstructed from canonical history, not treated as initial.
+    /// Reconstitute an authenticated current checkpoint.
     pub(crate) fn from_frontier(
         frontier: u64,
         ordinary_frontier: u64,
@@ -42,24 +41,6 @@ impl ReservedAllocation {
 
     pub(crate) const fn frontier(self) -> u64 {
         self.frontier
-    }
-
-    /// Canonical ATLC v2 allocations are fresh issuance witnesses, not the
-    /// caller-named receipt map (which may also contain existing-ID upserts).
-    /// Share this predecessor check with recovery, COW, and portable replay.
-    pub(crate) fn validate_fresh_witnesses(
-        self,
-        allocations: impl IntoIterator<Item = u64>,
-    ) -> Result<(), SemanticError> {
-        for entity in allocations {
-            if eid_to_part(entity)? == DB_PARTITION && eid_to_eidx(entity)? < self.frontier {
-                return Err(SemanticError::incorrect(
-                    "generation/reserved-allocation-not-fresh",
-                    "reserved allocation witness was already below the predecessor frontier",
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Reserve every previously observed partition-zero ID, including ones
@@ -130,19 +111,6 @@ impl ReservedAllocation {
             next.observe_entity(*entity)?;
         }
         *self = next;
-        Ok(())
-    }
-
-    /// Legacy physical excision can erase an explicit reference-only claim.
-    /// The caller supplies an authenticated ordinary frontier at the effective
-    /// removal cutoff (or a conservative later one), reserving the uncertain
-    /// prefix. This helper does not infer evidence from current schema.
-    pub(crate) fn reserve_legacy_excision_floor(
-        &mut self,
-        authenticated_cutoff_frontier: u64,
-    ) -> Result<(), SemanticError> {
-        crate::identity::validate_frontier(authenticated_cutoff_frontier)?;
-        self.frontier = self.frontier.max(authenticated_cutoff_frontier);
         Ok(())
     }
 
@@ -225,20 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_excision_uses_the_cutoff_not_the_later_ordinary_frontier() {
-        let mut state = ReservedAllocation::initial();
-        state.reserve_legacy_excision_floor(1_500).unwrap();
-        let mut restored = ReservedAllocation::from_frontier(state.frontier(), 2_000_000).unwrap();
-        assert_eq!(restored.allocate().unwrap(), 1_500);
-        restored.reserve_legacy_excision_floor(1_200).unwrap();
-        assert_eq!(restored.frontier(), 1_501);
-        // Retaining an observed high ID is intentionally conservative, never
-        // clamped to the schema or named-partition capacity.
-        restored.observe_entity(2_000_000).unwrap();
-        assert_eq!(restored.frontier(), 2_000_001);
-    }
-
-    #[test]
     fn maximum_identity_is_retained_without_wrap_or_reuse() {
         let mut state = ReservedAllocation::from_frontier(MAX_EIDX, MAX_EIDX + 1).unwrap();
         assert_eq!(state.allocate().unwrap(), MAX_EIDX);
@@ -256,7 +210,6 @@ mod tests {
         let invalid = Value::Tuple(vec![Some(Value::Ref(1_500)), Some(Value::Ref(u64::MAX))]);
         assert!(state.observe_value(&invalid).is_err());
         assert_eq!(state, ReservedAllocation::initial());
-        assert!(state.reserve_legacy_excision_floor(999).is_err());
         assert_eq!(state, ReservedAllocation::initial());
         assert!(ReservedAllocation::from_frontier(1_001, 1_000).is_err());
         assert!(ReservedAllocation::from_frontier(999, 1_000).is_err());

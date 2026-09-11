@@ -1,4 +1,5 @@
 mod common;
+use atomic_core::storage::{BlockDatabase, PgBlockStore};
 use atomic_core::*;
 use native_tls::Identity;
 use openssl::{
@@ -65,10 +66,8 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    PgBlockStore::install(&config).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -78,10 +77,7 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
             Cardinality::One,
         ))
         .unwrap();
-    PostgresStore::connect(&fixture.connection)
-        .unwrap()
-        .create_database("source", schema)
-        .unwrap();
+    BlockDatabase::create(&config, "source", schema).unwrap();
     Some(fixture)
 }
 fn request(key: &str, n: i64) -> TransactionRequest {
@@ -168,14 +164,7 @@ fn verified_tls_authentication_discovery_hints_loss_and_writer_replacement() {
     server
         .publish(&pg, server.local_addr(), "localhost")
         .unwrap();
-    PostgresStore::connect(url)
-        .unwrap()
-        .create_database("other", Schema::new())
-        .unwrap();
-    PostgresIndexer::connect(url, "other")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    BlockDatabase::create(&pg, "other", Schema::new()).unwrap();
     let other = Connection::connect(url, "other", 32).unwrap();
     assert_eq!(
         other
@@ -538,10 +527,11 @@ fn connection_owned_route_refreshes_before_submission_without_replaying_unknown_
             .is_err()
     );
     assert_eq!(
-        PostgresStore::connect(url)
+        PostgresOperator::connect(url)
             .unwrap()
-            .database_status(&reused.database.database_id)
+            .inspect_database(&reused.database.database_id, false)
             .unwrap()
+            .metrics
             .basis_t,
         0
     );
@@ -591,10 +581,13 @@ fn stored_query_transaction_program_preview_and_exact_remote_retry_survive_repla
     };
     let program = make_program(99);
     let program_bytes = encode_program(&program).unwrap();
-    let mut store = PostgresStore::connect(url).unwrap();
-    let hash = store.deploy_program_blob(&program).unwrap();
+    let mut store = PgBlockStore::connect(&pg).unwrap();
+    let hash = store.put(&program_bytes).unwrap();
     assert_eq!(hash, sha256(&program_bytes));
-    assert_eq!(store.resolve_program(hash).unwrap(), program);
+    assert_eq!(
+        decode_program(&store.get(hash).unwrap().unwrap()).unwrap(),
+        program
+    );
     let writer = common::start_service(url, "source");
     let peer = Connection::connect(url, "source", 128).unwrap();
     let (identity, root) = credentials();
@@ -670,7 +663,10 @@ fn stored_query_transaction_program_preview_and_exact_remote_retry_survive_repla
         vec![Value::Long(1)]
     );
     assert_eq!(
-        store.recover("source").unwrap().basis_t(),
+        Peer::connect(url, "source", 0)
+            .unwrap()
+            .database_value()
+            .basis_t(),
         installed.basis_t,
         "preview committed durable data"
     );
@@ -718,7 +714,9 @@ fn stored_query_transaction_program_preview_and_exact_remote_retry_survive_repla
         &pg,
     );
     assert_eq!(peer.discover_remote_writer(&pg).unwrap(), endpoint);
-    let next_hash = store.deploy_program_blob(&make_program(101)).unwrap();
+    let next_hash = store
+        .put(&encode_program(&make_program(101)).unwrap())
+        .unwrap();
     let rebound = peer
         .transact_remote(
             &endpoint,
@@ -757,10 +755,7 @@ fn stored_query_transaction_program_preview_and_exact_remote_retry_survive_repla
         .unwrap(),
         request_hash
     );
-    assert_eq!(
-        encode_program(&store.resolve_program(hash).unwrap()).unwrap(),
-        program_bytes
-    );
+    assert_eq!(store.get(hash).unwrap().unwrap(), program_bytes);
     let fresh = peer
         .transact_remote(
             &endpoint,

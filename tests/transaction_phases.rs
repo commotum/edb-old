@@ -1,10 +1,11 @@
 //! Bounded, opt-in phase evidence, not a throughput benchmark or timing gate.
 //! Run with an actual disposable PostgreSQL catalog:
 //! cargo test --release --test transaction_phases -- --ignored --nocapture
+mod common;
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, Cardinality, EntityRef, Keyword, OperationContext,
-    OperationKind, PostgresMigrator, PostgresStore, Schema, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxOp, Value, ValueType,
+    OperationKind, Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp,
+    Value, ValueType,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -47,10 +48,7 @@ impl Fixture {
             schema,
             connection,
         };
-        PostgresMigrator::connect(&fixture.connection)
-            .unwrap()
-            .migrate()
-            .unwrap();
+        common::install(&fixture.connection).unwrap();
         fixture
     }
 }
@@ -111,7 +109,7 @@ fn queued_dependent_transaction_phase_sample() {
                     Cardinality::One,
                 ))
                 .unwrap();
-            PostgresStore::connect(&fixture.connection)
+            common::TestStore::connect(&fixture.connection)
                 .unwrap()
                 .create_database(&database, schema)
                 .unwrap();

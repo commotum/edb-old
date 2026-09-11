@@ -185,7 +185,7 @@ impl AsyncExecutor {
         })
     }
 
-    pub(super) fn retain<T: Send + Sync + 'static>(
+    pub(crate) fn retain<T: Send + Sync + 'static>(
         &self,
         make: impl FnOnce() -> T,
     ) -> Result<Owned<T>, SemanticError> {
@@ -212,7 +212,7 @@ impl AsyncExecutor {
         })))
     }
 
-    pub(super) fn cleanup(&self, job: impl FnOnce() + Send + 'static) {
+    pub(crate) fn cleanup(&self, job: impl FnOnce() + Send + 'static) {
         // Every call is backed by a still-live operation/resource reservation.
         // No arbitrary public producer can append cleanup jobs. Thus cleanup
         // cannot grow with an unbounded number of abandoned unadmitted jobs.
@@ -297,7 +297,7 @@ impl Drop for Permit {
     }
 }
 
-pub(super) struct Owned<T: Send + Sync + 'static>(Arc<Deferred<T>>);
+pub(crate) struct Owned<T: Send + Sync + 'static>(Arc<Deferred<T>>);
 impl<T: Send + Sync + 'static> Clone for Owned<T> {
     fn clone(&self) -> Self {
         Self(self.0.clone())

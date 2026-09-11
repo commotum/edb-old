@@ -93,7 +93,7 @@ impl TreeConfig {
             .saturating_add((self.max_root_bytes as u64).saturating_mul(decoded_slot_bytes))
     }
 
-    fn validate(&self) -> Result<(), SemanticError> {
+    pub(crate) fn validate(&self) -> Result<(), SemanticError> {
         let count_limits = [
             ("max_leaf_datoms", self.max_leaf_datoms),
             ("max_leaves_per_directory", self.max_leaves_per_directory),

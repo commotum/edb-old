@@ -1,12 +1,26 @@
+mod common;
+#[path = "common/current_refs.rs"]
+mod current;
 use atomic_core::{
     Attribute, CapacityLimits, Cardinality, EntityRef, ErrorCategory, Keyword,
-    PostgresConnectionConfig, PostgresIoPolicy, PostgresMigrator, PostgresStore, Schema,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, Value, ValueType,
+    PostgresConnectionConfig, PostgresIoPolicy, Schema, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TxOp, Value, ValueType,
 };
 use postgres::{Client, NoTls};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const ITEM: u32 = 1_000;
+
+fn parameter(connection: &str, name: &str, value: &str) -> String {
+    if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+        format!(
+            "{connection}{}{name}={value}",
+            if connection.contains('?') { '&' } else { '?' }
+        )
+    } else {
+        format!("{connection} {name}={value}")
+    }
+}
 
 fn unique(prefix: &str) -> String {
     format!(
@@ -45,17 +59,14 @@ fn request(key: &str, value: i64) -> TransactionRequest {
 }
 
 fn setup(postgres: &str, prefix: &str, policy: PostgresIoPolicy) -> (String, TransactionService) {
-    PostgresMigrator::connect(postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(postgres).unwrap();
     let id = unique(prefix);
-    PostgresStore::connect(postgres)
+    common::TestStore::connect(postgres)
         .unwrap()
         .create_database(&id, schema())
         .unwrap();
     let connection =
-        PostgresConnectionConfig::plaintext(format!("{postgres} application_name={id}"))
+        PostgresConnectionConfig::plaintext(parameter(postgres, "application_name", &id))
             .with_io_policy(policy)
             .unwrap();
     let service = TransactionService::start_configured(
@@ -74,14 +85,9 @@ fn setup(postgres: &str, prefix: &str, policy: PostgresIoPolicy) -> (String, Tra
     (id, service)
 }
 
-fn head(client: &mut Client, database: &str) -> (i64, Vec<u8>) {
-    let row = client
-        .query_one(
-            "SELECT basis_t, tx_hash FROM atomic_heads WHERE database_id=$1",
-            &[&database],
-        )
-        .unwrap();
-    (row.get(0), row.get(1))
+fn head(connection: &str, database: &str) -> (u64, Option<[u8; 32]>) {
+    let root = current::root(connection, database);
+    (root.basis, root.log)
 }
 
 #[test]
@@ -89,8 +95,10 @@ fn server_statement_and_lock_timeouts_fire_and_the_connection_remains_usable() {
     let Ok(postgres) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
-    let connection = PostgresConnectionConfig::plaintext(format!(
-        "{postgres} options='-c application_name=io-policy-options -c statement_timeout=0'"
+    let connection = PostgresConnectionConfig::plaintext(parameter(
+        &postgres,
+        "application_name",
+        "io-policy-options",
     ))
     .with_io_policy(PostgresIoPolicy {
         connect_timeout: Some(Duration::from_secs(1)),
@@ -154,7 +162,7 @@ fn server_statement_and_lock_timeouts_fire_and_the_connection_remains_usable() {
 }
 
 #[test]
-fn public_head_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes() {
+fn public_publication_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes() {
     let Ok(postgres) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
@@ -169,13 +177,12 @@ fn public_head_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes()
     );
     let client = service.client();
     let reports = client.subscribe_reports();
-    let mut observer = Client::connect(&postgres, NoTls).unwrap();
-    let initial = head(&mut observer, &id);
+    let initial = head(&postgres, &id);
     let mut blocker = Client::connect(&postgres, NoTls).unwrap();
     let mut held = blocker.transaction().unwrap();
     held.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id=$1 FOR UPDATE",
-        &[&id],
+        "SELECT revision FROM atomic_refs WHERE key=$1 FOR UPDATE",
+        &[&current::root_key(&postgres, &id)],
     )
     .unwrap();
     let known_request = request("private-known-lock-key", 1);
@@ -191,7 +198,7 @@ fn public_head_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes()
     assert!(
         rejected_elapsed >= Duration::from_millis(200) && rejected_elapsed < Duration::from_secs(3)
     );
-    assert_eq!(head(&mut observer, &id), initial);
+    assert_eq!(head(&postgres, &id), initial);
     held.rollback().unwrap();
     let committed = client
         .transact(known_request.clone(), Duration::from_secs(3))
@@ -207,8 +214,8 @@ fn public_head_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes()
 
     let mut held = blocker.transaction().unwrap();
     held.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id=$1 FOR UPDATE",
-        &[&id],
+        "SELECT revision FROM atomic_refs WHERE key=$1 FOR UPDATE",
+        &[&current::root_key(&postgres, &id)],
     )
     .unwrap();
     let unknown_request = request("private-unknown-wait-key", 2);
@@ -242,7 +249,7 @@ fn public_head_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes()
         reconciled.tx_hash
     );
     assert_eq!(reports.pending_reports(), 0);
-    assert_eq!(head(&mut observer, &id).0 as u64, reconciled.basis_t);
+    assert_eq!(head(&postgres, &id).0 as u64, reconciled.basis_t);
     assert_eq!(
         committed
             .db_after
@@ -252,7 +259,7 @@ fn public_head_lock_rejection_and_shorter_unknown_wait_preserve_retry_outcomes()
     );
     service.shutdown();
     assert_eq!(
-        PostgresStore::connect(&postgres)
+        common::TestStore::connect(&postgres)
             .unwrap()
             .recover(&id)
             .unwrap()
@@ -279,13 +286,12 @@ fn public_statement_cancellation_before_commit_is_interrupted_and_retryable() {
         },
     );
     let client = service.client();
-    let mut observer = Client::connect(&postgres, NoTls).unwrap();
-    let initial = head(&mut observer, &id);
+    let initial = head(&postgres, &id);
     let mut blocker = Client::connect(&postgres, NoTls).unwrap();
     let mut held = blocker.transaction().unwrap();
     held.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id=$1 FOR UPDATE",
-        &[&id],
+        "SELECT revision FROM atomic_refs WHERE key=$1 FOR UPDATE",
+        &[&current::root_key(&postgres, &id)],
     )
     .unwrap();
     let request = request("statement-timeout", 3);
@@ -298,14 +304,14 @@ fn public_statement_cancellation_before_commit_is_interrupted_and_retryable() {
     assert_eq!(error.details["postgres_sqlstate"], "57014");
     assert!(!error.details.contains_key("postgres_transport"));
     assert!(elapsed >= Duration::from_millis(150) && elapsed < Duration::from_secs(3));
-    assert_eq!(head(&mut observer, &id), initial);
+    assert_eq!(head(&postgres, &id), initial);
     held.rollback().unwrap();
     let committed = client.transact(request, Duration::from_secs(3)).unwrap();
     assert!(!committed.replayed);
     assert_eq!(committed.basis_t, initial.0 as u64 + 1);
     service.shutdown();
     eprintln!(
-        "I/O outcomes: statement250ms canceled blocked head read after {elapsed:?}; no head advance until explicit retry"
+        "I/O outcomes: statement250ms canceled blocked publication guard after {elapsed:?}; no head advance until explicit retry"
     );
 }
 

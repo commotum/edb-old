@@ -95,7 +95,7 @@ pub struct Fixture {
     pub writer_url: String,
     pub peer_url: String,
     pub roles: Option<(String, String)>,
-    pub can_inject_replica_fault: bool,
+    pub can_inject_object_fault: bool,
 }
 
 impl Fixture {
@@ -124,7 +124,7 @@ impl Fixture {
             writer_url: scoped.clone(),
             peer_url: scoped,
             roles: None,
-            can_inject_replica_fault: false,
+            can_inject_object_fault: true,
         };
         let privileges = fixture
             .admin
@@ -133,7 +133,6 @@ impl Fixture {
                 &[],
             )
             .unwrap();
-        fixture.can_inject_replica_fault = privileges.get(0);
         let can_create_roles: bool = privileges.get(1);
         if can_create_roles {
             let writer = format!("{unique}_writer");
@@ -157,41 +156,51 @@ impl Fixture {
         fixture
     }
 
-    pub fn remove_derived_publication(&self, database: &str) {
-        // Deliberate fault, confined to this fixture's schema and logical database.
-        // Replica mode bypasses immutability/FK triggers; no log/head is changed.
-        let mut sql = Client::connect(&self.admin_url, NoTls).unwrap();
-        let mut transaction = sql.transaction().unwrap();
-        transaction
-            .batch_execute("SET LOCAL session_replication_role = replica")
+    fn current_root(&self, database: &str) -> atomic_core::storage::root::DatabaseRoot {
+        let config = atomic_core::PostgresConnectionConfig::plaintext(&self.admin_url);
+        let entry = atomic_core::DatabaseCatalog::connect_configured(&config)
+            .unwrap()
+            .resolve(database)
             .unwrap();
-        assert!(
-            transaction
-                .execute(
-                    "DELETE FROM atomic_tree_publications WHERE database_id = $1",
-                    &[&database],
-                )
-                .unwrap()
-                > 0
-        );
-        transaction
-            .execute(
-                "DELETE FROM atomic_tree_manifests WHERE database_id = $1",
-                &[&database],
-            )
+        let mut store = atomic_core::storage::PgBlockStore::connect(&config).unwrap();
+        let reference = store
+            .read_ref(&format!("databases/{}", entry.database_id))
+            .unwrap()
             .unwrap();
-        transaction.commit().unwrap();
+        let id = reference.value.as_deref().unwrap().try_into().unwrap();
+        atomic_core::storage::root::DatabaseRoot::decode(&id, &store.get(id).unwrap().unwrap())
+            .unwrap()
     }
 
+    pub fn remove_derived_publication(&self, database: &str) {
+        // Explicit corruption of one current index object in this test-owned
+        // schema. Canonical publication/log/receipts remain unchanged; ordinary
+        // startup fails until the operator repairs the selected current index.
+        let index = self.current_root(database).indexes.unwrap();
+        assert_eq!(
+            Client::connect(&self.admin_url, NoTls)
+                .unwrap()
+                .execute("DELETE FROM atomic_objects WHERE id=$1", &[&&index[..]])
+                .unwrap(),
+            1
+        );
+    }
+
+    /// Zero or one readable current index, not a historical publication count.
     pub fn publication_count(&self, database: &str) -> i64 {
-        Client::connect(&self.admin_url, NoTls)
+        let config = atomic_core::PostgresConnectionConfig::plaintext(&self.admin_url);
+        let root = self.current_root(database);
+        let Some(index) = root.indexes else {
+            return 0;
+        };
+        let Some(bytes) = atomic_core::storage::PgBlockStore::connect(&config)
             .unwrap()
-            .query_one(
-                "SELECT count(*) FROM atomic_tree_publications WHERE database_id = $1",
-                &[&database],
-            )
+            .get(index)
             .unwrap()
-            .get(0)
+        else {
+            return 0;
+        };
+        i64::from(atomic_core::storage::IndexDescriptor::decode(&index, &bytes).is_ok())
     }
 }
 

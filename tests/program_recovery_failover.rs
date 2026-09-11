@@ -1,11 +1,11 @@
+mod common;
 use atomic_core::{
     Attribute, CallableRef, CapacityLimits, Cardinality, DB_ATTR_PREDS, DB_FN, DB_IDENT, EntityRef,
-    ErrorCategory, IndexPrefix, Instruction, Keyword, PostgresIndexer, PostgresStore, Program,
-    ProgramCall, ProgramKind, ProgramLimits, QueryPattern, QueryTemplate, QueryTerm, RuntimeValue,
-    Schema, Symbol, TransactionRequest, TransactionService, TransactionServiceConfig,
-    TransactionStandby, TxOp, Value, ValueType,
+    ErrorCategory, IndexPrefix, Instruction, Keyword, Program, ProgramCall, ProgramKind,
+    ProgramLimits, QueryPattern, QueryTemplate, QueryTerm, RuntimeValue, Schema, Symbol,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TransactionStandby, TxOp,
+    Value, ValueType,
 };
-use postgres::{Client, NoTls};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const BALANCE: u32 = 1_000;
@@ -13,8 +13,10 @@ const OBSERVED_BALANCE: u32 = 1_001;
 const BATCH_VALUE: u32 = 1_002;
 const QUERY_MATCH: u32 = 1_003;
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+fn connection() -> Option<common::PostgresFixture> {
+    std::env::var("ATOMIC_POSTGRES_URL")
+        .ok()
+        .map(|url| common::PostgresFixture::new(&url, "current_semantics"))
 }
 
 fn unique(prefix: &str) -> String {
@@ -276,13 +278,13 @@ fn install_functions(
 
 #[test]
 fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("program_base_failover");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     store.create_database(&database_id, schema()).unwrap();
     let positive_hash = store.deploy_program_blob(&positive()).unwrap();
     let emitter_hash = store.deploy_program_blob(&emit_two_maps()).unwrap();
@@ -308,10 +310,7 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
     }));
     first.shutdown();
 
-    let base = PostgresIndexer::connect(&connection, &database_id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    let base = common::consolidate(&connection, &database_id).unwrap();
     assert_eq!(base.basis_t, emitted.basis_t);
 
     let warm = TransactionService::start(config(&connection, &database_id, "warm")).unwrap();
@@ -327,15 +326,21 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
     // Model a writer that died without releasing its still-live lease. The
     // standby must wait for expiry, recover base+tail, and use the same
     // temporal functions and predicate boundary before publishing.
-    let mut sql = Client::connect(&connection, NoTls).unwrap();
-    sql.execute(
-        "UPDATE atomic_transactor_leases \
-         SET holder_id = 'dead-process', \
-             expires_at = clock_timestamp() + 150::bigint * interval '1 millisecond' \
-         WHERE lease_scope = $1",
-        &[&database_id],
+    let block_config = atomic_core::PostgresConnectionConfig::plaintext(&connection);
+    let database =
+        atomic_core::storage::BlockDatabase::resolve(&block_config, &database_id).unwrap();
+    let abandoned = atomic_core::storage::BlockTransactor::claim(
+        &block_config,
+        database,
+        atomic_core::storage::BlockWriterOptions {
+            lease_duration: Duration::from_millis(150),
+            ..Default::default()
+        },
     )
     .unwrap();
+    // Dropping this direct transactor without release leaves its real opaque
+    // lease to expire, as after a process failure; no SQL lease forgery.
+    drop(abandoned);
     let standby = TransactionStandby::start(
         config(&connection, &database_id, "standby"),
         Duration::from_millis(20),
@@ -382,13 +387,13 @@ fn functions_maps_and_predicates_survive_base_recovery_and_standby_takeover() {
 
 #[test]
 fn persisted_stage_four_control_flow_is_atomic_and_db_before_consistent() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("program_stage_four_witness");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     store
         .create_database(&database_id, stage_four_witness_schema())
         .unwrap();
@@ -585,28 +590,31 @@ fn persisted_stage_four_control_flow_is_atomic_and_db_before_consistent() {
     assert_eq!(error.details["stage4/reason"], "map omitted :request/apply");
     assert_eq!(error.anomaly, Some(Box::new(expected_cancel)));
 
-    let recovered = PostgresStore::connect(&connection)
+    let recovered = common::TestStore::connect(&connection)
         .unwrap()
         .recover(&database_id)
         .unwrap();
     assert_eq!(recovered.basis_t(), applied.basis_t);
-    assert_eq!(recovered.values(source, BALANCE), vec![&Value::Long(9)]);
     assert_eq!(
-        recovered.values(source, OBSERVED_BALANCE),
-        vec![&Value::Long(5)]
+        recovered.values(source, BALANCE).unwrap(),
+        vec![Value::Long(9)]
+    );
+    assert_eq!(
+        recovered.values(source, OBSERVED_BALANCE).unwrap(),
+        vec![Value::Long(5)]
     );
     service.shutdown();
 }
 
 #[test]
 fn configured_budget_is_shared_by_siblings_nested_calls_predicates_and_queries() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique("program_service_limits");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     store.create_database(&database_id, schema()).unwrap();
     let empty_hash = store.deploy_program_blob(&empty_transaction()).unwrap();
     let setter_hash = store.deploy_program_blob(&set_balance()).unwrap();
@@ -808,7 +816,7 @@ fn configured_budget_is_shared_by_siblings_nested_calls_predicates_and_queries()
     );
 
     assert_eq!(
-        PostgresStore::connect(&connection)
+        common::TestStore::connect(&connection)
             .unwrap()
             .recover(&database_id)
             .unwrap()

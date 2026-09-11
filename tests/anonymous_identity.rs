@@ -2,9 +2,9 @@ mod common;
 
 use atomic_core::{
     Attribute, AttributeRef, CallableRef, Cardinality, DB_FN, DB_IDENT, Database, DatabaseValue,
-    EntityMap, EntityRef, IndexPrefix, Instruction, Keyword, MapValue, PostgresMigrator,
-    PostgresStore, Program, ProgramCall, ProgramKind, RuntimeValue, Schema, TransactionRequest,
-    TxCall, TxForm, TxFunctions, TxOp, TxValue, Unique, Value, ValueType,
+    EntityMap, EntityRef, IndexPrefix, Instruction, Keyword, MapValue, Program, ProgramCall,
+    ProgramKind, RuntimeValue, Schema, TransactionRequest, TxCall, TxForm, TxFunctions, TxOp,
+    TxValue, Unique, Value, ValueType,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{
@@ -332,11 +332,8 @@ fn postgres_generated_maps_commit_restart_and_retry_without_reexpansion() {
         return;
     };
     let fixture = common::PostgresFixture::new(&connection, "anonymous_identity");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     store
         .create_database("anonymous_identity", schema())
         .unwrap();

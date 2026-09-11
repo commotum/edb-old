@@ -1,7 +1,7 @@
-//! Exact endpoint memo lifetime: old values cannot inherit a successor's
-//! cursor, and physical publication changes cannot invalidate an old proof.
-use super::*;
-use crate::{Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, Value, ValueType};
+//! Allocation checkpoints belong to exact immutable values, not live peers.
+use crate::storage::{BlockDatabase, PgBlockStore};
+use crate::{Attribute, Cardinality, EntityRef, Keyword, Peer, Schema, TxOp, Value, ValueType};
+use std::time::Duration;
 
 struct Fixture {
     connection: String,
@@ -51,14 +51,12 @@ fn fixture() -> Option<Fixture> {
 }
 
 #[test]
-fn allocation_memo_is_exact_rebase_shared_successor_distinct_and_errors_retryable() {
+fn allocation_checkpoint_stays_exact_across_successor_indexing_and_reopen() {
     let Some(fixture) = fixture() else {
         return;
     };
-    crate::PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    let config = crate::PostgresConnectionConfig::plaintext(&fixture.connection);
+    PgBlockStore::install(&config).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -68,21 +66,10 @@ fn allocation_memo_is_exact_rebase_shared_successor_distinct_and_errors_retryabl
             Cardinality::One,
         ))
         .unwrap();
-    let mut store = crate::PostgresStore::connect(&fixture.connection).unwrap();
-    let created = store.create_database("memo", schema).unwrap();
-    PostgresIndexer::connect(&fixture.connection, "memo")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    BlockDatabase::create(&config, "memo", schema).unwrap();
     let peer = Peer::connect(&fixture.connection, "memo", 8).unwrap();
-    let before = peer.tiered_snapshot();
-    assert!(
-        before.endpoint().generation > 0,
-        "new databases use native allocation-capable generation"
-    );
-    assert!(before.state.reserved_allocation.get().is_none());
+    let before = peer.db();
     let allocation = before.reserved_allocation().unwrap();
-    assert_eq!(allocation, created.reserved_allocation());
     assert!(allocation.is_some());
     let context = crate::OperationContext::new(crate::OperationKind::Application);
     {
@@ -92,30 +79,6 @@ fn allocation_memo_is_exact_rebase_shared_successor_distinct_and_errors_retryabl
         }
     }
     assert_eq!(context.snapshot().sql_calls, 0);
-    // Keep the eager adapter cached so advancement exercises authenticated
-    // v2 replay, not only a fresh full recovery at the successor endpoint.
-    let eager_before = peer.try_db_compatibility().unwrap();
-    assert_eq!(eager_before.reserved_allocation(), allocation);
-    let (rebased, _) = before.rebase_exact(None).unwrap();
-    assert!(Arc::ptr_eq(
-        &before.state.reserved_allocation,
-        &rebased.state.reserved_allocation
-    ));
-
-    // A proof failure leaves no memo entry, even when multiple calls use the
-    // same retained value. Corrupt only this private endpoint, never storage.
-    let mut forged_state = (*before.state).clone();
-    forged_state.current_hash[0] ^= 1;
-    forged_state.reserved_allocation = Arc::new(OnceLock::new());
-    let forged = TieredSnapshot {
-        core: Arc::clone(&before.core),
-        state: Arc::new(forged_state),
-    };
-    for _ in 0..2 {
-        assert!(forged.reserved_allocation().is_err());
-        assert!(forged.state.reserved_allocation.get().is_none());
-    }
-
     let service = crate::TransactionService::start(crate::TransactionServiceConfig {
         connection: fixture.connection.clone(),
         database_id: "memo".into(),
@@ -143,18 +106,14 @@ fn allocation_memo_is_exact_rebase_shared_successor_distinct_and_errors_retryabl
                     },
                 ],
             )
-            .comparing_basis(created.basis_t())
+            .comparing_basis(before.basis_t())
             .with_tx_instant(1000),
             Duration::from_secs(10),
         )
         .unwrap();
-    service.shutdown();
-    peer.sync_compatibility().unwrap();
-    let after = peer.tiered_snapshot();
-    assert!(!Arc::ptr_eq(
-        &before.state.reserved_allocation,
-        &after.state.reserved_allocation
-    ));
+    let after = peer
+        .sync_to(report.basis_t, Duration::from_secs(10))
+        .unwrap();
     let successor = after.reserved_allocation().unwrap().unwrap();
     assert!(successor.frontier() > allocation.unwrap().frontier());
     assert_eq!(successor.frontier(), report.tempids["claim"] + 1);
@@ -163,27 +122,16 @@ fn allocation_memo_is_exact_rebase_shared_successor_distinct_and_errors_retryabl
         report.db_after.reserved_allocation().unwrap(),
         Some(successor)
     );
-    let eager_after = peer.try_db_compatibility().unwrap();
-    assert_eq!(eager_after.reserved_allocation(), Some(successor));
-    assert_eq!(eager_before.reserved_allocation(), allocation);
     let reopened = Peer::connect(&fixture.connection, "memo", 8).unwrap();
     assert_eq!(
-        reopened
-            .try_db_compatibility()
-            .unwrap()
-            .reserved_allocation(),
+        reopened.db().reserved_allocation().unwrap(),
         Some(successor)
     );
-    PostgresIndexer::connect(&fixture.connection, "memo")
-        .unwrap()
-        .consolidate()
-        .unwrap();
-    peer.refresh_index().unwrap();
-    let published = peer.tiered_snapshot();
-    assert_eq!(published.endpoint(), after.endpoint());
-    assert!(Arc::ptr_eq(
-        &published.state.reserved_allocation,
-        &after.state.reserved_allocation
-    ));
+    let target = service.client().request_index().unwrap().target_t;
+    let published = peer.sync_index(target, Duration::from_secs(10)).unwrap();
+    assert_eq!(published.basis_t(), after.basis_t());
     assert_eq!(published.reserved_allocation().unwrap(), Some(successor));
+    assert_eq!(after.reserved_allocation().unwrap(), Some(successor));
+    assert_eq!(before.reserved_allocation().unwrap(), allocation);
+    service.shutdown();
 }

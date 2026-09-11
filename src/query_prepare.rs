@@ -89,14 +89,14 @@ impl PreparedQueryCache {
         query: &Query,
         key: Option<String>,
     ) -> Result<PreparedQuery, SemanticError> {
-        if let Some(key) = &key {
-            if let Some(index) = self.entries.iter().position(|entry| &entry.key == key) {
-                let entry = self.entries.remove(index).expect("located entry");
-                let prepared = entry.query.clone();
-                self.entries.push_back(entry);
-                self.stats.hits = self.stats.hits.saturating_add(1);
-                return Ok(prepared);
-            }
+        if let Some(key) = &key
+            && let Some(index) = self.entries.iter().position(|entry| &entry.key == key)
+        {
+            let entry = self.entries.remove(index).expect("located entry");
+            let prepared = entry.query.clone();
+            self.entries.push_back(entry);
+            self.stats.hits = self.stats.hits.saturating_add(1);
+            return Ok(prepared);
         }
         self.stats.misses = self.stats.misses.saturating_add(1);
         let prepared = PreparedQuery::new(query)?;

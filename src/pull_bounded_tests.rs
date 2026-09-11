@@ -285,9 +285,10 @@ fn ordinary_and_controlled_cursor_complete_consumption_costs() {
 
 #[test]
 fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
+    use crate::storage::{BlockDatabase, PgBlockStore};
     use crate::{
-        CapacityLimits, Peer, PostgresIndexer, PostgresMigrator, PostgresStore, TransactionRequest,
-        TransactionService, TransactionServiceConfig,
+        CapacityLimits, Peer, PostgresConnectionConfig, TransactionRequest, TransactionService,
+        TransactionServiceConfig,
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -295,18 +296,45 @@ fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
         eprintln!("SKIP: native merge admission requires ATOMIC_POSTGRES_URL");
         return;
     };
-    let database_id = format!(
-        "pull-native-skip-{}-{}",
+    let catalog_schema = format!(
+        "pull_native_skip_{}_{}",
         std::process::id(),
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos()
     );
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
+    struct Fixture {
+        admin: postgres::Client,
+        schema: String,
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = self
+                .admin
+                .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema));
+        }
+    }
+    let mut admin = postgres::Client::connect(&connection, postgres::NoTls).unwrap();
+    admin
+        .batch_execute(&format!("CREATE SCHEMA {catalog_schema}"))
         .unwrap();
+    let connection =
+        if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+            format!(
+                "{connection}{}options=-csearch_path%3D{catalog_schema}%2Cpg_catalog",
+                if connection.contains('?') { "&" } else { "?" }
+            )
+        } else {
+            format!("{connection} options='-csearch_path={catalog_schema},pg_catalog'")
+        };
+    let _fixture = Fixture {
+        admin,
+        schema: catalog_schema,
+    };
+    let config = PostgresConnectionConfig::plaintext(&connection);
+    PgBlockStore::install(&config).unwrap();
+    let database_id = "pull-native-skip".to_owned();
     let mut schema = Schema::new();
     let mut attribute = Attribute::new(
         MANY,
@@ -316,10 +344,7 @@ fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
     );
     attribute.indexed = true;
     schema.install(attribute).unwrap();
-    PostgresStore::connect(&connection)
-        .unwrap()
-        .create_database(&database_id, schema)
-        .unwrap();
+    BlockDatabase::create(&config, &database_id, schema).unwrap();
     let writer = TransactionService::start(TransactionServiceConfig {
         connection: connection.clone(),
         database_id: database_id.clone(),
@@ -346,12 +371,11 @@ fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
         )
         .unwrap();
     let root = seeded.tempids["root"];
-    PostgresIndexer::connect(&connection, &database_id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    writer.client().request_index().unwrap();
     let before_peer = Peer::connect(&connection, &database_id, 64).unwrap();
-    let before = before_peer.db();
+    let before = before_peer
+        .sync_index(seeded.basis_t, Duration::from_secs(30))
+        .unwrap();
     let mut changes = (0..count - 1)
         .map(|value| TxOp::Retract {
             entity: EntityRef::Id(root),
@@ -395,7 +419,7 @@ fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
     assert_single(&before.pull(&pattern(), root).unwrap(), 0);
 
     let mut native = peer
-        .tiered_snapshot()
+        .snapshot()
         .prefix_cursor(
             false,
             &IndexPrefix::Eavt {

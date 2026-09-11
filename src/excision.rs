@@ -6,10 +6,13 @@
 
 use crate::database::FrozenExcisionRequest;
 use crate::{
-    DB_PARTITION, Database, Datom, Digest, DurableTransaction, ErrorCategory, IndexOrder,
-    SemanticError, Value, View, eid_to_part, sha256, tx_to_t,
+    DB_PARTITION, Datom, Digest, ErrorCategory, SemanticError, Value, eid_to_part, sha256, tx_to_t,
 };
-use std::collections::{BTreeSet, VecDeque};
+#[cfg(test)]
+use crate::{Database, DurableTransaction, IndexOrder, View};
+use std::collections::BTreeSet;
+#[cfg(test)]
+use std::collections::VecDeque;
 
 /// Exact values of recovered 1.0.7705 `datomic.db/BOOT-IDS`.
 ///
@@ -73,6 +76,44 @@ pub(crate) struct PlannedExcisionPredicate {
 }
 
 impl ExcisionPlan {
+    /// Construct/check the persisted material predicate without replaying an
+    /// eager database. A zero hash is used only by the initial Rust planner;
+    /// persisted callers require and supply the previously sealed hash.
+    pub(crate) fn from_materialized(
+        items: Vec<PlannedExcisionPredicate>,
+    ) -> Result<Self, SemanticError> {
+        let mut predicates = Vec::with_capacity(items.len());
+        let mut previous = None;
+        for item in items {
+            let identity = (item.request.request_t, item.request.request_entity);
+            if previous.is_some_and(|p| p >= identity) || item.before_t > item.request.request_t {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "excision/plan-order",
+                    "Frozen predicates are not canonical",
+                ));
+            }
+            previous = Some(identity);
+            let predicate = ExcisionPredicate {
+                request: item.request,
+                kind: item.kind,
+                before_t: item.before_t,
+                extent: item.extent,
+                reference_attributes: item.reference_attributes,
+                protected_entity_target: item.protected_entity_target,
+            };
+            if item.hash != [0; 32] && predicate.canonical_hash() != item.hash {
+                return Err(SemanticError::new(
+                    ErrorCategory::Fault,
+                    "excision/plan-hash",
+                    "Frozen predicate differs from its commitment",
+                ));
+            }
+            predicates.push(predicate);
+        }
+        Ok(Self { predicates })
+    }
+
     #[cfg(test)]
     pub(crate) fn pending_after(
         database: &Database,
@@ -84,6 +125,7 @@ impl ExcisionPlan {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn from_requests(
         database: &Database,
         mut requests: Vec<FrozenExcisionRequest>,
@@ -118,6 +160,10 @@ impl ExcisionPlan {
         self.predicates.is_empty()
     }
 
+    pub(crate) fn predicates_len(&self) -> usize {
+        self.predicates.len()
+    }
+
     #[cfg(test)]
     pub(crate) fn requests(&self) -> impl Iterator<Item = &FrozenExcisionRequest> {
         self.predicates.iter().map(|predicate| &predicate.request)
@@ -128,25 +174,6 @@ impl ExcisionPlan {
             .iter()
             .map(ExcisionPredicate::frozen)
             .collect()
-    }
-
-    /// One order-independent commitment to the exact predicates applied by a
-    /// physical generation. Individual hashes are sorted before aggregation,
-    /// matching declarative transaction/excision set semantics.
-    pub(crate) fn request_set_hash(&self) -> Digest {
-        let mut hashes = self
-            .predicates
-            .iter()
-            .map(ExcisionPredicate::canonical_hash)
-            .collect::<Vec<_>>();
-        hashes.sort_unstable();
-        let mut bytes = Vec::with_capacity(41 + hashes.len() * 32);
-        bytes.extend_from_slice(b"atomic/excision-request-set/v1\0");
-        bytes.extend_from_slice(&(hashes.len() as u64).to_be_bytes());
-        for hash in hashes {
-            bytes.extend_from_slice(&hash);
-        }
-        sha256(&bytes)
     }
 
     #[cfg(test)]
@@ -178,6 +205,7 @@ impl ExcisionPlan {
             .count() as u64
     }
 
+    #[cfg(test)]
     pub(crate) fn filter_transaction(
         &self,
         transaction: &DurableTransaction,
@@ -189,6 +217,7 @@ impl ExcisionPlan {
 }
 
 impl ExcisionPredicate {
+    #[cfg(test)]
     fn new(database: &Database, request: FrozenExcisionRequest) -> Result<Self, SemanticError> {
         // Recovered type selection: attrs force entity form; otherwise an
         // installed partition-zero attribute target selects attribute form.
@@ -311,6 +340,7 @@ impl ExcisionPredicate {
 /// comes from the current database value, matching the recovered calls through
 /// `component-attr?` and `ref?`: later data cannot expand an old request, but a
 /// later supported component-schema alteration can change its extent.
+#[cfg(test)]
 fn component_extent_as_of(
     database: &Database,
     request: &FrozenExcisionRequest,

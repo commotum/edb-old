@@ -1,4 +1,8 @@
 mod common;
+use atomic_core::storage::root::{Block, DatabaseRoot};
+use atomic_core::storage::{
+    BlockDatabase, CasOutcome, IndexDescriptor, PgBlockStore, SnapshotMetadata,
+};
 use atomic_core::*;
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -9,15 +13,54 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    PostgresStore::connect(&fixture.connection)
-        .unwrap()
-        .create_database("changes", Schema::new())
-        .unwrap();
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    PgBlockStore::install(&config).unwrap();
+    BlockDatabase::create(&config, "changes", Schema::new()).unwrap();
     Some(fixture)
+}
+
+fn channel(fixture: &common::PostgresFixture) -> String {
+    let database = BlockDatabase::resolve(
+        &PostgresConnectionConfig::plaintext(&fixture.connection),
+        "changes",
+    )
+    .unwrap();
+    let mut bytes = fixture.schema.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(database.reference_key().as_bytes());
+    format!(
+        "atomic_r_{}",
+        sha256(&bytes)[..24]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
+}
+
+fn checkpoint_key(fixture: &common::PostgresFixture, name: &str) -> String {
+    let mut sql = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
+    let principal: String = sql
+        .query_one("SELECT current_user::text", &[])
+        .unwrap()
+        .get(0);
+    let database = BlockDatabase::resolve(
+        &PostgresConnectionConfig::plaintext(&fixture.connection),
+        "changes",
+    )
+    .unwrap();
+    let mut bytes = b"atomic/change-consumer/v1".to_vec();
+    for value in [principal.as_str(), name] {
+        bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        bytes.extend_from_slice(value.as_bytes());
+    }
+    format!(
+        "consumers/{}/{}",
+        database.reference_key().strip_prefix("databases/").unwrap(),
+        sha256(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    )
 }
 
 #[test]
@@ -120,13 +163,17 @@ fn replay_is_contiguous_bounded_and_checkpointed_after_processing() {
     assert_eq!(small.checkpoint().last_t(), 0);
     // A checkpoint is not trusted merely because an application login wrote
     // it. Reopening verifies the referenced canonical transaction.
-    let mut admin = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    admin
-        .execute(
-            "UPDATE atomic_change_checkpoints SET commit_hash=$1 WHERE consumer_name='billing'",
-            &[&&[99_u8; 32][..]],
-        )
-        .unwrap();
+    let mut store = PgBlockStore::connect(&PostgresConnectionConfig::plaintext(url)).unwrap();
+    let key = checkpoint_key(&fixture, "billing");
+    let reference = store.read_ref(&key).unwrap().unwrap();
+    let mut payload = reference.value.unwrap();
+    payload[40..72].fill(99);
+    assert!(matches!(
+        store
+            .compare_exchange(&key, Some(reference.revision), Some(&payload))
+            .unwrap(),
+        CasOutcome::Applied(_)
+    ));
     assert_eq!(
         ChangeConsumer::connect(url, "changes", "billing", config)
             .err()
@@ -147,13 +194,7 @@ fn consumer_reconnect_repairs_a_dropped_notice_from_the_log() {
     let mut consumer =
         ChangeConsumer::connect(url, "changes", "resume", ChangeConsumerConfig::default()).unwrap();
     let mut admin = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    let channel: String = admin
-        .query_one(
-            "SELECT 'atomic_n_' || md5($1 || ':changes')",
-            &[&fixture.schema],
-        )
-        .unwrap()
-        .get(0);
+    let channel = channel(&fixture);
     let listen = format!("LISTEN {channel}");
     let pid:i32=admin.query_one("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query=$1 ORDER BY backend_start DESC LIMIT 1", &[&listen]).unwrap().get(0);
     let waiter = std::thread::spawn(move || {
@@ -196,13 +237,7 @@ fn spoofed_notice_flood_is_coalesced_without_fabricating_transactions() {
     .unwrap();
     let before = notice_listener_stats();
     let mut admin = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let channel: String = admin
-        .query_one(
-            "SELECT 'atomic_n_' || md5($1 || ':changes')",
-            &[&fixture.schema],
-        )
-        .unwrap()
-        .get(0);
+    let channel = channel(&fixture);
     admin
         .query(
             "SELECT pg_notify($1,repeat('x',100) || n::text) FROM generate_series(1,512) n",
@@ -226,129 +261,153 @@ fn spoofed_notice_flood_is_coalesced_without_fabricating_transactions() {
 }
 
 #[test]
-fn excision_does_not_silently_retarget_a_checkpoint_or_pin_old_history() {
+fn generation_transition_rejects_old_checkpoints_without_a_lifetime_pin() {
     let Some(fixture) = fixture("change_generation") else {
         return;
     };
-    let url = &fixture.connection;
-    let writer = common::start_service(url, "changes");
-    let seeded = writer
-        .client()
-        .transact(
-            TransactionRequest::new(
-                "seed",
-                vec![TxOp::Add {
-                    entity: EntityRef::Temp("person".into()),
-                    attribute: DB_DOC as u32,
-                    value: Value::String("remove me".into()).into(),
-                }],
-            ),
-            Duration::from_secs(10),
-        )
-        .unwrap();
-    let removed = seeded.tempids["person"];
-    drop(seeded);
-    let mut consumer = ChangeConsumer::connect(
-        url,
-        "changes",
-        "pre-excision",
-        ChangeConsumerConfig::default(),
-    )
-    .unwrap();
-    let pending = consumer.next(Duration::ZERO).unwrap().unwrap();
-    let old_generation = pending.checkpoint.generation();
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    let writer = common::start_service(&fixture.connection, "changes");
     writer
         .client()
         .transact(
-            TransactionRequest::new(
-                "excise",
-                vec![TxOp::Add {
-                    entity: EntityRef::Temp("request".into()),
-                    attribute: DB_EXCISE as u32,
-                    value: TxValue::Entity(EntityRef::Id(removed)),
-                }],
-            ),
+            TransactionRequest::new("seed", vec![]),
             Duration::from_secs(10),
         )
         .unwrap();
     writer.shutdown();
-    PostgresIndexer::connect(url, "changes")
-        .unwrap()
-        .consolidate()
-        .unwrap();
-    let receipt = PostgresOperator::connect(url)
-        .unwrap()
-        .process_excision_requests("changes")
-        .unwrap();
-    assert!(receipt.generation > old_generation);
+    let mut admin = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
+    let active_pins = |admin: &mut postgres::Client| -> std::collections::BTreeSet<String> {
+        admin
+            .query(
+                "SELECT key FROM atomic_refs WHERE key LIKE 'pins/%' AND value IS NOT NULL",
+                &[],
+            )
+            .unwrap()
+            .into_iter()
+            .map(|row| row.get(0))
+            .collect()
+    };
+    let pins_before = active_pins(&mut admin);
+    let mut consumer =
+        ChangeConsumer::connect(&fixture.connection, "changes", "old", Default::default()).unwrap();
+    let pending = consumer.next(Duration::ZERO).unwrap().unwrap();
+    // Previously released writer pins may finish asynchronous cleanup here.
+    // Delivery must add no retained pin of its own, irrespective of those drops.
+    assert!(
+        active_pins(&mut admin).is_subset(&pins_before),
+        "delivery retained a lifetime history pin"
+    );
+    let mut store = PgBlockStore::connect(&config).unwrap();
+    let database = BlockDatabase::resolve(&config, "changes").unwrap();
+    let reference = store.read_ref(&database.reference_key()).unwrap().unwrap();
+    let id = reference.value.unwrap().as_slice().try_into().unwrap();
+    let mut root = DatabaseRoot::decode(&id, &store.get(id).unwrap().unwrap()).unwrap();
+    // Fixture-only current publication transition: the Stage-5 excision worker
+    // owns redaction, while this regression isolates consumer generation fences.
+    let metadata_id = root.metadata.unwrap();
+    let mut metadata =
+        SnapshotMetadata::decode(&metadata_id, &store.get(metadata_id).unwrap().unwrap()).unwrap();
+    metadata.generation += 1;
+    root.metadata = Some(store.put(&metadata.encode().unwrap()).unwrap());
+    let index_id = root.indexes.unwrap();
+    let mut indexes =
+        IndexDescriptor::decode(&index_id, &store.get(index_id).unwrap().unwrap()).unwrap();
+    indexes.generation = metadata.generation;
+    root.indexes = Some(store.put(&indexes.encode().unwrap()).unwrap());
+    let next = store.put(&root.encode().unwrap()).unwrap();
+    assert!(matches!(
+        store
+            .compare_exchange(
+                &database.reference_key(),
+                Some(reference.revision),
+                Some(&next)
+            )
+            .unwrap(),
+        CasOutcome::Applied(_)
+    ));
     assert_eq!(
         consumer.acknowledge(&pending.checkpoint).unwrap_err().code,
         "consumer/generation-changed"
     );
     assert_eq!(
-        ChangeConsumer::connect(
-            url,
-            "changes",
-            "pre-excision",
-            ChangeConsumerConfig::default()
-        )
-        .err()
-        .unwrap()
-        .code,
+        ChangeConsumer::connect(&fixture.connection, "changes", "old", Default::default())
+            .err()
+            .unwrap()
+            .code,
         "consumer/generation-changed"
     );
-    let fresh = ChangeConsumer::connect(
-        url,
-        "changes",
-        "post-excision",
-        ChangeConsumerConfig::default(),
-    )
-    .unwrap();
-    assert_eq!(fresh.checkpoint().generation(), receipt.generation);
-    // The still-live old consumer owns no lifetime snapshot/generation pin.
-    let mut admin = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    let key: i64 = admin
-        .query_one(
-            "SELECT atomic_log_generation_pin_key($1,$2)",
-            &[&"changes", &(old_generation as i64)],
-        )
-        .unwrap()
-        .get(0);
-    assert!(
-        admin
-            .query_one("SELECT pg_try_advisory_lock($1)", &[&key])
-            .unwrap()
-            .get::<_, bool>(0)
-    );
-    assert!(
-        admin
-            .query_one("SELECT pg_advisory_unlock($1)", &[&key])
-            .unwrap()
-            .get::<_, bool>(0)
-    );
+    let fresh =
+        ChangeConsumer::connect(&fixture.connection, "changes", "fresh", Default::default())
+            .unwrap();
+    assert_eq!(fresh.checkpoint().generation(), metadata.generation);
+    assert!(active_pins(&mut admin).is_subset(&pins_before));
 }
 
 #[test]
-fn restricted_consumers_can_checkpoint_only_their_own_rows_not_canonical_data() {
-    let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
-        eprintln!("SKIP: ATOMIC_POSTGRES_URL required");
+fn consumer_names_are_principal_scoped_with_read_only_object_privileges() {
+    let Some(fixture) = fixture("change_roles") else {
         return;
     };
-    let fixture = common::product_support::Fixture::new(&url);
-    let Some((writer_role, peer_role)) = &fixture.roles else {
-        eprintln!("SKIP: fixture role creation unavailable");
-        return;
-    };
-    let mut migrator = PostgresMigrator::connect(&fixture.admin_url).unwrap();
-    migrator.migrate().unwrap();
-    migrator
-        .grant_runtime_privileges(writer_role, peer_role)
-        .unwrap();
-    PostgresStore::connect(&fixture.admin_url)
+    let mut admin = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
+    let can_create: bool = admin
+        .query_one(
+            "SELECT rolsuper OR rolcreaterole FROM pg_roles WHERE rolname=current_user",
+            &[],
+        )
         .unwrap()
-        .create_database("changes", Schema::new())
-        .unwrap();
-    let writer = common::start_service(&fixture.writer_url, "changes");
+        .get(0);
+    if !can_create {
+        eprintln!("SKIP: dedicated-role creation unavailable");
+        return;
+    }
+    let names = [
+        format!("{}_a", fixture.schema),
+        format!("{}_b", fixture.schema),
+    ];
+    struct Roles {
+        admin: postgres::Client,
+        schema: String,
+        names: [String; 2],
+    }
+    impl Drop for Roles {
+        fn drop(&mut self) {
+            for role in &self.names {
+                // Exact fixture grants only; never DROP OWNED or broad cleanup.
+                let _ = self.admin.batch_execute(&format!(
+                    "REVOKE SELECT ON {}.atomic_objects FROM {role}; REVOKE SELECT,INSERT,UPDATE,DELETE ON {}.atomic_refs FROM {role}; REVOKE USAGE ON SCHEMA {} FROM {role}; DROP ROLE {role}",
+                    self.schema, self.schema, self.schema));
+            }
+        }
+    }
+    for role in &names {
+        admin
+            .batch_execute(&format!(
+                "CREATE ROLE {role} LOGIN PASSWORD '{}'",
+                fixture.schema
+            ))
+            .unwrap();
+    }
+    let roles = Roles {
+        admin,
+        schema: fixture.schema.clone(),
+        names,
+    };
+    let mut admin = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
+    for role in &roles.names {
+        admin.batch_execute(&format!("GRANT USAGE ON SCHEMA {} TO {role}; GRANT SELECT ON {}.atomic_objects TO {role}; GRANT SELECT,INSERT,UPDATE,DELETE ON {}.atomic_refs TO {role}", fixture.schema, fixture.schema, fixture.schema)).unwrap();
+    }
+    let urls = roles
+        .names
+        .iter()
+        .map(|role| {
+            common::product_support::parameter(
+                &common::product_support::parameter(&fixture.connection, "user", role),
+                "password",
+                &fixture.schema,
+            )
+        })
+        .collect::<Vec<_>>();
+    let writer = common::start_service(&fixture.connection, "changes");
     writer
         .client()
         .transact(
@@ -356,54 +415,236 @@ fn restricted_consumers_can_checkpoint_only_their_own_rows_not_canonical_data() 
             Duration::from_secs(10),
         )
         .unwrap();
-    let mut consumer = ChangeConsumer::connect(
-        &fixture.peer_url,
-        "changes",
-        "same-name",
-        ChangeConsumerConfig::default(),
-    )
-    .unwrap();
+    let mut consumer =
+        ChangeConsumer::connect(&urls[0], "changes", "same-name", Default::default()).unwrap();
     let event = consumer.next(Duration::ZERO).unwrap().unwrap();
     consumer.acknowledge(&event.checkpoint).unwrap();
-    let other = ChangeConsumer::connect(
-        &fixture.writer_url,
-        "changes",
-        "same-name",
-        ChangeConsumerConfig::default(),
-    )
-    .unwrap();
+    let other =
+        ChangeConsumer::connect(&urls[1], "changes", "same-name", Default::default()).unwrap();
     assert_eq!(
         other.checkpoint().last_t(),
         0,
-        "checkpoint names crossed SQL login boundary"
+        "checkpoint names crossed login namespace"
     );
-    let mut peer = postgres::Client::connect(&fixture.peer_url, postgres::NoTls).unwrap();
-    assert_eq!(
-        peer.execute(
-            "UPDATE atomic_change_checkpoints SET revision=99 WHERE checkpoint_owner<>current_user",
-            &[]
-        )
-        .unwrap(),
-        0
-    );
+    let mut peer = postgres::Client::connect(&urls[0], postgres::NoTls).unwrap();
     assert!(
-        peer.execute("DELETE FROM atomic_change_checkpoints", &[])
+        peer.execute("UPDATE atomic_objects SET payload=payload", &[])
             .is_err()
     );
-    assert!(
-        peer.execute("UPDATE atomic_heads SET basis_t=basis_t", &[])
-            .is_err()
-    );
+    // Opaque references intentionally do not claim per-feature SQL row ACLs.
+    // Their provider authority is broader than this application consumer API.
     assert_eq!(
-        peer.query_one("SELECT count(*) FROM atomic_change_checkpoints", &[])
+        admin
+            .query_one(
+                "SELECT count(*) FROM atomic_refs WHERE key LIKE 'consumers/%'",
+                &[]
+            )
             .unwrap()
             .get::<_, i64>(0),
-        1
+        2
     );
-    drop(other);
-    drop(consumer);
-    drop(peer);
+    drop((consumer, other, peer));
     writer.shutdown();
+    drop(roles);
+}
+
+#[test]
+fn checkpoint_identity_survives_rename_and_never_follows_name_reuse() {
+    let Some(fixture) = fixture("change_identity") else {
+        return;
+    };
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    let writer = common::start_service(&fixture.connection, "changes");
+    writer
+        .client()
+        .transact(
+            TransactionRequest::new("one", vec![]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    writer.shutdown();
+    let mut consumer =
+        ChangeConsumer::connect(&fixture.connection, "changes", "resume", Default::default())
+            .unwrap();
+    let event = consumer.next(Duration::ZERO).unwrap().unwrap();
+    consumer.acknowledge(&event.checkpoint).unwrap();
+    let database = BlockDatabase::resolve(&config, "changes").unwrap();
+    let mut catalog = atomic_core::DatabaseCatalog::connect_configured(&config).unwrap();
+    catalog.rename("changes", "renamed").unwrap();
+    let replacement = BlockDatabase::create(&config, "changes", Schema::new()).unwrap();
+    assert_ne!(replacement.identity, database.identity);
+    consumer.reconnect().unwrap();
+    assert_eq!(consumer.checkpoint().last_t(), 1);
+    assert!(consumer.next(Duration::ZERO).unwrap().is_none());
+    let renamed =
+        ChangeConsumer::connect(&fixture.connection, "renamed", "resume", Default::default())
+            .unwrap();
+    assert_eq!(renamed.checkpoint(), consumer.checkpoint());
+    let reused =
+        ChangeConsumer::connect(&fixture.connection, "changes", "resume", Default::default())
+            .unwrap();
+    assert_eq!(reused.checkpoint().last_t(), 0);
+    assert_ne!(
+        reused.checkpoint().lineage_id(),
+        consumer.checkpoint().lineage_id()
+    );
+    catalog.retire("renamed").unwrap();
+    assert_eq!(
+        consumer.next(Duration::ZERO).unwrap_err().code,
+        "consumer/database-unavailable"
+    );
+}
+
+#[test]
+fn checkpoint_rejects_forged_earlier_prefix_with_unchanged_final_transaction() {
+    use atomic_core::storage::log::LogRoot;
+    let Some(fixture) = fixture("change_prefix") else {
+        return;
+    };
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    let writer = common::start_service(&fixture.connection, "changes");
+    for n in 1..=2 {
+        writer
+            .client()
+            .transact(
+                TransactionRequest::new(format!("tx{n}"), vec![]),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+    }
+    writer.shutdown();
+    let mut consumer =
+        ChangeConsumer::connect(&fixture.connection, "changes", "saved", Default::default())
+            .unwrap();
+    for _ in 0..2 {
+        let event = consumer.next(Duration::ZERO).unwrap().unwrap();
+        consumer.acknowledge(&event.checkpoint).unwrap();
+    }
+    let saved = consumer.checkpoint().clone();
+    let mut pending = ChangeConsumer::connect(
+        &fixture.connection,
+        "changes",
+        "pending",
+        Default::default(),
+    )
+    .unwrap();
+    let first = pending.next(Duration::ZERO).unwrap().unwrap();
+    pending.acknowledge(&first.checkpoint).unwrap();
+    let second = pending.next(Duration::ZERO).unwrap().unwrap();
+    let database = BlockDatabase::resolve(&config, "changes").unwrap();
+    let mut store = PgBlockStore::connect(&config).unwrap();
+    let reference = store.read_ref(&database.reference_key()).unwrap().unwrap();
+    let id = reference.value.unwrap().as_slice().try_into().unwrap();
+    let mut root = DatabaseRoot::decode(&id, &store.get(id).unwrap().unwrap()).unwrap();
+    let log_id = root.log.unwrap();
+    let log = LogRoot::open(&mut store, log_id).unwrap();
+    let mut changed = log.read(&mut store, 1).unwrap().unwrap();
+    changed
+        .tx_data
+        .iter_mut()
+        .find(|d| d.attribute == DB_TX_INSTANT as u32)
+        .unwrap()
+        .value = Value::Instant(-123);
+    let fork = LogRoot::empty().append(&mut store, &changed).unwrap();
+    let mut page = Block::decode(&log_id, &store.get(log_id).unwrap().unwrap()).unwrap();
+    page.links[0] = fork.read_record(&mut store, 1).unwrap().unwrap().id;
+    let forged = store.put(&page.encode().unwrap()).unwrap();
+    assert_eq!(
+        LogRoot::open(&mut store, forged)
+            .unwrap()
+            .read_record(&mut store, 2)
+            .unwrap()
+            .unwrap()
+            .id,
+        saved.commit_hash()
+    );
+    root.log = Some(forged);
+    let forged_root = store.put(&root.encode().unwrap()).unwrap();
+    assert!(matches!(
+        store
+            .compare_exchange(
+                &database.reference_key(),
+                Some(reference.revision),
+                Some(&forged_root)
+            )
+            .unwrap(),
+        CasOutcome::Applied(_)
+    ));
+    assert_eq!(
+        consumer.next(Duration::ZERO).unwrap_err().code,
+        "consumer/checkpoint-prefix"
+    );
+    assert_eq!(consumer.checkpoint(), &saved);
+    assert_eq!(
+        ChangeConsumer::connect(&fixture.connection, "changes", "saved", Default::default())
+            .err()
+            .unwrap()
+            .code,
+        "consumer/checkpoint-prefix"
+    );
+    assert_eq!(
+        pending.acknowledge(&second.checkpoint).unwrap_err().code,
+        "consumer/checkpoint-prefix"
+    );
+}
+
+#[test]
+fn oversized_chunked_event_is_admitted_before_chunk_transfer_and_can_be_reopened() {
+    let Some(fixture) = fixture("change_admission") else {
+        return;
+    };
+    let writer = common::start_service(&fixture.connection, "changes");
+    writer
+        .client()
+        .transact(
+            TransactionRequest::new(
+                "large",
+                vec![TxOp::Add {
+                    entity: EntityRef::Temp("large".into()),
+                    attribute: DB_DOC as u32,
+                    value: Value::String("x".repeat(2 * 1024 * 1024)).into(),
+                }],
+            ),
+            Duration::from_secs(15),
+        )
+        .unwrap();
+    writer.shutdown();
+    let mut consumer = ChangeConsumer::connect(
+        &fixture.connection,
+        "changes",
+        "bounded",
+        ChangeConsumerConfig {
+            max_event_bytes: 16 * 1024,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let context = OperationContext::new(OperationKind::Application);
+    {
+        let _guard = context.enter();
+        assert_eq!(
+            consumer.next(Duration::ZERO).unwrap_err().code,
+            "consumer/event-too-large"
+        );
+    }
+    assert_eq!(consumer.checkpoint().last_t(), 0);
+    assert!(
+        context.snapshot().known_payload_read_bytes < 16 * 1024,
+        "oversize rejection fetched transaction chunks: {:?}",
+        context.snapshot()
+    );
+    drop(consumer);
+    let mut resumed = ChangeConsumer::connect(
+        &fixture.connection,
+        "changes",
+        "bounded",
+        Default::default(),
+    )
+    .unwrap();
+    let event = resumed.next(Duration::ZERO).unwrap().unwrap();
+    assert!(event.accounted_bytes >= 4 * 1024 * 1024);
+    resumed.acknowledge(&event.checkpoint).unwrap();
+    assert_eq!(resumed.checkpoint().last_t(), 1);
 }
 
 #[cfg(unix)]

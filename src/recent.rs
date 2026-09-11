@@ -25,10 +25,6 @@ const LOG_CHUNK_SIZE: usize = 32;
 #[path = "recent_cursor_control_tests.rs"]
 mod cursor_control_tests;
 
-/// Transitional accounting name used by the transaction service. This now
-/// denotes one Arc-backed raw-tree reference, not an entry/ordinal array slot.
-pub(crate) type RecentLocator = RecentDatomRef;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RecentLimits {
     /// Optional deterministic test/deployment guard. Production scheduling is
@@ -431,7 +427,6 @@ impl RecentTier {
                 .map(|transaction| (None, transaction)),
             endpoint_projection,
             limits,
-            true,
         )
     }
 
@@ -457,34 +452,6 @@ impl RecentTier {
                 .map(|(hash, transaction)| (Some(hash), transaction)),
             endpoint_projection,
             limits,
-            true,
-        )
-    }
-
-    /// Reconstruct an already-committed authenticated tail under the current
-    /// runtime limits. Hard limits govern admission of new transactions; a
-    /// later, lower setting cannot make a durable database value or exact
-    /// transaction report unreadable. The resulting value still records the
-    /// current limits, reports that consolidation is needed, and rejects a
-    /// subsequent append until a covering base shortens the tail.
-    pub(crate) fn new_authenticated_existing(
-        database_id: impl Into<String>,
-        base_t: u64,
-        base_hash: Digest,
-        transactions: impl IntoIterator<Item = (Digest, DurableTransaction)>,
-        endpoint_projection: EndpointProjection,
-        limits: RecentLimits,
-    ) -> Result<Self, SemanticError> {
-        Self::new_entries(
-            database_id,
-            base_t,
-            base_hash,
-            transactions
-                .into_iter()
-                .map(|(hash, transaction)| (Some(hash), transaction)),
-            endpoint_projection,
-            limits,
-            false,
         )
     }
 
@@ -495,7 +462,6 @@ impl RecentTier {
         transactions: impl IntoIterator<Item = (Option<Digest>, DurableTransaction)>,
         endpoint_projection: EndpointProjection,
         limits: RecentLimits,
-        enforce_capacity: bool,
     ) -> Result<Self, SemanticError> {
         limits.validate()?;
         t_to_tx(base_t)?;
@@ -537,9 +503,7 @@ impl RecentTier {
                 entry.accounted_bytes,
                 "recent accounted byte count",
             )?;
-            if enforce_capacity {
-                enforce_hard_limit(datom_count, accounted_count, limits)?;
-            }
+            enforce_hard_limit(datom_count, accounted_count, limits)?;
             insert_entry(
                 &mut indexes,
                 &entry,
@@ -599,7 +563,6 @@ impl RecentTier {
                 .into_iter()
                 .map(|transaction| (None, transaction)),
             endpoint_projection,
-            true,
         )
     }
 
@@ -613,25 +576,6 @@ impl RecentTier {
                 .into_iter()
                 .map(|(hash, transaction)| (Some(hash), transaction)),
             endpoint_projection,
-            true,
-        )
-    }
-
-    /// Add authenticated transactions that are already durable. This is the
-    /// incremental counterpart of `new_authenticated_existing`: authentication
-    /// and indexing remain exact, while a current admission limit cannot
-    /// retroactively erase a committed endpoint.
-    pub(crate) fn extend_authenticated_existing(
-        &self,
-        transactions: impl IntoIterator<Item = (Digest, DurableTransaction)>,
-        endpoint_projection: EndpointProjection,
-    ) -> Result<Self, SemanticError> {
-        self.extend_entries(
-            transactions
-                .into_iter()
-                .map(|(hash, transaction)| (Some(hash), transaction)),
-            endpoint_projection,
-            false,
         )
     }
 
@@ -639,7 +583,6 @@ impl RecentTier {
         &self,
         transactions: impl IntoIterator<Item = (Option<Digest>, DurableTransaction)>,
         endpoint_projection: EndpointProjection,
-        enforce_capacity: bool,
     ) -> Result<Self, SemanticError> {
         let mut expected_t = self.stats.end_t;
         let mut end_hash = self.stats.end_hash;
@@ -678,9 +621,7 @@ impl RecentTier {
                 entry.accounted_bytes,
                 "recent accounted byte count",
             )?;
-            if enforce_capacity {
-                enforce_hard_limit(datom_count, accounted_count, self.limits)?;
-            }
+            enforce_hard_limit(datom_count, accounted_count, self.limits)?;
             insert_entry(
                 &mut indexes,
                 &entry,
@@ -2751,7 +2692,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_limits_do_not_make_an_authenticated_committed_tail_unreadable() {
+    fn explicit_recent_limits_apply_equally_to_construction_and_append() {
         let limits = RecentLimits {
             soft_datoms: 1,
             soft_bytes: u64::MAX - 1,
@@ -2775,21 +2716,23 @@ mod tests {
         .unwrap_err();
         assert_eq!(admission_error.code, "recent/hard-capacity");
 
-        let reconstructed = RecentTier::new_authenticated_existing(
+        let unbounded = RecentLimits {
+            hard_datoms: u64::MAX,
+            ..limits
+        };
+        let reconstructed = RecentTier::new_authenticated(
             DATABASE_ID,
             10,
             base_hash,
             [(committed_hash, committed.clone())],
             projection.clone(),
-            limits,
+            unbounded,
         )
         .unwrap();
         assert_eq!(reconstructed.stats().datoms, 3);
         assert_eq!(reconstructed.stats().end_hash, committed_hash);
         assert!(reconstructed.needs_consolidation());
 
-        // Exact receipt reconstruction starts from the bound db-before and
-        // folds its one already-committed log member incrementally.
         let empty = RecentTier::new(
             DATABASE_ID,
             10,
@@ -2803,14 +2746,23 @@ mod tests {
             .extend_authenticated([(committed_hash, committed.clone())], projection.clone())
             .unwrap_err();
         assert_eq!(incremental_error.code, "recent/hard-capacity");
+        assert_eq!(empty.stats().datoms, 0);
+        assert_eq!(empty.stats().end_hash, base_hash);
+        assert!(empty.entries().is_empty());
+
+        let empty = RecentTier::new(
+            DATABASE_ID,
+            10,
+            base_hash,
+            Vec::<DurableTransaction>::new(),
+            projection.clone(),
+            unbounded,
+        )
+        .unwrap();
         let incremental = empty
-            .extend_authenticated_existing([(committed_hash, committed)], projection.clone())
+            .extend_authenticated([(committed_hash, committed)], projection)
             .unwrap();
         assert_eq!(incremental.stats(), reconstructed.stats());
-
-        let next = manual_transaction(12, committed_hash, DATABASE_ID, 1);
-        let append_error = incremental.append(next, projection).unwrap_err();
-        assert_eq!(append_error.code, "recent/hard-capacity");
         assert_eq!(incremental.stats().datoms, 3);
         assert_eq!(incremental.entries().len(), 1);
     }

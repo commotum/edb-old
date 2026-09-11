@@ -10,10 +10,10 @@ use atomic_core::{
     Attribute, AttributeName, BackgroundIndexingConfig, CallableRef, CapacityLimits, Cardinality,
     Clause, CommittedTransaction, Connection, DataPattern, DatabaseValue, EntityRef, ErrorCategory,
     FindElement, FindSpec, IndexPrefix, Instruction, Keyword, LocalTransactionServer,
-    LocalTransportConfig, Peer, PostgresMigrator, PostgresStore, Program, ProgramCall, ProgramKind,
-    PullAttribute, PullPattern, Query, QueryControl, QueryResult, QueryValue, Schema, Term,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TxForm, TxOp, Unique, Value,
-    ValueType, Variable,
+    LocalTransportConfig, Peer, PostgresConnectionConfig, PostgresOperator, Program, ProgramCall,
+    ProgramKind, PullAttribute, PullPattern, Query, QueryControl, QueryResult, QueryValue, Schema,
+    Term, TransactionRequest, TransactionService, TransactionServiceConfig, TxForm, TxOp, Unique,
+    Value, ValueType, Variable,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -714,10 +714,13 @@ fn main() -> Result<()> {
         RECONCILE_TIMEOUT.as_secs(),
         import_timeout.as_secs()
     );
-    PostgresMigrator::connect(&postgres)?.migrate()?;
-    let mut store = PostgresStore::connect(&postgres)?;
-    store.create_database(&database, Schema::new())?;
-    let program = store.deploy_program_blob(&Program {
+    let storage = PostgresConnectionConfig::plaintext(&postgres);
+    atomic_core::storage::PgBlockStore::install(&storage)?;
+    atomic_core::storage::BlockDatabase::create(&storage, &database, Schema::new())?;
+    let route = atomic_core::DatabaseCatalog::connect_configured(&storage)?
+        .resolve(&database)?
+        .database_id;
+    let deployed = Program {
         kind: ProgramKind::Transaction,
         arity: 2,
         instructions: vec![
@@ -726,8 +729,9 @@ fn main() -> Result<()> {
             Instruction::EmitAdd(BALANCE),
             Instruction::Return,
         ],
-    })?;
-    drop(store);
+    };
+    let deployment = PostgresOperator::connect_configured(&storage)?.deploy_program(&deployed)?;
+    let program = deployment.hash();
     let (mut writer, endpoint) = start_writer(&database)?;
     let observer = connection(&postgres, &database)?;
     let mut category = Attribute::new(
@@ -830,14 +834,17 @@ fn main() -> Result<()> {
     let entity = account(&imported, 0, 0)?;
     assert!(old_empty.values(entity, KEY)?.is_empty());
     account(&imported, records as i64 - 1, (records as i64 - 1) * 10)?;
-    let mut sql = postgres::Client::connect(&postgres, postgres::NoTls)?;
-    let row = sql.query_one("SELECT count(*), COALESCE(sum(octet_length(c.payload)),0)::bigint FROM atomic_generation_transactions t JOIN atomic_transaction_contents c USING(content_hash) JOIN atomic_heads h ON h.database_id=t.database_id AND h.log_generation=t.generation WHERE t.database_id=$1", &[&database])?;
-    let log_rows: i64 = row.get(0);
-    let canonical_bytes: i64 = row.get(1);
-    assert_eq!(log_rows as u64, imported.basis_t());
-    let scale = canonical_bytes > RECENT_MAX as i64
-        && canonical_bytes > WRITER_BYTES as i64
-        && canonical_bytes > PEER_BYTES as i64;
+    let report = PostgresOperator::connect_configured(&storage)?.inspect_database(&route, true)?;
+    assert!(report.healthy(), "{:?}", report.problems);
+    let log_rows = report.metrics.transactions;
+    let canonical_bytes = report
+        .metrics
+        .transaction_bytes
+        .ok_or("deep inspection omitted log bytes")?;
+    assert_eq!(log_rows, imported.basis_t());
+    let scale = canonical_bytes > RECENT_MAX
+        && canonical_bytes > WRITER_BYTES as u64
+        && canonical_bytes > PEER_BYTES as u64;
     if require_scale {
         assert!(
             scale,

@@ -16,29 +16,32 @@ connection strings into logs or shell command arguments.
 ## Provisioning and inspection
 
 ```sh
-atomic migrate --writer-role atomic_writer --peer-role atomic_peer
+atomic install --writer-role atomic_writer --peer-role atomic_peer
 atomic create --database application
 atomic status --database application
 atomic inspect --database application
 ```
 
 The two distinct runtime roles must already exist and satisfy restricted-role
-requirements. `MIGRATED` and `GRANTED` are separate committed results: grant
-failure does not undo installation. The current schema is installed from one
-version-36 baseline. Earlier development catalogs require a fresh database/schema;
-the command never resets or silently upgrades them. Matching current installations
-can be verified/repaired idempotently. See [operations.md](operations.md).
+requirements. `INSTALLED` and `GRANTED` are separate committed results: grant
+failure does not undo installation. Installation creates the current opaque
+storage format in two tables and recognizes a matching installation idempotently.
+It does not repair schema damage, create the PostgreSQL database/schema, reset
+data or upgrade earlier development catalogs. Choose a fresh empty namespace for
+an unsupported format. `migrate` is an alias for installation, not an upgrade
+chain. See [operations.md](operations.md).
 
 `status` is a lightweight catalog-coordinate observation, not a deep integrity
-check or proof of a live transactor. `inspect` captures one consistent PostgreSQL
-snapshot and checks derived data deeply by default; `--shallow` omits the deep
-derived-index comparison, not every recovery/read operation. Inspection can use
-memory and time proportional to retained history. A nonzero `INTEGRITY_PROBLEM`
+check or proof of a live transactor. `inspect` pins one immutable publication
+and checks its retained graph and derived data deeply by default; `--shallow`
+checks root/log/index/metadata coordinates without graph traversal and canonical
+replay. Inspection can use memory and time proportional to retained history.
+A nonzero `INTEGRITY_PROBLEM`
 count exits unsuccessfully. Diagnostic labels are printed, not subject-bearing
 problem messages.
 
-`pending_tree_publications`, `pending_tree_membership_nodes`,
-`pending_avet_projections` and ordinary index lag are reported separately.
+`pending_avet_projections` and ordinary `index_lag` are reported separately,
+alongside the captured basis, index basis, generation and publication revision.
 Authenticated pending maintenance is not by itself corruption. Do not infer
 global storage health from one database's status, or force an unhealthy report
 to green by suppressing a problem.
@@ -57,45 +60,57 @@ atomic list-backups --repository /private/backups/application
 atomic verify-backup --repository /private/backups/application --basis 42 --generation 0
 ```
 
-Use a private repository owned by the process user. The native backup code
-checks paths/permissions, claims a repository for one lineage, serializes its
-writes, and publishes a point only after referenced immutable objects are
-durable. Do not mix databases in one repository. Repeating backup reuses
-unchanged objects; `objects_written` and `objects_reused` report what happened.
-Backup is live and pins its captured information generation, but backup capture
-alone is not semantic verification. Media encryption and repository retention
-remain deployment responsibilities.
+Use a private repository owned by the process user. Backup checks paths and
+permissions, claims the repository for one lineage, and publishes a point only
+after its immutable object closure is durable. Individual files are atomically
+published without overwriting existing content; there is no repository-wide
+SQL transaction or generation ledger. Do not mix lineages in one repository.
+Repeating capture authenticates and reuses unchanged objects. The reported
+write/reuse counts describe object operations, not saved network round trips.
+Capture pins one immutable live publication while ordinary writers continue.
+Copy success is not semantic verification. Media encryption and repository
+retention remain deployment responsibilities.
 
 [Direct backup reads](backup-reads.md) expose fixed database/log values and EDN
-query/Pull/preview commands without restore. Current captures include exact read
-indexes; a lagging source index entails a streaming capture-time index pass.
-`backup`, `restore` and `gc` accept `--maintenance-pause-ms N` (default0).
-Backup pauses after64 newly encountered objects or4MiB of copied/reused payload;
-restore after each committed256-transaction staging batch, GC after each
-committed collector call. `MAINTENANCE` reports actual batches/pauses/time.
-The Rust operators expose the same cloneable cancellation/pacing control.
+query/Pull/preview commands without restore. Each point links both its canonical
+publication and a separate same-basis read value. Capture finishes any pending
+AVET work, folds the captured recent tail, and prepares exact search/index roots
+in repository files; it neither repairs nor writes the source store. Ordinary
+offline opens do not replay history.
+
+`backup`, `restore` and `gc` accept `--maintenance-pause-ms N` (default 0).
+Capture paces at 128-object traversal boundaries and phase completion; restore
+paces after a persisted batch of at most 64 traversal/copy steps, not 64
+transactions or a fixed byte count. One admitted object may be large. GC paces
+after a committed collector call. `MAINTENANCE` reports observed batches,
+pauses and time; cancellation is cooperative between safe work boundaries.
 
 `list-backups` prints exact basis/generation pairs and manifest hashes. Generation
 matters when excision produces different physical information at one basis;
 verification/restore never silently select a different generation. Both zero
 basis and zero generation are valid when listed.
 
-Verification is offline and deep by default: it authenticates data and compares
-derived information to authoritative replay. `--presence-only` is the explicitly
-weaker reachability check and prints `semantic=false`. It is not a substitute for
-deep verification or a corruption-free certificate. Neither command changes a
-repository's immutable contents.
+Verification is offline and deep by default. It authenticates the object graph,
+checks log skip consistency and receipt/provenance coordinates, and compares
+retained covering trees and search records with canonical replay. Allocation
+frontiers, no-history omissions and partial AVET copies are checked explicitly.
+`--presence-only` checks authenticated reachability, including program
+dependencies, and prints `semantic=false`; it does not prove semantic agreement.
+Neither command changes repository contents. Deep verification can use resources
+proportional to retained history and indexes; it is not an ordinary read.
 
 ## Restore into a separately selected destination
 
 For this command, `ATOMIC_POSTGRES_URL` is the **destination connection**. The
 repository is the source; the live source need not be reachable. Explicitly
-provision/migrate the destination catalog first, then stop its writers and peers
-and exclude concurrent backup/restore against this repository.
+install the current opaque-object namespace first. Stop the target writer before
+applying a restore; target, lease and catalog guards reject a concurrent change.
+Existing pinned readers can retain their captured values. The repository must
+remain an operator-controlled immutable source throughout verification/copy.
 
 ```sh
 # First select the destination credentials/transport in your environment.
-atomic migrate
+atomic install
 atomic restore --repository /private/backups/application --basis 42 --generation 0 \
   --target-database recovered --postgres-database atomic_recovery --catalog-schema public
 
@@ -106,7 +121,7 @@ atomic inspect --database recovered
 ```
 
 `--postgres-database` names PostgreSQL's database, `--catalog-schema` names the
-namespace containing the actual `atomic_databases` relation, and
+namespace containing the installed `atomic_objects` and `atomic_refs` tables, and
 `--target-database` names the logical Atomic database. The first two names must
 match the configured destination; this protects against a wrong connection or
 an earlier empty schema in `search_path`. No SQL identifiers are interpolated
@@ -115,17 +130,26 @@ from these flags.
 Without `--apply`, restore only deep-verifies the selected backup and observes
 the target catalog. It does not stage, create or activate a logical database;
 the preview explicitly leaves target-lineage compatibility to the apply-time
-guard. Apply repeats the existing mandatory verification, stages inactive data,
-and conditionally activates the exact point. It rejects an unrelated existing
-lineage and cannot duplicate one lineage under a second name in the same catalog.
+guard. Apply repeats mandatory verification, persists an inactive resumable
+copy checkpoint, and conditionally activates the exact point. A new target name
+can be visible while its database is still unavailable (`backup/database-restoring`).
+Apply rejects an unrelated existing lineage, a retreating/incompatible log, or
+loss of acknowledged request identities. It cannot duplicate an active lineage
+under a second name in the same namespace.
 Use an independent PostgreSQL database/catalog for a simultaneous copy of a live
-source. Renaming at a separately selected destination is supported.
+source. Restoring a retired lineage creates a fresh route; previously retired
+handles do not become valid again. Immutable lineage and transaction identities
+are preserved rather than rewritten onto that route.
 
 An interrupted/ambiguous restore may have durably staged or activated work.
 Retry the same repository/basis/generation/destination; do not manually publish
 staged heads or assume process failure rolled back earlier commits. The library
-resumes its bounded ownership/fold phases. After success, restart clients and
-test the application's current/history/query and exact retry workflow.
+resumes persisted postorder object-copy steps. Only child-complete objects become
+strongly owned by the checkpoint; source objects not yet copied are weak pending
+identities. Publication and restore completion are one guarded atomic change.
+An exact completed retry does not roll back a newer target head or rerun hooks.
+After success, open new clients and test the application's current/history/query
+and exact transaction retry workflow.
 
 ## Explicit derived-index maintenance
 
@@ -134,38 +158,44 @@ atomic consolidate --database application
 atomic fulltext-rebuild --database application
 ```
 
-`consolidate` rebuilds/advances native indexes from authoritative information; it
-is explicit recovery or maintenance, not an ordinary startup fallback.
-`INDEXED` is the canonical result. A separate `SEARCH status=failed` means the
-optional search build failed after that canonical success; it does not undo
-index publication. Inspect the reported code and retry the derived work.
+`consolidate` advances a captured transaction prefix using the same index/search
+preparation and guarded publication as the background worker. Projection work
+is completed in bounded steps; the explicit call can perform multiple steps.
+If current indexes are damaged or missing, this operator-only path can replay
+the authenticated canonical log to reconstruct them. That recovery may retain
+an eager database and one index's datom vector; ordinary startup/read paths
+never perform this fallback. Existing receipts and index authorizations are
+preserved, so current-index recovery does **not** certify or repair every
+historical retained index. Use deep inspection to assess those separately.
 
-`fulltext-rebuild` builds a missing search projection for the newest published
-manifest. It may reuse an existing projection; its success is not a fresh deep
-proof of every existing search page. The command does not advance unindexed
-transaction novelty: consolidate/request indexing first when that is intended.
+`fulltext-rebuild` builds search afresh from the current indexed history without
+reading the old search attachment. It does not advance unindexed transactions:
+consolidate/request indexing first when that is intended. Canonical and search
+roots are published together; a failed preparation publishes neither.
 
-For a diagnosed corrupt projection, select the exact newest source manifest and
-authorize discarding only its derived search data:
+For a diagnosed corrupt search projection, select the exact current index
+descriptor and authorize replacing its search attachment:
 
 ```sh
 atomic fulltext-rebuild --database application \
-  --discard-manifest EXACT_64_HEX_MANIFEST --apply --batches 1
+  --discard-manifest EXACT_64_HEX_INDEX_DESCRIPTOR --apply --batches 1
 ```
 
-Obtain the manifest from an earlier `FULLTEXT_REBUILT source_manifest=...` result
-or an authorized `NativeFulltextReader::projection()` observation. The supplied
-digest must be this logical database's newest canonical publication, not an
-arbitrary hash. Each discard batch removes at most 4,096 blocks; the owner-only
-library repair serializes with builds. A `status=pending` result is partial
-progress: repeat the same command. Once discard completes, reconstruction runs.
-If the database advances meanwhile, the command reports a conflict rather than
-silently relabeling another manifest as the requested repair. Quiesce indexers
-when deliberately repairing a selected source.
+Obtain the descriptor from `INDEXED descriptor=...` or
+`FULLTEXT_REBUILT source_manifest=...`. The supplied digest is checked before
+preparation and against the publication being replaced. A competing index
+publication reports a target conflict instead of repairing another index.
+Ordinary transactions may continue: publication preserves newer log, receipt,
+metadata and writer-epoch fields and guards both root and lease revisions.
+The background worker discards and recaptures a candidate superseded by an
+operator. No second writer lease or transaction evaluator is introduced.
 
-Canonical facts/history are untouched. Existing cached search data may remain
-readable, while cold readers can fail until reconstruction; discard is neither
-a privacy-erasure guarantee nor a rollback of committed data.
+The `--discard-manifest` spelling remains an explicit target guard, but no
+physical discard phase is needed: one rebuild satisfies `--batches 1`.
+Canonical facts/history and pinned old search objects are untouched. Unowned
+derived objects become eligible only for ordinary GC; this is neither a
+privacy-erasure guarantee nor a rollback of committed data. Cancellation and
+repeated publication conflicts return an error without weakening these guards.
 
 ## Catalog-wide garbage collection
 
@@ -213,13 +243,10 @@ observation implies rollback of earlier committed work. Success with explicitly
 pending search repair or completed bounded GC batches is not whole-system
 completion.
 
-[admin_cli.rs](../tests/admin_cli.rs) drives actual commands for provisioning,
-repeat backup, offline verification, separately targeted restore/preview/retry,
-deep inspection, restricted/authorized GC and derived search repair. Its live
-test creates two dedicated disposable PostgreSQL databases; catalog-wide GC
-never runs on the shared connection's original database. On Unix it also holds
-an ordinary destination node-table lock, observes the restore process waiting
-to write a node, sends SIGTERM, releases the lock and retries the exact restore
-selection before checking current/history/search. No production fault hook is
-used. Missing
-`ATOMIC_POSTGRES_URL` is explicitly reported as skipped, not as verified coverage.
+[admin_cli.rs](../tests/admin_cli.rs) exercises fresh installation, selected
+namespace isolation, inspection/collection, runtime storage roles and operator-only
+catalog changes. [admin_backup_cli.rs](../tests/admin_backup_cli.rs) drives repeat
+capture, verification, separately targeted restore, interruption/retry and
+post-restore reads through current immutable objects and references. Test-only
+locks/signals act on disposable targets; the product has no SQL fault triggers.
+Missing `ATOMIC_POSTGRES_URL` is a skip, not verified PostgreSQL coverage.

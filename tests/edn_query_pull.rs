@@ -742,9 +742,7 @@ fn conversion_admits_total_inputs_and_repeated_pattern_expansion_before_cloning(
 
 #[test]
 fn fulltext_and_log_edn_use_actual_postgres_sources_and_captured_basis() {
-    use atomic_core::{
-        Connection, PostgresIndexer, PostgresMigrator, PostgresStore, TransactionRequest,
-    };
+    use atomic_core::{Connection, TransactionRequest};
     use std::time::Duration;
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIP EDN fulltext/log PostgreSQL: ATOMIC_POSTGRES_URL unset");
@@ -752,7 +750,7 @@ fn fulltext_and_log_edn_use_actual_postgres_sources_and_captured_basis() {
     };
     let fixture = common::PostgresFixture::new(&url, "edn_query_pull");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
+    common::install(url).unwrap();
     let mut schema = Schema::new();
     schema
         .install(
@@ -765,7 +763,7 @@ fn fulltext_and_log_edn_use_actual_postgres_sources_and_captured_basis() {
             .fulltext(),
         )
         .unwrap();
-    PostgresStore::connect(url)
+    common::TestStore::connect(url)
         .unwrap()
         .create_database("edn", schema)
         .unwrap();
@@ -807,9 +805,7 @@ fn fulltext_and_log_edn_use_actual_postgres_sources_and_captured_basis() {
     connection
         .sync_to(second.basis_t, Duration::from_secs(30))
         .unwrap();
-    let mut indexer = PostgresIndexer::connect(url, "edn").unwrap();
-    indexer.consolidate().unwrap();
-    indexer.rebuild_fulltext().unwrap();
+    common::consolidate(url, "edn").unwrap();
     connection
         .sync_index(second.basis_t, Duration::from_secs(30))
         .unwrap();

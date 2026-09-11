@@ -8,8 +8,8 @@ mod health;
 #[path = "atomic/runtime.rs"]
 mod runtime;
 use atomic_core::{
-    DatabaseCatalog, ErrorCategory, PostgresIndexer, PostgresMigrator, PostgresStore, Schema,
-    SemanticError, TransactionDefaults, postgres_config_from_env,
+    DatabaseCatalog, ErrorCategory, PostgresOperator, Schema, SemanticError, TransactionDefaults,
+    postgres_config_from_env,
 };
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -25,9 +25,10 @@ extern "C" fn stop_signal(_: libc::c_int) {
 const HELP: &str = "Atomic — native Rust/PostgreSQL database
 
 Usage:
+  atomic install [--writer-role ROLE --peer-role ROLE]
   atomic migrate [--writer-role ROLE --peer-role ROLE]
-  atomic create --database ID
-  atomic status --database ID
+  atomic create --database NAME
+  atomic status --database NAME
   atomic consolidate --database ID
   atomic transactor --database ID --endpoint PATH [OPTIONS]
   atomic transactor --database ID --listen IP:PORT --advertise IP:PORT
@@ -72,9 +73,10 @@ Transactor options (numeric limits are positive integers):
 
 Use a pre-existing private owner-only endpoint directory (mkdir -m 700).
 SIGINT/SIGTERM stop admission, drain bounded local requests, then stop the writer.
-Runtime never migrates or creates databases. Run migrate/create separately with
-administrative credentials. Roles passed to migrate must already exist and be
-dedicated restricted roles. consolidate is explicit missing-index recovery or
+Runtime never installs storage or creates databases. Run install/create separately
+with administrative credentials. migrate aliases fresh installation, without an
+upgrade chain. Runtime grants are additive; use pre-existing dedicated roles.
+consolidate is explicit missing-index recovery or
 maintenance, not automatic startup. status is catalog state, not deep integrity
 verification or proof of a live transactor. See docs/application.md.
 ";
@@ -90,7 +92,7 @@ impl Arguments {
         let command = args.next().unwrap_or_else(|| "--help".into());
         let allowed: &[&str] = match command.as_str() {
             "--help" | "help" | "--version" => &[],
-            "migrate" => &["--writer-role", "--peer-role"],
+            "install" | "migrate" => &["--writer-role", "--peer-role"],
             "create" | "status" | "consolidate" => &["--database"],
             "transactor" => &[
                 "--mode",
@@ -139,7 +141,7 @@ impl Arguments {
             "create" | "status" | "consolidate" | "transactor" => {
                 parsed.required("--database")?;
             }
-            "migrate" => {
+            "install" | "migrate" => {
                 if parsed.options.contains_key("--writer-role")
                     != parsed.options.contains_key("--peer-role")
                 {
@@ -147,7 +149,7 @@ impl Arguments {
                         "--writer-role and --peer-role must be supplied together",
                     ));
                 }
-                if parsed.options.get("--writer-role").is_some()
+                if parsed.options.contains_key("--writer-role")
                     && parsed.options.get("--writer-role") == parsed.options.get("--peer-role")
                 {
                     return Err(usage("writer and peer roles must be distinct"));
@@ -278,19 +280,14 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
     }
     let connection = postgres_config_from_env()?;
     match args.command.as_str() {
-        "migrate" => {
-            let mut migrator = PostgresMigrator::connect_configured(&connection)?;
-            migrator.migrate()?;
-            // Migration and grants are separate administrative steps. Preserve
-            // the first known result if subsequent role validation fails.
-            println!(
-                "MIGRATED schema_version={}",
-                atomic_core::POSTGRES_SCHEMA_VERSION
-            );
+        "install" | "migrate" => {
+            atomic_core::storage::PgBlockStore::install(&connection)?;
+            println!("INSTALLED storage_format=atomic/opaque-storage/1 tables=2");
             std::io::stdout().flush().map_err(|_| io_error())?;
             if let Some(writer) = args.options.get("--writer-role") {
-                migrator.grant_runtime_privileges(writer, args.required("--peer-role")?)?;
-                println!("GRANTED runtime_roles=true");
+                atomic_core::storage::PgBlockStore::connect(&connection)?
+                    .grant_runtime_privileges(writer, args.required("--peer-role")?)?;
+                println!("GRANTED runtime_roles=true additive=true object_delete=operator_only");
             }
         }
         "create" => {
@@ -307,32 +304,22 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         "status" => {
             let entry = DatabaseCatalog::connect_configured(&connection)?
                 .resolve(args.required("--database")?)?;
-            let status = PostgresStore::connect_configured(&connection)?
-                .database_status(&entry.database_id)?;
+            let status = PostgresOperator::connect_configured(&connection)?
+                .inspect_database(&entry.database_id, false)?;
             println!(
                 "STATUS database={:?} lineage={} basis_t={} generation={}",
                 args.required("--database")?,
-                status.lineage_id,
-                status.basis_t,
-                status.log_generation
+                entry.lineage_id,
+                status.metrics.basis_t,
+                status.metrics.generation
             );
         }
         "consolidate" => {
-            let mut indexer =
-                PostgresIndexer::connect_configured(&connection, args.required("--database")?)?;
-            let receipt = indexer.consolidate()?;
-            println!(
-                "INDEXED basis_t={} input_datoms={}",
-                receipt.basis_t, receipt.input_datoms
-            );
-            if let Some(error) = indexer.fulltext_build_error() {
-                println!(
-                    "SEARCH basis_t={} status=failed category={:?} code={}",
-                    receipt.basis_t, error.category, error.code
-                );
-            } else {
-                println!("SEARCH basis_t={} status=checked", receipt.basis_t);
-            }
+            admin::consolidate(
+                &connection,
+                args.required("--database")?,
+                &atomic_core::MaintenanceControl::default(),
+            )?;
         }
         "transactor" => runtime::run(&args, connection)?,
         _ => unreachable!("validated command"),
@@ -379,9 +366,9 @@ fn main() -> ExitCode {
             if error.code.starts_with("cli/") || error.code.starts_with("config/") {
                 eprintln!("{}", error.message);
             }
-            if error.code == "service/native-index-required" {
+            if error.category == ErrorCategory::Fault && error.code == "storage/missing-object" {
                 eprintln!(
-                    "Recover explicitly with atomic consolidate --database ID using authorized credentials."
+                    "Inspect the database before retrying. If only the derived current index is damaged, rebuild it with atomic consolidate --database ID using authorized credentials. Missing canonical or retained-receipt data requires separate recovery."
                 );
             }
             eprintln!(

@@ -3,10 +3,10 @@ use atomic_core::sql_io::SqlClient;
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, CapacityLimits, Cardinality, Clause, Connection,
     DataPattern, DatabaseValue, EntityRef, FindElement, FindSpec, Keyword, OperationContext,
-    OperationKind, PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresStore,
-    Query, QueryControl, QueryResult, QueryValue, Schema, SqlIoStats, Term, TransactionRequest,
-    TransactionService, TransactionServiceConfig, TxOp, Unique, Value, ValueType, Variable,
-    postgres_config_from_env, process_sql_stats,
+    OperationKind, PostgresConnectionConfig, PostgresOperator, Query, QueryControl, QueryResult,
+    QueryValue, Schema, SqlIoStats, Term, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TxOp, Unique, Value, ValueType, Variable, postgres_config_from_env,
+    process_sql_stats,
 };
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -377,7 +377,10 @@ fn writer(database: &str, records: usize, payload: usize) -> Result<()> {
     }
     // Make the seed a durable indexed base before opening cold peers: recent
     // novelty must not accidentally substitute for the cache-exceeding scan.
-    PostgresIndexer::connect_configured(&config, database)?.consolidate()?;
+    let route = atomic_core::DatabaseCatalog::connect_configured(&config)?
+        .resolve(database)?
+        .database_id;
+    PostgresOperator::connect_configured(&config)?.consolidate_database(&route)?;
     seed.finish(
         "seed",
         &[],
@@ -684,10 +687,9 @@ fn campaign(records: usize, millis: u64, payload: usize) -> Result<()> {
         &format!("-csearch_path={unique},pg_catalog"),
     );
     let scoped_config = scoped_config(&scoped, &config)?;
-    let mut migrator = PostgresMigrator::connect_configured(&scoped_config)?;
-    migrator.migrate()?;
-    migrator.grant_runtime_privileges(&writer_role, &peer_role)?;
-    drop(migrator);
+    atomic_core::storage::PgBlockStore::install(&scoped_config)?;
+    atomic_core::storage::PgBlockStore::connect(&scoped_config)?
+        .grant_runtime_privileges(&writer_role, &peer_role)?;
     let mut schema = Schema::new();
     for attribute in [
         Attribute::new(
@@ -712,7 +714,7 @@ fn campaign(records: usize, millis: u64, payload: usize) -> Result<()> {
     ] {
         schema.install(attribute)?;
     }
-    PostgresStore::connect_configured(&scoped_config)?.create_database("read-load", schema)?;
+    atomic_core::storage::BlockDatabase::create(&scoped_config, "read-load", schema)?;
     let role_url = |role: &str| parameter(&parameter(&scoped, "user", role), "password", &password);
     emit(format!(
         "CONFIG records={records} payload_per_record={payload} scan_payload_lower_bound={} peer_cache_entries={CACHE_ENTRIES} peer_cache_bytes={cache_bytes} writer_cache_bytes={} duration_ms={millis} sample_cap={MAX_SAMPLES} release={} schema={unique} transport={} ssd=false postgres_os_cache=uncontrolled_warm",

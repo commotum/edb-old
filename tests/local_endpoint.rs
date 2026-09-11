@@ -1,7 +1,7 @@
+mod common;
 use atomic_core::{
-    Connection, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
-    PostgresMigrator, PostgresStore, Schema, TransactionRequest, TransactionService,
-    TransactionServiceConfig,
+    Connection, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig, Schema,
+    TransactionRequest, TransactionService, TransactionServiceConfig,
 };
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -19,11 +19,8 @@ fn database(postgres: &str) -> String {
             .unwrap()
             .as_nanos()
     );
-    PostgresMigrator::connect(postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    PostgresStore::connect(postgres)
+    common::install(postgres).unwrap();
+    common::TestStore::connect(postgres)
         .unwrap()
         .create_database(&id, Schema::new())
         .unwrap();

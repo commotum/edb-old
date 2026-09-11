@@ -489,11 +489,8 @@ fn tuple_inputs_survive_native_socket_retry_and_recovery() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
     let expected = store.recover(&id).unwrap().with(&ops(), 10).unwrap();
     let writer = common::start_service(&postgres, &id);
@@ -543,13 +540,10 @@ fn tuple_maps_cas_and_retraction_cross_native_socket_without_materialization() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
-    let before = store.recover(&id).unwrap();
+    let before = Database::new(schema()).unwrap();
     let expected = before
         .with_forms(&map_forms(), &TxFunctions::new(), 10)
         .unwrap();

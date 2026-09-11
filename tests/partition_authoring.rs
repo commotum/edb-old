@@ -1,8 +1,8 @@
 mod common;
 
 use atomic_core::{
-    Attribute, CallableRef, Cardinality, DB_FN, DB_IDENT, PostgresMigrator, PostgresStore,
-    ProgramCall, Schema, TransactionRequest, ValueType, implicit_part, partition_eid,
+    Attribute, CallableRef, Cardinality, DB_FN, DB_IDENT, ProgramCall, Schema, TransactionRequest,
+    ValueType, implicit_part, partition_eid,
 };
 use atomic_core::{
     AttributeRef, Database, EntityRef, Instruction, Keyword, Program, ProgramControl, ProgramKind,
@@ -163,10 +163,7 @@ fn stored_partition_program_speculates_commits_retries_and_recovers_in_postgres(
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "partition_program");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&fixture.connection).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -176,7 +173,7 @@ fn stored_partition_program_speculates_commits_retries_and_recovers_in_postgres(
             Cardinality::One,
         ))
         .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     let created = store.create_database("partition-program", schema).unwrap();
     let partition = implicit_part(17).unwrap();
     let program = Program {
@@ -225,7 +222,7 @@ fn stored_partition_program_speculates_commits_retries_and_recovers_in_postgres(
     });
     let preview = installed
         .db_after
-        .with_forms(&[form.clone()], 2000)
+        .with_forms(std::slice::from_ref(&form), 2000)
         .unwrap();
     assert_eq!(partition_eid(preview.tempids["parent"]).unwrap(), partition);
     assert_eq!(partition_eid(preview.tempids["child"]).unwrap(), partition);

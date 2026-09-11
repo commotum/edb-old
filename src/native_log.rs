@@ -1,16 +1,11 @@
 //! An immutable log endpoint and a lazy, authenticated transaction cursor.
 //!
-//! A retained native snapshot owns generation/root pins; an offline backup
-//! owns its authenticated immutable point. Log data comes
+//! A retained snapshot owns a root pin; an offline backup owns its
+//! authenticated immutable point. Log data comes
 //! from authoritative transaction content, never an index whose noHistory
 //! consolidation may already have discarded earlier assertions.
-use super::{
-    TieredSnapshot, digest, fault, is_postgres_connection_error, lock, postgres_error,
-    read_authenticated_log_range, reconnect_peer_io, sql_basis, verify_database_lineage,
-};
 use crate::{
-    Datom, Digest, IndexBoundary, IndexComponents, IndexTransaction, SemanticError, TimePoint,
-    Value,
+    Datom, IndexBoundary, IndexComponents, IndexTransaction, SemanticError, TimePoint, Value,
 };
 use std::fmt;
 use std::iter::FusedIterator;
@@ -27,20 +22,14 @@ pub struct LogTransaction {
 /// Captured transaction-log value, independent of subsequent peer advancement.
 #[derive(Clone)]
 pub struct LogValue {
-    source: LogSource,
-}
-
-#[derive(Clone)]
-enum LogSource {
-    Native(TieredSnapshot),
-    Backup(crate::backup_snapshot::BackupSnapshot),
+    source: std::sync::Arc<crate::storage::BlockSnapshot>,
 }
 
 impl fmt::Debug for LogValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LogValue")
-            .field("offline", &matches!(self.source, LogSource::Backup(_)))
+            .field("offline", &self.source.is_repository())
             .field("basis_t", &self.basis_t())
             .field("generation", &self.generation())
             .finish()
@@ -58,8 +47,8 @@ pub struct LogCursorStats {
     pub transactions_read: u64,
     pub datoms_read: u64,
     pub payload_bytes_read: u64,
-    /// Canonical payload bytes transferred from PostgreSQL, excluding the
-    /// small authoritative metadata reads which still occur on cache hits.
+    /// Actual canonical object bytes transferred from PostgreSQL for this
+    /// traversal, including authenticated navigation and chunk envelopes.
     pub postgres_payload_bytes_read: u64,
     /// Transactions decoded from authenticated persistent local payloads.
     pub cache_hits: u64,
@@ -78,7 +67,6 @@ pub struct LogCursor {
     operation: Option<crate::OperationContext>,
     next_t: u64,
     end_t: u64,
-    predecessor: Option<Digest>,
     stats: LogCursorStats,
 }
 
@@ -95,32 +83,19 @@ impl fmt::Debug for LogCursor {
 }
 
 impl LogValue {
-    pub(crate) fn new(snapshot: TieredSnapshot) -> Self {
+    pub(crate) fn from_block(snapshot: crate::storage::BlockSnapshot) -> Self {
         Self {
-            source: LogSource::Native(snapshot),
-        }
-    }
-
-    pub(crate) fn from_backup(snapshot: crate::backup_snapshot::BackupSnapshot) -> Self {
-        Self {
-            source: LogSource::Backup(snapshot),
+            source: std::sync::Arc::new(snapshot),
         }
     }
 
     pub fn basis_t(&self) -> u64 {
-        match &self.source {
-            LogSource::Native(snapshot) => snapshot.state.basis_t,
-            LogSource::Backup(snapshot) => snapshot.basis_t(),
-        }
+        self.source.basis_t()
     }
 
     /// The physical log generation captured with this immutable value.
-    #[allow(clippy::misnamed_getters)] // TieredState.generation is a peer-local publication counter.
     pub fn generation(&self) -> u64 {
-        match &self.source {
-            LogSource::Native(snapshot) => snapshot.state.excision_generation,
-            LogSource::Backup(snapshot) => snapshot.generation(),
-        }
+        self.source.generation()
     }
 
     /// Start is inclusive and end exclusive. `None` means the beginning or
@@ -154,7 +129,6 @@ impl LogValue {
             operation: crate::OperationContext::current(),
             next_t: start,
             end_t: end,
-            predecessor: None,
             stats: LogCursorStats::default(),
         })
     }
@@ -187,7 +161,7 @@ impl LogValue {
         if t == 0 || t > self.basis_t() {
             return Ok(None);
         }
-        self.read_transaction(t, None)
+        self.read_transaction(t)
             .map(|(transaction, _, _, _)| Some(transaction.data))
     }
 
@@ -201,10 +175,7 @@ impl LogValue {
             TimePoint::Instant(instant) => {
                 // Recovered log.clj tx-range uses db/t-at-or-since, not
                 // as-of-t's predecessor rule for an instant between txes.
-                let database = match &self.source {
-                    LogSource::Native(snapshot) => snapshot.database_value(),
-                    LogSource::Backup(snapshot) => snapshot.database_value(),
-                };
+                let database = self.source.database_value();
                 let mut datoms = database.seek_cursor(&IndexBoundary::Avet(
                     IndexComponents::Two(crate::DB_TX_INSTANT as u32, Value::Instant(instant)),
                 ))?;
@@ -248,177 +219,23 @@ impl LogValue {
         }
     }
 
-    fn read_transaction(
-        &self,
-        t: u64,
-        predecessor: Option<Digest>,
-    ) -> Result<(LogTransaction, Digest, u64, bool), SemanticError> {
-        let snapshot = match &self.source {
-            LogSource::Native(snapshot) => snapshot,
-            LogSource::Backup(snapshot) => {
-                return snapshot
-                    .read_log_transaction(t, predecessor)
-                    .map(|(transaction, hash, bytes)| (transaction, hash, bytes, false));
-            }
-        };
-        snapshot.core.root_pins.ensure()?;
-        let mut io = lock(&snapshot.core.io);
-        if io.client.is_closed() {
-            reconnect_peer_io(&snapshot.core, &mut io)?;
-        }
-        let read = |client: &mut crate::sql_io::SqlClient| {
-            let database_id = &snapshot.core.database_id;
-            verify_database_lineage(client, database_id, &snapshot.core.lineage_id)?;
-            let previous = match predecessor {
-                Some(hash) => hash,
-                None => {
-                    let row = if t == 1 {
-                        client.query_opt("SELECT genesis_hash FROM atomic_databases WHERE database_id = $1", &[database_id])
-                    } else if self.generation() == 0 {
-                        client.query_opt("SELECT tx_hash FROM atomic_transactions WHERE database_id = $1 AND basis_t = $2", &[database_id, &sql_basis(t - 1)?])
-                    } else {
-                        client.query_opt("SELECT tx_hash FROM atomic_generation_transactions WHERE database_id = $1 AND generation = $2 AND basis_t = $3", &[database_id, &sql_basis(self.generation())?, &sql_basis(t - 1)?])
-                    }.map_err(|error| postgres_error("log/predecessor-read", error))?.ok_or_else(|| fault("log/missing-predecessor", "captured generation has no transaction predecessor anchor"))?;
-                    digest(row.get(0), "log predecessor hash")?
-                }
-            };
-            let (row, cache_hit) = if snapshot.core.ssd_cache.is_enabled() {
-                let cache = snapshot.core.ssd_log_for_generation(self.generation());
-                read_cached_transaction(
-                    client,
-                    database_id,
-                    &snapshot.core.lineage_id,
-                    self.generation(),
-                    t,
-                    previous,
-                    &cache,
-                )?
-            } else {
-                let mut rows = read_authenticated_log_range(
-                    client,
-                    database_id,
-                    self.generation(),
-                    t - 1,
-                    t,
-                    previous,
-                )?;
-                let row = rows.pop().ok_or_else(missing_transaction)?;
-                (row, false)
-            };
-            if t == self.basis_t() && row.tx_hash != snapshot.state.current_hash {
-                return Err(fault(
-                    "log/captured-endpoint-mismatch",
-                    "transaction does not match the captured immutable log endpoint",
-                ));
-            }
-            Ok((
-                LogTransaction {
-                    t: row.transaction.basis_t,
-                    data: row.transaction.tx_data,
-                },
-                row.tx_hash,
-                row.payload.len() as u64,
-                cache_hit,
-            ))
-        };
-        match read(&mut io.client) {
-            Err(error) if is_postgres_connection_error(&error) => {
-                reconnect_peer_io(&snapshot.core, &mut io)?;
-                read(&mut io.client)
-            }
-            result => result,
-        }
+    fn read_transaction(&self, t: u64) -> Result<(LogTransaction, u64, u64, bool), SemanticError> {
+        // Membership is authenticated through the captured immutable log root.
+        let (record, postgres_bytes, cached) = self.source.read_log_record_measured(t)?;
+        Ok((
+            LogTransaction {
+                t: record.entry.basis_t,
+                data: record.entry.tx_data,
+            },
+            record.encoded_bytes,
+            postgres_bytes,
+            cached,
+        ))
     }
 }
 
-fn missing_transaction() -> SemanticError {
-    fault(
-        "recovery/missing-transaction",
-        "transaction range is incomplete or lacks its exact request record",
-    )
-}
-
-/// Cache only content, never membership or authorization. The indexed joins
-/// deliberately retain request/content existence checks without transferring
-/// toasted payloads. Ordinary and cached reads share the exact authenticator.
-fn read_cached_transaction(
-    client: &mut crate::sql_io::SqlClient,
-    database_id: &str,
-    lineage_id: &str,
-    generation: u64,
-    t: u64,
-    previous: Digest,
-    cache: &crate::SsdCache,
-) -> Result<(crate::postgres::AuthenticatedLogTransaction, bool), SemanticError> {
-    let basis = sql_basis(t)?;
-    let generation_sql = sql_basis(generation)?;
-    let metadata = if generation == 0 {
-        client.query_opt(
-            "SELECT t.basis_t, t.previous_hash, t.tx_hash, NULL::bytea, \
-                    t.state_hash, NULL::bytea, NULL::bigint, NULL::text, \
-                    1::smallint, r.request_key, NULL::bytea, r.request_digest \
-               FROM atomic_transactions t JOIN atomic_requests r \
-                 ON r.database_id = t.database_id AND r.basis_t = t.basis_t \
-                AND r.tx_hash = t.tx_hash \
-              WHERE t.database_id = $1 AND t.basis_t = $2",
-            &[&database_id, &basis],
-        )
-    } else {
-        client.query_opt(
-            "SELECT t.basis_t, t.previous_hash, t.tx_hash, NULL::bytea, \
-                    t.state_hash, t.content_hash, t.eidx_frontier, c.lineage_id, \
-                    r.request_kind, NULL::text, r.request_key_hash, r.request_digest \
-               FROM atomic_generation_transactions t \
-               JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash \
-               JOIN atomic_generation_requests r \
-                 ON r.database_id = t.database_id AND r.generation = t.generation \
-                AND r.basis_t = t.basis_t AND r.tx_hash = t.tx_hash \
-              WHERE t.database_id = $1 AND t.generation = $2 AND t.basis_t = $3",
-            &[&database_id, &generation_sql, &basis],
-        )
-    }
-    .map_err(|error| postgres_error("log/cache-membership-read", error))?
-    .ok_or_else(missing_transaction)?;
-    let hash = digest(
-        metadata.get(if generation == 0 { 2 } else { 5 }),
-        "log payload hash",
-    )?;
-    let (payload, cache_hit) = match cache.get(&hash) {
-        Some(payload) => (payload, true),
-        None => {
-            let payload_row = if generation == 0 {
-                client.query_opt(
-                    "SELECT payload FROM atomic_transactions \
-                      WHERE database_id = $1 AND basis_t = $2 AND tx_hash = $3",
-                    &[&database_id, &basis, &&hash[..]],
-                )
-            } else {
-                client.query_opt(
-                    "SELECT payload FROM atomic_transaction_contents \
-                      WHERE content_hash = $1 AND lineage_id = $2",
-                    &[&&hash[..], &lineage_id],
-                )
-            }
-            .map_err(|error| postgres_error("log/cache-payload-read", error))?
-            .ok_or_else(missing_transaction)?;
-            (payload_row.get(0), false)
-        }
-    };
-    let authenticated = crate::postgres::authenticate_log_row(
-        &metadata,
-        payload,
-        database_id,
-        lineage_id,
-        generation,
-        t,
-        previous,
-    )?;
-    if !cache_hit {
-        // Cache admission is optional. Its envelope capacity can be smaller
-        // than a valid transaction; refusing admission never rejects a read.
-        cache.put(&hash, &authenticated.payload);
-    }
-    Ok((authenticated, cache_hit))
+fn fault(code: &'static str, message: impl Into<String>) -> SemanticError {
+    SemanticError::new(crate::ErrorCategory::Fault, code, message)
 }
 
 impl LogCursor {
@@ -437,10 +254,9 @@ impl Iterator for LogCursor {
             return None;
         }
         self.stats.range_reads = self.stats.range_reads.saturating_add(1);
-        match self.log.read_transaction(self.next_t, self.predecessor) {
-            Ok((transaction, hash, bytes, cache_hit)) => {
+        match self.log.read_transaction(self.next_t) {
+            Ok((transaction, bytes, postgres_bytes, cache_hit)) => {
                 self.next_t += 1;
-                self.predecessor = Some(hash);
                 self.stats.transactions_read = self.stats.transactions_read.saturating_add(1);
                 self.stats.datoms_read = self
                     .stats
@@ -449,10 +265,11 @@ impl Iterator for LogCursor {
                 self.stats.payload_bytes_read = self.stats.payload_bytes_read.saturating_add(bytes);
                 if cache_hit {
                     self.stats.cache_hits = self.stats.cache_hits.saturating_add(1);
-                } else if matches!(self.log.source, LogSource::Native(_)) {
-                    self.stats.postgres_payload_bytes_read =
-                        self.stats.postgres_payload_bytes_read.saturating_add(bytes);
                 }
+                self.stats.postgres_payload_bytes_read = self
+                    .stats
+                    .postgres_payload_bytes_read
+                    .saturating_add(postgres_bytes);
                 self.stats.peak_buffered_transactions = 1;
                 Some(Ok(transaction))
             }

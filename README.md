@@ -1,230 +1,120 @@
 # Atomic
 
-Atomic is a native Rust/PostgreSQL database inspired by Datomic: immutable
-database values and facts, serialized declarative transactions, schema and
-identity, history/time views, peer-local Datalog/Pull, controlled persisted
-programs, and operational recovery. Retained Datomic Pro documentation governs
-semantics; recovered source is architectural evidence, not a JVM/wire target.
+Atomic is a native Rust/PostgreSQL database inspired by Datomic. Applications use
+immutable database values, declarative serialized transactions, strong identity,
+schema as data, history/time views, and peer-local Datalog, Pull and navigation.
 
-The supported product includes a local or verified-TLS remote transactor,
-separate Rust applications, immutable cached peer reads, shared speculative
-branches, exact snapshot references, persisted native query programs, safe
-transaction planning, named/implicit partitions, UUID helpers and peer-local
-fulltext. Bounded restartable transaction consumers and an administrative CLI
-cover observation, backup/restore, inspection, GC and explicit recovery.
+Rust owns the database engine: persistent log/index structures, receipts,
+publication, writer fencing, retention and maintenance. PostgreSQL stores opaque
+immutable objects and revisioned references. It supplies durable atomic storage
+primitives, not transaction or maintenance policy. There is one production
+storage path and no JVM/wire compatibility target.
 
-See [product acceptance](docs/acceptance.md) for verified capabilities,
-integration results, operating measurements and limits. Historical
-100,000-record import/restore/inspection results remain in the
-[operational guide](docs/operations.md); they are not measurements of the
-newer implementation or a universal production/Datomic-parity certification.
+This is a first-release development product. Fresh databases may be required
+after format changes; earlier development databases and backups are not supported
+upgrade inputs. Installation never resets existing data.
 
 ## Start here
 
-- [Submit EDN transactions, queries and pull patterns](docs/edn.md), using native
-  Rust data adapters or the file/stdin CLI.
-- [Run the supported local or remote transactor and separate application](docs/application.md)
-  using the `atomic` binary, explicit PostgreSQL setup and restricted runtime roles.
-- [React to transactions with bounded durable consumers](docs/change-consumers.md).
-- [Back up, verify, restore, inspect and maintain databases](docs/admin.md).
-- [Create, list, rename and safely retire logical databases](docs/database-lifecycle.md),
-  with separate identity-checked storage reclamation.
-- [Interpret product acceptance and the measured operating envelope](docs/acceptance.md).
-- [Measure independent readers, cold opens and mixed analytics/write traffic](docs/read-load.md).
-- [Author persisted native query programs](docs/programs.md) with predicates,
-  recursive rules, negation, historical sources and dynamic attributes.
-- [Compose native database, tuple and log queries](docs/queries.md), reuse query
-  structure and configure join/resource limits.
-- [Query general application data](docs/query-data.md): wide relations, nested
-  values and pure Rust callbacks, with or without a database source.
-- [Use custom aggregates and native application logic](docs/application-computation.md):
-  portable data functions and explicitly deployed Rust transaction callbacks.
-- [Configure entity placement and partition hints](docs/partitions.md), and
-  [understand composite identity and native NaN behavior](docs/schema-identity.md).
-- [The operational guide](docs/operations.md) describes provisioning,
-  I/O policy, backup/restore, GC and excision.
-- [`1.0.7705/`](1.0.7705/) contains the newer Peer and Transactor reference
-  corpus recovered from the matched 1.0.7705 distribution.
-- [`tools/`](tools/) contains the repaired decompiler and the small set of
-  reusable JVM inspection tools retained after the clean.
+- [EDN transactions, queries, pull patterns and readable results](docs/edn.md),
+  using native Rust adapters or the file/stdin CLI.
+- [Local or verified-TLS remote applications](docs/application.md), including
+  explicit PostgreSQL installation and restricted runtime roles.
+- [Immutable read composition](docs/read-values.md), including snapshot references,
+  time views, entity identity, speculative branches and index access.
+- [Datalog](docs/queries.md), [general application data](docs/query-data.md) and
+  [native application computation](docs/application-computation.md).
+- [Persisted native programs](docs/programs.md), [fulltext](docs/fulltext.md),
+  [partitions](docs/partitions.md) and [schema/identity](docs/schema-identity.md).
+- [Durable change consumers](docs/change-consumers.md) and
+  [logical database lifecycle](docs/database-lifecycle.md).
+- [Backup, restore and administration](docs/admin.md),
+  [selective offline backup reads](docs/backup-reads.md) and
+  [operational guidance](docs/operations.md).
+- [Current acceptance and measured limits](docs/acceptance.md), plus
+  [reader measurements](docs/read-load.md).
 
-Within each release, `peer/` and `transactor/` are sibling
-artifact-provenance boundaries. Neither is structurally subordinate to the
-other.
+The retained [Datomic Pro documentation](datomic_pro_docs/) governs semantics.
+The recovered [1.0.7705 source](1.0.7705/) is architectural evidence, not the
+unpublished original source tree or a runnable recovered distribution. Its
+`peer/` and `transactor/` directories are sibling artifact-provenance boundaries.
+[Tools](tools/) retains narrowly useful decompiler and JVM inspection utilities.
 
-The active tree deliberately does **not** contain a runnable recovered Datomic
-distribution or the old broad recovery validation apparatus. Conformance is
-being rebuilt in small, Rust-facing pieces as concrete porting questions arise.
-Do not restore the old workflow wholesale: that would reintroduce thousands of
-historical requirements unrelated to the port.
-
-The default suite runs with (PostgreSQL-dependent tests self-skip without configuration):
+## Build and exercise
 
 ```sh
+cargo build --offline --bin atomic --examples
 cargo test --offline
 ```
 
-The complete PostgreSQL acceptance suite requires a migrated disposable
-PostgreSQL database and runs serially because restart/corruption fixtures share
-server state:
+PostgreSQL-dependent tests report missing configuration and return without
+exercising PostgreSQL. A green unconfigured run is not PostgreSQL acceptance.
+
+For real integration checks, use a dedicated disposable PostgreSQL database and
+an administrative test login. Fixtures install the current object/reference
+schema; role tests require permission to create restricted test roles.
 
 ```sh
 ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
-  cargo test --all-targets -- --test-threads=1
+  cargo test --offline --all-targets -- --test-threads=1
 ```
 
-Restart witnesses additionally require `ATOMIC_POSTGRES_CTL` (the absolute
-`pg_ctl` path) and `ATOMIC_POSTGRES_DATA` (that disposable server's data
-directory). Do not run other tests on that server during restart checks. Some
-TLS and role fixtures have additional prerequisites; a green exit without
-those prerequisites is not evidence that they executed.
+The server-crash test is separately opted in with
+`ATOMIC_ALLOW_DISPOSABLE_PG_CRASH=1`, `ATOMIC_RESTART_POSTGRES_URL`,
+`ATOMIC_RESTART_POSTGRES_DATA`, `ATOMIC_RESTART_PG_CTL`,
+`ATOMIC_RESTART_POSTGRES_LOG` and `ATOMIC_RESTART_POSTGRES_OPTIONS`.
+The options must specify the disposable server's exact `-k`, `-p` and `-h`
+settings. Run `--test postgres_restart_resilience` alone: never point it at a
+shared server or run other tests against that server while it is being crashed.
+PostgreSQL TLS checks have separate trust/server prerequisites documented in
+[operations](docs/operations.md); do not count skipped fixtures as evidence.
 
-`postgres_restart_resilience` deliberately uses a separate fixture:
-`ATOMIC_RESTART_POSTGRES_URL`, `ATOMIC_RESTART_POSTGRES_DATA`,
-`ATOMIC_RESTART_PG_CTL`, `ATOMIC_RESTART_POSTGRES_LOG`, and
-`ATOMIC_RESTART_POSTGRES_OPTIONS`. Set the last variable to the server's exact
-`-k`, `-p`, and `-h` startup options; `pg_ctl start` does not infer a prior
-custom endpoint. Never point a restart fixture at a shared or production server.
-
-Run the public-API application workflow against a disposable database:
+Run the public Rust application against the disposable database:
 
 ```sh
 ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
   cargo run --offline --example native_workflow
 ```
 
-It explicitly provisions a unique logical database, then uses the connection
-API for schema, transact, query, pull, history, immutable old values, and reopen.
-It fails if PostgreSQL configuration is missing. The writer has a separate
-lifetime; a second read-only peer observes its commits and reopens after writer
-shutdown. Submission attachment in this example is an in-process handle, not a
-remote writer protocol.
+It creates a unique logical database and exercises schema, program deployment,
+transactions, queries, Pull, history, held values and reopen. The
+`process_workflow` example exercises an independent writer and submitting peers.
+The stock `application_workflow` example uses the CLI-managed local or remote
+transactor; follow the [application guide](docs/application.md).
 
-The Unix-only independent-process workflow runs a writer and two submitting
-peer child processes, with a separate observer:
+## Application model
 
-```sh
-ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
-  cargo run --offline --example process_workflow
-```
+Capture `Connection::db()` or `Peer::db()` once and pass the resulting
+`DatabaseValue` through computations. Capturing a resident value does no I/O;
+cold reads authenticate immutable storage objects, while warm reads can be
+entirely local. Queries and navigation do not run in the transactor.
 
-`LocalTransactionServer` exposes an existing writer through a bounded, versioned
-native Unix socket. `Connection::transact_socket` submits full declarative forms
-and opens exact native receipt values using the peer's read-only PostgreSQL
-permissions. Socket access is restricted to the same OS user (private 0700
-directory, 0600 socket); this is a same-host deployment, not a TCP service or
-Datomic wire protocol. Restarting the adapter creates a new endpoint to pass
-to callers. PostgreSQL transport can independently require verified TLS.
+`DatabaseValue::with` and `with_forms` return speculative reports without
+publishing anything. Branches share their base and own their new information.
+Maps, primitive forms, symbolic references and controlled persisted calls use
+the same transaction semantics as committed requests. Transactions on filtered
+values use the full basis and preserve filters on the result; `as_of` is not
+a writable branch of the past. History values cannot transact.
 
-A lost response after attempted delivery is `UnknownOutcome`: retry the same
-request key and content. A confirmed commit returns `CommittedTransaction`;
-its `report` can separately fail to open without changing the known commit.
-Remote semantic errors retain category, details, and structured anomaly; the
-original code is in `details["remote_code"]`. Delivery uses a total socket
-deadline; native receipt opening uses the configured PostgreSQL I/O policy.
+A successful committed report contains the exact before/after values, transaction
+data and resolved tempids. After an ambiguous delivery outcome, retry the same
+request key and content. Receipt-first resolution preserves the committed result
+instead of running the transaction again. A committed response can separately
+report failure to open its read values without changing the durable outcome.
 
-Both `Connection::db()` and `Peer::db()` capture native immutable values without
-I/O. Eager diagnostic access is explicitly named `Peer::db_compatibility`,
-`try_db_compatibility`, `sync_compatibility`, and `sync_to_compatibility`.
-Connections advance in the background without blocking the writer: a bounded
-one-slot hint channel is repaired from the durable log. Only explicitly enabled
-transaction-report queues are unbounded; consumers must drain or disable them.
-`observation_error()` is separate from a transaction's durable outcome.
-Dropping a read connection requests observer shutdown without waiting for a
-stalled storage read; its worker and pins release when that in-flight read ends.
+Connections observe newer roots in the background using coalesced notifications
+and durable catch-up. Change consumers expose explicit checkpoints and bounded
+replay. Retained handles and backup captures participate in Rust-owned retention;
+a serialized snapshot reference is neither a credential nor a retention pin.
+Excision cannot erase bytes or memories already exported to another process.
 
-These small examples establish application paths, not scale acceptance. See
-[product acceptance](docs/acceptance.md) and the
-[operational guide](docs/operations.md) for measured deployment/maintenance
-workloads and their operating limits.
+Read limits, deadlines and cancellation are cooperative resource policies, not
+hard allocator or SQL preemption guarantees. Local Rust callbacks are trusted.
+Fulltext has an explicit coverage frontier and supplied-view validation; an
+absent search hit is not an identity or uniqueness constraint. Advisory hints
+never become transaction meaning or durable request identity.
 
-`DatabaseValue::with(&ops, tx_instant)` now returns a pure
-`SpeculativeTransactionReport`; its `db_after` can be extended, queried, pulled,
-or viewed through history/time/raw indexes without advancing PostgreSQL or a
-connection. Speculative chains share their committed base and retain their own
-information delta. `with` accepts primitive operations; `with_forms` also accepts
-maps and persisted controlled calls, using durable binding/predicate checks.
-`with_forms_with_limits` exposes operation/read/program and code-retention
-resource policy. Tuple ref slots accept `TxValue::Tuple` with symbolic references
-and nils; structured lookup keys use `EntityRef::LookupInput`. Stored values
-remain fully resolved. Ordinary request and program hashes remain unchanged;
-new inputs select new grammars and (for code literals) program ABI 6. Expanded
-native query templates select ABI 7; general query literals/relations select
-template 3 and ABI 10. Unchanged programs preserve earlier bytes.
-Transactions
-on filtered values use the full basis and retain the filters on their result:
-`as_of` is not a branch of the past. History values cannot transact. Controlled
-generation follows this same docs-first native rule. See
-[product acceptance](docs/acceptance.md) for semantic, load and failure
-verification and its limits.
-
-## Native read access
-
-Queries and Pull use exact immutable `DatabaseValue`s, including temporal and
-custom-filtered values. `QueryControl` and `PullControl` default to no arbitrary
-work/row/depth/entity ceilings; configure explicit budgets and cancellation for
-untrusted or broad reads. Pull's documented default many-valued limit remains
-1,000. General query allocations can also be bounded explicitly; the CLI uses a
-configurable 16 MiB allowance. See [general query data](docs/query-data.md).
-Limits are cooperative logical-work policies, not hard allocator or SQL
-preemption guarantees. Result cloning, comparison, formatting and destruction,
-unlimited Pull, explicit selector ownership, and component `Entity::touch` use
-heap traversal instead of depending on Rust call-stack depth.
-
-`QueryEngine::sequence` / `DatabaseValue::query_sequence` prepare joins and
-aggregates eagerly, then defer Pull and transforms until each row is consumed.
-`QueryEngine::sequence_sources` also accepts mixed database, tuple and log sources;
-bound EDN queries expose the same sequence path. See [composing immutable reads](docs/read-values.md)
-for entity identity comparison, physical AVET readiness, partial tuple seeks and
-read-only invocation of stored native functions.
-`remaining_rows()` counts prepared tuples without running those projections;
-a later error terminates the iterator. Distinct entity bindings remain distinct
-even when their projected maps compare equal. `PullAttribute::transform` accepts
-native conversions or a named `PullTransform::new` Rust callback; transforms see
-missing nil values, run before defaults, and propagate errors. Arbitrary local
-Rust callbacks are trusted/cooperative, not forcibly preempted.
-
-`Function::Query` embeds a native subquery. It uses the clause's exact source as
-`$` and retains named sources, sharing the enclosing resource controls.
-`Aggregate::Rand(n)` samples with replacement; `Sample(n)` returns up to n
-distinct values. This randomness is local read behavior, not persisted program
-semantics. `QueryResult::into_return_maps` gives keyword/string/symbol keys plus
-positional access; use `into_return_maps_with_arity` when empty-result arity must
-also be checked. Stack-safe `QueryValue` destruction requires the consuming
-`into_map`/`into_collection`/`into_tuple`/`into_scalar` accessors to move fields;
-borrowed enum matching is unchanged.
-
-`Connection::log()` / `Peer::log()` capture an immutable authenticated transaction
-log, independently of writer availability. `tx_range` uses inclusive start and
-exclusive end T/Tx/instant bounds; `tx_ids` and `tx_data` expose query-friendly
-transaction data without reconstructing the database. Log data retains original
-noHistory transactions. `DatabaseValue::index_pull` lazily projects AVET/AEVT
-ranges with forward/reverse bounds, offset and optional limit, using the exact
-captured database and documented reference/cardinality rules.
-
-Native [fulltext search](docs/fulltext.md) provides versioned string analysis,
-phrase/Boolean/prefix expressions, BM25 ranking and structured Datalog joins.
-Immutable PostgreSQL search projections are built in the background; every hit
-is checked against the supplied database view. Coverage may lag and is explicit;
-search is not a complete-membership correctness constraint. Schema upgrades,
-stored ABI9 programs and the separate-process application are verified on real
-PostgreSQL; [product acceptance](docs/acceptance.md) records lifecycle checks
-and measured costs. Native advisory read tracing/prefetch and versioned
-authenticated cross-host hint transport are implemented and verified. Hints never become
-transaction meaning or durable request identity. Cold submissions may still
-incur additional index reads. Neither search lag nor missing hint transport changes
-identity, transactions, history, or local Datalog/Pull semantics. See
-[read-load measurements](docs/read-load.md) for reader fixtures and costs, and the
-[operational guide](docs/operations.md) for integrity, recovery and GC behavior,
-including the limits and failed checks in earlier large-workload measurements.
-
-## Working boundary
-
-Treat the recovered source as evidence, not as the unpublished original source
-tree. Compilation erased comments, formatting, some names, and some macro
-forms. Preserve observed behavior and architectural invariants; do not copy JVM
-or Clojure machinery merely because it appears in the recovery.
-
-The last pre-clean repository state is Git commit
-`b8ebb1af74e6357d8242b2713af92f98d9e20e3a`. It retains the deleted recovery
-apparatus if a narrowly identified historical fact must be consulted later.
+Current acceptance, including measured whole-operation costs and outstanding
+verification, is recorded in [product acceptance](docs/acceptance.md). Historical
+implementation results remain in Git history; they are not evidence for the
+current storage engine.

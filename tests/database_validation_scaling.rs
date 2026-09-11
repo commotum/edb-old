@@ -4,8 +4,8 @@
 //! top-level decimal storage equality from index/identity comparison.
 use atomic_core::{
     Attribute, Cardinality, DB_ALTER_ATTRIBUTE, DB_PART_DB, Database, Datom, EntityRef,
-    ErrorCategory, IndexOrder, IndexSegment, Keyword, Schema, TxOp, USER_PARTITION, Unique, Value,
-    ValueType, View, encode_index_segment, make_eid, t_to_tx,
+    ErrorCategory, IndexOrder, Keyword, Schema, TxOp, USER_PARTITION, Unique, Value, ValueType,
+    View, canonical_datom_bytes, make_eid, t_to_tx,
 };
 use bigdecimal::BigDecimal;
 use std::collections::BTreeMap;
@@ -72,19 +72,12 @@ fn schema() -> Schema {
     schema
 }
 
-fn encoded(mut datoms: Vec<Datom>, order: IndexOrder, history: bool) -> Vec<u8> {
+fn encoded(mut datoms: Vec<Datom>, order: IndexOrder, _history: bool) -> Vec<u8> {
     datoms.sort_by(|left, right| left.cmp_in(right, order));
-    // Flat format-v3 segments intentionally retain an older ordering than
-    // native trees. Encode individual datoms and preserve current native
-    // ordering here; this is an observation, not a production index segment.
+    // Frame exact canonical datoms in current native index order.
     let mut observation = Vec::new();
     for datom in datoms {
-        let bytes = encode_index_segment(&IndexSegment {
-            order,
-            history,
-            datoms: vec![datom],
-        })
-        .unwrap();
+        let bytes = canonical_datom_bytes(&datom).unwrap();
         observation.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
         observation.extend_from_slice(&bytes);
     }

@@ -436,11 +436,8 @@ fn persisted_nested_function_tuple_emission_survives_socket_retry_and_writer_rec
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&postgres).unwrap();
+    common::install(&postgres).unwrap();
+    let mut store = common::TestStore::connect(&postgres).unwrap();
     store.create_database(&id, schema()).unwrap();
     let child = store
         .deploy_program_blob(&emitter(Instruction::EmitAdd(TUPLE), 2))

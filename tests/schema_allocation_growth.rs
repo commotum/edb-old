@@ -6,12 +6,9 @@
 mod common;
 
 use atomic_core::{
-    Connection, DB_TX_INSTANT, Database, EntityRef, IndexOrder, PostgresMigrator, PostgresStore,
-    Schema, TransactionRequest, TransactionService, TxOp, USER_PARTITION, View, eid_to_eidx,
-    eid_to_part,
+    Connection, DB_TX_INSTANT, Database, EntityRef, IndexOrder, Schema, TransactionRequest,
+    TransactionService, TxOp, USER_PARTITION, View, eid_to_eidx, eid_to_part,
 };
-use postgres::fallible_iterator::FallibleIterator;
-use sha2::{Digest, Sha256};
 use std::time::{Duration, Instant};
 
 const PARTITION_BOUNDARY: u64 = 524_288;
@@ -324,11 +321,8 @@ fn postgres_late_allocation_growth_retains_frontier_and_receipts_across_restart(
     } else {
         Some(fixture)
     };
-    PostgresMigrator::connect(&fixture_connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture_connection).unwrap();
+    common::install(&fixture_connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture_connection).unwrap();
     store.create_database("growth", Schema::new()).unwrap();
     drop(store);
     let started = Instant::now();
@@ -396,179 +390,24 @@ fn postgres_late_allocation_growth_retains_frontier_and_receipts_across_restart(
     restarted.shutdown();
     let key = peer.db().snapshot_key().unwrap();
     let mut inspect = postgres::Client::connect(&fixture_connection, postgres::NoTls).unwrap();
-    let size = inspect.query_one("SELECT count(*), COALESCE(sum(octet_length(c.payload)), 0)::bigint FROM atomic_generation_transactions t JOIN atomic_transaction_contents c USING(content_hash) WHERE t.database_id = 'growth'", &[]).unwrap();
-    let first_row = inspect.query_one("SELECT r.request_digest, r.tx_hash, t.state_hash FROM atomic_generation_requests r JOIN atomic_generation_transactions t USING(database_id, generation, basis_t) WHERE r.database_id = 'growth' AND r.basis_t = $1", &[&(first.basis_t as i64)]).unwrap();
-    let tempid_size = inspect.query_one("SELECT count(*), pg_total_relation_size('atomic_generation_request_tempids') FROM atomic_generation_request_tempids WHERE database_id = 'growth'", &[]).unwrap();
-    let hex = |bytes: Vec<u8>| {
-        bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
+    let size = inspect
+        .query_one(
+            "SELECT count(*), COALESCE(sum(octet_length(payload)),0)::bigint FROM atomic_objects",
+            &[],
+        )
+        .unwrap();
     eprintln!(
-        "PostgreSQL baseline schema={} database=growth head_basis={expected_basis} frontier={expected_frontier}; canonical_transactions={} canonical_transaction_payload_bytes={}; first_request=growth-0000 request_digest={} tx_hash={} state_hash={} first_allocated={} last_allocated={} count={}; complete {:?}",
-        fixture_schema,
+        "PostgreSQL growth schema={fixture_schema} basis={expected_basis} frontier={expected_frontier} objects={} physical_payload_bytes={} first_tx_hash={:?} first_allocated={} last_allocated={} tempids={} snapshot={key:?} complete_ms={}",
         size.get::<_, i64>(0),
         size.get::<_, i64>(1),
-        hex(first_row.get(0)),
-        hex(first_row.get(1)),
-        hex(first_row.get(2)),
+        first.tx_hash,
         first.tempids.values().next().unwrap(),
         first.tempids.values().next_back().unwrap(),
         first.tempids.len(),
-        started.elapsed()
-    );
-    eprintln!(
-        "native snapshot={key:?}; tempid_receipt_rows={} tempid_table_and_indexes_bytes={}",
-        tempid_size.get::<_, i64>(0),
-        tempid_size.get::<_, i64>(1)
+        started.elapsed().as_millis()
     );
     assert!(
         partition.is_ok() && schema.is_ok(),
         "late automatic system allocation must remain possible after durable ordinary growth"
-    );
-}
-
-fn old_generation_fingerprint(client: &mut postgres::Client) -> (String, i64, i64) {
-    let mut digest = Sha256::new();
-    let mut transactions = 0i64;
-    // Include every original canonical byte and immutable transaction/request
-    // field, not merely a count or a newly reconstructed receipt.
-    for row in client.query("SELECT row_to_json(t)::text, row_to_json(r)::text, c.payload, c.envelope_version FROM atomic_generation_transactions t JOIN atomic_transaction_contents c USING(content_hash) JOIN atomic_generation_requests r ON r.database_id=t.database_id AND r.generation=t.generation AND r.basis_t=t.basis_t WHERE t.database_id='growth' AND t.generation=1 AND t.basis_t<=65 ORDER BY t.basis_t", &[]).unwrap() {
-        for column in 0..2 {
-            let value: String = row.get(column);
-            digest.update((value.len() as u64).to_be_bytes());
-            digest.update(value.as_bytes());
-        }
-        let payload: Vec<u8> = row.get(2);
-        digest.update((payload.len() as u64).to_be_bytes());
-        digest.update(payload);
-        digest.update(row.get::<_, i16>(3).to_be_bytes());
-        transactions += 1;
-    }
-    let mut rows = client.query_raw("SELECT t.basis_t,n.tempid_name,n.entity_id FROM atomic_generation_request_tempids n JOIN atomic_generation_requests t USING(database_id,generation,request_key_hash) WHERE n.database_id='growth' AND n.generation=1 AND t.basis_t<=65 ORDER BY t.basis_t,n.tempid_name", std::iter::empty::<&str>()).unwrap();
-    let mut names = 0i64;
-    while let Some(row) = rows.next().unwrap() {
-        digest.update(row.get::<_, i64>(0).to_be_bytes());
-        let name: String = row.get(1);
-        digest.update((name.len() as u64).to_be_bytes());
-        digest.update(name.as_bytes());
-        digest.update(row.get::<_, i64>(2).to_be_bytes());
-        names += 1;
-    }
-    (format!("{:x}", digest.finalize()), transactions, names)
-}
-
-/// Deliberately separate from seeding: this can only use an explicitly named
-/// retained old-binary fixture. It never creates, replaces, or removes it.
-#[test]
-#[ignore = "explicit retained old-binary schema; migrates and appends two repair transactions, never reseeds"]
-fn postgres_upgrade_retained_legacy_growth_without_rewriting_original_receipts() {
-    let url = std::env::var("ATOMIC_POSTGRES_URL").expect("configure disposable PostgreSQL");
-    let schema = std::env::var("ATOMIC_ALLOCATION_UPGRADE_SCHEMA")
-        .expect("name the retained old-binary fixture explicitly");
-    assert!(
-        schema.starts_with("allocation_growth_")
-            && schema
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-    );
-    let connection = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
-        format!(
-            "{url}{}options=-csearch_path%3D{schema}%2Cpg_catalog",
-            if url.contains('?') { "&" } else { "?" }
-        )
-    } else {
-        format!("{url} options='-csearch_path={schema},pg_catalog'")
-    };
-    let started = Instant::now();
-    let mut inspect = postgres::Client::connect(&connection, postgres::NoTls).unwrap();
-    let original = old_generation_fingerprint(&mut inspect);
-    assert_eq!(original.1, 65);
-    assert_eq!(original.2, 1_047_577);
-    let endpoint: i64 = inspect.query_one("SELECT eidx_frontier FROM atomic_generation_transactions WHERE database_id='growth' AND generation=1 AND basis_t=65", &[]).unwrap().get(0);
-    assert_eq!(endpoint, 1_048_577);
-    let first_row = inspect.query_one("SELECT encode(r.request_digest,'hex'),encode(r.tx_hash,'hex'),encode(t.state_hash,'hex') FROM atomic_generation_requests r JOIN atomic_generation_transactions t USING(database_id,generation,basis_t) WHERE r.database_id='growth' AND r.generation=1 AND r.basis_t=1", &[]).unwrap();
-    assert_eq!(
-        first_row.get::<_, String>(0),
-        "7c078db2a8df8e445e03f8a3fa629e1ba26d29c66e8d14800a080856d04a5b79"
-    );
-    assert_eq!(
-        first_row.get::<_, String>(1),
-        "cce0b5eb6afbdf72b693da3b5a9fd911c49a4324da6ff29da331d647184f4ed9"
-    );
-    assert_eq!(
-        first_row.get::<_, String>(2),
-        "7f686514ee5869379b9b372b45f5ce1533d71fd2f7cc25339f4274e7aff461ec"
-    );
-    eprintln!(
-        "before retained upgrade schema={schema} original65 transactions+1047577 namedallocations SHA256={} complete {:?}",
-        original.0,
-        started.elapsed()
-    );
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let writer = common::start_service(&connection, "growth");
-    let first = writer
-        .client()
-        .transact(
-            TransactionRequest::new("growth-0000", retractions(BATCH)),
-            Duration::from_secs(30),
-        )
-        .unwrap();
-    assert!(first.replayed);
-    assert_eq!(first.basis_t, 1);
-    assert_eq!(first.tempids.len(), BATCH);
-    assert_eq!(*first.tempids.values().next().unwrap(), 17_592_186_045_416);
-    assert_eq!(
-        *first.tempids.values().next_back().unwrap(),
-        17_592_186_061_799
-    );
-    let partition = TransactionRequest::from_edn("late-partition", r#"[{:db/id "late-partition" :db/ident :growth.part/late :db.install/_partition :db.part/db}]"#).unwrap();
-    let attribute = TransactionRequest::from_edn("late-schema", r#"[{:db/id "late-schema" :db/ident :growth/late :db/valueType :db.type/long :db/cardinality :db.cardinality/one}]"#).unwrap();
-    let part = writer
-        .client()
-        .transact(partition.clone(), Duration::from_secs(30))
-        .unwrap();
-    let attr = writer
-        .client()
-        .transact(attribute.clone(), Duration::from_secs(30))
-        .unwrap();
-    assert_eq!(part.tempids["late-partition"], 1_000);
-    assert_eq!(attr.tempids["late-schema"], 1_001);
-    assert_eq!(part.basis_t, 66);
-    assert_eq!(attr.basis_t, 67);
-    assert_eq!(attr.db_after.eidx_frontier(), 1_048_577);
-    writer.shutdown();
-    let reopened = Connection::connect(&connection, "growth", 8).unwrap();
-    assert_eq!(reopened.db().basis_t(), 67);
-    assert_eq!(reopened.db().eidx_frontier(), 1_048_577);
-    let restarted = common::start_service(&connection, "growth");
-    for (request, expected) in [
-        (
-            TransactionRequest::new("growth-0000", retractions(BATCH)),
-            first,
-        ),
-        (partition, part),
-        (attribute, attr),
-    ] {
-        let replay = restarted
-            .client()
-            .transact(request, Duration::from_secs(30))
-            .unwrap();
-        assert!(replay.replayed);
-        assert_eq!(replay.tx_hash, expected.tx_hash);
-        assert_eq!(replay.tempids, expected.tempids);
-        assert_eq!(replay.basis_t, expected.basis_t);
-    }
-    restarted.shutdown();
-    let after = old_generation_fingerprint(&mut inspect);
-    assert_eq!(original, after);
-    eprintln!(
-        "after retained upgrade schema={schema} original SHA256={} unchanged; partition1000/schema1001, head67/frontier1048577, old+new exactretries afterrestart; complete {:?}",
-        after.0,
-        started.elapsed()
     );
 }

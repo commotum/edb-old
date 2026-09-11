@@ -4,8 +4,7 @@ mod common;
 
 use atomic_core::{
     Attribute, Cardinality, Connection, Database, DatabaseValue, Datom, EntityRef, IndexPrefix,
-    Keyword, PostgresIndexer, PostgresMigrator, PostgresStore, Schema, SemanticError, TupleSpec,
-    TxOp, Unique, Value, ValueType,
+    Keyword, Schema, SemanticError, TupleSpec, TxOp, Unique, Value, ValueType,
 };
 use std::collections::BTreeMap;
 use std::time::Instant;
@@ -386,11 +385,8 @@ fn native_postgres_contracts_survive_consolidation_and_recovery() {
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "schema_identity_contracts");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     let created = store.create_database("contracts", schema()).unwrap();
     let service = common::start_service(&fixture.connection, "contracts");
     let start = Instant::now();
@@ -415,10 +411,7 @@ fn native_postgres_contracts_survive_consolidation_and_recovery() {
     let composite = composite_contract(&mut transact);
     let latest = numeric_contracts(&mut transact);
     service.shutdown();
-    PostgresIndexer::connect(&fixture.connection, "contracts")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&fixture.connection, "contracts").unwrap();
     let reopened = Connection::connect(&fixture.connection, "contracts", 8).unwrap();
     let recovered = store.recover("contracts").unwrap();
     common::assert_same_information(&latest, &reopened.db());

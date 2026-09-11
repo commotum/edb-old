@@ -425,12 +425,9 @@ fn postgres_fixture(label: &str) -> Option<common::PostgresFixture> {
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&fixture.connection).unwrap();
     drop(
-        PostgresStore::connect(&fixture.connection)
+        common::TestStore::connect(&fixture.connection)
             .unwrap()
             .create_database("async", schema())
             .unwrap(),

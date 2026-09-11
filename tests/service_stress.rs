@@ -1,7 +1,7 @@
+mod common;
 use atomic_core::{
-    Attribute, Cardinality, EntityRef, ErrorCategory, Keyword, PostgresStore, Schema,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue,
-    USER_PARTITION, Value, ValueType, make_eid,
+    Attribute, Cardinality, EntityRef, ErrorCategory, Keyword, Schema, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxOp, TxValue, Value, ValueType,
 };
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,10 +9,6 @@ const COUNTER_VALUE: u32 = 1_000;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
-}
-
-fn user(eidx: u64) -> u64 {
-    make_eid(USER_PARTITION, eidx).unwrap()
 }
 
 fn unique(prefix: &str) -> String {
@@ -47,9 +43,8 @@ fn concurrent_load_stays_bounded_and_every_timeline_is_serial() {
     const PRODUCERS: usize = 12;
     const TRANSACTIONS: u64 = 20;
     const QUEUE_CAPACITY: usize = 4;
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut setup = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut setup = common::TestStore::connect(&connection).unwrap();
     let database_id = unique("stress");
     let initial_basis = setup
         .create_database(&database_id, schema())
@@ -68,16 +63,35 @@ fn concurrent_load_stays_bounded_and_every_timeline_is_serial() {
     })
     .unwrap();
     let client = service.client();
+    let seeded = client
+        .transact(
+            TransactionRequest::new(
+                "counters",
+                (0..PRODUCERS)
+                    .map(|producer| TxOp::Add {
+                        entity: EntityRef::Temp(format!("counter-{producer}")),
+                        attribute: COUNTER_VALUE,
+                        value: Value::Long(0).into(),
+                    })
+                    .collect(),
+            ),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+    let counters: Vec<_> = (0..PRODUCERS)
+        .map(|producer| seeded.tempids[&format!("counter-{producer}")])
+        .collect();
     let started = Instant::now();
     let handles: Vec<_> = (0..PRODUCERS)
         .map(|producer| {
             let client = client.clone();
+            let counter = counters[producer];
             std::thread::spawn(move || {
                 for ordinal in 0..TRANSACTIONS {
                     let request = TransactionRequest::new(
                         format!("producer-{producer}-request-{ordinal}"),
                         vec![TxOp::Add {
-                            entity: EntityRef::Id(user(42 + producer as u64)),
+                            entity: EntityRef::Id(counter),
                             attribute: COUNTER_VALUE,
                             value: TxValue::Scalar(Value::Long((ordinal + 1) as i64)),
                         }],
@@ -104,7 +118,7 @@ fn concurrent_load_stays_bounded_and_every_timeline_is_serial() {
     }
     let elapsed = started.elapsed();
     let stats = client.stats();
-    assert_eq!(stats.processed, PRODUCERS as u64 * TRANSACTIONS);
+    assert_eq!(stats.processed, 1 + PRODUCERS as u64 * TRANSACTIONS);
     assert!(
         stats.max_queued <= QUEUE_CAPACITY + 1,
         "accounting includes the one request handed from the channel to the worker"
@@ -114,16 +128,16 @@ fn concurrent_load_stays_bounded_and_every_timeline_is_serial() {
         "load did not exercise backpressure"
     );
 
-    let mut verify = PostgresStore::connect(&connection).unwrap();
+    let mut verify = common::TestStore::connect(&connection).unwrap();
     let recovered = verify.recover(&database_id).unwrap();
     assert_eq!(
         recovered.basis_t(),
-        initial_basis + PRODUCERS as u64 * TRANSACTIONS
+        initial_basis + 1 + PRODUCERS as u64 * TRANSACTIONS
     );
-    for producer in 0..PRODUCERS {
+    for &counter in &counters[..PRODUCERS] {
         assert_eq!(
-            recovered.values(user(42 + producer as u64), COUNTER_VALUE),
-            vec![&Value::Long(TRANSACTIONS as i64)]
+            recovered.values(counter, COUNTER_VALUE).unwrap(),
+            vec![Value::Long(TRANSACTIONS as i64)]
         );
     }
     eprintln!(

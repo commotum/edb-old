@@ -109,8 +109,8 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
             error.contains("ERROR"),
             "rejection omitted its error category"
         );
-        assert_eq!(fixture.publication_count(DATABASE), 0);
-        println!("PEER_RUNTIME_REJECTED no_ready=true no_publication=true");
+        assert_eq!(fixture.publication_count(DATABASE), 1);
+        println!("PEER_RUNTIME_REJECTED no_ready=true original_publication_unchanged=true");
     }
     for round in 0..2 {
         let mut command = atomic();
@@ -204,10 +204,10 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
         assert!(!endpoint.exists(), "normal shutdown retained the socket");
     }
     let committed_status = cli(&fixture.admin_url, &["status", "--database", DATABASE]);
-    if fixture.can_inject_replica_fault {
+    if fixture.can_inject_object_fault {
         fixture.remove_derived_publication(DATABASE);
         let error = rejected_transactor(&fixture.writer_url, DATABASE, &endpoint);
-        assert!(error.contains("service/native-index-required"));
+        assert!(error.contains("storage/missing-object"), "{error}");
         assert!(error.contains("atomic consolidate"));
         assert_eq!(fixture.publication_count(DATABASE), 0);
         assert_eq!(
@@ -236,6 +236,6 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
     println!(
         "PRODUCT_ACCEPTANCE_OK restricted_roles={} writer_restarts={} application_processes=2",
         fixture.roles.is_some(),
-        1 + usize::from(fixture.can_inject_replica_fault)
+        1 + usize::from(fixture.can_inject_object_fault)
     );
 }

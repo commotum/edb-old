@@ -12,7 +12,7 @@ Recovered `peer/src-clj/datomic/db.clj` supplies map expansion and assignment
 evidence; `common.clj` supplies the squuid layout. Native authoring uses Rust
 enums, not a JVM object or EDN wire compatibility layer.
 
-## Identity and installation
+## Identity and partition installation
 
 `eid_to_part(entity)` returns the raw partition bits. `partition_eid(entity)`
 returns the partition's entity ID; these differ for implicit partitions.
@@ -55,94 +55,31 @@ facts, not a hidden schema descriptor. `db.schema().partitions()` lists installe
 names. An installed partition cannot be removed while retaining its allocated
 identity space. No UUID or user entity is silently migrated to another partition.
 
-New databases include `:db.install/partition`. Old supported genesis profiles
-remain readable with their original bytes and commitments. Upgrade an old
-database explicitly with `partition_vocabulary_upgrade_ops()` as its own ordinary
-transaction, with a durable request key. Do not rerun the upgrade with a new key
-on an already upgraded database; retry the original key after an unknown outcome.
-Do not rewrite genesis or treat an absent attribute as already installed.
+New databases include the partition vocabulary in their canonical genesis.
+No separate vocabulary upgrade or generation-zero conversion is required.
+Storage installation and logical database creation remain explicit
+administrative actions; see [operations](operations.md#provisioning-and-current-storage).
 
-## Reserved allocation and existing databases
+## Reserved allocation
 
 Schema and named-partition allocation uses a retained, monotone system-partition
 cursor, independent of ordinary entity growth. The ordinary issued frontier stays
-at least as high as this cursor so existing explicit-ID range checks remain valid.
-This is not a separate counter for each application partition, and does not move
-or renumber existing entities. Receipt-only allocations and typed references also
-reserve system identities; a scan of current schema alone cannot establish which
-IDs are safe to issue.
+at least as high as this cursor so explicit-ID range checks remain valid. This
+is not a separate counter for each application partition, and does not move or
+renumber existing entities.
 
-Run `atomic migrate` on a fresh PostgreSQL catalog before starting writers. The
-single current schema baseline admits ATLC v2 allocation checkpoints; historical
-catalog schema upgrades are unsupported. For an existing native generation containing
-ATLC v1, the first fresh transaction obtains allocation proof from the complete
-authenticated log, including numeric allocation witnesses and any required legacy
-excision bounds. An immutable loaded value caches that proof. The next commit
-stores its reserved frontier in ATLC v2; subsequent exact endpoints read this
-authenticated checkpoint instead of reconstructing the whole prefix. Existing
-v1 content and saved request receipts remain readable without reexecution.
+The current immutable log records ordinary and reserved allocation checkpoints;
+captured metadata binds the same endpoint. Receipt-only allocations and typed
+references also reserve identities, so scanning current schema alone cannot
+establish which IDs are safe to issue. Recovery and exact retry preserve these
+checkpoints rather than reapplying today's allocation defaults. Excision carries
+the retained frontier into its successor even when it removes the original facts.
 
-The available ranges remain finite: named-partition entities must be below
-524,288, and schema attribute IDs must be at most 1,048,576. An explicit high
-system ID can advance the retained cursor past otherwise unused lower slots.
-The allocator does not search holes or clamp that observation to a smaller range.
-Legacy physical excision may have erased an explicit reference-only identity;
-without a modern checkpoint, the proof conservatively reserves the issued prefix
-that could have lost evidence. Exact cutoffs exclude later ordinary growth, but a
-large uncertain prefix can still exhaust automatic reserved allocation. The
-database fails closed rather than reusing a possibly acknowledged identity.
-
-### Generation-zero conversion
-
-Generation zero remains readable/recoverable, but current native writers reject
-fresh writes with `postgres/native-writer-requires-generation`. Convert explicitly
-using a latest-point backup and same-target restore. Stop the writer and release
-peer/report pins on the generation being replaced before the administrative
-cutover; unrelated retained readers do not need to be closed. Do not select an
-older point, which would intentionally restore older information.
-
-The following uses the existing public operator APIs; `connection` selects the
-same migrated PostgreSQL catalog throughout, and `database_id` is unchanged:
-
-```rust
-use atomic_core::{PortableBackup, PostgresIndexer};
-
-let mut backup = PortableBackup::connect(&connection)?;
-let point = backup.backup_database(database_id, repository)?;
-assert_eq!(point.log_generation, 0);
-PortableBackup::verify_backup_point(repository, point.basis_t, 0, true)?;
-let restored = backup.restore_backup_point(repository, point.basis_t, 0, database_id)?;
-let mut indexer = PostgresIndexer::connect(&connection, database_id)?;
-indexer.consolidate()?;
-drop(indexer);
-```
-
-Restore publishes a positive native generation while retaining lineage, EIDs,
-facts and caller receipt mappings. Physical generation/membership hashes change;
-they are not cross-restore logical equality checks. Administrative consolidation
-creates or completes the ordinary native publication before restarting the
-writer. A log-only backup can have historical receipt archives without that
-ordinary publication; starting its writer prematurely reports
-`service/native-index-required`. Run the explicit consolidation above instead
-of expecting ordinary startup to scan the full log. Restart the writer afterward;
-its next fresh native transaction establishes the reserved allocation checkpoint.
-Retry the same exact backup point/target after an interrupted restore.
-
-Conversion also builds native historical receipt checkpoints without changing
-old receipt kinds or caller mappings. Reopening an old receipt uses a native
-checkpoint plus at most 256 transactions, 16,384 datoms, or 4 MiB of encoded
-and estimated retained value bytes between checkpoints, plus one indivisible
-historical transaction when that transaction alone exceeds a limit. Checkpoints
-are built incrementally; AVET backfill uses the existing bounded projection
-steps. This is not a bounded-memory claim for the whole administrative restore:
-deep verification still replays the database, and each archive records its
-reachable node membership. Generation-owned archives remain protected until
-their generation can be retired.
-
-The CLI exposes the same operations through `backup`, `verify-backup`, and
-`restore`; restore requires an exact basis/generation, explicit PostgreSQL
-database/catalog targets, and `--apply`. See [administrative commands](admin.md)
-for the complete target checks and preview behavior.
+The ranges are finite: named-partition entities must be below 524,288, and schema
+attribute IDs must be at most 1,048,576. An explicit high system ID can advance
+the retained cursor past unused lower slots. The allocator does not search holes,
+clamp that observation, or reuse a possibly acknowledged identity. Exhaustion
+fails explicitly.
 
 ## Transaction allocation policy
 
@@ -190,9 +127,9 @@ Persisted transaction programs can use `Instruction::EmitForcePartition` and
 `EmitMatchPartition`, consuming `[tempid, partition/entity]` from the stack. A
 tempid can be a native Temp reference or nonempty string; qualified keywords can
 name partitions. These instructions obey the shared fuel, emitted-form and byte
-budgets. Only programs containing them select ABI 8; existing ABI 4–7 content
-retains its old encoding. Explicit directive forms select native submission wire
-version 3 and request-identity grammar 4; old forms keep their prior bytes.
+budgets. The program and request codecs encode these directives explicitly; decoding
+and execution apply the same allocation rules as typed transaction forms.
+Use the current encoder rather than constructing protocol versions by hand.
 
 ## Default placement for new entities
 
@@ -302,8 +239,7 @@ order, and clock regression can produce earlier timestamps.
 
 Both expose creation-time information and are not credentials or authenticated
 provenance. They are not transaction order, entity allocation order, or substitutes
-for transaction `t`. The existing UUID index comparator compares signed 64-bit
-halves; it is deliberately unchanged for compatibility. Time-local prefixes help
+for transaction `t`. The UUID index comparator compares signed 64-bit halves. Time-local prefixes help
 group nearby times, but unsigned byte order and native index order differ at a
 high-half sign boundary. No universal latency or throughput improvement is claimed.
 
@@ -318,8 +254,8 @@ facts are not independently removed or rewritten; it is not a general outbox.
 
 [Partition tests](../tests/partitions.rs) cover allocation, identity and bounded
 native locality workloads. [Authoring tests](../tests/partition_authoring.rs)
-cover version selection, stored-program speculation/commit, receipt retry and
-restart replay. Existing encoding/program goldens remain regression gates.
+cover authoring, stored-program speculation/commit, receipt retry and restart
+replay. Encoding/program fixtures check canonical round-trips.
 
 The separate-process [product acceptance](../tests/product_cli.rs) exercises the
 application using restricted PostgreSQL roles, a native Unix-socket transactor,

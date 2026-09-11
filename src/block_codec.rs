@@ -18,7 +18,7 @@ pub fn is_encoded(bytes: &[u8]) -> bool {
     bytes.starts_with(MAGIC)
 }
 
-/// Retain legacy raw bytes unless gzip, including its physical envelope, is
+/// Retain raw bytes unless gzip, including its physical envelope, is
 /// strictly smaller. This changes no canonical bytes, hashes, or tree grammar.
 pub fn encode_block(canonical: &[u8]) -> Result<Vec<u8>, SemanticError> {
     if canonical.len() > MAX_CANONICAL_BLOCK_BYTES {
@@ -49,21 +49,57 @@ pub fn encode_block(canonical: &[u8]) -> Result<Vec<u8>, SemanticError> {
     Ok(physical)
 }
 
-/// Authenticate legacy raw bytes or one versioned gzip member. The advertised
+/// Authenticate raw bytes or one versioned gzip member. The advertised
 /// lengths bound allocation and output independently; gzip CRC, exact output,
 /// complete input consumption, and canonical SHA-256 must all agree. Native
 /// callers must still apply their canonical tree/log decoder to the result.
 pub fn decode_block(expected_hash: &Digest, physical: &[u8]) -> Result<Vec<u8>, SemanticError> {
+    inspect_block(expected_hash, physical)?.decode()
+}
+
+/// Borrowed preflight proof. Multi-object readers sum `canonical_len` before
+/// allocating any decoded output. The borrow binds admission to the exact
+/// physical bytes inspected, including legal raw content starting with MAGIC.
+pub(crate) struct BlockDecoder<'a> {
+    expected_hash: &'a Digest,
+    physical: &'a [u8],
+    canonical_len: usize,
+    compressed: bool,
+}
+impl BlockDecoder<'_> {
+    pub(crate) fn canonical_len(&self) -> usize {
+        self.canonical_len
+    }
+    pub(crate) fn is_compressed(&self) -> bool {
+        self.compressed
+    }
+    pub(crate) fn decode(self) -> Result<Vec<u8>, SemanticError> {
+        if !self.compressed {
+            return Ok(self.physical.to_vec());
+        }
+        decode_gzip(self.expected_hash, self.physical, self.canonical_len)
+    }
+}
+
+pub(crate) fn inspect_block<'a>(
+    expected_hash: &'a Digest,
+    physical: &'a [u8],
+) -> Result<BlockDecoder<'a>, SemanticError> {
     if physical.len() > MAX_PHYSICAL_BLOCK_BYTES {
         return Err(invalid(
             "block/size-limit",
             "physical block exceeds its size limit",
         ));
     }
-    // Authenticate raw input first, preserving every old canonical byte string
+    // Authenticate raw input first, preserving every canonical byte string
     // even if its prefix happens to resemble a physical-envelope marker.
     if &sha256(physical) == expected_hash {
-        return Ok(physical.to_vec());
+        return Ok(BlockDecoder {
+            expected_hash,
+            physical,
+            canonical_len: physical.len(),
+            compressed: false,
+        });
     }
     if !is_encoded(physical) {
         return Err(invalid(
@@ -97,16 +133,27 @@ pub fn decode_block(expected_hash: &Digest, physical: &[u8]) -> Result<Vec<u8>, 
             "physical block length does not match its envelope",
         ));
     }
+    Ok(BlockDecoder {
+        expected_hash,
+        physical,
+        canonical_len: canonical_len as usize,
+        compressed: true,
+    })
+}
+
+fn decode_gzip(
+    expected_hash: &Digest,
+    physical: &[u8],
+    canonical_len: usize,
+) -> Result<Vec<u8>, SemanticError> {
     let mut canonical = Vec::new();
-    canonical
-        .try_reserve_exact(canonical_len as usize)
-        .map_err(|_| {
-            invalid(
-                "block/allocation",
-                "bounded canonical block allocation failed",
-            )
-        })?;
-    canonical.resize(canonical_len as usize, 0);
+    canonical.try_reserve_exact(canonical_len).map_err(|_| {
+        invalid(
+            "block/allocation",
+            "bounded canonical block allocation failed",
+        )
+    })?;
+    canonical.resize(canonical_len, 0);
     let mut decoder = GzDecoder::new(&physical[HEADER_BYTES..]);
     decoder.read_exact(&mut canonical).map_err(|_| {
         invalid(

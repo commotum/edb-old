@@ -1,11 +1,6 @@
 //! Bounded, at-least-once application consumption of the authenticated log.
 //! Checkpoints neither reserve history nor acknowledge external side effects.
 use crate::change_notices::NoticeListener;
-use crate::postgres::{
-    is_postgres_connection_error, postgres_error, read_authenticated_log_range,
-    verify_schema_compatibility,
-};
-use crate::sql_io::{GenericClient, SqlClient};
 use crate::{
     Digest, ErrorCategory, LogTransaction, ObservationConfig, PostgresConnectionConfig,
     SemanticError,
@@ -31,7 +26,7 @@ impl Default for ChangeConsumerConfig {
 }
 
 /// An immutable progress token; only a token delivered by this consumer's
-/// current next() call can be acknowledged. SQL rows are reauthenticated on
+/// current next() call can be acknowledged. Opaque references are reauthenticated on
 /// reopen, never treated as an alternate source of transaction authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChangeCheckpoint {
@@ -39,6 +34,7 @@ pub struct ChangeCheckpoint {
     generation: u64,
     last_t: u64,
     commit_hash: Digest,
+    prefix_hash: Digest,
     revision: u64,
 }
 impl ChangeCheckpoint {
@@ -51,6 +47,7 @@ impl ChangeCheckpoint {
     pub fn last_t(&self) -> u64 {
         self.last_t
     }
+    /// Authenticated transaction object identity; zero only at the t=0 origin.
     pub fn commit_hash(&self) -> Digest {
         self.commit_hash
     }
@@ -81,133 +78,323 @@ pub struct ChangeConsumerStats {
 
 pub struct ChangeConsumer {
     connection: PostgresConnectionConfig,
-    database: String,
-    name: String,
+    database: crate::storage::BlockDatabase,
+    principal: String,
+    checkpoint_key: String,
     config: ChangeConsumerConfig,
-    client: SqlClient,
+    store: crate::storage::PgBlockStore,
+    reader: crate::storage::BlockReader,
     listener: Option<NoticeListener>,
     checkpoint: ChangeCheckpoint,
     pending: Option<ChangeCheckpoint>,
     stats: ChangeConsumerStats,
 }
 
+const CHECKPOINT_MAGIC: &[u8; 8] = b"ATCC\0\0\0\x01";
+const CHECKPOINT_BYTES: usize = 8 + 16 + 8 + 8 + 32 + 32;
+const MAX_PUBLICATION_RETRIES: usize = 8;
+
 struct Head {
-    lineage: String,
+    identity: [u8; 16],
     generation: u64,
-    t: u64,
-    hash: Digest,
-    genesis: Digest,
+    log: crate::storage::log::LogRoot,
+    publication: crate::storage::RefCondition,
+    pin: crate::storage::RefCondition,
 }
-fn number(value: i64) -> Result<u64, SemanticError> {
-    u64::try_from(value)
-        .map_err(|_| fault("consumer/invalid-coordinate", "negative durable coordinate"))
-}
-fn sql(value: u64) -> Result<i64, SemanticError> {
-    i64::try_from(value).map_err(|_| {
-        fault(
-            "consumer/coordinate-overflow",
-            "durable coordinate exceeds PostgreSQL bigint",
-        )
-    })
-}
-fn hash(value: Vec<u8>) -> Result<Digest, SemanticError> {
-    value
-        .try_into()
-        .map_err(|_| fault("consumer/invalid-hash", "durable hash has the wrong length"))
-}
+
 fn fault(code: &'static str, message: &str) -> SemanticError {
     SemanticError::new(ErrorCategory::Fault, code, message)
 }
 fn unavailable(code: &'static str, message: &str) -> SemanticError {
     SemanticError::new(ErrorCategory::Unavailable, code, message)
 }
-fn head(client: &mut impl GenericClient, database: &str) -> Result<Head, SemanticError> {
-    let row = client.query_opt("SELECT d.lineage_id,h.log_generation,h.basis_t,h.tx_hash,d.genesis_hash FROM atomic_databases d JOIN atomic_heads h USING(database_id) WHERE d.database_id=$1", &[&database])
-        .map_err(|e| postgres_error("consumer/head", e))?.ok_or_else(|| unavailable("consumer/database-unavailable", "consumer database no longer exists"))?;
-    Ok(Head {
-        lineage: row.get(0),
-        generation: number(row.get(1))?,
-        t: number(row.get(2))?,
-        hash: hash(row.get(3))?,
-        genesis: hash(row.get(4))?,
+fn history_error(error: SemanticError) -> SemanticError {
+    if error.code == "storage/missing-object" {
+        unavailable(
+            "consumer/history-unavailable",
+            "Required authenticated log history is not retained",
+        )
+    } else if error.code == "storage/log-read-limit" {
+        oversized()
+    } else {
+        error
+    }
+}
+fn oversized() -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Busy,
+        "consumer/event-too-large",
+        "Transaction exceeds the configured encoded/decoded event byte limit",
+    )
+}
+fn transport(error: &SemanticError) -> bool {
+    error.category == ErrorCategory::Unavailable
+        && (error.code == "storage/postgres"
+            || error
+                .details
+                .get("postgres_transport")
+                .is_some_and(|v| v == "true"))
+}
+fn checkpoint_key(identity: [u8; 16], principal: &str, name: &str) -> String {
+    let mut scope = b"atomic/change-consumer/v1".to_vec();
+    for value in [principal, name] {
+        scope.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        scope.extend_from_slice(value.as_bytes());
+    }
+    let digest = crate::sha256(&scope)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    format!(
+        "consumers/{}/{digest}",
+        crate::storage::engine::identity_string(identity)
+    )
+}
+fn encode_checkpoint(checkpoint: &ChangeCheckpoint, identity: [u8; 16]) -> Vec<u8> {
+    let mut bytes = CHECKPOINT_MAGIC.to_vec();
+    bytes.extend_from_slice(&identity);
+    bytes.extend_from_slice(&checkpoint.generation.to_be_bytes());
+    bytes.extend_from_slice(&checkpoint.last_t.to_be_bytes());
+    bytes.extend_from_slice(&checkpoint.commit_hash);
+    bytes.extend_from_slice(&checkpoint.prefix_hash);
+    bytes
+}
+fn decode_checkpoint(
+    reference: &crate::storage::Reference,
+) -> Result<ChangeCheckpoint, SemanticError> {
+    let bytes = reference.value.as_deref().ok_or_else(|| {
+        unavailable(
+            "consumer/checkpoint-retired",
+            "Checkpoint is retired; choose a new consumer name",
+        )
+    })?;
+    if bytes.len() != CHECKPOINT_BYTES || &bytes[..8] != CHECKPOINT_MAGIC {
+        return Err(fault(
+            "consumer/checkpoint-format",
+            "Checkpoint has an invalid current encoding",
+        ));
+    }
+    let identity: [u8; 16] = bytes[8..24].try_into().unwrap();
+    let last_t = u64::from_be_bytes(bytes[32..40].try_into().unwrap());
+    let commit_hash: Digest = bytes[40..72].try_into().unwrap();
+    let prefix_hash: Digest = bytes[72..104].try_into().unwrap();
+    if identity == [0; 16]
+        || crate::t_to_tx(last_t).is_err()
+        || (last_t == 0) != (commit_hash == [0; 32])
+        || (last_t == 0) != (prefix_hash == [0; 32])
+    {
+        return Err(fault(
+            "consumer/checkpoint-format",
+            "Checkpoint identity or transaction coordinate is invalid",
+        ));
+    }
+    Ok(ChangeCheckpoint {
+        lineage_id: crate::storage::engine::identity_string(identity),
+        generation: u64::from_be_bytes(bytes[24..32].try_into().unwrap()),
+        last_t,
+        commit_hash,
+        prefix_hash,
+        // The public token starts at revision zero; the generic reference
+        // starts at one. The provider revision is the only CAS authority.
+        revision: reference.revision.checked_sub(1).ok_or_else(|| {
+            fault(
+                "consumer/invalid-coordinate",
+                "Reference revision must be positive",
+            )
+        })?,
     })
 }
 fn verify_head(head: &Head, checkpoint: &ChangeCheckpoint) -> Result<(), SemanticError> {
-    if head.lineage != checkpoint.lineage_id {
+    if crate::storage::engine::identity_string(head.identity) != checkpoint.lineage_id {
         return Err(unavailable(
             "consumer/lineage-changed",
-            "database name now identifies another lineage",
+            "Database publication belongs to another lineage",
         ));
     }
     if head.generation != checkpoint.generation {
         return Err(unavailable(
             "consumer/generation-changed",
-            "checkpoint predates excision; explicitly choose a new consumer in the current generation",
+            "Checkpoint predates excision; choose a new consumer in the current generation",
         ));
     }
-    if checkpoint.last_t > head.t {
+    if checkpoint.last_t > head.log.basis_t() {
         return Err(fault(
             "consumer/checkpoint-future",
-            "checkpoint is beyond the authenticated log head",
+            "Checkpoint is beyond the authenticated log head",
         ));
     }
     Ok(())
 }
-fn pin(
-    client: &mut impl GenericClient,
-    database: &str,
-    checkpoint: &ChangeCheckpoint,
-) -> Result<Head, SemanticError> {
-    let acquired: bool = client.query_one("SELECT COALESCE(pg_try_advisory_xact_lock_shared(atomic_log_generation_pin_key($1,$2)),false)", &[&database, &sql(checkpoint.generation)?])
-        .map_err(|e| postgres_error("consumer/generation-pin",e))?.get(0);
-    if !acquired {
-        return Err(unavailable(
+fn required(
+    store: &mut crate::storage::PgBlockStore,
+    id: Digest,
+) -> Result<Vec<u8>, SemanticError> {
+    store.get(id)?.ok_or_else(|| {
+        unavailable(
             "consumer/history-unavailable",
-            "consumer generation is being reclaimed",
-        ));
-    }
-    let current = head(client, database)?;
-    verify_head(&current, checkpoint)?;
-    Ok(current)
-}
-fn predecessor(
-    client: &mut impl GenericClient,
-    database: &str,
-    generation: u64,
-    t: u64,
-    genesis: Digest,
-) -> Result<Digest, SemanticError> {
-    if t == 1 {
-        return Ok(genesis);
-    }
-    let row = if generation == 0 {
-        client.query_opt("SELECT tx_hash FROM atomic_transactions WHERE database_id=$1 AND basis_t=$2", &[&database,&sql(t-1)?])
-    } else {
-        client.query_opt("SELECT tx_hash FROM atomic_generation_transactions WHERE database_id=$1 AND generation=$2 AND basis_t=$3", &[&database,&sql(generation)?,&sql(t-1)?])
-    }.map_err(|e| postgres_error("consumer/predecessor",e))?.ok_or_else(|| unavailable("consumer/history-unavailable", "checkpoint predecessor is not retained"))?;
-    hash(row.get(0))
+            "Publication object is not retained",
+        )
+    })
 }
 
-fn admit_payload(
-    client: &mut impl GenericClient,
-    database: &str,
-    generation: u64,
-    t: u64,
-    limit: usize,
+/// A short capture protects only this operation. No capture, snapshot or log
+/// page is retained by the consumer between calls, including while unacked.
+fn with_head<T>(
+    store: &mut crate::storage::PgBlockStore,
+    reader: &crate::storage::BlockReader,
+    database: &crate::storage::BlockDatabase,
+    f: impl FnOnce(&mut crate::storage::PgBlockStore, &Head) -> Result<T, SemanticError>,
+) -> Result<T, SemanticError> {
+    let mut captured = None;
+    for _ in 0..MAX_PUBLICATION_RETRIES {
+        match reader.pin_reference(&database.reference_key()) {
+            Ok(capture) => {
+                captured = Some(capture);
+                break;
+            }
+            Err(error)
+                if matches!(
+                    error.code,
+                    "storage/capture-conflict" | "storage/capture-gc-conflict"
+                ) =>
+            {
+                continue;
+            }
+            Err(error)
+                if matches!(
+                    error.code,
+                    "storage/reference-not-found"
+                        | "storage/reference-retired"
+                        | "catalog/database-retired"
+                ) =>
+            {
+                return Err(unavailable(
+                    "consumer/database-unavailable",
+                    "Consumer database identity is no longer active",
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    let capture = captured.ok_or_else(busy_head)?;
+    let result = (|| {
+        let id = capture.root_id();
+        let root = crate::storage::root::DatabaseRoot::decode(&id, &required(store, id)?)?;
+        if root.identity != database.identity {
+            return Err(unavailable(
+                "consumer/lineage-changed",
+                "Database publication belongs to another lineage",
+            ));
+        }
+        let metadata = root
+            .metadata
+            .ok_or_else(|| fault("consumer/head-format", "Publication lacks metadata"))?;
+        let metadata =
+            crate::storage::SnapshotMetadata::decode(&metadata, &required(store, metadata)?)?;
+        let log = match root.log {
+            Some(id) => crate::storage::log::LogRoot::open(store, id).map_err(history_error)?,
+            None => crate::storage::log::LogRoot::empty(),
+        };
+        if metadata.identity != root.identity
+            || metadata.basis != root.basis
+            || log.basis_t() != root.basis
+            || (root.basis != 0
+                && (log.eidx_frontier() != metadata.eidx_frontier
+                    || log.reserved_frontier() != metadata.reserved_frontier))
+        {
+            return Err(fault(
+                "consumer/head-format",
+                "Publication log and metadata coordinates disagree",
+            ));
+        }
+        f(
+            store,
+            &Head {
+                identity: root.identity,
+                generation: metadata.generation,
+                log,
+                publication: capture.source_condition(),
+                pin: capture.condition(),
+            },
+        )
+    })();
+    // A cleanup transport failure conservatively retains the short pin. It
+    // must not turn a known committed checkpoint CAS into an unknown result.
+    let _ = capture.release();
+    result
+}
+fn authenticate_checkpoint(
+    store: &mut crate::storage::PgBlockStore,
+    head: &Head,
+    checkpoint: &ChangeCheckpoint,
+    max_bytes: usize,
 ) -> Result<(), SemanticError> {
-    let row = if generation == 0 {
-        client.query_opt("SELECT octet_length(payload)::bigint FROM atomic_transactions WHERE database_id=$1 AND basis_t=$2", &[&database,&sql(t)?])
-    } else {
-        client.query_opt("SELECT octet_length(c.payload)::bigint FROM atomic_generation_transactions t JOIN atomic_transaction_contents c ON c.content_hash=t.content_hash WHERE t.database_id=$1 AND t.generation=$2 AND t.basis_t=$3", &[&database,&sql(generation)?,&sql(t)?])
-    }.map_err(|e|postgres_error("consumer/event-size",e))?.ok_or_else(||unavailable("consumer/history-unavailable","transaction is not retained"))?;
-    if number(row.get(0))? > limit as u64 {
-        return Err(SemanticError::new(
-            ErrorCategory::Busy,
-            "consumer/event-too-large",
-            "transaction exceeds configured event byte limit",
+    verify_head(head, checkpoint)?;
+    if checkpoint.last_t == 0 {
+        return Ok(());
+    }
+    let record = head
+        .log
+        .read_record_bounded(store, checkpoint.last_t, max_bytes)
+        .map_err(history_error)?
+        .ok_or_else(|| {
+            unavailable(
+                "consumer/history-unavailable",
+                "Checkpoint transaction is not retained",
+            )
+        })?;
+    if record.id != checkpoint.commit_hash {
+        return Err(fault(
+            "consumer/checkpoint-hash",
+            "Checkpoint differs from the authenticated transaction",
+        ));
+    }
+    verify_prefix(store, head, checkpoint)?;
+    admit_decoded(&record, max_bytes)?;
+    Ok(())
+}
+
+fn verify_prefix(
+    store: &mut crate::storage::PgBlockStore,
+    head: &Head,
+    checkpoint: &ChangeCheckpoint,
+) -> Result<(), SemanticError> {
+    if head
+        .log
+        .prefix_hash(store, checkpoint.last_t)
+        .map_err(history_error)?
+        .unwrap_or([0; 32])
+        != checkpoint.prefix_hash
+    {
+        return Err(fault(
+            "consumer/checkpoint-prefix",
+            "Previously consumed log prefix changed without a generation transition",
         ));
     }
     Ok(())
+}
+fn admit_decoded(
+    record: &crate::storage::log::LogRecord,
+    limit: usize,
+) -> Result<usize, SemanticError> {
+    let bytes = record
+        .entry
+        .tx_data
+        .iter()
+        .fold(record.encoded_bytes as usize, |n, d| {
+            n.saturating_add(d.retained_bytes() as usize)
+        });
+    if bytes > limit {
+        return Err(oversized());
+    }
+    Ok(bytes)
+}
+fn busy_head() -> SemanticError {
+    SemanticError::new(
+        ErrorCategory::Busy,
+        "consumer/publication-busy",
+        "Publication changed repeatedly; retry without advancing this checkpoint",
+    )
 }
 
 impl ChangeConsumer {
@@ -230,127 +417,116 @@ impl ChangeConsumer {
         name: impl Into<String>,
         config: ChangeConsumerConfig,
     ) -> Result<Self, SemanticError> {
+        use crate::storage::{
+            BatchOutcome, BlockDatabase, BlockReader, PgBlockStore, RefChange, RefCondition,
+        };
         config.observation.validate()?;
-        let database = database.into();
         let name = name.into();
-        if name.is_empty() || name.len() > 512 || config.max_event_bytes == 0 {
+        if name.is_empty() || name.len() > 512 || name.contains('\0') || config.max_event_bytes == 0
+        {
             return Err(SemanticError::incorrect(
                 "consumer/invalid-config",
-                "consumer name must contain 1..512 bytes and event byte limit must be positive",
+                "Consumer name must contain 1..512 non-NUL bytes and event byte limit must be positive",
             ));
         }
-        let mut client = connection.connect_for("consumer/connect")?;
-        verify_schema_compatibility(&mut client)?;
-        // Subscribe before taking the durable endpoint; a concurrent commit
-        // is therefore either in this read or leaves a wakeup for next().
-        let listener = Some(NoticeListener::connect(&connection, &database)?);
-        let mut tx = client
-            .transaction()
-            .map_err(|e| postgres_error("consumer/open-begin", e))?;
-        let initial = head(&mut tx, &database)?;
-        let genesis: Vec<u8> = tx
-            .query_one(
-                "SELECT genesis FROM atomic_databases WHERE database_id=$1",
-                &[&database],
-            )
-            .map_err(|e| postgres_error("consumer/genesis", e))?
-            .get(0);
-        if crate::sha256(&genesis) != initial.genesis {
-            return Err(fault(
-                "consumer/genesis-hash",
-                "canonical genesis does not match its digest",
-            ));
-        }
-        crate::decode_genesis(&genesis)?;
-        tx.execute("INSERT INTO atomic_change_checkpoints(database_id,consumer_name,lineage_id,generation,last_t,commit_hash,revision) VALUES($1,$2,$3,$4,0,$5,0) ON CONFLICT DO NOTHING", &[&database,&name,&initial.lineage,&sql(initial.generation)?,&&initial.genesis[..]])
-            .map_err(|e|postgres_error("consumer/checkpoint-create",e))?;
-        let row = tx.query_one("SELECT lineage_id,generation,last_t,commit_hash,revision FROM atomic_change_checkpoints WHERE database_id=$1 AND consumer_name=$2 AND checkpoint_owner=current_user", &[&database,&name])
-            .map_err(|e|postgres_error("consumer/checkpoint-open",e))?;
-        let checkpoint = ChangeCheckpoint {
-            lineage_id: row.get(0),
-            generation: number(row.get(1))?,
-            last_t: number(row.get(2))?,
-            commit_hash: hash(row.get(3))?,
-            revision: number(row.get(4))?,
-        };
-        let current = pin(&mut tx, &database, &checkpoint)?;
-        if checkpoint.last_t == 0 {
-            if checkpoint.commit_hash != current.genesis {
-                return Err(fault(
-                    "consumer/checkpoint-hash",
-                    "checkpoint does not identify canonical genesis",
-                ));
-            }
-        } else {
-            admit_payload(
-                &mut tx,
-                &database,
-                checkpoint.generation,
-                checkpoint.last_t,
-                config.max_event_bytes,
-            )?;
-            let previous = predecessor(
-                &mut tx,
-                &database,
-                checkpoint.generation,
-                checkpoint.last_t,
-                current.genesis,
-            )?;
-            let rows = read_authenticated_log_range(
-                &mut tx,
-                &database,
-                checkpoint.generation,
-                checkpoint.last_t - 1,
-                checkpoint.last_t,
-                previous,
-            )?;
-            let observed = rows
-                .last()
-                .ok_or_else(|| {
-                    unavailable(
-                        "consumer/history-unavailable",
-                        "checkpoint transaction is not retained",
-                    )
-                })?
-                .tx_hash;
-            if observed != checkpoint.commit_hash
-                || (checkpoint.last_t == current.t && observed != current.hash)
-            {
-                return Err(fault(
-                    "consumer/checkpoint-hash",
-                    "checkpoint does not identify the authenticated transaction",
-                ));
+        let mut store = PgBlockStore::connect(&connection)?;
+        let database =
+            BlockDatabase::resolve_in(&mut store, &database.into())?.ok_or_else(|| {
+                unavailable(
+                    "consumer/database-unavailable",
+                    "Consumer database name is not active",
+                )
+            })?;
+        let principal = store.principal()?;
+        let key = checkpoint_key(database.route, &principal, &name);
+        let reader = BlockReader::connect(&connection, Default::default())?;
+        // Listen before reading a durable endpoint; hints never supply data.
+        let listener = Some(NoticeListener::connect(
+            &connection,
+            &crate::storage::engine::identity_string(database.route),
+        )?);
+        for _ in 0..MAX_PUBLICATION_RETRIES {
+            let checkpoint = with_head(&mut store, &reader, &database, |store, head| {
+                if let Some(reference) = store.read_ref(&key)? {
+                    let checkpoint = decode_checkpoint(&reference)?;
+                    authenticate_checkpoint(store, head, &checkpoint, config.max_event_bytes)?;
+                    return Ok(Some(checkpoint));
+                }
+                let checkpoint = ChangeCheckpoint {
+                    lineage_id: crate::storage::engine::identity_string(database.identity),
+                    generation: head.generation,
+                    last_t: 0,
+                    commit_hash: [0; 32],
+                    prefix_hash: [0; 32],
+                    revision: 0,
+                };
+                match store.compare_exchange_many(
+                    &[
+                        RefCondition {
+                            key: key.clone(),
+                            expected: None,
+                        },
+                        head.publication.clone(),
+                        head.pin.clone(),
+                    ],
+                    &[RefChange {
+                        key: key.clone(),
+                        value: Some(encode_checkpoint(&checkpoint, database.identity)),
+                    }],
+                )? {
+                    BatchOutcome::Applied(_) => Ok(Some(checkpoint)),
+                    BatchOutcome::Conflict(_) => Ok(None),
+                }
+            })?;
+            if let Some(checkpoint) = checkpoint {
+                return Ok(Self {
+                    connection,
+                    database,
+                    principal,
+                    checkpoint_key: key,
+                    config,
+                    store,
+                    reader,
+                    listener,
+                    checkpoint,
+                    pending: None,
+                    stats: Default::default(),
+                });
             }
         }
-        tx.commit()
-            .map_err(|e| postgres_error("consumer/open-commit", e))?;
-        Ok(Self {
-            connection,
-            database,
-            name,
-            config,
-            client,
-            listener,
-            checkpoint,
-            pending: None,
-            stats: ChangeConsumerStats::default(),
-        })
+        Err(busy_head())
     }
     pub fn checkpoint(&self) -> &ChangeCheckpoint {
         &self.checkpoint
     }
     pub fn stats(&self) -> ChangeConsumerStats {
-        let mut stats = self.stats;
-        stats.unacknowledged = self.pending.is_some();
-        stats
+        ChangeConsumerStats {
+            unacknowledged: self.pending.is_some(),
+            ..self.stats
+        }
     }
-
-    /// Reconnect transport only. Durable progress is never silently changed;
-    /// another consumer's advance is detected by checkpoint CAS at acknowledge.
+    /// Reconnect transport, never silently change identity or durable progress.
     pub fn reconnect(&mut self) -> Result<(), SemanticError> {
-        self.client = self.connection.connect_for("consumer/reconnect")?;
-        self.listener = Some(NoticeListener::connect(&self.connection, &self.database)?);
-        verify_head(&head(&mut self.client, &self.database)?, &self.checkpoint)?;
+        self.store = crate::storage::PgBlockStore::connect(&self.connection)?;
+        if self.store.principal()? != self.principal {
+            return Err(unavailable(
+                "consumer/principal-changed",
+                "Reconnected PostgreSQL principal differs",
+            ));
+        }
+        self.reader.reconnect()?;
+        self.listener = Some(NoticeListener::connect(
+            &self.connection,
+            &crate::storage::engine::identity_string(self.database.route),
+        )?);
+        with_head(
+            &mut self.store,
+            &self.reader,
+            &self.database,
+            |store, head| {
+                authenticate_checkpoint(store, head, &self.checkpoint, self.config.max_event_bytes)
+            },
+        )?;
         self.stats.reconnects = self.stats.reconnects.saturating_add(1);
         Ok(())
     }
@@ -358,8 +534,7 @@ impl ChangeConsumer {
         static NEVER: AtomicBool = AtomicBool::new(false);
         self.next_with_cancel(timeout, &NEVER)
     }
-    /// Timeout/cancellation bound idle waiting, not an already-issued SQL
-    /// statement; the configured PostgreSQL I/O policy bounds that operation.
+    /// Timeout/cancellation bound idle waiting, not already-issued provider I/O.
     pub fn next_with_cancel(
         &mut self,
         timeout: Duration,
@@ -369,11 +544,11 @@ impl ChangeConsumer {
             return Err(SemanticError::new(
                 ErrorCategory::Busy,
                 "consumer/unacknowledged",
-                "acknowledge the delivered event before requesting another",
+                "Acknowledge the delivered event before requesting another",
             ));
         }
         let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
-            SemanticError::incorrect("consumer/timeout-overflow", "consumer timeout is too large")
+            SemanticError::incorrect("consumer/timeout-overflow", "Consumer timeout is too large")
         })?;
         let mut check = true;
         let mut repair_at = Instant::now();
@@ -382,15 +557,14 @@ impl ChangeConsumer {
                 return Err(SemanticError::new(
                     ErrorCategory::Interrupted,
                     "consumer/cancelled",
-                    "consumer wait was cancelled",
+                    "Consumer wait was cancelled",
                 ));
             }
             if check || Instant::now() >= repair_at {
-                let result = self.read_next();
-                match result {
+                match self.read_next() {
                     Ok(Some(event)) => return Ok(Some(event)),
                     Ok(None) => {}
-                    Err(error) if is_postgres_connection_error(&error) => {
+                    Err(error) if transport(&error) => {
                         self.reconnect()?;
                         if let Some(event) = self.read_next()? {
                             return Ok(Some(event));
@@ -409,12 +583,12 @@ impl ChangeConsumer {
                 .saturating_duration_since(now)
                 .min(repair_at.saturating_duration_since(now))
                 .min(Duration::from_millis(25));
-            let result = self
+            match self
                 .listener
                 .as_mut()
                 .expect("consumer listener exists")
-                .wait(wait);
-            match result {
+                .wait(wait)
+            {
                 Ok(true) => {
                     self.stats.notices = self.stats.notices.saturating_add(1);
                     check = true;
@@ -429,75 +603,61 @@ impl ChangeConsumer {
     }
     fn read_next(&mut self) -> Result<Option<ChangeEvent>, SemanticError> {
         self.stats.gap_checks = self.stats.gap_checks.saturating_add(1);
-        let mut tx = self
-            .client
-            .transaction()
-            .map_err(|e| postgres_error("consumer/read-begin", e))?;
-        let current = pin(&mut tx, &self.database, &self.checkpoint)?;
-        if current.t == self.checkpoint.last_t {
-            if current.hash != self.checkpoint.commit_hash {
-                return Err(fault(
-                    "consumer/head-hash",
-                    "checkpoint and current head disagree",
-                ));
-            }
-            tx.commit()
-                .map_err(|e| postgres_error("consumer/read-commit", e))?;
+        let result = with_head(
+            &mut self.store,
+            &self.reader,
+            &self.database,
+            |store, head| {
+                verify_head(head, &self.checkpoint)?;
+                verify_prefix(store, head, &self.checkpoint)?;
+                if self.checkpoint.last_t != 0
+                    && head
+                        .log
+                        .record_id(store, self.checkpoint.last_t)
+                        .map_err(history_error)?
+                        != Some(self.checkpoint.commit_hash)
+                {
+                    return Err(fault(
+                        "consumer/checkpoint-hash",
+                        "Checkpoint is not in the captured authenticated log",
+                    ));
+                }
+                if head.log.basis_t() == self.checkpoint.last_t {
+                    return Ok(None);
+                }
+                let next = self.checkpoint.last_t + 1;
+                let record = head
+                    .log
+                    .read_record_bounded(store, next, self.config.max_event_bytes)
+                    .map_err(history_error)?
+                    .ok_or_else(|| {
+                        unavailable(
+                            "consumer/history-unavailable",
+                            "Next transaction is not retained",
+                        )
+                    })?;
+                let accounted = admit_decoded(&record, self.config.max_event_bytes)?;
+                let prefix = head
+                    .log
+                    .prefix_hash(store, next)
+                    .map_err(history_error)?
+                    .expect("positive retained transaction");
+                Ok(Some((record, accounted, prefix)))
+            },
+        )?;
+        let Some((record, accounted_bytes, prefix_hash)) = result else {
             return Ok(None);
-        }
-        let next = self.checkpoint.last_t + 1;
-        admit_payload(
-            &mut tx,
-            &self.database,
-            self.checkpoint.generation,
-            next,
-            self.config.max_event_bytes,
-        )?;
-        let mut rows = read_authenticated_log_range(
-            &mut tx,
-            &self.database,
-            self.checkpoint.generation,
-            self.checkpoint.last_t,
-            next,
-            self.checkpoint.commit_hash,
-        )?;
-        let row = rows.pop().ok_or_else(|| {
-            unavailable(
-                "consumer/history-unavailable",
-                "next transaction is not retained",
-            )
-        })?;
-        if next == current.t && row.tx_hash != current.hash {
-            return Err(fault(
-                "consumer/head-hash",
-                "transaction does not match current head",
-            ));
-        }
-        let accounted = row
-            .transaction
-            .tx_data
-            .iter()
-            .fold(row.payload.len(), |n, d| {
-                n.saturating_add(d.retained_bytes() as usize)
-            });
-        if accounted > self.config.max_event_bytes {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "consumer/event-too-large",
-                "decoded transaction exceeds configured event byte limit",
-            ));
-        }
-        tx.commit()
-            .map_err(|e| postgres_error("consumer/read-commit", e))?;
+        };
         let checkpoint = ChangeCheckpoint {
             lineage_id: self.checkpoint.lineage_id.clone(),
             generation: self.checkpoint.generation,
-            last_t: next,
-            commit_hash: row.tx_hash,
+            last_t: record.entry.basis_t,
+            commit_hash: record.id,
+            prefix_hash,
             revision: self.checkpoint.revision.checked_add(1).ok_or_else(|| {
                 fault(
                     "consumer/revision-overflow",
-                    "checkpoint revision exhausted",
+                    "Checkpoint revision exhausted",
                 )
             })?,
         };
@@ -506,43 +666,144 @@ impl ChangeConsumer {
         self.stats.payload_bytes = self
             .stats
             .payload_bytes
-            .saturating_add(row.payload.len() as u64);
+            .saturating_add(record.encoded_bytes);
         Ok(Some(ChangeEvent {
             transaction: LogTransaction {
-                t: next,
-                data: row.transaction.tx_data,
+                t: record.entry.basis_t,
+                data: record.entry.tx_data,
             },
             checkpoint,
-            accounted_bytes: accounted,
+            accounted_bytes,
         }))
     }
-    /// Call only after processing the event. CAS prevents stale instances from
-    /// overwriting progress; the external effect and this write are not atomic.
-    /// On ambiguous transport failure, reopen and use the persisted checkpoint.
+    /// Acknowledgement and external effects are not atomic. On ambiguous
+    /// transport failure reopen to discover the persisted checkpoint.
     pub fn acknowledge(&mut self, checkpoint: &ChangeCheckpoint) -> Result<(), SemanticError> {
+        use crate::storage::{BatchOutcome, RefChange, RefCondition};
         if self.pending.as_ref() != Some(checkpoint) {
             return Err(SemanticError::incorrect(
                 "consumer/not-delivered",
-                "checkpoint is not this consumer's pending contiguous event",
+                "Checkpoint is not this consumer's pending contiguous event",
             ));
         }
-        verify_head(&head(&mut self.client, &self.database)?, &self.checkpoint)?;
-        let updated=self.client.execute("UPDATE atomic_change_checkpoints SET last_t=$3,commit_hash=$4,revision=$5 WHERE database_id=$1 AND consumer_name=$2 AND checkpoint_owner=current_user AND lineage_id=$6 AND generation=$7 AND last_t=$8 AND commit_hash=$9 AND revision=$10 AND EXISTS (SELECT 1 FROM atomic_heads h JOIN atomic_databases d USING(database_id) WHERE h.database_id=$1 AND h.log_generation=$7 AND d.lineage_id=$6)", &[&self.database,&self.name,&sql(checkpoint.last_t)?,&&checkpoint.commit_hash[..],&sql(checkpoint.revision)?,&self.checkpoint.lineage_id,&sql(self.checkpoint.generation)?,&sql(self.checkpoint.last_t)?,&&self.checkpoint.commit_hash[..],&sql(self.checkpoint.revision)?]);
-        let updated=updated.map_err(|e| {
-            let error=postgres_error("consumer/checkpoint-update",e);
-            if is_postgres_connection_error(&error) { SemanticError::new(ErrorCategory::UnknownOutcome,"consumer/checkpoint-unknown-outcome","checkpoint acknowledgment may have committed; reopen to resolve durable progress") } else { error }
-        })?;
-        if updated != 1 {
-            verify_head(&head(&mut self.client, &self.database)?, &self.checkpoint)?;
-            return Err(SemanticError::new(
-                ErrorCategory::Conflict,
-                "consumer/checkpoint-conflict",
-                "another consumer advanced this checkpoint; reopen before continuing",
-            ));
+        for _ in 0..MAX_PUBLICATION_RETRIES {
+            let applied = with_head(
+                &mut self.store,
+                &self.reader,
+                &self.database,
+                |store, head| {
+                    verify_head(head, &self.checkpoint)?;
+                    verify_prefix(store, head, checkpoint)?;
+                    if head
+                        .log
+                        .record_id(store, checkpoint.last_t)
+                        .map_err(history_error)?
+                        != Some(checkpoint.commit_hash)
+                    {
+                        return Err(fault(
+                            "consumer/checkpoint-hash",
+                            "Delivered transaction is not in the current authenticated log",
+                        ));
+                    }
+                    let previous = store.read_ref(&self.checkpoint_key)?;
+                    if previous
+                        .as_ref()
+                        .map(decode_checkpoint)
+                        .transpose()?
+                        .as_ref()
+                        != Some(&self.checkpoint)
+                    {
+                        return Err(SemanticError::conflict(
+                            "consumer/checkpoint-conflict",
+                            "Another consumer advanced this checkpoint; reopen before continuing",
+                        ));
+                    }
+                    let conditions = [
+                        RefCondition {
+                            key: self.checkpoint_key.clone(),
+                            expected: Some(self.checkpoint.revision + 1),
+                        },
+                        head.publication.clone(),
+                        head.pin.clone(),
+                    ];
+                    let changes = [RefChange {
+                        key: self.checkpoint_key.clone(),
+                        value: Some(encode_checkpoint(checkpoint, self.database.identity)),
+                    }];
+                    let outcome = store.compare_exchange_many(&conditions, &changes).map_err(|error| {
+                        if transport(&error) || error.category == ErrorCategory::UnknownOutcome {
+                            SemanticError::new(
+                                ErrorCategory::UnknownOutcome,
+                                "consumer/checkpoint-unknown-outcome",
+                                "Acknowledgement may have committed; reopen to resolve durable progress",
+                            )
+                        } else { error }
+                    })?;
+                    Ok(matches!(outcome, BatchOutcome::Applied(_)))
+                },
+            )?;
+            if applied {
+                self.checkpoint = checkpoint.clone();
+                self.pending = None;
+                self.stats.acknowledged = self.stats.acknowledged.saturating_add(1);
+                return Ok(());
+            }
         }
-        self.checkpoint = checkpoint.clone();
-        self.pending = None;
-        self.stats.acknowledged = self.stats.acknowledged.saturating_add(1);
-        Ok(())
+        Err(busy_head())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::storage::Reference;
+
+    #[test]
+    fn checkpoint_codec_is_bounded_current_and_keeps_provider_cas_revision() {
+        let identity = [7; 16];
+        let checkpoint = ChangeCheckpoint {
+            lineage_id: crate::storage::engine::identity_string(identity),
+            generation: 2,
+            last_t: 3,
+            commit_hash: [8; 32],
+            prefix_hash: [9; 32],
+            revision: 5,
+        };
+        let bytes = encode_checkpoint(&checkpoint, identity);
+        assert_eq!(bytes.len(), CHECKPOINT_BYTES);
+        let reference = Reference {
+            revision: 6,
+            value: Some(bytes.clone()),
+        };
+        assert_eq!(decode_checkpoint(&reference).unwrap(), checkpoint);
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            decode_checkpoint(&Reference {
+                revision: 6,
+                value: Some(trailing)
+            })
+            .unwrap_err()
+            .code,
+            "consumer/checkpoint-format"
+        );
+        assert_eq!(
+            decode_checkpoint(&Reference {
+                revision: 6,
+                value: None
+            })
+            .unwrap_err()
+            .code,
+            "consumer/checkpoint-retired"
+        );
+        assert_eq!(
+            decode_checkpoint(&Reference {
+                revision: 0,
+                value: Some(bytes)
+            })
+            .unwrap_err()
+            .code,
+            "consumer/invalid-coordinate"
+        );
     }
 }

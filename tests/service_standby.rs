@@ -18,10 +18,7 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&fixture.connection).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -84,10 +81,7 @@ fn takeover_preserves_indexing_native_registry_partition_defaults_and_captured_i
             WAIT,
         )
         .unwrap();
-    PostgresIndexer::connect(&fixture.connection, "items")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&fixture.connection, "items").unwrap();
     let partition = eid_to_eidx(
         installed
             .db_after
@@ -276,23 +270,54 @@ fn cancellation_during_blocked_activation_cleans_up_after_the_driver_returns() {
         return;
     };
     let mut observer = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let mut blocker = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let mut blocked = blocker.transaction().unwrap();
-    blocked
-        .query_one(
-            "SELECT database_id FROM atomic_databases WHERE database_id='items' FOR UPDATE",
-            &[],
-        )
+    observer
+        .batch_execute("SET statement_timeout='2s'")
         .unwrap();
-    let mut standby = TransactionStandby::start(
+    let mut blocker = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
+    let database = DatabaseCatalog::connect(&fixture.connection)
+        .unwrap()
+        .resolve("items")
+        .unwrap();
+    let lease_key = format!("writers/{}", database.database_id);
+    // Match the generic reference guard used even when the lease is absent.
+    // Catalog resolution reads immutable objects synchronously before start()
+    // returns; a table lock would block the caller before it can request stop.
+    let digest = sha256(format!("atomic-storage\0{}\0{lease_key}", fixture.schema).as_bytes());
+    let guard = i64::from_be_bytes(digest[..8].try_into().unwrap());
+    let high = ((guard as u64) >> 32) as i64;
+    let low = ((guard as u64) & u32::MAX as u64) as i64;
+    let connection = PostgresConnectionConfig::plaintext(&fixture.connection)
+        .with_io_policy(PostgresIoPolicy {
+            statement_timeout: Some(Duration::from_secs(10)),
+            lock_timeout: Some(Duration::from_secs(10)),
+            ..Default::default()
+        })
+        .unwrap();
+    // On assertion unwind, drop the blocking transaction before joining the
+    // contender; its bounded driver call can then finish and clean up normally.
+    let mut standby;
+    let mut blocked = blocker.transaction().unwrap();
+    let blocker_pid: i32 = blocked
+        .query_one("SELECT pg_backend_pid()", &[])
+        .unwrap()
+        .get(0);
+    blocked
+        .query_one("SELECT pg_catalog.pg_advisory_xact_lock($1)", &[&guard])
+        .unwrap();
+    standby = TransactionStandby::start_configured(
         config(&fixture.connection, "starting"),
+        connection,
         Duration::from_millis(10),
     )
     .unwrap();
-    // Fresh-schema native publication needs a content/build FK on the locked
-    // database row, after the genuine lease was acquired. No startup mock.
+    // The real activation driver is blocked on its own fixture's writer guard.
+    // Cancellation cannot interrupt a synchronous SQL call; it must discard
+    // and clean up any completed activation once the driver returns.
     until(|| {
-        observer.query_one("SELECT EXISTS(SELECT 1 FROM atomic_transactor_leases WHERE lease_scope='items' AND holder_id='starting' AND expires_at>clock_timestamp())", &[]).unwrap().get::<_, bool>(0)
+        observer.query_one(
+            "SELECT EXISTS(SELECT 1 FROM pg_catalog.pg_locks l WHERE l.locktype='advisory' AND NOT l.granted AND l.classid::bigint=$2 AND l.objid::bigint=$3 AND l.objsubid=1 AND $1=ANY(pg_catalog.pg_blocking_pids(l.pid)))",
+            &[&blocker_pid, &high, &low],
+        ).unwrap().get::<_,bool>(0)
     });
     assert_eq!(standby.status(), StandbyStatus::Activating);
     standby.request_stop();

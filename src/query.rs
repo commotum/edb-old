@@ -1290,13 +1290,13 @@ fn validate_nested_sources(
                         ));
                     }
                 }
-                if let Term::Constant(search) = &args[1] {
-                    if !matches!(search, Value::String(_)) {
-                        return Err(SemanticError::incorrect(
-                            "query/fulltext-search",
-                            "fulltext search must be a string",
-                        ));
-                    }
+                if let Term::Constant(search) = &args[1]
+                    && !matches!(search, Value::String(_))
+                {
+                    return Err(SemanticError::incorrect(
+                        "query/fulltext-search",
+                        "fulltext search must be a string",
+                    ));
                 }
             }
             Clause::Predicate {
@@ -2241,7 +2241,7 @@ fn evaluate_pattern(
         // selected native index remains the same as in the one-row evaluator.
         let mut groups = BTreeMap::<_, Vec<Row>>::new();
         let mut bytes = 0usize;
-        while let Some(row) = input.next() {
+        for row in input.by_ref() {
             state.check(1)?;
             let entity = resolve_entity(database, &pattern.entity, &row)?;
             // A bound lookup ref that does not resolve denotes no entity.  Keep it

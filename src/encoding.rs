@@ -20,8 +20,8 @@ mod submission_codec;
 pub(crate) use program_query_codec::native_query_version;
 pub(crate) use program_query_codec::validate_native_query;
 pub(crate) use submission_codec::{
-    WireOutcome, WireReport, decode_submission, decode_submission_outcome, encode_submission,
-    encode_submission_outcome,
+    ExactEndpoint, WireOutcome, WireReport, decode_submission, decode_submission_outcome,
+    encode_submission, encode_submission_outcome,
 };
 
 pub type Digest = [u8; 32];
@@ -36,7 +36,6 @@ const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const MAX_BLOB_LEN: usize = 64 * 1024 * 1024;
-pub(crate) const MAX_BLOB_BYTES: usize = HEADER_LEN + MAX_BLOB_LEN + CHECKSUM_LEN;
 const MAX_VALUE_LEN: usize = 16 * 1024 * 1024;
 /// Total checked canonical blob size accepted for executable database code.
 /// Programs are serialized-pipeline inputs, so they receive a deliberately
@@ -47,8 +46,6 @@ const MAX_PROGRAM_INSTRUCTIONS: usize = 4_096;
 const MAX_PROGRAM_BLOCK_DEPTH: usize = 32;
 const KIND_TRANSACTION: u8 = 2;
 const KIND_REQUEST: u8 = 3;
-const KIND_INDEX_SEGMENT: u8 = 4;
-const KIND_INDEX_MANIFEST: u8 = 5;
 const KIND_PROGRAM: u8 = 6;
 const KIND_PROGRAM_REQUEST: u8 = 7;
 const KIND_PROGRAM_OUTPUT: u8 = 8;
@@ -64,36 +61,6 @@ pub struct DurableTransaction {
     pub eidx_frontier: u64,
     pub tempids: BTreeMap<String, u64>,
     pub tx_data: Vec<Datom>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct IndexSegment {
-    pub order: IndexOrder,
-    pub history: bool,
-    pub datoms: Vec<Datom>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SegmentRef {
-    pub order: IndexOrder,
-    pub history: bool,
-    pub ordinal: u32,
-    pub hash: Digest,
-    pub count: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct IndexManifest {
-    pub database_id: String,
-    /// This legacy flat-manifest coordinate is already the basis represented
-    /// by its stored index segments. It is not the logical head basis and
-    /// therefore needs no second `index_basis_t` field; ATIM V6 needs that
-    /// distinction because one tree publication also binds pending AVET work.
-    pub basis_t: u64,
-    pub tx_hash: Digest,
-    /// Exclusive low-42-bit entity-index issuance frontier.
-    pub eidx_frontier: u64,
-    pub segments: Vec<SegmentRef>,
 }
 
 pub fn sha256(bytes: &[u8]) -> Digest {
@@ -369,11 +336,11 @@ pub(crate) fn canonical_datom_hash(datom: &Datom) -> Result<Digest, SemanticErro
     Ok(sha256(&encoded))
 }
 
-/// Canonical typed datom bytes used by lineage transaction-content values.
+/// Canonical typed datom bytes, including valid native genesis assertions.
 /// Keeping this codec here prevents a second value representation from
 /// drifting away from the authoritative transaction/index encoding.
-pub(crate) fn canonical_datom_bytes(datom: &Datom) -> Result<Vec<u8>, SemanticError> {
-    validate_encoded_datom(datom)?;
+pub fn canonical_datom_bytes(datom: &Datom) -> Result<Vec<u8>, SemanticError> {
+    validate_index_datom_contents(std::slice::from_ref(datom))?;
     let mut encoded = Vec::new();
     encode_datom(&mut encoded, datom)?;
     Ok(encoded)
@@ -430,10 +397,8 @@ pub(crate) fn decode_canonical_value(bytes: &[u8]) -> Result<Value, SemanticErro
     Ok(value)
 }
 
-/// Validate datoms at a derived index boundary without forcing a caller to
-/// wrap them in the legacy flat-segment format. This remains the same semantic
-/// validation used by that format while allowing the new tree codec to own a
-/// distinct envelope.
+/// Validate exact datom contents and current index ordering independently of
+/// the persistent tree's physical envelope.
 pub(crate) fn validate_persistent_index_datoms(
     order: IndexOrder,
     datoms: &[Datom],
@@ -481,124 +446,6 @@ pub fn decode_genesis(bytes: &[u8]) -> Result<Vec<Datom>, SemanticError> {
     Ok(datoms)
 }
 
-pub fn encode_index_segment(segment: &IndexSegment) -> Result<Vec<u8>, SemanticError> {
-    validate_index_segment(segment)?;
-    let mut body = Vec::new();
-    body.push(index_order_tag(segment.order));
-    put_bool(&mut body, segment.history);
-    put_len(&mut body, segment.datoms.len())?;
-    for datom in &segment.datoms {
-        encode_datom(&mut body, datom)?;
-    }
-    encode_blob(KIND_INDEX_SEGMENT, &body)
-}
-
-pub fn decode_index_segment(bytes: &[u8]) -> Result<IndexSegment, SemanticError> {
-    let body = decode_blob(bytes, KIND_INDEX_SEGMENT)?;
-    let mut cursor = Cursor::new(body);
-    let order = decode_index_order(cursor.u8()?)?;
-    let history = cursor.boolean()?;
-    let count = cursor.collection_len()?;
-    let mut datoms = Vec::with_capacity(count);
-    for _ in 0..count {
-        datoms.push(decode_datom(&mut cursor)?);
-    }
-    cursor.finish()?;
-    let segment = IndexSegment {
-        order,
-        history,
-        datoms,
-    };
-    validate_index_segment(&segment)?;
-    if encode_index_segment(&segment)? != bytes {
-        return Err(fault(
-            "encoding/noncanonical-index-segment",
-            "index segment is not canonical",
-        ));
-    }
-    Ok(segment)
-}
-
-pub fn encode_index_manifest(manifest: &IndexManifest) -> Result<Vec<u8>, SemanticError> {
-    validate_index_manifest(manifest)?;
-    let mut body = Vec::new();
-    put_string(&mut body, &manifest.database_id)?;
-    put_u64(&mut body, manifest.basis_t);
-    body.extend_from_slice(&manifest.tx_hash);
-    put_u64(&mut body, manifest.eidx_frontier);
-    put_len(&mut body, manifest.segments.len())?;
-    for reference in &manifest.segments {
-        body.push(index_order_tag(reference.order));
-        put_bool(&mut body, reference.history);
-        put_u32(&mut body, reference.ordinal);
-        body.extend_from_slice(&reference.hash);
-        put_u32(&mut body, reference.count);
-    }
-    encode_blob(KIND_INDEX_MANIFEST, &body)
-}
-
-pub fn decode_index_manifest(bytes: &[u8]) -> Result<IndexManifest, SemanticError> {
-    let body = decode_blob(bytes, KIND_INDEX_MANIFEST)?;
-    let mut cursor = Cursor::new(body);
-    let database_id = cursor.string()?;
-    let basis_t = cursor.u64()?;
-    let tx_hash = cursor.digest()?;
-    let eidx_frontier = cursor.u64()?;
-    let count = cursor.collection_len()?;
-    let mut segments = Vec::with_capacity(count);
-    for _ in 0..count {
-        segments.push(SegmentRef {
-            order: decode_index_order(cursor.u8()?)?,
-            history: cursor.boolean()?,
-            ordinal: cursor.u32()?,
-            hash: cursor.digest()?,
-            count: cursor.u32()?,
-        });
-    }
-    cursor.finish()?;
-    let manifest = IndexManifest {
-        database_id,
-        basis_t,
-        tx_hash,
-        eidx_frontier,
-        segments,
-    };
-    validate_index_manifest(&manifest)?;
-    if encode_index_manifest(&manifest)? != bytes {
-        return Err(fault(
-            "encoding/noncanonical-index-manifest",
-            "index manifest is not canonical",
-        ));
-    }
-    Ok(manifest)
-}
-
-fn validate_index_segment(segment: &IndexSegment) -> Result<(), SemanticError> {
-    if segment.datoms.is_empty() {
-        return Err(fault(
-            "encoding/empty-index-segment",
-            "index segments cannot be empty",
-        ));
-    }
-    validate_format_v3_index_datoms(segment.order, &segment.datoms)
-}
-
-fn validate_format_v3_index_datoms(
-    order: IndexOrder,
-    datoms: &[Datom],
-) -> Result<(), SemanticError> {
-    if datoms
-        .windows(2)
-        .any(|pair| format_v3_datom_cmp(&pair[0], &pair[1], order).is_gt())
-    {
-        return Err(fault(
-            "encoding/unsorted-index-segment",
-            "index segment datoms must be ordered",
-        ));
-    }
-    validate_index_datom_contents(datoms)
-}
-
 fn validate_index_datom_contents(datoms: &[Datom]) -> Result<(), SemanticError> {
     for datom in datoms {
         let datom_t = tx_to_t(datom.tx).map_err(|error| {
@@ -628,8 +475,7 @@ fn validate_index_datom_contents(datoms: &[Datom]) -> Result<(), SemanticError> 
     Ok(())
 }
 
-/// Comparator frozen into authoritative ATMC v3 genesis, transaction, and
-/// flat-segment values. The native ATIX v4 tree comparator intentionally
+/// Comparator used by current ATMC genesis and transaction values. The native ATIX v4 tree comparator intentionally
 /// differs: it places descending T/op before the stored representation tie.
 fn format_v3_datom_cmp(left: &Datom, right: &Datom, order: IndexOrder) -> std::cmp::Ordering {
     let ordering = match order {
@@ -677,79 +523,6 @@ fn format_v3_value_cmp(left: &Value, right: &Value) -> std::cmp::Ordering {
             .unwrap_or_else(|| left.len().cmp(&right.len())),
         _ => std::cmp::Ordering::Equal,
     })
-}
-
-fn validate_index_manifest(manifest: &IndexManifest) -> Result<(), SemanticError> {
-    if manifest.database_id.is_empty() || manifest.basis_t == 0 {
-        return Err(fault(
-            "encoding/invalid-index-manifest",
-            "index manifest needs a database id and positive basis",
-        ));
-    }
-    t_to_tx(manifest.basis_t).map_err(|error| {
-        fault(
-            "encoding/index-basis-out-of-range",
-            format!("index manifest basis cannot be represented: {error}"),
-        )
-    })?;
-    validate_frontier(manifest.eidx_frontier).map_err(|error| {
-        fault(
-            "encoding/invalid-index-frontier",
-            format!("index manifest has an invalid issued frontier: {error}"),
-        )
-    })?;
-    let mut expected = std::collections::BTreeMap::<(bool, u8), u32>::new();
-    let mut last_key = None;
-    for reference in &manifest.segments {
-        if reference.count == 0 {
-            return Err(fault(
-                "encoding/empty-index-reference",
-                "manifest segment count must be positive",
-            ));
-        }
-        let key = (
-            reference.history,
-            index_order_tag(reference.order),
-            reference.ordinal,
-        );
-        if last_key.is_some_and(|last| last >= key) {
-            return Err(fault(
-                "encoding/noncanonical-index-manifest",
-                "segment references must be strictly ordered",
-            ));
-        }
-        let ordinal = expected
-            .entry((reference.history, index_order_tag(reference.order)))
-            .or_default();
-        if reference.ordinal != *ordinal {
-            return Err(fault(
-                "encoding/index-segment-gap",
-                "segment ordinals must be contiguous",
-            ));
-        }
-        *ordinal += 1;
-        last_key = Some(key);
-    }
-    Ok(())
-}
-
-fn index_order_tag(order: IndexOrder) -> u8 {
-    match order {
-        IndexOrder::Eavt => 0,
-        IndexOrder::Aevt => 1,
-        IndexOrder::Avet => 2,
-        IndexOrder::Vaet => 3,
-    }
-}
-
-fn decode_index_order(tag: u8) -> Result<IndexOrder, SemanticError> {
-    match tag {
-        0 => Ok(IndexOrder::Eavt),
-        1 => Ok(IndexOrder::Aevt),
-        2 => Ok(IndexOrder::Avet),
-        3 => Ok(IndexOrder::Vaet),
-        _ => Err(invalid_tag("index order", tag)),
-    }
 }
 
 /// Canonical digest of an unordered primitive transaction request.
@@ -961,17 +734,39 @@ pub(crate) fn validate_transaction_content(
             ));
         }
     }
-    for (offset, datom) in tx_data.iter().enumerate() {
-        if tx_data[offset + 1..].iter().any(|other| {
-            datom.entity == other.entity
-                && datom.attribute == other.attribute
-                && datom.value.stored_eq(&other.value)
-        }) {
-            return Err(fault(
-                "encoding/duplicate-datom",
-                "durable transaction contains duplicate or contradictory datoms",
-            ));
-        }
+    // Sort only borrowed references: O(n) pointers and O(n log n) comparisons,
+    // without copying values or changing the canonical transaction order.
+    // Do not sort by stored_cmp: top-level decimal scale makes stored equality
+    // non-transitive across representations (1.0M != 1.00M, but both equal 1).
+    // Logical groups are ordered first; non-decimals precede decimals, whose
+    // scales then order strictly. A group with a non-decimal and another value
+    // necessarily has an adjacent forbidden pair. An all-decimal group has one
+    // exactly when a scale repeats. Tuples use logical recursive equality, not
+    // the top-level decimal scale distinction, so need no extra tie-break.
+    let mut ordered: Vec<&Datom> = tx_data.iter().collect();
+    ordered.sort_unstable_by(|left, right| {
+        left.entity
+            .cmp(&right.entity)
+            .then_with(|| left.attribute.cmp(&right.attribute))
+            .then_with(|| left.value.index_cmp(&right.value))
+            .then_with(|| match (&left.value, &right.value) {
+                (Value::BigDec(left), Value::BigDec(right)) => left
+                    .fractional_digit_count()
+                    .cmp(&right.fractional_digit_count()),
+                (Value::BigDec(_), _) => std::cmp::Ordering::Greater,
+                (_, Value::BigDec(_)) => std::cmp::Ordering::Less,
+                _ => std::cmp::Ordering::Equal,
+            })
+    });
+    if ordered.windows(2).any(|pair| {
+        pair[0].entity == pair[1].entity
+            && pair[0].attribute == pair[1].attribute
+            && pair[0].value.stored_eq(&pair[1].value)
+    }) {
+        return Err(fault(
+            "encoding/duplicate-datom",
+            "durable transaction contains duplicate or contradictory datoms",
+        ));
     }
     Ok(tx)
 }
@@ -2606,8 +2401,206 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_observations_include_genesis_without_admitting_genesis_retractions() {
+        let datom = crate::vocabulary::canonical_genesis_datoms().remove(0);
+        let bytes = canonical_datom_bytes(&datom).unwrap();
+        assert_eq!(sha256(&bytes), canonical_datom_hash(&datom).unwrap());
+        let mut invalid = datom;
+        invalid.added = false;
+        assert_eq!(
+            canonical_datom_bytes(&invalid).unwrap_err().code,
+            "encoding/invalid-index-genesis-datom"
+        );
+    }
     use crate::{USER_PARTITION, canonical_genesis_datoms, make_eid};
     use std::str::FromStr;
+
+    fn content_datoms(values: impl IntoIterator<Item = Value>) -> Vec<Datom> {
+        values
+            .into_iter()
+            .map(|value| Datom {
+                entity: 1,
+                attribute: 10,
+                value,
+                tx: t_to_tx(1).unwrap(),
+                added: true,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn transaction_duplicate_check_preserves_exact_numeric_and_tuple_equality() {
+        let decimal = |value| Value::BigDec(BigDecimal::from_str(value).unwrap());
+        let duplicate_pairs = [
+            (Value::Long(1), Value::BigInt(BigInt::from(1))),
+            (Value::Long(1), Value::Double(1.0)),
+            (Value::Long(1), Value::Ref(1)),
+            (decimal("1.0"), Value::Long(1)),
+            (decimal("1.00"), decimal("1.00")),
+            (Value::Float(-0.0), Value::Double(0.0)),
+            (
+                Value::Float(f32::from_bits(0x7fc0_0001)),
+                Value::Double(f64::from_bits(0xfff8_0000_0000_0001)),
+            ),
+            (
+                Value::Tuple(vec![None, Some(decimal("1.0"))]),
+                Value::Tuple(vec![None, Some(decimal("1.00"))]),
+            ),
+            (
+                Value::Tuple(vec![
+                    Some(Value::Tuple(vec![Some(Value::Long(1)), None])),
+                    Some(Value::Long(2)),
+                ]),
+                Value::Tuple(vec![
+                    Some(Value::Tuple(vec![Some(decimal("1.00")), None])),
+                    Some(Value::Double(2.0)),
+                ]),
+            ),
+        ];
+        for (left, right) in duplicate_pairs {
+            assert!(left.stored_eq(&right), "fixture must be stored-equal");
+            for reversed in [false, true] {
+                for opposite in [false, true] {
+                    let mut datoms = content_datoms([left.clone(), right.clone()]);
+                    datoms[1].added = !opposite;
+                    if reversed {
+                        datoms.reverse();
+                    }
+                    assert_eq!(
+                        validate_transaction_content(1, 1_000, &datoms)
+                            .unwrap_err()
+                            .code,
+                        "encoding/duplicate-datom",
+                        "opposite={opposite}, reversed={reversed}: {datoms:?}"
+                    );
+                }
+            }
+        }
+        let distinct_pairs = [
+            (decimal("1.0"), decimal("1.00")),
+            (
+                Value::Long(9_007_199_254_740_993),
+                Value::Double(9_007_199_254_740_992.0),
+            ),
+            (
+                Value::BigInt(BigInt::from(u64::MAX)),
+                Value::Double(u64::MAX as f64),
+            ),
+            (decimal("0.1"), Value::Double(0.1)),
+            (
+                Value::Tuple(vec![None, Some(Value::Long(1))]),
+                Value::Tuple(vec![Some(Value::Long(1)), None]),
+            ),
+        ];
+        for (left, right) in distinct_pairs {
+            assert!(!left.stored_eq(&right), "fixture must be stored-distinct");
+            let mut datoms = content_datoms([left, right]);
+            datoms[1].added = false;
+            assert!(validate_transaction_content(1, 1_000, &datoms).is_ok());
+            datoms.reverse();
+            assert!(validate_transaction_content(1, 1_000, &datoms).is_ok());
+        }
+    }
+
+    #[test]
+    fn transaction_duplicate_check_handles_nontransitive_decimal_scale_groups() {
+        let values = [
+            Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+            Value::Long(1),
+            Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+        ];
+        assert!(!values[0].stored_eq(&values[2]));
+        assert!(values[0].stored_eq(&values[1]));
+        assert!(values[1].stored_eq(&values[2]));
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let datoms = content_datoms(order.map(|index| values[index].clone()));
+            assert_eq!(
+                validate_transaction_content(1, 1_000, &datoms)
+                    .unwrap_err()
+                    .code,
+                "encoding/duplicate-datom"
+            );
+        }
+    }
+
+    #[test]
+    fn transaction_duplicate_check_keeps_entity_attribute_boundaries_and_input_order() {
+        let mut datoms = content_datoms([Value::Long(1), Value::Long(1), Value::Long(1)]);
+        datoms[1].entity = 2;
+        datoms[2].attribute = 11;
+        let before = datoms.clone();
+        assert!(validate_transaction_content(1, 1_000, &datoms).is_ok());
+        assert_eq!(datoms, before);
+        datoms.push(before[0].clone());
+        datoms.last_mut().unwrap().added = false;
+        assert_eq!(
+            validate_transaction_content(1, 1_000, &datoms)
+                .unwrap_err()
+                .code,
+            "encoding/duplicate-datom"
+        );
+    }
+
+    #[test]
+    fn transaction_duplicate_check_large_unordered_group_matches_pairwise_oracle() {
+        // A single large E/A group exercises the value comparator rather than
+        // obtaining the scaling improvement only from distinct entity IDs.
+        let mut datoms =
+            content_datoms((0..16_384).map(|index| Value::Long((index * 8_191) % 16_384)));
+        assert!(validate_transaction_content(1, 1_000, &datoms).is_ok());
+        for (index, datom) in datoms.iter().enumerate() {
+            assert_eq!(datom.value, Value::Long((index as i64 * 8_191) % 16_384));
+        }
+        let mut duplicate = datoms[7_001].clone();
+        duplicate.added = false;
+        datoms.push(duplicate);
+        assert_eq!(
+            validate_transaction_content(1, 1_000, &datoms)
+                .unwrap_err()
+                .code,
+            "encoding/duplicate-datom"
+        );
+        // Exhaustive small vectors compare the optimized predicate to the
+        // previous pairwise definition, including mixed-scale logical groups.
+        let values = [
+            Value::Long(1),
+            Value::BigDec(BigDecimal::from_str("1.0").unwrap()),
+            Value::BigDec(BigDecimal::from_str("1.00").unwrap()),
+            Value::Double(f64::NAN),
+            Value::Float(f32::NAN),
+            Value::Tuple(vec![None, Some(Value::Long(1))]),
+            Value::Tuple(vec![
+                None,
+                Some(Value::BigDec(BigDecimal::from_str("1.00").unwrap())),
+            ]),
+        ];
+        for a in &values {
+            for b in &values {
+                for c in &values {
+                    let datoms = content_datoms([a.clone(), b.clone(), c.clone()]);
+                    let duplicate = datoms.iter().enumerate().any(|(offset, datom)| {
+                        datoms[offset + 1..]
+                            .iter()
+                            .any(|other| datom.value.stored_eq(&other.value))
+                    });
+                    assert_eq!(
+                        validate_transaction_content(1, 1_000, &datoms).is_err(),
+                        duplicate,
+                        "{datoms:?}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn every_value_variant_round_trips_in_a_transaction() {
@@ -2775,50 +2768,6 @@ mod tests {
         ));
         transaction.tx_data.reverse();
         assert_eq!(encode_transaction(&transaction).unwrap(), forward);
-    }
-
-    #[test]
-    fn format_v3_flat_segments_keep_stored_value_before_transaction_order() {
-        let datom = |value: &str, t| Datom {
-            entity: 1,
-            attribute: 10,
-            value: Value::BigDec(BigDecimal::from_str(value).unwrap()),
-            tx: t_to_tx(t).unwrap(),
-            added: true,
-        };
-        let older_short_scale = datom("1.0", 1);
-        let newer_long_scale = datom("1.00", 2);
-        assert!(
-            format_v3_datom_cmp(&older_short_scale, &newer_long_scale, IndexOrder::Eavt).is_lt()
-        );
-        assert!(
-            newer_long_scale
-                .cmp_in(&older_short_scale, IndexOrder::Eavt)
-                .is_lt(),
-            "ATIX v4 must instead put descending T before stored scale"
-        );
-
-        let legacy = IndexSegment {
-            order: IndexOrder::Eavt,
-            history: true,
-            datoms: vec![older_short_scale.clone(), newer_long_scale.clone()],
-        };
-        let bytes = encode_index_segment(&legacy).unwrap();
-        assert_eq!(u16::from_be_bytes([bytes[5], bytes[6]]), 3);
-        assert_eq!(decode_index_segment(&bytes).unwrap(), legacy);
-
-        let current_tree_order = vec![newer_long_scale, older_short_scale];
-        validate_persistent_index_datoms(IndexOrder::Eavt, &current_tree_order).unwrap();
-        assert_eq!(
-            encode_index_segment(&IndexSegment {
-                order: IndexOrder::Eavt,
-                history: true,
-                datoms: current_tree_order,
-            })
-            .unwrap_err()
-            .code,
-            "encoding/unsorted-index-segment"
-        );
     }
 
     #[test]

@@ -1,7 +1,14 @@
 //! Versioned native process-boundary grammar, separate from request hashing
 //! and immutable database values. Reuses their scalar/form representations.
 use super::*;
-use crate::peer::ExactEndpoint;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ExactEndpoint {
+    pub generation: u64,
+    pub basis_t: u64,
+    pub tx_hash: Digest,
+    pub state_hash: Digest,
+    pub eidx_frontier: u64,
+}
 use crate::{DatabaseIdentity, ServiceTransactionReport, TransactionRequest};
 
 const REQUEST: u8 = 11;
@@ -391,14 +398,19 @@ pub(crate) fn encode_submission_outcome(
         Ok(report) => {
             bytes.push(0);
             for database in [&report.db_before, &report.db_after] {
-                let snapshot = database.native_tiered_snapshot().ok_or_else(|| {
-                    fault(
-                        "transport/non-native-report",
-                        "report must contain native values",
-                    )
-                })?;
-                put_endpoint(&mut bytes, snapshot.endpoint());
-                bytes.extend_from_slice(&snapshot.required_manifest_hash()?);
+                let (snapshot, ..) = database.committed_block_parts()?;
+                let key = database.snapshot_key()?;
+                put_endpoint(
+                    &mut bytes,
+                    ExactEndpoint {
+                        generation: key.generation(),
+                        basis_t: key.basis_t(),
+                        tx_hash: key.transaction_hash(),
+                        state_hash: key.state_hash(),
+                        eidx_frontier: key.eidx_frontier(),
+                    },
+                );
+                bytes.extend_from_slice(&snapshot.storage_root_id());
             }
             bytes.push(u8::from(report.replayed));
             put_len(&mut bytes, report.tx_data.len())?;

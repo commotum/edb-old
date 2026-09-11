@@ -529,11 +529,8 @@ fn postgres_socket_schema_maps_and_receipt_replay_precede_ident_resolution() {
         return;
     };
     let fixture = common::PostgresFixture::new(&connection, "edn_receipt");
-    atomic_core::PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     store.create_database("edn", Schema::new()).unwrap();
     let writer = common::start_service(&fixture.connection, "edn");
     let server =
@@ -654,11 +651,8 @@ fn postgres_edn_program_rebinding_cannot_change_a_retained_receipt() {
         return;
     };
     let fixture = common::PostgresFixture::new(&connection, "edn_program");
-    atomic_core::PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = atomic_core::PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     store.create_database("edn", schema()).unwrap();
     let program = |count| atomic_core::Program {
         kind: atomic_core::ProgramKind::Transaction,

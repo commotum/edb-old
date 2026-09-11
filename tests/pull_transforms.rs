@@ -407,11 +407,8 @@ fn native_postgres_transforms_keep_exact_values_and_peer_local_execution() {
             .unwrap()
             .as_nanos()
     );
-    atomic_core::PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    atomic_core::PostgresStore::connect(&postgres)
+    common::install(&postgres).unwrap();
+    common::TestStore::connect(&postgres)
         .unwrap()
         .create_database(&id, schema())
         .unwrap();

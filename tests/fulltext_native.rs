@@ -28,7 +28,7 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
     };
     let fixture = common::PostgresFixture::new(&url, "fulltext_native");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
+    common::install(url).unwrap();
     let mut schema = Schema::new();
     schema
         .install(
@@ -41,7 +41,7 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
             .fulltext(),
         )
         .unwrap();
-    let created = PostgresStore::connect(url)
+    let created = common::TestStore::connect(url)
         .unwrap()
         .create_database("search", schema)
         .unwrap();
@@ -59,16 +59,10 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
     let seeded = common::transact(&writer, "seed", created.basis_t(), &ops, 1000);
     let a = seeded.tempids["a"];
     let b = seeded.tempids["b"];
-    let mut indexer = PostgresIndexer::connect(url, "search")
+    let build = common::consolidate(url, "search")
         .unwrap()
-        .with_fulltext_build_limits(FulltextBuildLimits {
-            sort_memory_bytes: 16 * 1024,
-            page_bytes: 2048,
-            ..Default::default()
-        });
-    indexer.consolidate().unwrap();
-    assert!(indexer.fulltext_build_error().is_none());
-    let build = indexer.fulltext_build_stats();
+        .fulltext
+        .unwrap_or_default();
     let peer = Connection::connect(url, "search", 512).unwrap();
     let old = peer.db();
     assert_eq!(old.basis_t(), seeded.basis_t);
@@ -157,8 +151,7 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
     let not_yet = find(&lagging, "juliet");
     assert!(not_yet.hits.is_empty());
     assert!(not_yet.stats.index_basis_t < lagging.basis_t());
-    indexer.consolidate().unwrap();
-    assert!(indexer.fulltext_build_error().is_none());
+    common::consolidate(url, "search").unwrap();
     let current_peer = Connection::connect(url, "search", 512).unwrap();
     let current = current_peer.db();
     assert_eq!(ids(&find(&current, "juliet")), BTreeSet::from([a]));

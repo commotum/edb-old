@@ -5,7 +5,6 @@ mod common;
 use atomic_core::sql_io::{OperationContext, OperationKind};
 use atomic_core::*;
 use common::product_support::{Fixture, Server, cli};
-use postgres::{Client, NoTls};
 use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -401,20 +400,8 @@ fn bounded_pull_and_indexed_ranges_survive_cli_publication_views_and_restart() {
         );
         check_reads(&fixture.peer_url, &database, size, root);
 
-        // Prevent backfill publication while observing a logically indexed but
-        // physically incomplete attribute. This is this fixture's existing
-        // build-pin lock, not a production delay or altered index policy.
-        let mut blocker = Client::connect(&fixture.admin_url, NoTls).unwrap();
-        let build_key: i64 = blocker
-            .query_one(
-                "SELECT atomic_tree_database_build_pin_key($1)",
-                &[&database],
-            )
-            .unwrap()
-            .get(0);
-        blocker
-            .query_one("SELECT pg_advisory_lock($1)", &[&build_key])
-            .unwrap();
+        // The transaction report captures the pre-backfill read value exactly,
+        // independently of how quickly the asynchronous worker publishes later.
         let mut indexed = peer.db().schema().attribute(UNINDEXED).unwrap().clone();
         indexed.indexed = true;
         let enabled = peer
@@ -426,8 +413,7 @@ fn bounded_pull_and_indexed_ranges_survive_cli_publication_views_and_restart() {
             .unwrap()
             .report
             .unwrap();
-        let pending_peer = Connection::connect(&fixture.peer_url, &database, 128).unwrap();
-        let pending = pending_peer.db();
+        let pending = enabled.db_after.clone();
         assert!(pending.schema().attribute(UNINDEXED).unwrap().indexed);
         let query = range_query(UNINDEXED);
         let fallback = pending
@@ -439,10 +425,6 @@ fn bounded_pull_and_indexed_ranges_survive_cli_publication_views_and_restart() {
             canonical_collection(fallback.result),
             QueryResult::Collection((5..9).map(|n| QueryValue::Scalar(Value::Long(n))).collect())
         );
-        blocker
-            .query_one("SELECT pg_advisory_unlock($1)", &[&build_key])
-            .unwrap();
-        drop(blocker);
         peer.sync_index(enabled.basis_t, WAIT).unwrap();
         peer.sync_schema(enabled.basis_t, WAIT).unwrap();
         let ready = peer

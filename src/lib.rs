@@ -5,7 +5,6 @@
 //! independent peers provide local queries, pull, temporal views, and native
 //! immutable snapshots. The pure kernel remains available as an explicit oracle.
 
-mod allocation_storage;
 pub mod async_client;
 pub use async_client::{
     AsyncClient, AsyncConfig, AsyncExecutor, AsyncOperation, AsyncStats, AsyncStream,
@@ -16,9 +15,7 @@ mod backup_snapshot;
 mod block_codec;
 mod change_consumer;
 pub(crate) mod change_notices;
-pub(crate) mod compressed_nodes;
 mod connection;
-mod cow_generation;
 mod database;
 pub(crate) mod database_catalog;
 pub use database_catalog::{CreateDatabaseResult, DatabaseCatalog, DatabaseCatalogEntry};
@@ -42,9 +39,9 @@ mod identity;
 mod idents;
 mod index;
 mod index_pull;
+mod index_support;
 #[cfg(unix)]
 mod local_transport;
-mod log_generation;
 mod operations;
 mod overlay_index;
 mod partitions;
@@ -52,13 +49,11 @@ mod reserved_allocation;
 pub use partitions::TransactionDefaults;
 mod native_registry;
 mod peer;
-mod persistent_commitment;
 pub mod persistent_tree;
-mod postgres;
 mod postgres_connection;
-#[cfg(test)]
-mod postgres_internal_tests;
 mod program;
+mod program_bindings;
+mod program_cache;
 mod pull;
 mod query;
 mod query_return_maps;
@@ -71,6 +66,7 @@ mod remote_config;
 mod remote_routing;
 #[cfg(unix)]
 mod remote_transport;
+mod runtime;
 mod runtime_config;
 #[cfg(unix)]
 pub use remote_config::{remote_client_config_from_env, remote_server_credentials_from_env};
@@ -82,14 +78,15 @@ mod shared_map;
 pub mod sql_io;
 mod ssd_cache;
 mod state_commitment;
+pub mod storage;
 mod telemetry;
 mod tiered_assessor;
 mod time_point;
 mod transaction;
 mod transaction_hints;
 mod transaction_stats;
-mod tree_manifest;
-mod tree_store;
+mod tree_cursor;
+mod tree_read;
 mod uuid;
 mod value;
 mod vocabulary;
@@ -103,7 +100,6 @@ pub use change_notices::{
     NoticeListenerStats, NoticePublisherStats, ObservationConfig, notice_listener_stats,
     notice_publisher_stats,
 };
-pub use compressed_nodes::{NodeBlockReadStats, NodeBlockWriteStats};
 pub use connection::{Connection, ConnectionTransactionTicket, DatabaseIdentity};
 pub use database::{Database, EntityRef, TxOp, TxReport, TxValue, View};
 pub use database_invoke::{InvokeControl, InvokeRole};
@@ -114,19 +110,18 @@ pub use database_value::{
 };
 pub use datom::{Datom, IndexOrder};
 pub use encoding::{
-    Digest, DurableTransaction, IndexManifest, IndexSegment, SegmentRef, decode_genesis,
-    decode_index_manifest, decode_index_segment, decode_program, decode_transaction,
-    encode_genesis, encode_index_manifest, encode_index_segment, encode_program,
-    encode_program_output, encode_transaction, program_hash, program_request_digest,
-    request_digest, sha256, submission_request_digest, transaction_hash,
+    Digest, DurableTransaction, canonical_datom_bytes, decode_genesis, decode_program,
+    decode_transaction, encode_genesis, encode_program, encode_program_output, encode_transaction,
+    program_hash, program_request_digest, request_digest, sha256, submission_request_digest,
+    transaction_hash,
 };
 pub use entity_identity::EntityIdentity;
 pub use error::{ErrorCategory, SemanticError};
+pub use fulltext::NativeFulltextReader;
 pub use fulltext::{FulltextHit, FulltextOptions, FulltextReport, FulltextStats};
 pub use fulltext_store::{
-    FulltextBuildFault, FulltextBuildLimits, FulltextBuildStats, FulltextCacheStats,
-    FulltextCursor, FulltextProjection, FulltextReadLimits, FulltextReadStats, FulltextRecord,
-    FulltextStore,
+    FulltextBuildLimits, FulltextBuildStats, FulltextCacheStats, FulltextCursor,
+    FulltextProjection, FulltextReadLimits, FulltextReadStats, FulltextRecord,
 };
 pub use identity::{
     DB_PARTITION, EIDX_BITS, EIDX_MASK, INITIAL_EIDX_FRONTIER, MAX_EID, MAX_EIDX, MAX_PARTITION,
@@ -147,26 +142,14 @@ pub use native_registry::{
 };
 pub use operations::{
     ExcisionConfig, ExcisionFault, ExcisionProgress, ExcisionReceipt, GarbageInventory,
-    IntegrityProblem, IntegrityReport, LogGenerationGarbage, MAX_DATABASE_RECLAMATION_ROWS,
-    MAX_LOG_GENERATION_ROWS_PER_GC, MAX_LOG_GENERATIONS_PER_GC, MAX_PROGRAMS_PER_GC,
-    MAX_RECEIPT_ARCHIVE_WORK_PER_GC, MAX_REQUEST_BASE_ARCHIVE_NODES_PER_GC,
-    MAX_SEMANTIC_COMMITMENT_NODES_PER_GC, MAX_SEMANTIC_COMMITMENT_ROOTS_PER_GC,
-    MAX_TREE_BUILD_INTENT_NODES_PER_GC, MAX_TREE_BUILD_INTENTS_PER_GC, MAX_TREE_NODES_PER_GC,
-    MAX_TREE_RETIREMENT_NODES_PER_GC, MAX_TREE_RETIREMENTS_PER_GC, OperationalMetrics,
-    PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE, ReceiptArchiveConversion,
-    RequestBaseArchiveGarbage, RetiredDatabaseReclamation, SemanticCommitmentRootGarbage,
-    TreeBuildIntentGarbage, TreePublicationGarbage,
+    IndexMaintenanceReceipt, IntegrityProblem, IntegrityReport, MAX_COLLECTION_STEPS,
+    OperationalMetrics, PostgresOperator, ProgramDeployment, RECOMMENDED_GARBAGE_COLLECTION_AGE,
+    RetiredDatabaseReclamation,
 };
-pub use peer::NativeFulltextReader;
 pub use peer::native_log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
 pub use peer::snapshot_reference::{SnapshotKey, SnapshotReference};
 pub use peer::{
-    CacheStats, IndexBuildFault, IndexBuildReceipt, Peer, PeerCursorStats, PeerIndexCursor,
-    PeerLoadStats, PeerSnapshot, PostgresIndexer, RecoveryStats,
-};
-pub use postgres::{
-    CapacityLimits, DatabaseStatus, POSTGRES_IN_PLACE_UPGRADE_FLOOR, POSTGRES_SCHEMA_VERSION,
-    PostgresMigrator, PostgresStore, ProgramCacheStats, WriterResidencyStats,
+    CacheStats, Peer, PeerCursorStats, PeerIndexCursor, PeerLoadStats, PeerSnapshot, RecoveryStats,
 };
 pub use postgres_connection::{PostgresConnectionConfig, PostgresIoPolicy};
 pub use program::{
@@ -198,6 +181,7 @@ pub use remote_transport::{
     RemoteAuthToken, RemoteClientConfig, RemoteTransactionEndpoint, RemoteTransactionServer,
     RemoteTransportConfig, RemoteTransportStats, RemoteWriterEndpoint,
 };
+pub use runtime::{CapacityLimits, ProgramCacheStats, WriterResidencyStats};
 pub use runtime_config::postgres_config_from_env;
 pub use schema::{Attribute, Cardinality, Schema, TupleSpec, Unique, ValueType};
 pub use service::{
@@ -224,11 +208,7 @@ pub use transaction_hints::{
     HintTraceStats, HintedSpeculation, ReadHint, TransactionHints,
 };
 pub use transaction_stats::{TransactionDiagnostics, TransactionWorkStats};
-pub use tree_manifest::{AvetProjectionWork, ManifestTree, PersistentTreeManifest};
-pub use tree_store::{
-    NodeUploadLimits, PostgresTreeStore, TreeManifestRecord, TreePublicationDelta,
-    TreePublishOutcome, TreeRootBinding, TreeStoreStats,
-};
+pub use tree_read::NodeBlockReadStats;
 pub use uuid::{squuid, squuid_at, squuid_time_millis, uuid_v7, uuid_v7_at, uuid_v7_time_millis};
 pub use value::{Keyword, Symbol, Value};
 pub use vocabulary::{
@@ -241,6 +221,5 @@ pub use vocabulary::{
     DB_TYPE_BIGINT, DB_TYPE_BOOLEAN, DB_TYPE_BYTES, DB_TYPE_DOUBLE, DB_TYPE_FLOAT, DB_TYPE_FN,
     DB_TYPE_INSTANT, DB_TYPE_KEYWORD, DB_TYPE_LONG, DB_TYPE_REF, DB_TYPE_STRING, DB_TYPE_SYMBOL,
     DB_TYPE_TUPLE, DB_TYPE_URI, DB_TYPE_UUID, DB_UNIQUE, DB_UNIQUE_IDENTITY, DB_UNIQUE_VALUE,
-    DB_VALUE_TYPE, MAX_SCHEMA_ATTRIBUTE_ID, canonical_genesis_datoms,
-    fulltext_vocabulary_upgrade_ops, partition_vocabulary_upgrade_ops, schema_eid_to_attr_id,
+    DB_VALUE_TYPE, MAX_SCHEMA_ATTRIBUTE_ID, canonical_genesis_datoms, schema_eid_to_attr_id,
 };

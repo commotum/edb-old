@@ -415,11 +415,8 @@ fn postgres_native_clauses_keep_identity_and_index_selectivity() {
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "query_diagnostics");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    PostgresStore::connect(&fixture.connection)
+    common::install(&fixture.connection).unwrap();
+    common::TestStore::connect(&fixture.connection)
         .unwrap()
         .create_database("diagnostics", schema())
         .unwrap();

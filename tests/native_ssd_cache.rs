@@ -2,10 +2,9 @@ mod common;
 
 use atomic_core::{
     Attribute, Cardinality, EntityRef, IndexOrder, Keyword, OperationContext, OperationKind, Peer,
-    PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, PostgresStore, Schema,
-    SsdCacheConfig, SsdCacheLimits, TxOp, Value, ValueType,
+    PostgresConnectionConfig, Schema, SsdCacheConfig, SsdCacheLimits, TxOp, Value, ValueType,
 };
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, Write};
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
@@ -21,7 +20,7 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
         .tempdir()
         .unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
+    common::install(url).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -31,7 +30,7 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
             Cardinality::One,
         ))
         .unwrap();
-    PostgresStore::connect(url)
+    common::TestStore::connect(url)
         .unwrap()
         .create_database("ssd", schema)
         .unwrap();
@@ -47,10 +46,7 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     let expected = report.db_after.datoms(IndexOrder::Eavt).unwrap();
     drop(report);
     service.shutdown();
-    PostgresIndexer::connect(url, "ssd")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(url, "ssd").unwrap();
     let config = PostgresConnectionConfig::plaintext(url).with_ssd_cache(SsdCacheConfig {
         directory: directory.path().to_owned(),
         limits: SsdCacheLimits {
@@ -87,7 +83,14 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     assert!(initial.current_entries <= 128 && initial.current_bytes <= 16 * 1024 * 1024);
     drop(peer);
 
-    let peer = Peer::connect_configured_with_cache_limits(&config, "ssd", 0, 0).unwrap();
+    let reopened = OperationContext::diagnostic(OperationKind::Query);
+    let (peer, reopen_stats) =
+        reopened.measure(|| Peer::connect_configured_with_cache_limits(&config, "ssd", 0, 0));
+    let peer = peer.unwrap();
+    assert!(
+        reopen_stats.stats.sql_calls > 0,
+        "opening establishes current authority"
+    );
     let restart = OperationContext::diagnostic(OperationKind::Query);
     {
         let _scope = restart.enter();
@@ -113,9 +116,9 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     assert_eq!(peer.load_stats().cursor_sql_read_bytes, 0);
     assert_eq!(peer.load_stats().cursor_sql_reads, 0);
     assert!(restart_sql.sql_calls < cold_sql.sql_calls);
-    assert!(
-        restart_sql.sql_calls > 0,
-        "cold SSD still establishes retention health"
+    assert_eq!(
+        restart_sql.sql_calls, 0,
+        "the captured pin authorizes warm reads"
     );
     let warm_peer =
         Peer::connect_configured_with_cache_limits(&config, "ssd", 128, 16 * 1024 * 1024).unwrap();
@@ -163,9 +166,17 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
             .extension()
             .is_some_and(|extension| extension == "block")
         {
-            let mut file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let mut file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(path)
+                .unwrap();
             file.seek(std::io::SeekFrom::End(-1)).unwrap();
-            file.write_all(&[0xa5]).unwrap();
+            let mut byte = [0];
+            file.read_exact(&mut byte).unwrap();
+            byte[0] ^= 0xff;
+            file.seek(std::io::SeekFrom::End(-1)).unwrap();
+            file.write_all(&byte).unwrap();
             damaged += 1;
         }
     }
@@ -183,18 +194,22 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
 
     // A damaged owned .block header is not deletion authority, but must not
     // prevent a fresh native peer from opening and falling back to PostgreSQL.
-    let malformed_path = std::fs::read_dir(directory.path())
+    let malformed_entries = std::fs::read_dir(directory.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| {
+        .filter(|path| {
             path.extension()
                 .is_some_and(|extension| extension == "block")
         })
-        .unwrap();
-    let intact_framing = std::fs::read(&malformed_path).unwrap();
-    let mut damaged_framing = intact_framing.clone();
-    damaged_framing[0] ^= 0xff;
-    std::fs::write(&malformed_path, &damaged_framing).unwrap();
+        .map(|path| {
+            let intact = std::fs::read(&path).unwrap();
+            let mut damaged = intact.clone();
+            damaged[0] ^= 0xff;
+            std::fs::write(&path, &damaged).unwrap();
+            (path, intact, damaged)
+        })
+        .collect::<Vec<_>>();
+    assert!(!malformed_entries.is_empty());
     let peer = Peer::connect_configured_with_cache_limits(&config, "ssd", 0, 0).unwrap();
     assert!(!peer.ssd_cache_stats().inventory_complete);
     assert!(peer.ssd_cache_stats().corrupt_entry_bypasses > 0);
@@ -208,11 +223,15 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     assert!(peer.node_block_read_stats().canonical_bytes > 0);
     assert_eq!(peer.ssd_cache_stats().puts, 0);
     assert!(!peer.purge_ssd_generation(generation));
-    assert_eq!(std::fs::read(&malformed_path).unwrap(), damaged_framing);
+    for (path, _, damaged) in &malformed_entries {
+        assert_eq!(&std::fs::read(path).unwrap(), damaged);
+    }
     drop(peer);
     // Explicit fixture repair restores the original owned file; the cache
     // itself never overwrote or deleted the uncertain representation.
-    std::fs::write(&malformed_path, intact_framing).unwrap();
+    for (path, intact, _) in malformed_entries {
+        std::fs::write(path, intact).unwrap();
+    }
     let peer = Peer::connect_configured_with_cache_limits(&config, "ssd", 0, 0).unwrap();
     assert!(peer.ssd_cache_stats().inventory_complete);
     assert!(peer.purge_ssd_generation(generation));

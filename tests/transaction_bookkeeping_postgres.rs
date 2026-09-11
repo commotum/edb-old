@@ -87,13 +87,10 @@ fn fixed_transactions_reuse_metadata_and_account_tails_through_recovery_and_adop
         return;
     };
     let fixture = PostgresFixture::new(&url, "bookkeeping");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&fixture.connection).unwrap();
     for groups in [4, 32, 128] {
         let database = format!("bookkeeping_{groups}");
-        let mut setup = PostgresStore::connect(&fixture.connection).unwrap();
+        let mut setup = common::TestStore::connect(&fixture.connection).unwrap();
         let initial = setup
             .create_database(&database, wide_schema(groups))
             .unwrap();
@@ -141,7 +138,7 @@ fn fixed_transactions_reuse_metadata_and_account_tails_through_recovery_and_adop
             let elapsed = started.elapsed();
             if [0, 32, 128].contains(&ordinal) {
                 eprintln!(
-                    "BOOKKEEPING_PG groups={groups} attributes={} tail={} datoms={total_datoms} schema_scans=0 schema_reuses={} dependency_lookups={} dependency_edges={} source_datoms={} ranges={} sql_reads={} commitment_visits={} transact_stats_query_drop_us={}",
+                    "BOOKKEEPING_PG groups={groups} attributes={} tail={} datoms={total_datoms} schema_scans=0 schema_reuses={} dependency_lookups={} dependency_edges={} source_datoms={} ranges={} sql_reads={} transact_stats_query_drop_us={}",
                     writer.resident_schema_attributes,
                     ordinal + 1,
                     writer.last_schema_reuses,
@@ -150,7 +147,6 @@ fn fixed_transactions_reuse_metadata_and_account_tails_through_recovery_and_adop
                     writer.last_transaction_source_read_datoms,
                     writer.last_native_cursor_ranges,
                     writer.last_native_sql_reads,
-                    writer.last_commitment_node_visits,
                     elapsed.as_micros()
                 );
             }
@@ -300,8 +296,7 @@ fn fixed_transactions_reuse_metadata_and_account_tails_through_recovery_and_adop
             replay.db_after.values(first, PAIR).unwrap(),
             expected_pair(0)
         );
-        let mut indexer = PostgresIndexer::connect(&fixture.connection, &database).unwrap();
-        let publication = indexer.consolidate().unwrap();
+        let publication = common::consolidate(&fixture.connection, &database).unwrap();
         assert_eq!(publication.basis_t, endpoint);
         // An administrative external publication is not an unsolicited service
         // notification. Use the normal bounded request to have its coordinator

@@ -341,8 +341,8 @@ fn actual_postgres_mixed_log_database_and_raw_sequence_retains_basis_after_write
     };
     let fixture = common::PostgresFixture::new(&url, "read_sequence_sources");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    PostgresStore::connect(url)
+    common::install(url).unwrap();
+    common::TestStore::connect(url)
         .unwrap()
         .create_database("sequence", schema())
         .unwrap();

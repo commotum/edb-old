@@ -794,7 +794,7 @@ pub(crate) fn visit_program_closure(
     Ok(reachable)
 }
 
-fn collect_fixed_program_dependencies(
+pub(crate) fn collect_fixed_program_dependencies(
     instructions: &[crate::program::Instruction],
     output: &mut Vec<Digest>,
 ) {

@@ -3,9 +3,9 @@
 //! to run without explicit disposable-server opt-in and matching data_directory.
 use atomic_core::{
     AttributeName, BackgroundIndexingConfig, CapacityLimits, Connection, DatabaseValue, EntityRef,
-    ErrorCategory, IndexOrder, IndexPrefix, IndexSegment, PostgresConnectionConfig,
-    PostgresIoPolicy, PullAttribute, PullPattern, TimePoint, TransactionRequest,
-    TransactionService, TransactionServiceConfig, TxOp, Value, encode_index_segment,
+    ErrorCategory, IndexOrder, IndexPrefix, PostgresConnectionConfig, PostgresIoPolicy,
+    PullAttribute, PullPattern, TimePoint, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TxOp, Value, canonical_datom_bytes,
 };
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -126,11 +126,7 @@ fn fingerprint(phase: &str, view: &str, value: &DatabaseValue) -> Result<Fingerp
     // operations/GC workflows, frame one canonical datom at a time: no whole
     // database collection, tree-packing dependency or legacy sort conversion.
     for datom in value.scan_cursor(IndexOrder::Eavt)? {
-        let encoded = encode_index_segment(&IndexSegment {
-            order: IndexOrder::Eavt,
-            history: true,
-            datoms: vec![datom?],
-        })?;
+        let encoded = canonical_datom_bytes(&datom?)?;
         hash.update((encoded.len() as u64).to_be_bytes());
         hash.update(encoded);
         datoms += 1;

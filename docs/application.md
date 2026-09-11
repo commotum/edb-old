@@ -31,24 +31,27 @@ strings, subject values and detailed transaction errors.
 Create dedicated PostgreSQL LOGIN roles through your normal administration,
 then run the following with the object-owning administrative connection in
 `ATOMIC_POSTGRES_URL`. Roles must satisfy the
-[restricted runtime requirements](operations.md#provision-and-upgrade).
+[runtime credential requirements](operations.md#provisioning-and-current-storage).
 
 ```sh
 export ATOMIC_POSTGRES_TRANSPORT=plaintext
-target/debug/atomic migrate --writer-role atomic_writer --peer-role atomic_peer
+target/debug/atomic install --writer-role atomic_writer --peer-role atomic_peer
 target/debug/atomic create --database application-demo
 target/debug/atomic status --database application-demo
 ```
 
-Migration and runtime grants are separate committed actions. `MIGRATED` confirms
-the schema migration even if subsequent role validation or grants fail; a failed
-grant does not roll migration back. Correct the roles and rerun the grant command.
+Installation and runtime grants are separate committed actions. `INSTALLED`
+confirms the two-table storage installation even if subsequent role validation
+or grants fail. Correct the roles and rerun the same command. `migrate` remains
+an installation alias, not an upgrade path. Runtime roles are trusted clients
+of this shared storage, not per-database SQL authorization; grants are additive
+and do not audit inherited access.
 
 The sample reserves IDs 1000–1011 (including its named partition entity) and versioned request keys within
-this dedicated logical database. Use a fresh database for the sample. Migration
-and creation are explicit administrative actions; runtime processes do not
-migrate. Consolidation is an explicit administrative recovery operation when a
-diagnosed missing native publication requires it, not normal startup work.
+this dedicated logical database. Use a fresh logical database for the sample. Installation and creation are
+explicit administrative actions; runtime processes do neither. Creation supplies
+initial indexes. Consolidation is explicit administrative maintenance/recovery,
+not a startup fallback for damaged read indexes.
 
 Create a private endpoint directory and keep its path for the next terminal:
 
@@ -102,16 +105,16 @@ Replace the example address/name with a reachable numeric unicast address and
 the certificate's DNS name. The listen address may be wildcard; the advertised
 address may not. The small indexing threshold has the same fixture-only purpose
 as in the local example above. Do not supply `--endpoint` for a remote listener.
-The writer publishes its endpoint through PostgreSQL, bound to database lineage,
-the current fenced lease and a new listener instance. A peer does not accept a
+The writer publishes its endpoint through a guarded opaque reference, bound to
+the database route/lineage, current fenced lease and a new listener instance. A peer does not accept a
 stale endpoint merely because its address is reused.
 
-The lease duration governs heartbeat/failover, not a transaction's maximum runtime.
-A request that validated and continuously holds its PostgreSQL lease-row lock
-renews that same holder/epoch immediately before a successful fresh commit or
-exact-receipt replay releases the lock. A contender must wait and recheck ownership.
-Ordinary renewal still rejects an expired, unlocked or replaced epoch; failed
-transactions do not revive it.
+Writer ownership is a Rust lease/epoch protocol over conditional references.
+A successor claims a new epoch; every fresh publication checks the captured root,
+lease and GC protection. A stale writer cannot commit merely because its work
+started before takeover. Lease duration is not an application callback timeout;
+use transaction and I/O controls separately. Receipt lookup can resolve an
+already committed request without reassessing it or reviving writer authority.
 
 In the application environment, set peer PostgreSQL credentials and the same
 `ATOMIC_REMOTE_TOKEN_FILE`. System certificate roots are used; optionally set
@@ -235,10 +238,10 @@ native fulltext candidates against the structured public-status fact. Only the
 public article remains. It demonstrates a locally encoded/decoded ABI9 query
 program without granting the read-only application program-deployment authority.
 The separate PostgreSQL test deploys a stored fulltext query and transaction
-program and checks restart/retry. The application waits for canonical indexing,
-then retries only an unavailable search projection against the same captured
-value, with a finite deadline. Search is eventual: canonical `sync_index` alone
-does not establish fulltext readiness. This final stage finishes at basis11;
+program and checks restart/retry. Index/search preparation publishes one coherent
+descriptor. The sample synchronizes to the article basis before querying and
+uses a finite deadline; it does not claim that an unsynchronized or older
+captured value has caught up. This final stage finishes at basis11;
 the original project calculations and fixed requests are unchanged.
 See [fulltext.md](fulltext.md) for search grammar, limits and consistency caveats.
 
@@ -274,14 +277,29 @@ when detailed diagnostics are disabled.
 
 For an attached writer, a caller's `OperationContext` follows submitted work
 across the service queue. Its `phases` include transaction expansion, assessment,
-encoding/commitment preparation, publication/COMMIT and report construction;
+encoding/object preparation, guarded publication and report construction;
 these wall durations are separate from SQL-call elapsed time. Outer transaction
-time is inclusive, commit has two disjoint spans, and phase invocations are not
-transaction counts. Retries and partial failures record only executed work;
+time is inclusive, and phase invocations are not transaction counts.
+Retries and partial failures record only executed work;
 unknown-outcome reconciliation can add measurements after the initial response.
 Metric callbacks run only when the caller explicitly calls `publish()`.
 
 ## Captured values, references and query programs
+
+An enabled transaction report queue follows every transaction observed while
+the peer remains connected, including transactions from other writers. A live
+peer can catch up across local excision rewrites without losing the original
+before/after values, transaction datoms or tempids. Excision retains a small
+generation handoff while a connected lagging observer still needs it; catchup
+or observer drop permits later GC to reclaim that ownership. A held database
+value or drained report keeps only its own immutable data, not an interest in
+future transactions. Remove unused queues and drop unused peers/connections.
+
+A same-route restore can import an excision generation whose original reports
+never existed on that route. If a required handoff is absent, an enabled queue
+returns `peer/report-history-unavailable` without advancing its value or
+silently omitting reports. Disconnect and reopen against the restored state;
+this is not reconstruction of erased reports from a sanitized backup.
 
 `DatabaseValue::snapshot_key()` returns a cheap comparable/hashable committed
 view key: database lineage, excision generation, commit identity and temporal/
@@ -291,12 +309,12 @@ a supported logical view, not arbitrary query results or the retained history
 policy: queries, inputs, rules, extensions and `noHistory` retention still matter.
 An as-of view on a newer basis is not an exact older database reopening.
 
-`snapshot_reference()` adds a versioned encoded handoff containing the logical
-database route and its exact retained manifest witness. Decode it with
+`snapshot_reference()` adds a versioned encoded handoff containing the stable
+database route and its exact retained index witness. Decode it with
 `SnapshotReference::decode`, then use `Peer::reopen_snapshot`,
 `Connection::reopen_snapshot`, or `reference.open(&config, entries, bytes)`.
-Reopening authenticates PostgreSQL authority, lineage, generation, commit and
-required tree/log data; it does not advance the peer or recover the latest
+Reopening authenticates current publication authority, lineage, generation,
+canonical log/metadata coordinates and the authorized retained index; it does not advance the peer or recover the latest
 database first. References are not credentials and do not hold retention pins.
 If GC collected the witness, reopening fails instead of substituting another
 tree. This matters especially when `noHistory` consolidation changes retained
@@ -328,7 +346,27 @@ or uncommitted branches. They remain usable ordinary database values. The common
 application demonstrates pure branching and exact reference round-trip; the
 [query sources/reuse guide](queries.md) explains native database/tuple/log joins;
 the [persisted program API](programs.md) exposes richer native query authoring with
-versioned durable compatibility and shared resource controls.
+current canonical codecs and shared resource controls.
+
+### Protected program deployment
+
+An administrator can call
+`PostgresOperator::deploy_program(&Program) -> ProgramDeployment`.
+Use `deployment.hash()` when binding or invoking the program, and retain the
+handle until the binding transaction is acknowledged. Deployment authenticates
+and protects the complete fixed-dependency closure; dependencies must already
+exist. Keep child deployment handles alive until parent deployment succeeds.
+
+`release(self)` explicitly releases protection and may perform blocking I/O.
+Dropping the handle queues cleanup on the bounded worker lane. Once a committed
+database graph references the program, ordinary graph ownership retains it.
+An unbound program can become collectable after the deployment handle is
+released; uploading bytes alone is not durable application ownership. A
+concurrent GC seal can reject deployment safely with a conflict; retry the
+deployment without dropping protection for its dependencies.
+
+The read-only application example does not need this administrative capability
+for its local encode/decode demonstration.
 
 ## Advisory transaction hints
 
@@ -396,8 +434,8 @@ links still reject opening; malformed framing is not permission to delete them.
 New peers still authorize and authenticate their root through PostgreSQL. Cache
 names separate connection/trust configuration, database lineage, excision
 generation and format; they are not authorization tokens. An SSD hit supplies
-hash-authenticated canonical bytes, but a cold RAM miss first checks retention
-pins. Therefore SSD reuse reduces payload reads, not all SQL, and does not promise
+hash-authenticated canonical bytes under the captured reader's protection.
+A new live capture still needs PostgreSQL authority; SSD reuse does not promise
 disconnected startup or indefinitely available historical data. Fully resident
 RAM reads avoid foreground SQL within the stated retention policy.
 
@@ -410,15 +448,19 @@ from this cache root, returning false on a busy/error path; it is not secure
 erasure and does not purge other processes' differently configured namespaces.
 Retire obsolete cache roots explicitly under your data-retention policy.
 
-New native node uploads also create a compressed read representation when it is
-smaller. Versioned, bounded decompression authenticates the unchanged canonical
-hash. Existing canonical node rows and their SQL integrity checks remain
-authoritative; missing/corrupt optional representations fall back to raw nodes.
-The SQL read checks canonical raw length/hash even on a compressed hit, so a
-projection cannot mask canonical corruption. This saves suitable transferred
-payloads and SSD bytes, **not PostgreSQL disk space**: the projection adds storage
-and compression/server-hashing work. `node_block_read_stats()` reports this
-distinction. Backups remain canonical and restore recreates optional projections.
+Opaque object storage chooses raw bytes or a versioned gzip envelope when the
+latter is smaller. The single stored representation authenticates against the
+canonical SHA-256; it is not an optional SQL projection beside a second raw copy.
+Declared sizes, decompression output, complete input consumption and canonical
+hash are checked. A corrupt authoritative object fails clearly; there is no
+hidden raw fallback. The canonical per-object limit is 64 MiB, independent of
+whether compression makes its physical representation small.
+
+`node_block_read_stats()` separates canonical/physical node payload bytes,
+compressed/raw reads and decode time. `PgBlockStore::object_read_stats()` gives
+generic per-connection object counts. These measure transferred payloads, not
+PostgreSQL disk allocation, WAL, network framing or whole-process memory.
+Backup repositories contain canonical objects, independent of storage compression.
 
 ## CLI acceptance driver
 
@@ -434,10 +476,11 @@ roles, it also creates dedicated restricted writer/peer roles, grants through
 the CLI, and removes those roles afterward. Otherwise it explicitly reports
 that the restricted-role witness was unavailable. Two actual application
 processes run across a graceful transactor restart at the same private endpoint.
-The restricted peer is also rejected when used as a writer. With a superuser
-fixture, the driver deliberately removes only its own derived index publication,
-checks that startup reports `service/native-index-required` without rebuilding,
-runs `atomic consolidate`, and restarts without changing the authoritative head.
+The restricted peer is also rejected when used as a writer. The fixture owner can deliberately remove its own current index-descriptor
+object, check that startup fails without rebuilding, run `atomic consolidate`,
+and restart. This replaces only the damaged current read index; canonical
+log, receipts and logical basis remain unchanged. It does not certify damaged
+historical read roots.
 This destructive fault is test-only; the fixture's schema is removed afterward.
 Configuration/redaction checks run without PostgreSQL. The real workflow reports
 a skip if its PostgreSQL URL is absent; that skip is not integration evidence.
@@ -465,52 +508,35 @@ These checks cover semantic acceptance/rejection and orderly restart against the
 existing `Database::with` oracle, not arbitrary crash/network-fault simulation or
 automatic failure minimization. A PostgreSQL-unset skip is not a generated run.
 
-The storage campaign extends the same pure/native oracle with generated writes,
-interrupted uploads, index publication and peer reopen. Run with a disposable
-PostgreSQL URL and save/replay a private synthetic trace:
+A separate seeded block-storage schedule exercises abandoned prepared indexes,
+exact outcomes, immutable values and durable consumer restart:
 
 ```sh
-ATOMIC_STORAGE_FAULT_SEED=0xbeef ATOMIC_STORAGE_FAULT_STEPS=18 cargo test --offline --test storage_fault_replay generated_storage_fault_schedule_replays_real_postgres_and_exact_values -- --exact --nocapture
-ATOMIC_STORAGE_FAULT_REPLAY=/absolute/path/printed.trace cargo test --offline --test storage_fault_replay generated_storage_fault_schedule_replays_real_postgres_and_exact_values -- --exact --nocapture
-cargo test --offline --test storage_fault_replay controlled_storage_fault_fixture_is_automatically_reduced_on_real_postgres -- --exact --nocapture
+ATOMIC_BLOCK_FAULT_SEED=42 cargo test --offline --test storage_fault_replay seeded_block_schedule_preserves_publication_receipts_and_consumer_checkpoints -- --exact --nocapture
 ```
 
-`ATOMIC_STORAGE_FAULT_TRACE` and `ATOMIC_STORAGE_FAULT_REDUCED_TRACE` optionally
-select new absolute output files. No overwrite; traces contain fixture actions,
-not connection strings. The interruption is the existing `AfterSegments` hook,
-after upload and before root publication—not a process-kill simulation. A real
-failure is reduced while preserving its failure signature; the separate
-controlled fixture proves reduction without claiming a production defect.
+This is a fixed-size seeded schedule, not a saved/reduced trace framework or a
+process-crash simulation. The PostgreSQL environment must select a disposable
+fixture. An unconfigured skip is not evidence of a live run.
 
-## Measure upload and transaction costs
+## Measure complete transaction and read costs
 
-`PostgresIndexer` supports `with_node_upload_limits`,
-`with_compressed_node_blocks` and `with_node_block_encoding_overlap`. Default
-uploads are bounded to128 nodes/8MiB; a larger valid node travels alone within
-the existing codec bound. Canonical insertion and verification precede root
-publication. Batches of at least64KiB can use one scoped codec worker overlapping
-canonical SQL; it joins on both success and failure. `None` disables overlap,
-and compression can be disabled independently. These controls also exist on
-`PostgresTreeStore`; they do not change durable meaning.
-
-To compare canonical-only, serial compression and overlap, build the release
-upload witness, then run the printed test executable as a fresh process for each
-case using `--ignored --exact postgres_upload_measurement_child --nocapture`.
-`ATOMIC_UPLOAD_BENCH_MODE` accepts `canonical`, `serial`, `overlap`;
-`ATOMIC_UPLOAD_BENCH_ENTROPY` accepts `repeat`, `random`;
-`ATOMIC_UPLOAD_BENCH_SIZE` selects the per-value byte size. The fixture reports
-driver calls, canonical/physical bytes, actual overlap, per-upload process CPU
-and process peak RSS; input-byte bounds are not RSS estimates.
+Use [read-load](read-load.md) for independent readers and
+[operations](operations.md#disposable-workload-checks) for capture/restore.
+The focused `block_live_costs` fixture reports startup/capture, resident
+advancement, automatic indexing and reused-value warm queries. The opt-in
+`transaction_phases` target reports ordered transaction phase costs:
 
 ```sh
-cargo test --offline --release --test node_upload_batch --no-run
+cargo test --offline --release --test block_live_costs -- --nocapture --test-threads=1
 cargo test --offline --release --test transaction_phases -- --ignored --nocapture --test-threads=1
 ```
 
-The phase campaign compares sequential versus queued, dependent CAS/basis-checked
-transactions on several working-set sizes. PostgreSQL server CPU is not measured;
-Rust process CPU includes maintenance threads. One shared-host sample is not a
-universal throughput claim. Current measurements retain the ordered transaction
-path: expansion/report work is small, while larger encoding phases contain
-substantial commitment-tree SQL. Profile that work before adding cross-transaction
-pipeline stages. This decision is distinct from implemented node-codec/I/O overlap.
+Run against disposable storage and retain configuration with results. Count
+startup, preparation, publication, result consumption and cleanup when reporting
+complete-path costs; show excluded phases explicitly. Foreground operation
+counters differ from process-wide work, and neither captures PostgreSQL server
+CPU. Cache/novelty budgets are accounted residency, not measured process RSS.
+A warm query on a reused immutable value can perform zero SQL when its working
+set is resident; that does not establish zero-I/O capture or unlimited scale.
+No former relational-engine benchmark is evidence for the current engine.

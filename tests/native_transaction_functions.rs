@@ -483,11 +483,8 @@ fn postgres_native_host_matches_speculation_and_retries_without_old_deployment_a
     };
     let started = Instant::now();
     let fixture = common::PostgresFixture::new(&url, "native_functions");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&fixture.connection).unwrap();
+    common::install(&fixture.connection).unwrap();
+    let mut store = common::TestStore::connect(&fixture.connection).unwrap();
     store.create_database("native-functions", schema()).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let registry = registry(calls.clone());
@@ -590,18 +587,12 @@ fn postgres_native_host_matches_speculation_and_retries_without_old_deployment_a
         .unwrap();
     PortableBackup::verify_backup(backup_dir.path(), point.basis_t, true).unwrap();
     let target = common::PostgresFixture::new(&url, "native_restore");
-    PostgresMigrator::connect(&target.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&target.connection).unwrap();
     PortableBackup::connect(&target.connection)
         .unwrap()
         .restore_backup(backup_dir.path(), point.basis_t, "native-functions")
         .unwrap();
-    PostgresIndexer::connect(&target.connection, "native-functions")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&target.connection, "native-functions").unwrap();
     let restored = Connection::connect(&target.connection, "native-functions", 8).unwrap();
     let restored_db = restored.db();
     let predicate = restored_db

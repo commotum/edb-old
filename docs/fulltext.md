@@ -1,9 +1,11 @@
 # Native fulltext search
 
-Fulltext is an optional, eventually consistent search index over string facts.
+Fulltext is an optional derived search index over string facts. Background
+indexing can lag transactions; each captured value uses one immutable index/search
+attachment, and refreshing the peer produces a new value rather than mutating it.
 It complements structured query; it does not replace identity, schema validation,
-or the immutable database value supplied to a query. PostgreSQL remains the
-durable store. The analyzer, expression evaluator, scoring and queries run in
+or the immutable database value supplied to a query. PostgreSQL stores opaque immutable objects and conditional references; backup
+repositories can supply the same authenticated read graph without PostgreSQL. The analyzer, expression evaluator, scoring and queries run in
 Rust; Lucene/JVM interoperability and identical Lucene scores are not promised.
 
 ## Declare and search
@@ -17,9 +19,8 @@ Attribute::new(1000, Keyword::new("article", "text"),
 
 The flag is false by default, is queryable as `:db/fulltext` schema data, and
 cannot be toggled after installation. Both single- and multi-valued string
-attributes are supported. Legacy databases missing the descriptor must use the
-explicit `fulltext_vocabulary_upgrade_ops` upgrade before installing flagged
-attributes; opening a database does not silently rewrite its schema.
+attributes are supported. New databases contain the vocabulary in their canonical genesis. Installing an
+attribute is an ordinary transaction; opening a database does not rewrite schema.
 
 ```rust
 let report = database.fulltext(1000, "\"blue river\" OR mountain*",
@@ -81,18 +82,20 @@ Candidates are checked against the supplied value's visible facts. Retained,
 `as_of`, `since`, history, filtered and speculative views must not leak a fact
 hidden by that view. The `tx` column is the visible assertion transaction, not
 the indexing time. An old assertion can still appear in history after its
-current value is retracted. Candidate availability and scoring remain eventual:
-a stable logical snapshot key is not a promise of identical fulltext results
-as its search projection becomes available or advances.
+current value is retracted. An attachment is fixed for its captured value. A newer value can have a more
+complete search basis even when no new transaction changed its logical snapshot
+key. That key omits physical index placement and is not a fulltext-result cache
+key.
 
-Native search reads the separately derived immutable projection; it must not
+Persisted search reads the captured source-bound immutable attachment; it does not
 fall back to materializing the whole native database when the projection is
 missing. Missing/unusable search data is an explicit error. Fulltext coverage
 is reported through `FulltextStats::index_basis_t`; a value newer than this
 frontier may have missing matches. Ordinary transaction acknowledgment is not
-a search-index completion receipt. Small deployments can lower background
-index scheduling thresholds, or an attached writer connection can request
-indexing. A read-only connection's transaction socket currently does not carry
+a search-index completion receipt. Small deployments can lower background index scheduling thresholds, or an
+attached writer connection can request indexing and synchronize to the desired
+basis. Required search data is built in the same coherent job as canonical
+indexes; successful adoption does not publish a missing attachment. A read-only connection's transaction socket currently does not carry
 maintenance requests. Do not turn an absent hit into a uniqueness or absence
 constraint.
 
@@ -111,24 +114,26 @@ Queries debit search work and allocated bytes from their enclosing query or
 stored-program budget, including attempted work on failure. A query row limit
 remains an error, not an implicit search top-k. `QueryStats` reports search,
 lagging-search and truncation counts; nested query counters are included.
-`FulltextStats::read_bytes` counts authenticated search pages fetched from
-PostgreSQL (zero for eager fixtures); `admitted_bytes` is the separate cumulative
-logical allowance. Search-page bytes exclude metadata, protocol overhead and
-structured candidate-validation reads. Use the operation's total SQL observation
-for that broader I/O picture.
+`FulltextStats::read_bytes` counts authenticated search objects loaded through
+the backing source (PostgreSQL or repository; zero for eager fixtures and decoded
+page-cache hits). `admitted_bytes` is the separate cumulative logical allowance.
+Search-page bytes exclude other metadata, protocol overhead and structured
+candidate-validation reads. Use the operation's SQL/cache diagnostics for the
+broader I/O picture.
 
 ## Stored programs and operations
 
-Fulltext-bearing portable native templates select program ABI 9, including
-nested queries and rules. Existing programs that do not need fulltext retain
-their previous encoding and hash. Fulltext is also allowed in transaction
+The current program codec supports fulltext-bearing native templates, including
+nested queries and rules; author them with the typed query API and current encoder. Fulltext is also allowed in transaction
 programs: the writer re-executes the program and commits its grounded facts.
 Its selection can depend on eventual index availability, so do not describe
 such a program as deterministic from its logical db-before key alone. Use
 structured indexes for correctness constraints needing complete membership.
 
-Search data is derived, not authoritative history: backups/recovery must
-preserve canonical facts and rebuild search projections. Cache hits must not
+Search data is derived, not authoritative history. Backup preserves the
+canonical publication and supplies an exact read graph with a coherent search
+attachment; restore imports that authenticated graph. Explicit administrative
+rebuild can reconstruct search from canonical index facts. Cache hits must not
 bypass access/generation rules or turn corrupted search pages into empty
 results. Operational benchmarks should report dataset/index coverage, cold
 versus warmed reads, measured SQL/payload I/O and real memory separately from
@@ -148,92 +153,102 @@ with unchanged statistics without charging those old records as new input.
 An empty-string document is still a document and prevents this shortcut;
 non-text changes to an empty corpus still reuse its root without rebuilding.
 
-Search pages are immutable and content-addressed, with explicit root/child
-references for retention. Successors do not depend on predecessor lookup chains
-or copy every predecessor page into their own namespace. SQL migration30 retains
-the earlier source-owned sidecars; their first incremental reuse imports and
-authenticates their pages once. Page/header FORMAT1 and canonical datom encodings
-are unchanged. This one-off conversion, missing compatible predecessors, generation
-changes and explicit repair can legitimately require whole-projection work.
+Search pages are immutable content-addressed objects with explicit child links.
+A source-bound attachment links its exact canonical index descriptor and search
+root. Successors reuse unchanged pages directly, not a predecessor lookup chain
+or a SQL namespace copy. Missing predecessors, generation changes and explicit
+repair can require whole-projection work.
 
-Incremental does not mean constant cost: canonical roots/directories must be
-inspected, changed leaves decoded, affected search paths read/written, and all
-publication/pinning SQL completed. A small corpus can fit inside one changed
-canonical leaf. Root/directory metadata grows with tree width. Maintenance
-statistics distinguish this source work, tokenization, search-page I/O, legacy
-imports and unchanged-root reuse.
-Page-upload statistics include verification reads, physically inserted pages
-and direct child/root references. Releasing a build guard counts the source-origin
-pages examined and candidates added in the same indexed retention pass. These
-reference counts do not claim to measure every internal trigger row operation.
-`PostgresIndexer::with_fulltext_build_limits` controls sort memory, target page
-size, record/key capacities, record count, cumulative spill writes and the work
-directory. Default sort admission is8 MiB, target pages64 KiB, at most10 million
-input records per operation and4 GiB cumulative spill writes. Incremental input
-counts mutations; reused records are not new input, and this allowance is not a
-new maximum database size. One admitted record/page can
-exceed the target sort/page size; hard format limits remain enforced, never
-silently truncating tokens. Spill counts include merge rewrites, not live disk
-occupancy. `FulltextBuildStats::blocks`/`encoded_bytes` count complete page upload
-attempts, including intermediate and deduplicated pages; `FulltextProjection`
-totals describe the final reachable tree. `peak_buffer_bytes` tracks sort/editor
-workspace, not total process RSS or all live source caches and retained values.
-Use complete operation timing and `OperationContext` for foreground SQL, including
-metadata/control calls; separate worker work needs its own attribution.
+Incremental does not mean constant cost: roots/directories are inspected,
+changed leaves decoded, affected search paths read/written, and source/GC guards
+checked before adoption. A small corpus can fit inside one changed canonical
+leaf. Root/directory metadata grows with tree width. `FulltextBuildStats`
+distinguishes source work, tokenization, search-page I/O, spills and unchanged-root
+reuse; it does not report fictitious SQL edges or trigger operations.
+
+`ServiceOptions.fulltext_build_limits` and
+`PostgresOperator::with_fulltext_build_limits(limits)` configure sort memory,
+target page size, record/key capacities, input count, cumulative spill writes
+and work directory. Service settings survive standby takeover and apply to
+background indexing and automatic excision; operator settings apply to
+consolidation, current-index recovery, search rebuild and excision. Invalid
+numeric settings reject before work admission. Raising a valid limit can resume
+an interrupted job without changing canonical request identity.
+
+The lower-level `IndexInput::with_fulltext_build_limits` and `storage::fulltext`
+builders expose the same policy. Defaults remain 8 MiB sort admission,
+64 KiB target pages, at most 10 million input
+records per operation and 4 GiB cumulative spill writes. Incremental input counts
+mutations, not unchanged reused records; this is not a maximum database size.
+One admitted record/page may exceed the target sort/page size, subject to hard
+format limits. Spill counts include merge rewrites, not live disk occupancy.
+
+`FulltextBuildStats::blocks`/`encoded_bytes` count page upload attempts,
+including intermediate and deduplicated pages; `FulltextProjection` totals
+describe the final reachable tree. `peak_buffer_bytes` tracks sort/editor
+workspace, not process RSS or all source caches and retained values.
+Measure complete operation time and foreground/worker I/O separately.
 
 `NativeFulltextReader::cache_stats` exposes cache-owned decoded bytes, entries
 and configured bounds. This positive header/page cache has a separate allowance
 equal to the configured native tree-cache bounds; it is not part of tree-cache
-occupancy and is not persisted in the optional SSD cache. Active cursors may
-retain additional pages outside cache ownership. A fully warmed search requires
-no SQL, including no foreground health check; a cold miss checks exact retention
-and reacquires that source's pin or fails safely.
+occupancy. Its decoded entries are not persisted; underlying immutable objects
+can use the shared SSD cache on a live snapshot. Active cursors may retain
+additional pages outside cache ownership. A fully warmed search can require no
+SQL. New live captures establish current
+authority and reader-session protection; cold source reads fail if that
+protection is no longer valid. A cache hit is not an authorization token.
 
-Canonical index success and search readiness are separate. The background
-service exposes `BackgroundIndexingStats.fulltext`, with attempted-source basis,
-failure details and retry state, not a universal search-ready watermark. Transient
-Busy/Unavailable/Interrupted failures receive up to8 idle retries with exponential
-250ms delay capped at30s; permanent failures remain visible until an explicit
-index request or repair. Exhaustion is visible and needs operator intervention.
-Ordinary transactions do not wait for search readiness. `atomic consolidate`
-reports canonical `INDEXED` and a separate `SEARCH checked/failed` line.
+The block background service prepares canonical indexes and their search
+attachment as one coherent candidate. `BackgroundIndexingStats.fulltext`
+observes this combined job's attempts, failures and successfully adopted checked
+basis; a preparation error is not necessarily a fulltext-specific error. There
+is no separate idle search worker (`idle_retries` remains zero). Candidate
+preparation failures remain visible and retry through the actual indexing
+scheduler. A candidate with required fulltext data is not published without its
+authenticated search attachment. Ordinary transactions can continue while a
+background candidate is prepared; an admitted excision deliberately parks fresh
+transactions until its complete successor, including search, is activated.
 
-Restore deliberately starts without derived search pages; `rebuild_fulltext`
-reconstructs them from authenticated restored facts. Owner-only
-`FulltextStore::discard_projection` is an explicit bounded repair of one named
-source; it never edits source facts. During repair, retained readers may cold-fail;
-reopen peers after repair that changes the search root/analyzer to discard cached
-headers. Ordinary GC preserves pinned sources, retires unpinned canonical sources
-under existing policy, and reclaims unreferenced search pages in bounded batches.
-Removing an old root does not remove pages reachable from a successor. A shared
-build/exclusive-GC fence protects publication, and a persisted source build guard
-retains interrupted uploads until retry, explicit discard or source retirement.
-GC can report Busy while a build is active. Each collected page releases its direct
-child references; later batches reclaim newly unreferenced descendants, without
-recursive whole-tree deletion. Candidate discovery uses an indexed rootless-page
-frontier, not a scan of every live page. The batch limit bounds physical removals;
-rechecking guarded candidates may inspect more frontier entries. Explicit discard
-detaches the named source only;
-shared pages can remain reachable and it is not an erasure guarantee.
-Excision publishes a new generation; search is reconstructed from that generation
-and may be unavailable until its projection is ready. New current and history
-views cannot return removed facts. Already-held authorized old values
-retain the repository's existing pre-excision access policy; excision is not a
-promise to erase bytes or memories already delivered to an application.
+## Retention, repair and excision
 
-[query_fulltext.rs](../tests/query_fulltext.rs) exercises structured joins,
-prepared inputs, exact views, grammar/ranking/truncation and program budgets.
-With `ATOMIC_POSTGRES_URL` set, it also deploys stored ABI9 query/transaction
-programs and verifies native execution, speculative/committed agreement and exact
-receipt retry before/after writer restart; an unset URL explicitly skips this
-PostgreSQL witness. The separate application executes the read-only query path
-with the setup in [application.md](application.md).
+`PostgresOperator::rebuild_fulltext(database_id, expected_index)` prepares a
+replacement attachment and adopts it conditionally. The stable route ID comes
+from the catalog; the optional expected descriptor guards against replacing a
+different concurrent source. The CLI's `fulltext-rebuild --discard-manifest`
+spelling supplies that expected digest, not permission to delete pages under
+readers. Reopen/synchronize to observe the replacement; existing held values
+continue using their old immutable graph.
+
+Objects are retained through ordinary Rust graph ownership. Current publications,
+exact receipts, authorized retained indexes, reader pins and protected work all
+participate in the same GC protocol. Dropping an old root does not delete pages
+reachable through a successor or another owner. GC advances bounded persisted
+work and honors retention; no feature-specific SQL page frontier, sidecar import
+or physical discard procedure is involved. Search repair is not secure erasure.
+
+Excision builds search from the rewritten successor before activating its new
+generation. New current/history views exclude excised facts, while already-held
+authorized old values retain their pre-excision graph. New serialized openings
+of the old generation are denied. GC waits for remaining owners and retention;
+independent backups, SSD copies and already delivered application data are
+separate retention responsibilities. See [operations](operations.md#excision).
+
+## Focused examples and regressions
+
+[query_fulltext.rs](../tests/query_fulltext.rs) covers structured joins, prepared
+inputs, exact views, grammar/ranking/truncation and program budgets.
 [fulltext_schema.rs](../tests/fulltext_schema.rs) covers schema installation and
-immutable-flag enforcement. These tests do not establish Lucene parity or a
-general-purpose search throughput claim.
-The incremental cost/view oracle is in
-[fulltext_incremental.rs](../tests/fulltext_incremental.rs); admission and empty
-corpus guards are in [fulltext_empty_bulk.rs](../tests/fulltext_empty_bulk.rs).
-[fulltext_incremental_lifecycle.rs](../tests/fulltext_incremental_lifecycle.rs)
-covers legacy sidecars, shared-page retirement, interrupted builds and restricted
-runtime roles.
+immutable flags. The separate application follows [application.md](application.md).
+
+[block_fulltext.rs](../tests/block_fulltext.rs) exercises the current source-bound
+builder/reader: selective reads beyond a small cache, warm reuse, incremental
+text/nontext/noHistory changes, captured/time/filter/speculative views and
+corruption/cancellation. Pure shared page/difference/empty-corpus tests retain
+the algorithm checks without a SQL adapter.
+[block_backup.rs](../tests/block_backup.rs) and
+[catalog_backup.rs](../tests/catalog_backup.rs) cover portable graph and restored
+behavior; block excision/GC tests cover retained programs/search and released
+old-generation data. An unset PostgreSQL URL is not integration evidence.
+No local fixture establishes Lucene parity or a universal search throughput
+claim.

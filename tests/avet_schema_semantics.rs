@@ -1,9 +1,12 @@
+use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions};
 use atomic_core::{
-    Attribute, Cardinality, Database, EntityRef, IndexPrefix, Keyword, Peer, PostgresIndexer,
-    PostgresMigrator, PostgresStore, Schema, TxOp, TxValue, Unique, Value, ValueType,
+    Attribute, Cardinality, Database, EntityRef, IndexPrefix, Keyword, Peer, Schema, TxOp, TxValue,
+    Unique, Value, ValueType,
 };
-use postgres::{Client, NoTls};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use atomic_core::{
+    PostgresConnectionConfig, SemanticError, ServiceTransactionReport, TransactionRequest,
+};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod common;
 
@@ -87,8 +90,10 @@ fn eager_unique_enablement_uses_history_not_only_current_values() {
     assert_eq!(error.code, "schema/unique-requires-avet");
 }
 
-fn connection() -> Option<String> {
-    std::env::var("ATOMIC_POSTGRES_URL").ok()
+fn connection() -> Option<common::PostgresFixture> {
+    std::env::var("ATOMIC_POSTGRES_URL")
+        .ok()
+        .map(|url| common::PostgresFixture::new(&url, "current_semantics"))
 }
 
 fn unique_name(prefix: &str) -> String {
@@ -104,47 +109,79 @@ fn unique_name(prefix: &str) -> String {
 
 #[test]
 fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
-    let Some(connection) = connection() else {
+    let Some(fixture) = connection() else {
         return;
     };
+    let connection = fixture.connection.clone();
     let database_id = unique_name("avet_readiness");
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
-    PostgresIndexer::connect(&connection, &database_id)
+    let config = PostgresConnectionConfig::plaintext(&connection);
+    let database = BlockDatabase::resolve(&config, &database_id).unwrap();
+    let mut objects = atomic_core::storage::PgBlockStore::connect(&config).unwrap();
+    let read_root = |objects: &mut atomic_core::storage::PgBlockStore| {
+        let id = objects
+            .read_ref(&database.reference_key())
+            .unwrap()
+            .unwrap()
+            .value
+            .unwrap()
+            .try_into()
+            .unwrap();
+        atomic_core::storage::root::DatabaseRoot::decode(&id, &objects.get(id).unwrap().unwrap())
+            .unwrap()
+    };
+    let fresh = read_root(&mut objects);
+    assert_eq!(fresh.writer_epoch, 0);
+    common::consolidate(&connection, &database_id).unwrap();
+    let route = atomic_core::DatabaseCatalog::connect(&connection)
         .unwrap()
-        .consolidate()
+        .resolve(&database_id)
+        .unwrap()
+        .database_id;
+    atomic_core::PostgresOperator::connect(&connection)
+        .unwrap()
+        .rebuild_fulltext(&route, None)
         .unwrap();
-    let mut blocker = Client::connect(&connection, NoTls).unwrap();
-    let build_key: i64 = blocker
-        .query_one(
-            "SELECT atomic_tree_database_build_pin_key($1)",
-            &[&database_id],
+    let maintained = read_root(&mut objects);
+    assert_eq!(
+        maintained.writer_epoch, 0,
+        "operator maintenance must not acquire writer authority"
+    );
+    assert_eq!(
+        (
+            maintained.basis,
+            maintained.log,
+            maintained.receipts,
+            maintained.metadata
+        ),
+        (fresh.basis, fresh.log, fresh.receipts, fresh.metadata)
+    );
+    // A direct writer deliberately has no background index job; publication is
+    // explicit below, so logical readiness cannot race physical backfill.
+    let claim = || {
+        BlockTransactor::claim(
+            &config,
+            BlockDatabase::resolve(&config, &database_id).unwrap(),
+            BlockWriterOptions::default(),
         )
         .unwrap()
-        .get(0);
-
-    // Empty attributes have no physical range to backfill, so uniqueness can
-    // become available in the schema transaction itself.
-    blocker
-        .query_one("SELECT pg_advisory_lock($1)", &[&build_key])
-        .unwrap();
-    let service = common::start_service(&connection, &database_id);
+    };
+    let mut service = claim();
     let empty_unique = {
         let mut descriptor = created.schema().attribute(EMPTY_ID).unwrap().clone();
         descriptor.unique = Some(Unique::Identity);
         descriptor
     };
-    let empty_enabled = common::transact(
-        &service,
+    let empty_enabled = transact(
+        &mut service,
         "unique-empty",
         created.basis_t(),
         &[TxOp::AlterAttribute(empty_unique)],
         1_000,
-    );
+    )
+    .unwrap();
     let empty_avet = Peer::connect(&connection, &database_id, 32)
         .unwrap()
         .snapshot()
@@ -158,22 +195,14 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
         )
         .unwrap();
     assert!(empty_avet.datoms.is_empty());
-    let released: bool = blocker
-        .query_one("SELECT pg_advisory_unlock($1)", &[&build_key])
-        .unwrap()
-        .get(0);
-    assert!(released);
-    service.shutdown();
-    PostgresIndexer::connect(&connection, &database_id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    service.release().unwrap();
+    common::consolidate(&connection, &database_id).unwrap();
 
     // A retracted value still counts: recovered has-values? probes history
     // AEVT, not the current relation.
-    let service = common::start_service(&connection, &database_id);
-    let populated = common::transact(
-        &service,
+    let mut service = claim();
+    let populated = transact(
+        &mut service,
         "seed-unindexed",
         empty_enabled.basis_t,
         &[
@@ -189,10 +218,11 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
             },
         ],
         2_000,
-    );
+    )
+    .unwrap();
     let historical_entity = populated.tempids["historical"];
-    let retracted = common::transact(
-        &service,
+    let retracted = transact(
+        &mut service,
         "retract-unindexed",
         populated.basis_t,
         &[TxOp::Retract {
@@ -201,7 +231,8 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
             value: Some(TxValue::Scalar(Value::String("gone".into()))),
         }],
         3_000,
-    );
+    )
+    .unwrap();
     let mut historical_unique = retracted
         .db_after
         .schema()
@@ -209,8 +240,8 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
         .unwrap()
         .clone();
     historical_unique.unique = Some(Unique::Identity);
-    let history_error = common::try_transact(
-        &service,
+    let history_error = transact(
+        &mut service,
         "unique-historical-unindexed",
         retracted.basis_t,
         &[TxOp::AlterAttribute(historical_unique)],
@@ -218,19 +249,10 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
     )
     .unwrap_err();
     assert_eq!(history_error.code, "schema/unique-requires-avet");
-    service.shutdown();
-    PostgresIndexer::connect(&connection, &database_id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    service.release().unwrap();
+    common::consolidate(&connection, &database_id).unwrap();
 
-    // Hold the database build fence so the service's schema-triggered index
-    // job cannot publish between the two writer requests.
-    blocker
-        .query_one("SELECT pg_advisory_lock($1)", &[&build_key])
-        .unwrap();
-
-    let service = common::start_service(&connection, &database_id);
+    let mut service = claim();
     let mut indexed = retracted
         .db_after
         .schema()
@@ -238,13 +260,14 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
         .unwrap()
         .clone();
     indexed.indexed = true;
-    let index_enabled = common::transact(
-        &service,
+    let index_enabled = transact(
+        &mut service,
         "enable-pending-index",
         retracted.basis_t,
         &[TxOp::AlterAttribute(indexed)],
         5_000,
-    );
+    )
+    .unwrap();
 
     let peer = Peer::connect(&connection, &database_id, 32).unwrap();
     let avet_error = peer
@@ -267,8 +290,8 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
         .unwrap()
         .clone();
     pending_unique.unique = Some(Unique::Identity);
-    let pending_error = common::try_transact(
-        &service,
+    let pending_error = transact(
+        &mut service,
         "unique-before-backfill",
         index_enabled.basis_t,
         &[TxOp::AlterAttribute(pending_unique.clone())],
@@ -277,31 +300,18 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
     .unwrap_err();
     assert_eq!(pending_error.code, "schema/unique-requires-avet");
 
-    let released: bool = blocker
-        .query_one("SELECT pg_advisory_unlock($1)", &[&build_key])
-        .unwrap()
-        .get(0);
-    assert!(released);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let stats = service.background_indexing_stats();
-        if stats.published_basis_t >= index_enabled.basis_t && stats.pending_avet_projections == 0 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "schema-triggered AVET publication did not complete"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    service.release().unwrap();
+    common::consolidate(&connection, &database_id).unwrap();
+    let mut service = claim();
 
-    let unique_enabled = common::transact(
-        &service,
+    let unique_enabled = transact(
+        &mut service,
         "unique-after-backfill",
         index_enabled.basis_t,
         &[TxOp::AlterAttribute(pending_unique)],
         7_000,
-    );
+    )
+    .unwrap();
     assert_eq!(
         unique_enabled
             .db_after
@@ -311,5 +321,19 @@ fn postgres_writer_rejects_logical_but_unready_avet_until_publication() {
             .unique,
         Some(Unique::Identity)
     );
-    service.shutdown();
+    service.release().unwrap();
+}
+
+fn transact(
+    writer: &mut BlockTransactor,
+    key: &str,
+    basis: u64,
+    ops: &[TxOp],
+    instant: i64,
+) -> Result<ServiceTransactionReport, SemanticError> {
+    writer.transact(
+        &TransactionRequest::new(key, ops.to_vec())
+            .comparing_basis(basis)
+            .with_tx_instant(instant),
+    )
 }

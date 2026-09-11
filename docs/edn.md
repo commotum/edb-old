@@ -13,12 +13,12 @@ restore is needed; file/stdin input and EDN results are unchanged.
 
 Build `cargo build --release --bin atomic`. Configure PostgreSQL and explicit
 transport as described in [the application guide](application.md). Use
-administrative credentials for migration/creation, a writer role for the
+administrative credentials for installation/creation, a writer role for the
 transactor, and a peer role for application reads/submission. The data commands
-never migrate, create a database, or start an embedded writer implicitly.
+never install storage, create a database, or start an embedded writer implicitly.
 
 ```sh
-target/release/atomic migrate
+target/release/atomic install
 target/release/atomic create --database edn-demo
 ```
 
@@ -238,30 +238,18 @@ prints increasing-size complete-process cost samples. `edn_values` measures
 coefficient-sized exact-number conversion with huge compact scales. These are
 bounded fixtures, not universal throughput or deployment certification.
 
-### Observed costs
+### Cost fixtures
 
-On 2026-09-10, the optimized EDN acceptance run passed 45 tests (the five EDN
-suites plus binary tests), with PostgreSQL enabled and no skips. Environment:
-x86-64 Ryzen Threadripper 2950X, Rust 1.90.0, local Unix-socket PostgreSQL with
-`fsync` and `synchronous_commit` on, restricted writer/peer roles. Release debug
-information and incremental compilation were disabled. These are single samples
-under shared-machine load, not statistical throughput estimates.
+The current `edn_cli` fixture measures 32/128/512-entity inputs. Complete CLI
+samples include process startup, configured connection, normal transaction/read
+processing, EDN output, process exit and harness validation; the transactor is
+already running. It measures growing query outputs and a single-entity Pull
+separately from parsing and canonical request conversion.
 
-| New entities | Input bytes | Parse / format (ms) | Parse + canonical request (ms) | Complete CLI submit (ms) | Complete CLI query / pull (ms) |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| 32 | 2,062 | 0.173 / 0.087 | 0.440 | 106.658 | 31.004 / 43.675 |
-| 128 | 8,614 | 0.874 / 0.503 | 2.563 | 141.440 | 44.161 / 42.884 |
-| 512 | 35,110 | 2.226 / 1.384 | 7.001 | 333.391 | 57.434 / 47.636 |
-
-Complete CLI samples include process startup, configured connection, normal
-transaction/query/pull processing, EDN output, process exit and the harness's
-output reading/EDN validation. The transactor is already running. Query rows grow
-cumulatively: 34, 162 and 674; output sizes are 1,506, 7,412 and 31,366 bytes.
-Pull selects one entity, not the entire growing database.
-
-Exact-number fixtures use 64/256/1,024/4,096 coefficient digits and scales
-0/1,000,000/`i64::MAX`. Even at the largest scale, the 4,096-digit value prints in
-4,118 bytes; measured parsing was 287–345 µs and conversion/printing 294–329 µs
-across that coefficient's three scales. Query fixtures with 32/128/512 rows and
-scales 0/1,000/100,000 used 195/771/3,075 native work units respectively at every
-scale. No RSS or cluster-wide scalability claim is made from these checks.
+`edn_values` exercises 64/256/1,024/4,096 coefficient digits with compact scales
+up to `i64::MAX`, checking that work follows represented coefficient size rather
+than expanding the scale into enormous strings. Query fixtures similarly vary
+row count and scale. These are bounded cost/representation checks, not RSS or
+cluster-wide throughput guarantees. See [current acceptance](acceptance.md) for
+verified storage-path results; earlier relational-engine CLI timings are retained
+in Git history, not asserted for the current engine.

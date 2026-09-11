@@ -8,10 +8,10 @@
 //! Backups are retained; this example never deletes an existing repository.
 use atomic_core::{
     Attribute, CallableRef, CapacityLimits, Cardinality, Clause, DataPattern, DatabaseValue,
-    EntityRef, FindElement, FindSpec, IndexOrder, IndexSegment, Keyword, Peer, PortableBackup,
-    PostgresMigrator, PostgresOperator, ProgramCall, Query, QueryControl, QueryResult, QueryValue,
-    RuntimeValue, Term, TransactionRequest, TransactionService, TransactionServiceConfig, TxForm,
-    TxOp, Value, ValueType, Variable, encode_index_segment,
+    EntityRef, FindElement, FindSpec, IndexOrder, Keyword, Peer, PortableBackup,
+    PostgresConnectionConfig, PostgresOperator, ProgramCall, Query, QueryControl, QueryResult,
+    QueryValue, RuntimeValue, Term, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TxForm, TxOp, Value, ValueType, Variable, canonical_datom_bytes,
 };
 use postgres::{Client, NoTls};
 use sha2::{Digest as _, Sha256};
@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     if catalog_identity(&source)? == catalog_identity(&target)? {
         return Err("restore must use a separate PostgreSQL catalog or schema".into());
     }
-    require_stopped(&source, &database)?;
+
     let directory = std::env::var_os("ATOMIC_BACKUP_DIRECTORY")
         .map(PathBuf::from)
         .map(Ok)
@@ -133,14 +133,11 @@ fn check_resume_point(
         .get("basis")
         .ok_or("source basis missing")?
         .parse()?;
-    let row = Client::connect(source, NoTls)?.query_one(
-        "SELECT d.lineage_id, h.log_generation, h.basis_t FROM atomic_heads h \
-         JOIN atomic_databases d USING (database_id) WHERE h.database_id=$1",
-        &[&database],
-    )?;
-    let lineage: String = row.get(0);
-    let generation = u64::try_from(row.get::<_, i64>(1))?;
-    if u64::try_from(row.get::<_, i64>(2))? != basis {
+    let entry = atomic_core::DatabaseCatalog::connect(source)?.resolve(database)?;
+    let report = PostgresOperator::connect(source)?.inspect_database(&entry.database_id, false)?;
+    let lineage = entry.lineage_id;
+    let generation = report.metrics.generation;
+    if report.metrics.basis_t != basis {
         return Err("source advanced before resume-point validation".into());
     }
     // The basis-only restore API chooses the latest generation at that basis.
@@ -213,7 +210,6 @@ fn run_phase(phase: &str) -> Result<Fields> {
             }
         }
         "backup-first" | "backup-repeat" => {
-            require_stopped(&source, &database)?;
             let point = PortableBackup::connect(&source)?.backup_database(&database, &directory)?;
             if point.basis_t.to_string() != expected("basis")? {
                 return Err("backup basis differs from captured stopped source".into());
@@ -235,8 +231,10 @@ fn run_phase(phase: &str) -> Result<Fields> {
             fields.insert("basis".into(), verified.database.basis_t().to_string());
         }
         "restore" => {
-            PostgresMigrator::connect(&target)?.migrate()?;
-            require_stopped(&target, &database)?;
+            atomic_core::storage::PgBlockStore::install(&PostgresConnectionConfig::plaintext(
+                &target,
+            ))?;
+
             let restored = PortableBackup::connect(&target)?.restore_backup(
                 &directory,
                 expected("basis")?.parse()?,
@@ -249,7 +247,9 @@ fn run_phase(phase: &str) -> Result<Fields> {
         }
         "retry" => retry_scale_request(&target, &database, &mut fields)?,
         "deep-inspect" => {
-            let report = PostgresOperator::connect(&target)?.inspect_database(&database, true)?;
+            let entry = atomic_core::DatabaseCatalog::connect(&target)?.resolve(&database)?;
+            let report =
+                PostgresOperator::connect(&target)?.inspect_database(&entry.database_id, true)?;
             if !report.healthy() {
                 return Err(format!("restored integrity failure: {:?}", report.problems).into());
             }
@@ -272,7 +272,8 @@ fn seed_maintenance_fixture(connection: &str, database: &str) -> Result<()> {
             "maintenance profile records must be a positive multiple of128, at most100000".into(),
         );
     }
-    PostgresMigrator::connect(connection)?.migrate()?;
+    let config = PostgresConnectionConfig::plaintext(connection);
+    atomic_core::storage::PgBlockStore::install(&config)?;
     let mut schema = atomic_core::Schema::new();
     let mut key = Attribute::new(
         1000,
@@ -288,9 +289,8 @@ fn seed_maintenance_fixture(connection: &str, database: &str) -> Result<()> {
         ValueType::String,
         Cardinality::One,
     ))?;
-    let mut basis = atomic_core::PostgresStore::connect(connection)?
-        .create_database(database, schema)?
-        .basis_t();
+    atomic_core::storage::BlockDatabase::create(&config, database, schema)?;
+    let mut basis = Peer::connect(connection, database, 8)?.basis_t();
     for publication in (0..records).step_by(1024) {
         let service = TransactionService::start(TransactionServiceConfig {
             connection: connection.to_owned(),
@@ -328,7 +328,8 @@ fn seed_maintenance_fixture(connection: &str, database: &str) -> Result<()> {
             }
         }
         service.shutdown();
-        atomic_core::PostgresIndexer::connect(connection, database)?.consolidate()?;
+        let entry = atomic_core::DatabaseCatalog::connect(connection)?.resolve(database)?;
+        PostgresOperator::connect(connection)?.consolidate_database(&entry.database_id)?;
         println!(
             "maintenance_seed records={} basis_t={basis}",
             records.min(publication + 1024)
@@ -436,11 +437,7 @@ fn fingerprint(database: &DatabaseValue) -> Result<String> {
     for datom in database.scan_cursor(IndexOrder::Eavt)? {
         // Canonical codec rather than tree packing or Debug formatting. The
         // one-datom envelope is length-delimited before entering the stream.
-        let encoded = encode_index_segment(&IndexSegment {
-            order: IndexOrder::Eavt,
-            history: true,
-            datoms: vec![datom?],
-        })?;
+        let encoded = canonical_datom_bytes(&datom?)?;
         hash.update((encoded.len() as u64).to_be_bytes());
         hash.update(encoded);
         count += 1;
@@ -449,7 +446,6 @@ fn fingerprint(database: &DatabaseValue) -> Result<String> {
 }
 
 fn retry_scale_request(connection: &str, database: &str, fields: &mut Fields) -> Result<()> {
-    require_stopped(connection, database)?;
     let writer = TransactionService::start(TransactionServiceConfig {
         connection: connection.into(),
         database_id: database.into(),
@@ -513,18 +509,6 @@ fn catalog_identity(connection: &str) -> Result<(String, String, String)> {
         "SELECT system_identifier::text, current_database(), current_schema() FROM pg_control_system()", &[],
     )?;
     Ok((row.get(0), row.get(1), row.get(2)))
-}
-
-fn require_stopped(connection: &str, database: &str) -> Result<()> {
-    let active: bool = Client::connect(connection, NoTls)?.query_one(
-        "SELECT EXISTS (SELECT 1 FROM atomic_transactor_leases WHERE lease_scope=$1 AND expires_at>clock_timestamp())", &[&database],
-    )?.get(0);
-    if active {
-        return Err(
-            "stop the source/target transaction service before operational acceptance".into(),
-        );
-    }
-    Ok(())
 }
 
 fn repository_size(directory: &Path) -> Result<(u64, u64)> {

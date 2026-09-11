@@ -3,7 +3,7 @@
 use atomic_core::{
     Attribute, AttributeName, CallableRef, CapacityLimits, Cardinality, Clause, Connection,
     DataPattern, EntityRef, FindElement, FindSpec, IndexComponents, IndexOrder, IndexPullOptions,
-    IndexTransaction, Instruction, Keyword, PostgresMigrator, PostgresStore, Program, ProgramCall,
+    IndexTransaction, Instruction, Keyword, PostgresConnectionConfig, Program, ProgramCall,
     ProgramKind, PullAttribute, PullPattern, PullTransform, Query, QueryControl, QueryResult,
     QueryValue, ReturnMapShape, Schema, Term, TimePoint, TransactionRequest, TransactionService,
     TransactionServiceConfig, TupleSpec, TxForm, TxOp, TxValue, Unique, Value, ValueType, Variable,
@@ -25,10 +25,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
     );
     // Provisioning is explicit. All subsequent application work uses Connection.
-    PostgresMigrator::connect(&postgres)?.migrate()?;
-    let mut store = PostgresStore::connect(&postgres)?;
-    store.create_database(&database_id, Schema::new())?;
-    let rename = store.deploy_program_blob(&Program {
+    let storage = PostgresConnectionConfig::plaintext(&postgres);
+    atomic_core::storage::PgBlockStore::install(&storage)?;
+    atomic_core::storage::BlockDatabase::create(&storage, &database_id, Schema::new())?;
+    let rename_program = Program {
         kind: ProgramKind::Transaction,
         arity: 2,
         instructions: vec![
@@ -37,8 +37,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Instruction::EmitAdd(NAME),
             Instruction::Return,
         ],
-    })?;
-    drop(store);
+    };
+    let deployment = atomic_core::PostgresOperator::connect_configured(&storage)?
+        .deploy_program(&rename_program)?;
+    let rename = deployment.hash();
     let config = TransactionServiceConfig {
         connection: postgres,
         database_id: database_id.clone(),

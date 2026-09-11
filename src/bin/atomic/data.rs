@@ -281,7 +281,7 @@ fn output(value: &EdnValue) -> Result<(), SemanticError> {
 }
 enum ReadConnection {
     Live(Connection),
-    Backup(BackupConnection),
+    Backup(Box<BackupConnection>),
 }
 impl ReadConnection {
     fn db(&self) -> DatabaseValue {
@@ -306,10 +306,11 @@ fn open_backup(
     match (basis, generation) {
         (None, None) => BackupConnection::open(repository),
         (Some(basis), Some(generation)) => {
-            let point = atomic_core::PortableBackup::list_backup_points(std::path::Path::new(repository))?
-                .into_iter()
-                .find(|point| point.basis_t == basis && point.log_generation == generation)
-                .ok_or_else(|| usage("requested backup point does not exist in repository"))?;
+            let point =
+                atomic_core::PortableBackup::list_backup_points(std::path::Path::new(repository))?
+                    .into_iter()
+                    .find(|point| point.basis_t == basis && point.log_generation == generation)
+                    .ok_or_else(|| usage("requested backup point does not exist in repository"))?;
             BackupConnection::open_point(repository, &point)
         }
         _ => Err(usage("backup point requires both basis and generation")),
@@ -324,11 +325,11 @@ fn open_primary(args: &Arguments) -> Result<ReadConnection, SemanticError> {
                 .then(|| args.number(flag, 0))
                 .transpose()
         };
-        Ok(ReadConnection::Backup(open_backup(
+        Ok(ReadConnection::Backup(Box::new(open_backup(
             repository,
             coordinate("--backup-basis")?,
             coordinate("--backup-generation")?,
-        )?))
+        )?)))
     } else {
         Ok(ReadConnection::Live(Connection::connect_configured(
             postgres_config_from_env()?,
@@ -699,11 +700,11 @@ fn source_value(
     let opened;
     let connection = match (options.get("repository"), options.get("database")) {
         (Some(EdnValue::String(repository)), None) => {
-            opened = ReadConnection::Backup(open_backup(
+            opened = ReadConnection::Backup(Box::new(open_backup(
                 repository,
                 coordinate("basis")?,
                 coordinate("generation")?,
-            )?);
+            )?));
             &opened
         }
         (Some(_), _) => return Err(usage("repository path must be a string")),

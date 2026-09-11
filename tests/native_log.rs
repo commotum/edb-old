@@ -2,9 +2,8 @@ mod common;
 
 use atomic_core::{
     Attribute, Cardinality, Connection, EntityRef, IndexOrder, IndexTransaction, Keyword,
-    LogTransaction, LogValue, Peer, PostgresIndexer, PostgresMigrator, PostgresOperator,
-    PostgresStore, Schema, ServiceTransactionReport, TimePoint, TransactionRequest,
-    TransactionService, TxOp, Value, ValueType,
+    LogTransaction, LogValue, Peer, PostgresOperator, Schema, ServiceTransactionReport, TimePoint,
+    TransactionRequest, TransactionService, TxOp, Value, ValueType,
 };
 use postgres::{Client, NoTls};
 use std::sync::mpsc;
@@ -24,15 +23,14 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-fn setup(no_history: bool) -> Option<(String, String)> {
+fn setup(no_history: bool) -> Option<(common::PostgresFixture, String, String)> {
     let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIP native log: ATOMIC_POSTGRES_URL is unset");
         return None;
     };
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    let scope = common::PostgresFixture::new(&connection, "native_log");
+    let connection = scope.connection.clone();
+    common::install(&connection).unwrap();
     let database_id = unique("native_log");
     let mut schema = Schema::new();
     let mut count = Attribute::new(
@@ -43,11 +41,11 @@ fn setup(no_history: bool) -> Option<(String, String)> {
     );
     count.no_history = no_history;
     schema.install(count).unwrap();
-    PostgresStore::connect(&connection)
+    common::TestStore::connect(&connection)
         .unwrap()
         .create_database(&database_id, schema)
         .unwrap();
-    Some((connection, database_id))
+    Some((scope, connection, database_id))
 }
 
 fn write(
@@ -87,7 +85,7 @@ fn transactions(
 
 #[test]
 fn captured_native_log_is_lazy_time_bounded_and_preserves_no_history_transaction_data() {
-    let Some((postgres, id)) = setup(true) else {
+    let Some((_scope, postgres, id)) = setup(true) else {
         return;
     };
     let writer = common::start_service(&postgres, &id);
@@ -101,10 +99,7 @@ fn captured_native_log_is_lazy_time_bounded_and_preserves_no_history_transaction
     let captured = connection.log();
     let third = write(&writer, "third", EntityRef::Id(item), 30, 2_000);
     connection.sync_to(third.basis_t, TIMEOUT).unwrap();
-    PostgresIndexer::connect(&postgres, &id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&postgres, &id).unwrap();
     connection.sync_index(third.basis_t, TIMEOUT).unwrap();
     let latest = connection.log();
     let current = connection.db();
@@ -226,7 +221,7 @@ fn captured_native_log_is_lazy_time_bounded_and_preserves_no_history_transaction
 
 #[test]
 fn native_log_keeps_its_exact_generation_across_excision_recovery_and_new_writes() {
-    let Some((postgres, id)) = setup(false) else {
+    let Some((_scope, postgres, id)) = setup(false) else {
         return;
     };
     let writer = common::start_service(&postgres, &id);
@@ -262,7 +257,13 @@ fn native_log_keeps_its_exact_generation_across_excision_recovery_and_new_writes
     writer.shutdown();
     PostgresOperator::connect(&postgres)
         .unwrap()
-        .process_excision_requests(&id)
+        .process_excision_requests(
+            &atomic_core::DatabaseCatalog::connect(&postgres)
+                .unwrap()
+                .resolve(&id)
+                .unwrap()
+                .database_id,
+        )
         .unwrap();
     drop(peer);
     let recovered = Peer::connect(&postgres, &id, 4).unwrap();
@@ -344,7 +345,7 @@ impl Drop for Roles {
 
 #[test]
 fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
-    let Some((postgres, id)) = setup(false) else {
+    let Some((_scope, postgres, id)) = setup(false) else {
         return;
     };
     let writer_role = unique("native_log_writer");
@@ -361,10 +362,12 @@ fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
         writer: writer_role.clone(),
         peer: peer_role.clone(),
     };
-    PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .grant_runtime_privileges(&writer_role, &peer_role)
-        .unwrap();
+    atomic_core::storage::PgBlockStore::connect(&atomic_core::PostgresConnectionConfig::plaintext(
+        &postgres,
+    ))
+    .unwrap()
+    .grant_runtime_privileges(&writer_role, &peer_role)
+    .unwrap();
     let peer_connection = with_parameter(
         &with_parameter(&postgres, "user", &peer_role),
         "password",
@@ -372,10 +375,7 @@ fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
     );
     let mut restricted = Client::connect(&peer_connection, NoTls).unwrap();
     let denied = restricted
-        .execute(
-            "UPDATE atomic_heads SET basis_t = basis_t WHERE database_id = $1",
-            &[&id],
-        )
+        .execute("UPDATE atomic_objects SET payload = payload", &[])
         .unwrap_err();
     assert_eq!(denied.code().map(|code| code.code()), Some("42501"));
     let writer = common::start_service(&postgres, &id);
@@ -391,8 +391,13 @@ fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
     let mut transaction = roles.client.transaction().unwrap();
     transaction
         .query_one(
-            "SELECT basis_t FROM atomic_heads WHERE database_id = $1 FOR UPDATE",
-            &[&id],
+            "SELECT revision FROM atomic_refs WHERE key = $1 FOR UPDATE",
+            &[&atomic_core::storage::BlockDatabase::resolve(
+                &atomic_core::PostgresConnectionConfig::plaintext(&postgres),
+                &id,
+            )
+            .unwrap()
+            .reference_key()],
         )
         .unwrap();
     let (sender, receiver) = mpsc::channel();
@@ -420,7 +425,7 @@ fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
 
 #[test]
 fn lazy_log_authenticates_each_payload_and_fuses_on_corruption() {
-    let Some((postgres, id)) = setup(false) else {
+    let Some((_scope, postgres, id)) = setup(false) else {
         return;
     };
     let writer = common::start_service(&postgres, &id);
@@ -440,39 +445,55 @@ fn lazy_log_authenticates_each_payload_and_fuses_on_corruption() {
         .unwrap();
     assert_eq!(cursor.next().unwrap().unwrap().data, first.tx_data);
     let mut client = Client::connect(&postgres, NoTls).unwrap();
-    let row = client.query_one(
-        "SELECT t.content_hash, c.payload FROM atomic_generation_transactions t JOIN atomic_transaction_contents c ON c.content_hash = t.content_hash WHERE t.database_id = $1 AND t.generation = $2 AND t.basis_t = $3",
-        &[&id, &(log.generation() as i64), &(second.basis_t as i64)],
-    ).unwrap();
-    let hash: Vec<u8> = row.get(0);
-    let payload: Vec<u8> = row.get(1);
+    let config = atomic_core::PostgresConnectionConfig::plaintext(&postgres);
+    let mut store = atomic_core::storage::PgBlockStore::connect(&config).unwrap();
+    let database = atomic_core::storage::BlockDatabase::resolve(&config, &id).unwrap();
+    let root_id = store
+        .read_ref(&database.reference_key())
+        .unwrap()
+        .unwrap()
+        .value
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let root = atomic_core::storage::root::DatabaseRoot::decode(
+        &root_id,
+        &store.get(root_id).unwrap().unwrap(),
+    )
+    .unwrap();
+    let root_log = atomic_core::storage::log::LogRoot::open(&mut store, root.log.unwrap()).unwrap();
+    let hash = root_log
+        .read_record(&mut store, second.basis_t)
+        .unwrap()
+        .unwrap()
+        .id
+        .to_vec();
+    let payload: Vec<u8> = client
+        .query_one("SELECT payload FROM atomic_objects WHERE id=$1", &[&hash])
+        .unwrap()
+        .get(0);
     let mut changed = payload.clone();
     let last = changed.last_mut().unwrap();
     *last ^= 1;
     // The selected content belongs to this unique database lineage. Restore
     // it before assertions, even if the read unexpectedly succeeds.
-    let affected = common::with_replica_triggers_disabled(&mut client, |client| {
-        client.execute(
-            "UPDATE atomic_transaction_contents SET payload = $2 WHERE content_hash = $1",
+    let affected = client
+        .execute(
+            "UPDATE atomic_objects SET payload=$2 WHERE id=$1",
             &[&hash, &changed],
         )
-    })
-    .unwrap();
+        .unwrap();
     assert_eq!(affected, 1);
     let result = cursor.next();
     let exhausted = cursor.next();
-    let restored = common::with_replica_triggers_disabled(&mut client, |client| {
-        client.execute(
-            "UPDATE atomic_transaction_contents SET payload = $2 WHERE content_hash = $1",
+    let restored = client
+        .execute(
+            "UPDATE atomic_objects SET payload=$2 WHERE id=$1",
             &[&hash, &payload],
         )
-    })
-    .unwrap();
+        .unwrap();
     assert_eq!(restored, 1);
-    assert_eq!(
-        result.unwrap().unwrap_err().code,
-        "recovery/content-checksum-mismatch"
-    );
+    assert_eq!(result.unwrap().unwrap_err().code, "storage/object-corrupt");
     assert!(exhausted.is_none());
     assert_eq!(cursor.stats().transactions_read, 1);
     assert_eq!(cursor.stats().range_reads, 2);

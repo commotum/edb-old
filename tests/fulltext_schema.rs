@@ -157,11 +157,8 @@ fn native_fulltext_schema_survives_exact_retry_indexing_and_reopen() {
     };
     let fixture = common::PostgresFixture::new(&connection, "fulltext_schema");
     let connection = &fixture.connection;
-    PostgresMigrator::connect(connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(connection).unwrap();
+    common::install(connection).unwrap();
+    let mut store = common::TestStore::connect(connection).unwrap();
     store
         .create_database("fulltext-schema", Schema::new())
         .unwrap();
@@ -182,10 +179,7 @@ fn native_fulltext_schema_survives_exact_retry_indexing_and_reopen() {
     assert!(repeated.replayed);
     assert_eq!(report.tx_data, repeated.tx_data);
     service.shutdown();
-    PostgresIndexer::connect(connection, "fulltext-schema")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(connection, "fulltext-schema").unwrap();
     let peer = Peer::connect(connection, "fulltext-schema", 8).unwrap();
     assert!(
         peer.database_value()
@@ -208,77 +202,5 @@ fn native_fulltext_schema_survives_exact_retry_indexing_and_reopen() {
             .attribute(1000)
             .unwrap()
             .fulltext
-    );
-}
-
-#[test]
-fn actual_pre_fulltext_binary_upgrades_without_reinterpreting_genesis() {
-    let Ok(url) = std::env::var("ATOMIC_FULLTEXT_LEGACY_URL") else {
-        eprintln!("SKIP: ATOMIC_FULLTEXT_LEGACY_URL required for one-time old-binary upgrade");
-        return;
-    };
-    let name = "legacy-fulltext";
-    let mut admin = postgres::Client::connect(&url, postgres::NoTls).unwrap();
-    let row = admin
-        .query_one(
-            "SELECT genesis,genesis_hash FROM atomic_databases WHERE database_id=$1",
-            &[&name],
-        )
-        .unwrap();
-    let genesis: Vec<u8> = row.get(0);
-    let hash: Vec<u8> = row.get(1);
-    assert_eq!(genesis.len(), 4818);
-    assert_eq!(
-        hex(&hash),
-        "9074cee4e4bbf8358ef3fcd804de6ef218fe7e55e5710d5fd60a205d09ec243a"
-    );
-    assert_eq!(sha256(&genesis), hash.as_slice());
-    // SQL migrations may add optional search storage; they must not install
-    // vocabulary or rewrite the old canonical root as a side effect.
-    PostgresMigrator::connect(&url).unwrap().migrate().unwrap();
-    let initial = Peer::connect(&url, name, 8).unwrap().db();
-    assert_eq!(initial.basis_t(), 0);
-    assert!(initial.schema().attribute(DB_FULLTEXT as u32).is_err());
-    let ops = fulltext_vocabulary_upgrade_ops();
-    let preview = initial.with(&ops, 10).unwrap();
-    let service = common::start_service(&url, name);
-    let request = TransactionRequest::new("fulltext-vocabulary-upgrade/v1", ops)
-        .comparing_basis(0)
-        .with_tx_instant(10);
-    let upgraded = service
-        .client()
-        .transact(request.clone(), Duration::from_secs(30))
-        .unwrap();
-    common::assert_same_information(&preview.db_after, &upgraded.db_after);
-    assert!(initial.schema().attribute(DB_FULLTEXT as u32).is_err());
-    assert_eq!(
-        initial.collect_datoms(IndexOrder::Eavt).unwrap(),
-        decode_genesis(&genesis).unwrap()
-    );
-    service.shutdown();
-    PostgresIndexer::connect(&url, name)
-        .unwrap()
-        .consolidate()
-        .unwrap();
-    let service = common::start_service(&url, name);
-    let replay = service
-        .client()
-        .transact(request, Duration::from_secs(30))
-        .unwrap();
-    assert!(replay.replayed);
-    assert_eq!(replay.tx_hash, upgraded.tx_hash);
-    service.shutdown();
-    let recovered = PostgresStore::connect(&url).unwrap().recover(name).unwrap();
-    common::assert_same_information(&recovered, &upgraded.db_after);
-    let row = admin
-        .query_one(
-            "SELECT genesis,genesis_hash FROM atomic_databases WHERE database_id=$1",
-            &[&name],
-        )
-        .unwrap();
-    assert_eq!(row.get::<_, Vec<u8>>(0), genesis);
-    assert_eq!(row.get::<_, Vec<u8>>(1), hash);
-    println!(
-        "LEGACY_FULLTEXT_UPGRADE_OK old_genesis_bytes=4818 basis_t=1 exact_retry=true retained_old=true indexed_recovery=true"
     );
 }

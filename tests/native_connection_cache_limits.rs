@@ -1,7 +1,6 @@
 use atomic_core::{
     Attribute, Cardinality, Connection, EntityRef, IndexBoundary, IndexComponents, Keyword,
-    PostgresConnectionConfig, PostgresIndexer, PostgresIoPolicy, PostgresMigrator, PostgresStore,
-    Schema, TransactionRequest, TxOp, Value, ValueType,
+    PostgresConnectionConfig, PostgresIoPolicy, Schema, TransactionRequest, TxOp, Value, ValueType,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,10 +35,7 @@ fn explicit_entry_and_byte_caches_preserve_old_values_and_do_not_own_attached_wr
             .unwrap()
             .as_nanos()
     );
-    PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&postgres).unwrap();
     let mut schema = Schema::new();
     let mut attribute = Attribute::new(
         PAYLOAD,
@@ -49,7 +45,7 @@ fn explicit_entry_and_byte_caches_preserve_old_values_and_do_not_own_attached_wr
     );
     attribute.indexed = true;
     schema.install(attribute).unwrap();
-    PostgresStore::connect(&postgres)
+    common::TestStore::connect(&postgres)
         .unwrap()
         .create_database(&id, schema)
         .unwrap();
@@ -66,10 +62,7 @@ fn explicit_entry_and_byte_caches_preserve_old_values_and_do_not_own_attached_wr
             TIMEOUT,
         )
         .unwrap();
-    PostgresIndexer::connect(&postgres, &id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&postgres, &id).unwrap();
 
     // The configured constructor owns the same explicit PostgreSQL policy as
     // existing Connection::connect_configured, while cache entries and bytes

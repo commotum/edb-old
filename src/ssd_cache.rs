@@ -107,6 +107,20 @@ pub struct SsdCache {
     state: Arc<Mutex<State>>,
 }
 
+/// Share the existing policy-safe directory admission between block readers and
+/// the remaining explicitly staged legacy read path.
+pub(crate) fn open_connection_cache(
+    connection: &crate::PostgresConnectionConfig,
+    identity: &str,
+) -> Result<(SsdCache, Digest), crate::SemanticError> {
+    let namespace = connection.ssd_access_namespace(identity);
+    let cache = match connection.ssd_cache_config() {
+        Some(config) => SsdCache::open(&config.directory, namespace, config.limits)?,
+        None => SsdCache::disabled(),
+    };
+    Ok((cache, namespace))
+}
+
 impl SsdCache {
     pub fn disabled() -> Self {
         Self {

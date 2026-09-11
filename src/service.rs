@@ -1,33 +1,34 @@
+#[cfg(test)]
+use crate::Datom;
 use crate::connection::DatabaseIdentity;
-use crate::log_generation::request_key_hash;
-use crate::postgres::{
-    CapacityLimits, CommitReceipt, PostgresStore, SharedProgramCache, TransactorLease,
-    WriterResidencyStats, is_postgres_connection_error, postgres_error,
-    read_authenticated_log_range, shared_program_cache_stats,
+use crate::runtime::{
+    CapacityLimits, TransactorLease, WriterResidencyStats, is_postgres_connection_error,
 };
 use crate::{
-    DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, OperationContext,
-    OperationKind, PersistentTreeManifest, PostgresConnectionConfig, PostgresIndexer,
-    ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm, TxOp,
+    DatabaseValue, Digest, DurableTransaction, ErrorCategory, OperationContext, OperationKind,
+    PostgresConnectionConfig, ProgramCacheStats, ProgramCall, RecoveryStats, SemanticError, TxForm,
+    TxOp,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+#[cfg(test)]
 use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[path = "block_service.rs"]
+mod block_service;
+
 const DEFAULT_MEMORY_INDEX_THRESHOLD_BYTES: u64 = 32 * 1024 * 1024;
 const DEFAULT_MEMORY_INDEX_MAX_BYTES: u64 = 512 * 1024 * 1024;
 // Recovered `process-request-index` permits the initial publication attempt
 // plus two retries before failing the transactor process.
 const MAX_INDEX_JOB_RETRIES: usize = 2;
-const MAX_FULLTEXT_IDLE_RETRIES: u8 = 8;
-const FULLTEXT_RETRY_INITIAL: Duration = Duration::from_millis(250);
-const FULLTEXT_RETRY_MAX: Duration = Duration::from_secs(30);
 // RecentTier retains at most four raw BTSet entries per datom. Its
 // allocator-independent conservative account reserves a fifth reference for
 // persistent-log/tree overhead; keep admission on that same bound.
+#[cfg(test)]
 const MAX_RECENT_REFERENCES_PER_DATOM: u64 = 5;
 
 /// Bounded novelty settings for the transactor-owned background indexer.
@@ -81,76 +82,63 @@ pub struct BackgroundIndexingFailure {
     pub message: String,
 }
 
-/// Optional search projection observations, independent of writer authority.
-/// A successful check can also mean no fulltext attributes exist. It is not
-/// a promise that a peer has caught up with the current transaction head.
+/// Observations of the coherent background index/search projection job.
+/// The field name is retained, but failures can arise in canonical preparation,
+/// search preparation, or guarded adoption; they are not search-only failures.
+/// A successful job can find no fulltext attributes. These service observations
+/// do not imply that an independent peer has caught up.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BackgroundFulltextStats {
-    /// Last successful check's source basis, or the service's adopted basis
-    /// when that check found no fulltext attributes. Not a search-ready watermark.
+    /// Source basis of the last successfully adopted coherent projection job.
+    /// Prepared but unadopted candidates never advance this observation.
     pub checked_basis_t: Option<u64>,
-    /// Observed canonical basis for the last attempt. On a failed idle check,
-    /// an externally published newer source may not yet have been identified.
+    /// Frozen source basis of the last preparation attempt. A dispatch failure
+    /// before preparation records the requested basis instead.
     pub attempted_basis_t: Option<u64>,
     pub attempts: u64,
+    /// Failed whole-job attempts, including preparation and adoption failures.
     pub failures: u64,
+    /// Always zero: there is no separate idle fulltext retry worker. Whole-job
+    /// retries increment `attempts` and use the ordinary index retry policy.
     pub idle_retries: u64,
-    /// Until the next scheduled attempt; None also covers a running attempt.
+    /// Until the next real whole-job retry; None also covers a running attempt.
     pub retry_in: Option<Duration>,
+    /// The whole-job retry budget was exhausted or ownership was lost, so this
+    /// service stopped accepting work. Startup creates a new observation set.
     pub retry_exhausted: bool,
     pub last_failure: Option<BackgroundIndexingFailure>,
 }
 
 #[derive(Debug, Default)]
-struct FulltextRetry {
+struct ProjectionObservations {
     stats: BackgroundFulltextStats,
     retry_at: Option<Instant>,
-    retries: u8,
-    reconnect: bool,
 }
 
-impl FulltextRetry {
-    fn record(&mut self, basis_t: u64, error: Option<&SemanticError>, retry: bool, now: Instant) {
+impl ProjectionObservations {
+    fn started(&mut self, basis_t: u64) {
         self.stats.attempts = self.stats.attempts.saturating_add(1);
         self.stats.attempted_basis_t = Some(basis_t);
-        if retry {
-            self.retries = self.retries.saturating_add(1);
-            self.stats.idle_retries = self.stats.idle_retries.saturating_add(1);
-        } else {
-            self.retries = 0;
-        }
         self.retry_at = None;
         self.stats.retry_exhausted = false;
-        self.reconnect = error.is_some_and(is_postgres_connection_error);
-        if let Some(error) = error {
-            self.stats.failures = self.stats.failures.saturating_add(1);
-            self.stats.last_failure = Some(BackgroundIndexingFailure {
-                category: error.category,
-                code: error.code,
-                message: error.message.clone(),
-            });
-            if matches!(
-                error.category,
-                ErrorCategory::Busy | ErrorCategory::Unavailable | ErrorCategory::Interrupted
-            ) {
-                if self.retries < MAX_FULLTEXT_IDLE_RETRIES {
-                    let delay = FULLTEXT_RETRY_INITIAL
-                        .saturating_mul(1_u32 << self.retries)
-                        .min(FULLTEXT_RETRY_MAX);
-                    self.retry_at = now.checked_add(delay);
-                } else {
-                    self.stats.retry_exhausted = true;
-                }
-            }
-        } else {
-            self.stats.checked_basis_t = Some(basis_t);
-            self.stats.last_failure = None;
-        }
     }
 
-    #[cfg(test)]
-    fn snapshot(&self, now: Instant) -> BackgroundFulltextStats {
-        self.snapshot_with_messages(now, true)
+    fn failed(&mut self, error: &SemanticError, retry_at: Option<Instant>, exhausted: bool) {
+        self.stats.failures = self.stats.failures.saturating_add(1);
+        self.stats.last_failure = Some(BackgroundIndexingFailure {
+            category: error.category,
+            code: error.code,
+            message: error.message.clone(),
+        });
+        self.retry_at = retry_at;
+        self.stats.retry_exhausted = exhausted;
+    }
+
+    fn adopted(&mut self, basis_t: u64) {
+        self.stats.checked_basis_t = Some(basis_t);
+        self.stats.last_failure = None;
+        self.stats.retry_exhausted = false;
+        self.retry_at = None;
     }
 
     fn snapshot_with_messages(&self, now: Instant, messages: bool) -> BackgroundFulltextStats {
@@ -313,21 +301,6 @@ pub struct ServiceTransactionReport {
     pub diagnostics: Option<Arc<crate::TransactionDiagnostics>>,
 }
 
-impl ServiceTransactionReport {
-    fn from_commit(commit: CommitReceipt) -> Self {
-        Self {
-            db_before: commit.db_before,
-            db_after: commit.database,
-            basis_t: commit.basis_t,
-            tx_hash: commit.tx_hash,
-            tx_data: commit.tx_data,
-            tempids: commit.tempids,
-            replayed: commit.replayed,
-            diagnostics: None,
-        }
-    }
-}
-
 struct Work {
     request: TransactionRequest,
     request_hash: Digest,
@@ -341,9 +314,9 @@ struct Work {
 /// request so parallel tests cannot alter ordinary work.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CommitObservationFault {
+pub(crate) enum CommitObservationFault {
     AbsentUnknownOutcome,
-    RollbackAfterHeadUpdate,
+    BeforePublication,
     AfterCommitBeforeResponse,
 }
 
@@ -363,19 +336,14 @@ fn arm_observation_fault(database_id: &str, request_key: &str, fault: CommitObse
 }
 
 #[cfg(test)]
-fn take_observation_fault(database_id: &str, request_key: &str) -> Option<CommitObservationFault> {
+pub(crate) fn take_observation_fault(
+    database_id: &str,
+    request_key: &str,
+) -> Option<CommitObservationFault> {
     observation_faults()
         .lock()
         .expect("observation fault mutex poisoned")
         .remove(&(database_id.to_owned(), request_key.to_owned()))
-}
-
-#[derive(Debug)]
-struct AmbiguousOutcome {
-    request_key: String,
-    reconnect_required: bool,
-    notify_if_durable: bool,
-    operation: OperationContext,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -387,11 +355,6 @@ struct Novelty {
 
 #[derive(Debug)]
 struct IndexingSeed {
-    /// Stable database identity used to make client request identifiers
-    /// opaque before they can enter diagnostics.  A lineage survives
-    /// generation replacement, so tickets remain reconcilable across an
-    /// excision or restore race without retaining plaintext in an error.
-    lineage_id: String,
     /// Newest fully authenticated publication selected for replay.
     published_revision: u64,
     published_basis_t: u64,
@@ -470,8 +433,9 @@ struct BackgroundIndexing {
     backpressure_stalls: AtomicU64,
     backpressure_rejections: AtomicU64,
     last_failure: Mutex<Option<SemanticError>>,
-    fulltext: Mutex<FulltextRetry>,
+    fulltext: Mutex<ProjectionObservations>,
     excision: Mutex<(crate::ExcisionProgress, Option<SemanticError>)>,
+    excision_requested: AtomicBool,
 }
 
 impl BackgroundIndexing {
@@ -513,8 +477,9 @@ impl BackgroundIndexing {
             backpressure_stalls: AtomicU64::new(0),
             backpressure_rejections: AtomicU64::new(0),
             last_failure: Mutex::new(None),
-            fulltext: Mutex::new(FulltextRetry::default()),
+            fulltext: Mutex::new(ProjectionObservations::default()),
             excision: Mutex::new(Default::default()),
+            excision_requested: AtomicBool::new(true),
         }
     }
 
@@ -599,18 +564,7 @@ impl BackgroundIndexing {
                 scheduled,
             }
         };
-        let retry_search = {
-            let mut fulltext = self.fulltext.lock().expect("fulltext retry mutex poisoned");
-            if fulltext.stats.last_failure.is_some() {
-                fulltext.retries = 0;
-                fulltext.stats.retry_exhausted = false;
-                fulltext.retry_at = Some(Instant::now());
-                true
-            } else {
-                false
-            }
-        };
-        if request.scheduled || retry_search {
+        if request.scheduled {
             self.wake();
         }
         request
@@ -717,6 +671,14 @@ impl BackgroundIndexing {
         self.jobs_failed.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A failed preparation/adoption has published no observed completion.
+    /// Keep all demand/novelty while releasing its frozen in-flight accounting.
+    fn retry_job(&self) {
+        let mut backlog = self.backlog.lock().expect("index backlog mutex poisoned");
+        backlog.indexing_through = None;
+        backlog.indexing_totals = IndexingTotals::default();
+    }
+
     fn should_continue(&self) -> bool {
         let backlog = self.backlog.lock().expect("index backlog mutex poisoned");
         should_index(&backlog, self.config)
@@ -768,6 +730,7 @@ impl BackgroundIndexing {
             .is_some()
     }
 
+    #[cfg(test)]
     fn published_revision(&self) -> u64 {
         self.backlog
             .lock()
@@ -789,6 +752,27 @@ impl BackgroundIndexing {
 
     fn record_backpressure_rejection(&self) {
         self.backpressure_rejections.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn projection_started(&self, basis_t: u64) {
+        self.fulltext
+            .lock()
+            .expect("projection status mutex poisoned")
+            .started(basis_t);
+    }
+
+    fn projection_failed(&self, error: &SemanticError, retry_at: Option<Instant>, exhausted: bool) {
+        self.fulltext
+            .lock()
+            .expect("projection status mutex poisoned")
+            .failed(error, retry_at, exhausted);
+    }
+
+    fn projection_adopted(&self, basis_t: u64) {
+        self.fulltext
+            .lock()
+            .expect("projection status mutex poisoned")
+            .adopted(basis_t);
     }
 
     fn stats(&self) -> BackgroundIndexingStats {
@@ -855,7 +839,7 @@ impl BackgroundIndexing {
             fulltext: self
                 .fulltext
                 .lock()
-                .expect("fulltext retry mutex poisoned")
+                .expect("projection status mutex poisoned")
                 .snapshot_with_messages(Instant::now(), messages),
         }
     }
@@ -951,13 +935,14 @@ struct Shared {
     queued_report_payload_bytes: AtomicU64,
     max_queued_report_payload_bytes: AtomicU64,
     writer_residency: Mutex<WriterResidencyStats>,
+    program_cache: crate::program_cache::SharedProgramCache,
     max_request_bytes: usize,
     hint_worker: crate::transaction_hints::HintWorkerSlot,
     indexing: Arc<BackgroundIndexing>,
-    connection: PostgresConnectionConfig,
     database_id: String,
     lineage_id: String,
     transport_lease: TransactorLease,
+    request_identity: [u8; 16],
     telemetry: Option<crate::TelemetryEmitter>,
 }
 
@@ -966,10 +951,10 @@ impl Shared {
         max_request_bytes: usize,
         writer_residency: WriterResidencyStats,
         indexing: Arc<BackgroundIndexing>,
-        connection: PostgresConnectionConfig,
         database_id: String,
         lineage_id: String,
         transport_lease: TransactorLease,
+        request_identity: [u8; 16],
     ) -> Self {
         Self {
             accepting: AtomicBool::new(true),
@@ -986,13 +971,14 @@ impl Shared {
             queued_report_payload_bytes: AtomicU64::new(0),
             max_queued_report_payload_bytes: AtomicU64::new(0),
             writer_residency: Mutex::new(writer_residency),
+            program_cache: Default::default(),
             max_request_bytes,
             hint_worker: crate::transaction_hints::HintWorkerSlot::default(),
             indexing,
-            connection,
             database_id,
             lineage_id,
             transport_lease,
+            request_identity,
             telemetry: None,
         }
     }
@@ -1003,6 +989,10 @@ impl Shared {
             "service/unavailable",
             "transaction service is not accepting requests",
         )
+    }
+
+    fn indexing_stats(&self, messages: bool) -> BackgroundIndexingStats {
+        self.indexing.stats_with_messages(messages)
     }
 
     fn observe(&self, report: &ServiceTransactionReport) {
@@ -1057,83 +1047,6 @@ impl Shared {
                 false
             }
         });
-    }
-
-    /// At the pressure gate, already-committed idempotent requests remain
-    /// resolvable. A new request receives the hard-limit marker so the worker
-    /// can park it without evaluating or extending the log.
-    fn check_index_gate(
-        &self,
-        request_key: &str,
-        request_hash: Digest,
-    ) -> Result<(), SemanticError> {
-        let Some(limit) = self.indexing.limiting_error() else {
-            return Ok(());
-        };
-        let mut client = self.connection.connect_for("service/index-gate-connect")?;
-        let head = client
-            .query_opt(
-                "SELECT h.log_generation, d.lineage_id \
-                   FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
-                  WHERE h.database_id = $1",
-                &[&self.database_id],
-            )
-            .map_err(|error| postgres_error("service/index-gate-head", error))?
-            .ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::NotFound,
-                    "postgres/database-not-found",
-                    format!("database {} does not exist", self.database_id),
-                )
-            })?;
-        let generation = nonnegative_basis(head.get(0), "active log generation")?;
-        let lineage_id: String = head.get(1);
-        let generation_sql = i64::try_from(generation).map_err(|_| {
-            SemanticError::new(
-                ErrorCategory::Fault,
-                "service/index-generation-overflow",
-                "active log generation exceeds PostgreSQL bigint",
-            )
-        })?;
-        let key_hash = request_key_hash(&lineage_id, request_key)?;
-        let row = if generation == 0 {
-            client.query_opt(
-                "SELECT request_digest, 1::smallint FROM atomic_requests \
-                 WHERE database_id = $1 AND request_key = $2",
-                &[&self.database_id, &request_key],
-            )
-        } else {
-            client.query_opt(
-                "SELECT request_digest, request_kind FROM atomic_generation_requests \
-                 WHERE database_id = $1 AND generation = $2 AND request_key_hash = $3",
-                &[&self.database_id, &generation_sql, &&key_hash[..]],
-            )
-        }
-        .map_err(|error| postgres_error("service/index-gate-read", error))?;
-        let Some(row) = row else {
-            return Err(limit);
-        };
-        if row.get::<_, i16>(1) == 0 {
-            return Err(SemanticError::conflict(
-                "postgres/idempotency-predates-excision",
-                "request key was committed before excision, but its original receipt was deliberately erased",
-            ));
-        }
-        let bytes: Vec<u8> = row.get(0);
-        let stored: Digest = bytes.try_into().map_err(|_| {
-            SemanticError::new(
-                ErrorCategory::Fault,
-                "service/request-digest-corrupt",
-                "durable request digest is not 32 bytes",
-            )
-        })?;
-        if stored != request_hash {
-            return Err(SemanticError::conflict(
-                "postgres/idempotency-key-reused",
-                "idempotency key is already bound to a different request",
-            ));
-        }
-        Ok(())
     }
 }
 
@@ -1245,7 +1158,10 @@ impl TransactionClient {
             self.shared.max_request_bytes,
         )?;
         let request_key = request.request_key.clone();
-        let request_key_hash = request_key_hash(&self.shared.lineage_id, &request_key)?;
+        let request_key_hash = crate::storage::receipts::scoped_request_key(
+            &self.shared.request_identity,
+            &request_key,
+        )?;
         let (sender, receiver) = mpsc::sync_channel(1);
         let _admission = self
             .shared
@@ -1330,7 +1246,7 @@ impl TransactionClient {
     }
 
     pub(crate) fn operational_indexing_stats(&self) -> BackgroundIndexingStats {
-        self.shared.indexing.stats_with_messages(false)
+        self.shared.indexing_stats(false)
     }
 
     pub fn stats(&self) -> ServiceStats {
@@ -1382,7 +1298,7 @@ impl TransactionClient {
 
     /// Snapshot maintained live/frozen aggregates without scanning the backlog.
     pub fn background_indexing_stats(&self) -> BackgroundIndexingStats {
-        self.shared.indexing.stats()
+        self.shared.indexing_stats(true)
     }
 
     /// Request background indexing through the currently observed committed
@@ -1601,7 +1517,6 @@ pub struct ServiceStats {
 pub struct TransactionService {
     client: TransactionClient,
     recovery_stats: RecoveryStats,
-    program_cache: SharedProgramCache,
     worker: Option<JoinHandle<()>>,
     index_worker: Option<JoinHandle<()>>,
 }
@@ -1612,6 +1527,8 @@ pub struct TransactionService {
 pub struct ServiceOptions {
     /// CPU edit-preparation lanes for incremental indexing; SQL stays serial.
     pub index_preparation_parallelism: usize,
+    /// Search build admission shared by background indexing and excision.
+    pub fulltext_build_limits: crate::FulltextBuildLimits,
     /// Advisory prefix-read lanes, independent of transaction authority.
     pub hint_prefetch: crate::HintPrefetchConcurrency,
     pub indexing: BackgroundIndexingConfig,
@@ -1626,6 +1543,7 @@ impl Default for ServiceOptions {
     fn default() -> Self {
         Self {
             index_preparation_parallelism: 1,
+            fulltext_build_limits: crate::FulltextBuildLimits::default(),
             hint_prefetch: crate::HintPrefetchConcurrency::default(),
             indexing: BackgroundIndexingConfig::default(),
             execution: crate::TransactionExecutionOptions::default(),
@@ -1664,10 +1582,8 @@ pub struct TransactionStandby {
 fn resolve_service_database_name(
     connection: &PostgresConnectionConfig,
     name: &str,
-) -> Result<String, SemanticError> {
-    let mut client = connection.connect_for("service/resolve-database")?;
-    crate::postgres::verify_schema_compatibility(&mut client)?;
-    Ok(crate::database_catalog::resolve_name_in(&mut client, name)?.database_id)
+) -> Result<crate::storage::BlockDatabase, SemanticError> {
+    crate::storage::BlockDatabase::resolve(connection, name)
 }
 
 impl TransactionStandby {
@@ -1720,7 +1636,7 @@ impl TransactionStandby {
     }
 
     pub fn start_configured_with_options(
-        mut config: TransactionServiceConfig,
+        config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
         options: ServiceOptions,
         poll_interval: Duration,
@@ -1728,8 +1644,9 @@ impl TransactionStandby {
         TransactionService::validate_config(&config)?;
         options.indexing.validate()?;
         options.excision.validate()?;
+        options.fulltext_build_limits.validate()?;
         options.hint_prefetch.validate()?;
-        crate::tree_store::validate_index_preparation_parallelism(
+        crate::tree_read::validate_index_preparation_parallelism(
             options.index_preparation_parallelism,
         )?;
         if poll_interval.is_zero() {
@@ -1740,7 +1657,7 @@ impl TransactionStandby {
         }
         // Resolve before spawning, not on each lease attempt. A rename or name
         // reuse while waiting must never redirect this standby to another DB.
-        config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
+        let database = resolve_service_database_name(&connection, &config.database_id)?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let status = Arc::new(Mutex::new(StandbyStatus::Activating));
@@ -1762,12 +1679,15 @@ impl TransactionStandby {
                         config.clone(),
                         connection.clone(),
                         options.clone(),
+                        database.clone(),
                     );
                     match result {
                         Err(error)
-                            if (error.category == ErrorCategory::Unavailable
-                                && error.code == "postgres/lease-held")
-                                || is_postgres_connection_error(&error) =>
+                            if error.code == "storage/writer-active"
+                                || error.code == "storage/writer-claim-conflict"
+                                || error.code == "storage/capture-conflict"
+                                || error.code == "storage/capture-gc-conflict"
+                                || block_service::connection_unavailable(&error) =>
                         {
                             {
                                 let mut status =
@@ -2063,19 +1983,20 @@ impl TransactionService {
     }
 
     pub fn start_configured_with_options(
-        mut config: TransactionServiceConfig,
+        config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
         options: ServiceOptions,
     ) -> Result<Self, SemanticError> {
         Self::validate_config(&config)?;
         options.indexing.validate()?;
         options.excision.validate()?;
+        options.fulltext_build_limits.validate()?;
         options.hint_prefetch.validate()?;
-        crate::tree_store::validate_index_preparation_parallelism(
+        crate::tree_read::validate_index_preparation_parallelism(
             options.index_preparation_parallelism,
         )?;
-        config.database_id = resolve_service_database_name(&connection, &config.database_id)?;
-        Self::start_identity_configured_with_options(config, connection, options)
+        let database = resolve_service_database_name(&connection, &config.database_id)?;
+        Self::start_identity_configured_with_options(config, connection, options, database)
     }
 
     fn validate_config(config: &TransactionServiceConfig) -> Result<(), SemanticError> {
@@ -2093,225 +2014,15 @@ impl TransactionService {
         Ok(())
     }
 
-    // Only callers that already captured a stable ID may enter this path.
-    // Lease acquisition independently fences retired identities in PostgreSQL.
+    // Only callers that already captured an immutable block identity may enter.
+    // BlockTransactor acquires authority through guarded opaque references.
     fn start_identity_configured_with_options(
         config: TransactionServiceConfig,
         connection: PostgresConnectionConfig,
         options: ServiceOptions,
+        database: crate::storage::BlockDatabase,
     ) -> Result<Self, SemanticError> {
-        Self::validate_config(&config)?;
-        let indexing_config = options.indexing.validate()?;
-        let excision_config = options.excision.validate()?;
-        let hint_prefetch = crate::transaction_hints::HintWorkerSlot::new(options.hint_prefetch)?;
-        crate::tree_store::validate_index_preparation_parallelism(
-            options.index_preparation_parallelism,
-        )?;
-        let lease_millis = duration_millis(config.lease_duration)?;
-        let mut store = PostgresStore::connect_configured(&connection)?;
-        store.set_transaction_defaults(options.execution.defaults);
-        store.set_native_registry(options.execution.native);
-        store.set_capacity_limits(config.capacity_limits)?;
-        let writer_recent_limits = crate::recent::RecentLimits {
-            soft_datoms: u64::MAX,
-            soft_bytes: indexing_config.memory_index_threshold_bytes,
-            hard_datoms: u64::MAX,
-            // The recovered processor checks the memory-index maximum before
-            // dequeuing the next ordinary request, so the transaction that
-            // crosses the line is accepted and then causes indexing-first
-            // backpressure. Preserve that bounded overshoot here: rejecting
-            // the crossing transaction inside RecentTier would invent an
-            // atomic transaction size limit stricter than the configured one.
-            hard_bytes: indexing_config
-                .memory_index_max_bytes
-                .saturating_add(max_transaction_novelty_bytes(config.capacity_limits)),
-        };
-        store.set_writer_recent_limits(writer_recent_limits)?;
-        let lease = store.acquire_lease(&config.database_id, &config.holder_id, lease_millis)?;
-        let startup_excision = match resume_excision_before_activation(
-            &mut store,
-            &connection,
-            &lease,
-            lease_millis,
-            excision_config,
-        ) {
-            Ok(progress) => progress,
-            Err(error) => {
-                let _ = store.release_lease(&lease);
-                return Err(error);
-            }
-        };
-        let mut indexer =
-            match PostgresIndexer::connect_identity_configured(&connection, &config.database_id) {
-                Ok(indexer) => indexer,
-                Err(error) => {
-                    let _ = store.release_lease(&lease);
-                    return Err(error);
-                }
-            };
-        indexer =
-            indexer.with_index_preparation_parallelism(options.index_preparation_parallelism)?;
-        // Probe with the strict native opener before deciding whether this is
-        // the one bounded startup exception: a just-created database may build
-        // its fixed bootstrap/application-schema value at basis 0/1. Once user
-        // history exists, ordinary activation never hides an eager `recover_to`
-        // behind service startup. Operators must publish a native root with
-        // `PostgresIndexer::consolidate` before retrying. A present but corrupt
-        // native authority continues to fail closed for explicit repair.
-        let recovery_stats = match store.activate_transactor_state(&lease, lease_millis) {
-            Ok(stats) => stats,
-            Err(error) if error.code == "peer/exact-no-native-publication" => {
-                match indexer.consolidate_fresh_database() {
-                    Ok(Some(_)) => match store.activate_transactor_state(&lease, lease_millis) {
-                        Ok(stats) => stats,
-                        Err(error) => {
-                            let _ = store.release_lease(&lease);
-                            return Err(error);
-                        }
-                    },
-                    Ok(None) => {
-                        let _ = store.release_lease(&lease);
-                        return Err(native_index_required(&error));
-                    }
-                    Err(index_error) => {
-                        let _ = store.release_lease(&lease);
-                        return Err(index_error);
-                    }
-                }
-            }
-            Err(error) if error.code == "recent/hard-capacity" => {
-                let _ = store.release_lease(&lease);
-                return Err(native_index_required(&error));
-            }
-            Err(error) => {
-                let _ = store.release_lease(&lease);
-                return Err(error);
-            }
-        };
-        let initial_writer_residency = store.writer_residency_stats(&config.database_id);
-        // Exact immutable values remain readable when a deployment lowers its
-        // configured limit; a capacity setting cannot make committed history
-        // cease to exist. An accepting transactor is a stricter boundary: it
-        // must not begin service while its recovered recent tier is already
-        // above the hard admission bound and then synchronously hide a full
-        // catch-up build. Leave the log untouched and require the same explicit
-        // administrative consolidation as a missing late root.
-        if initial_writer_residency.recent_datoms > writer_recent_limits.hard_datoms
-            || initial_writer_residency.recent_accounted_bytes > writer_recent_limits.hard_bytes
-        {
-            let error = SemanticError::new(
-                ErrorCategory::Busy,
-                "recent/hard-capacity",
-                format!(
-                    "recovered recent tail requires {} datoms/{} accounted resident bytes, above startup hard limits {}/{}",
-                    initial_writer_residency.recent_datoms,
-                    initial_writer_residency.recent_accounted_bytes,
-                    writer_recent_limits.hard_datoms,
-                    writer_recent_limits.hard_bytes,
-                ),
-            );
-            let _ = store.release_lease(&lease);
-            return Err(native_index_required(&error));
-        }
-        let seed = match load_indexing_seed(
-            &connection,
-            &config.database_id,
-            initial_writer_residency.publication_revision,
-            recovery_stats.base_t,
-        ) {
-            Ok(seed) => seed,
-            Err(error) => {
-                let _ = store.release_lease(&lease);
-                return Err(error);
-            }
-        };
-        // The seed walk can be materially longer than a heartbeat on a large
-        // tail. Keep the already-authenticated, pinned writer value and extend
-        // that same epoch immediately before any accepting worker is exposed.
-        if let Err(error) = store.renew_lease(&lease, lease_millis) {
-            let _ = store.release_lease(&lease);
-            return Err(error);
-        }
-        let program_cache = store.program_cache_handle();
-        let (index_sender, index_receiver) = mpsc::sync_channel(1);
-        let lineage_id = seed.lineage_id.clone();
-        let indexing = Arc::new(BackgroundIndexing::new(indexing_config, seed, index_sender));
-        if let Some(progress) = startup_excision {
-            indexing
-                .excision
-                .lock()
-                .expect("excision progress poisoned")
-                .0 = progress;
-        }
-        let (sender, receiver) = mpsc::sync_channel(config.queue_capacity);
-        let mut shared = Shared::new(
-            config.capacity_limits.max_transaction_bytes,
-            initial_writer_residency,
-            Arc::clone(&indexing),
-            connection.clone(),
-            config.database_id.clone(),
-            lineage_id,
-            lease.clone(),
-        );
-        shared.telemetry = options.telemetry;
-        shared.hint_worker = hint_prefetch;
-        let shared = Arc::new(shared);
-        let index_shared = Arc::clone(&shared);
-        let index_worker = match thread::Builder::new()
-            .name(format!("atomic-indexer-{}", config.holder_id))
-            .spawn(move || {
-                run_index_worker(indexer, index_receiver, &index_shared, excision_config);
-            }) {
-            Ok(worker) => worker,
-            Err(error) => {
-                let _ = store.release_lease(&lease);
-                return Err(SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "service/index-spawn",
-                    error.to_string(),
-                ));
-            }
-        };
-        let worker_shared = shared.clone();
-        let renew_interval = config.renew_interval;
-        let database_id = config.database_id.clone();
-        let cleanup_connection = connection;
-        let cleanup_lease = lease.clone();
-        let worker = match thread::Builder::new()
-            .name(format!("atomic-transactor-{}", config.holder_id))
-            .spawn(move || {
-                run_worker(
-                    &mut store,
-                    &lease,
-                    &database_id,
-                    lease_millis,
-                    renew_interval,
-                    receiver,
-                    &worker_shared,
-                );
-            }) {
-            Ok(worker) => worker,
-            Err(error) => {
-                shared.accepting.store(false, Ordering::Release);
-                indexing.shutdown();
-                let _ = index_worker.join();
-                if let Ok(mut cleanup) = PostgresStore::connect_configured(&cleanup_connection) {
-                    let _ = cleanup.release_lease(&cleanup_lease);
-                }
-                return Err(SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "service/spawn",
-                    error.to_string(),
-                ));
-            }
-        };
-        Ok(Self {
-            client: TransactionClient { sender, shared },
-            recovery_stats,
-            program_cache,
-            worker: Some(worker),
-            index_worker: Some(index_worker),
-        })
+        block_service::start(config, connection, options, database)
     }
 
     pub fn client(&self) -> TransactionClient {
@@ -2327,10 +2038,9 @@ impl TransactionService {
         self.recovery_stats
     }
 
-    /// Observe the transactor's bounded compiled-program cache without
-    /// reaching through the single-writer service boundary.
+    /// Cumulative decoded-program work in the actual writer's bounded cache.
     pub fn program_cache_stats(&self) -> ProgramCacheStats {
-        shared_program_cache_stats(&self.program_cache)
+        crate::program_cache::stats(&self.client.shared.program_cache)
     }
 
     pub fn background_indexing_stats(&self) -> BackgroundIndexingStats {
@@ -2357,692 +2067,9 @@ impl TransactionService {
     }
 }
 
-fn native_index_required(cause: &SemanticError) -> SemanticError {
-    let mut error = SemanticError::new(
-        ErrorCategory::Unavailable,
-        "service/native-index-required",
-        "ordinary transactor startup cannot rebuild or overrun the native index; run \
-         PostgresIndexer::consolidate in an explicit offline/admin step, then retry startup",
-    )
-    .detail("cause", cause.code);
-    for (key, value) in &cause.details {
-        error.details.insert(format!("cause_{key}"), value.clone());
-    }
-    error
-}
-
 impl Drop for TransactionService {
     fn drop(&mut self) {
         self.stop_and_join();
-    }
-}
-
-fn run_worker(
-    store: &mut PostgresStore,
-    lease: &TransactorLease,
-    database_id: &str,
-    lease_millis: u64,
-    renew_interval: Duration,
-    receiver: mpsc::Receiver<Work>,
-    shared: &Shared,
-) {
-    // Independent lease/adoption maintenance is not part of the last caller's
-    // transaction. Work-specific scopes below override this background scope.
-    let maintenance = OperationContext::new(OperationKind::WriterMaintenance);
-    let _maintenance_scope = maintenance.enter();
-    let mut last_renewal = Instant::now();
-    let mut pending: Option<Work> = None;
-    let mut pending_was_stalled = false;
-    let mut ambiguous_outcome: Option<AmbiguousOutcome> = None;
-    loop {
-        if !shared.accepting.load(Ordering::Acquire) {
-            if let Some(work) = pending.take() {
-                decrement_queued(shared);
-                let _ = work.response.send(Err(shared.unavailable()));
-            }
-            drain_unavailable(&receiver, shared);
-            break;
-        }
-        if shared.indexing.has_failure() {
-            shared.accepting.store(false, Ordering::Release);
-            continue;
-        }
-        if let Some(mut ambiguous) = ambiguous_outcome.take() {
-            let _operation_scope = ambiguous.operation.enter();
-            let _phase = ambiguous.operation.phase(OperationKind::TransactionReport);
-            // The connection which returned an ambiguous COMMIT result is not
-            // safe to reuse. Reconnect first, then renew the exact lease epoch
-            // before observing the durable decision. This never resubmits or
-            // re-evaluates transaction data.
-            if ambiguous.reconnect_required {
-                match store.reconnect() {
-                    Ok(()) => {
-                        if store.renew_lease(lease, lease_millis).is_err() {
-                            shared.accepting.store(false, Ordering::Release);
-                            continue;
-                        }
-                        last_renewal = Instant::now();
-                        ambiguous.reconnect_required = false;
-                    }
-                    Err(error) if is_postgres_connection_error(&error) => {
-                        ambiguous_outcome = Some(ambiguous);
-                        thread::park_timeout(renew_interval.min(Duration::from_millis(100)));
-                        continue;
-                    }
-                    Err(_) => {
-                        shared.accepting.store(false, Ordering::Release);
-                        continue;
-                    }
-                }
-            }
-            match store.resolve_request_outcome(database_id, &ambiguous.request_key) {
-                Ok(Some(commit)) => {
-                    drop(_phase);
-                    if ambiguous.notify_if_durable {
-                        let mut report = ServiceTransactionReport::from_commit(commit);
-                        debug_assert!(report.replayed);
-                        // Reconstruction is an idempotent read, but this is the
-                        // first and only live notification for the original
-                        // durable transaction.
-                        report.replayed = false;
-                        record_transaction_diagnostics(shared, &mut report, &ambiguous.operation);
-                        if let Err(error) = note_report_commit(shared, database_id, &report) {
-                            shared.indexing.fail_job(error);
-                            shared.accepting.store(false, Ordering::Release);
-                        }
-                        shared.publish(&report);
-                    }
-                    *shared
-                        .writer_residency
-                        .lock()
-                        .expect("writer residency mutex poisoned") =
-                        store.writer_residency_stats(database_id);
-                }
-                Ok(None) => {
-                    *shared
-                        .writer_residency
-                        .lock()
-                        .expect("writer residency mutex poisoned") =
-                        store.writer_residency_stats(database_id);
-                }
-                Err(error) if is_postgres_connection_error(&error) => {
-                    ambiguous.reconnect_required = true;
-                    ambiguous_outcome = Some(ambiguous);
-                    thread::park_timeout(renew_interval.min(Duration::from_millis(100)));
-                }
-                Err(_) => {
-                    // Continuing would either lose a committed notification
-                    // or permit later work to overtake an unresolved decision.
-                    shared.accepting.store(false, Ordering::Release);
-                }
-            }
-            continue;
-        }
-        if last_renewal.elapsed() >= renew_interval {
-            if store.renew_lease(lease, lease_millis).is_err() {
-                shared.accepting.store(false, Ordering::Release);
-                // A hard-limit parked request has not been assessed and
-                // cannot have reached the log. Settle it as definitely
-                // unavailable before releasing ownership; dropping its
-                // response channel would manufacture an UnknownOutcome and
-                // leave the admission count permanently inflated.
-                if let Some(work) = pending.take() {
-                    decrement_queued(shared);
-                    let _ = work.response.send(Err(shared.unavailable()));
-                }
-                drain_unavailable(&receiver, shared);
-                break;
-            }
-            last_renewal = Instant::now();
-        }
-        let wait = renew_interval.saturating_sub(last_renewal.elapsed());
-        let work = match pending.take() {
-            Some(work) => work,
-            None => match receiver.recv_timeout(wait) {
-                Ok(work) => work,
-                Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            },
-        };
-        if !shared.accepting.load(Ordering::Acquire) {
-            decrement_queued(shared);
-            let _ = work.response.send(Err(shared.unavailable()));
-            continue;
-        }
-        if pending_was_stalled && shared.indexing.should_continue() {
-            // `check_index_gate` performs the one durable idempotency lookup
-            // that classified this work as novel. Do not reconnect and repeat
-            // that query or reassess a hard-cap retry on every throttle tick
-            // while the covering publication is still pending.
-            shared.indexing.wake();
-            pending = Some(work);
-            thread::park_timeout(wait.min(Duration::from_millis(100)));
-            continue;
-        }
-        let _operation_scope = work.operation.enter();
-        let gate = shared.check_index_gate(&work.request.request_key, work.request_hash);
-        if gate
-            .as_ref()
-            .is_err_and(|error| error.code == "service/index-backpressure")
-        {
-            // Match the recovered transactor's hard-limit behavior: retain
-            // this ordinary request without evaluating it, keep renewing the
-            // lease, and let the index worker run. Bounded admission—not a new
-            // transaction semantic—decides whether additional callers see
-            // Busy while this slot is parked.
-            if !pending_was_stalled {
-                shared.indexing.record_backpressure_stall();
-                pending_was_stalled = true;
-            }
-            shared.indexing.wake();
-            pending = Some(work);
-            thread::park_timeout(wait.min(Duration::from_millis(100)));
-            continue;
-        }
-        decrement_queued(shared);
-        pending_was_stalled = false;
-        let request_key = work.request.request_key.clone();
-        let mut result = match gate {
-            Ok(()) => {
-                let published_revision = shared.indexing.published_revision();
-                match store.adopt_published_tree(database_id, published_revision) {
-                    Ok(()) => crate::transaction_hints::overlap(
-                        store.hint_database_value(database_id),
-                        work.hints.as_ref(),
-                        &shared.hint_worker,
-                        || {
-                            process_work(
-                                store,
-                                lease,
-                                lease_millis,
-                                database_id,
-                                &work.request,
-                                work.request_hash,
-                            )
-                        },
-                    ),
-                    // An ambiguous commit deliberately invalidates the cached
-                    // writer value. The authoritative transaction path locks
-                    // the head and either reconstructs the durable receipt or
-                    // opens that exact head before doing new work, so absence
-                    // of a process-local value is not an adoption failure.
-                    Err(error) if error.code == "postgres/writer-not-activated" => process_work(
-                        store,
-                        lease,
-                        lease_millis,
-                        database_id,
-                        &work.request,
-                        work.request_hash,
-                    ),
-                    Err(error) => Err(error),
-                }
-            }
-            Err(error) => Err(error),
-        };
-        if let Ok(report) = &mut result {
-            record_transaction_diagnostics(shared, report, &work.operation);
-        }
-        if result
-            .as_ref()
-            .is_err_and(|error| error.code == "recent/hard-capacity")
-            && shared.indexing.force_publication()
-        {
-            // The exact recent representation found pressure that admission
-            // could not predict (or raced a still-unadopted publication).
-            // Nothing was committed. Park this same request, force an index
-            // through the known durable tail, and reassess only afterward.
-            if !pending_was_stalled {
-                shared.indexing.record_backpressure_stall();
-                pending_was_stalled = true;
-            }
-            increment_queued(shared);
-            pending = Some(work);
-            thread::park_timeout(wait.min(Duration::from_millis(100)));
-            continue;
-        }
-        let publish = result
-            .as_ref()
-            .ok()
-            .filter(|report| !report.replayed)
-            .cloned();
-        if result.is_ok() {
-            shared.processed.fetch_add(1, Ordering::Relaxed);
-        } else if result
-            .as_ref()
-            .is_err_and(|error| error.code == "postgres/leadership-lost")
-        {
-            shared.accepting.store(false, Ordering::Release);
-        }
-        let reconcile = result
-            .as_ref()
-            .err()
-            .filter(|error| error.category == ErrorCategory::UnknownOutcome)
-            .map(|error| AmbiguousOutcome {
-                request_key,
-                reconnect_required: true,
-                operation: work.operation.clone(),
-                // An acknowledgement-lost idempotent outcome read names an
-                // already-observed transaction. Resolve it to restore the
-                // connection/writer, but never duplicate its report or
-                // indexing novelty.
-                notify_if_durable: error
-                    .details
-                    .get("ambiguity_kind")
-                    .is_some_and(|kind| kind == "publication"),
-            });
-        if let Some(report) = &publish
-            && let Err(error) = note_report_commit(shared, database_id, report)
-        {
-            shared.indexing.fail_job(error);
-            shared.accepting.store(false, Ordering::Release);
-        }
-        *shared
-            .writer_residency
-            .lock()
-            .expect("writer residency mutex poisoned") = store.writer_residency_stats(database_id);
-        let _ = work.response.send(result);
-        if let Some(report) = publish {
-            shared.publish(&report);
-        }
-        // Future/result delivery precedes report notification, matching the
-        // recovered peer. Reconciliation therefore begins only after the
-        // originating caller has received the honest UnknownOutcome.
-        ambiguous_outcome = reconcile;
-    }
-    let _ = store.release_lease(lease);
-    shared.accepting.store(false, Ordering::Release);
-}
-
-fn run_index_worker(
-    mut indexer: PostgresIndexer,
-    receiver: mpsc::Receiver<IndexCommand>,
-    shared: &Shared,
-    excision_config: crate::ExcisionConfig,
-) {
-    let indexing = OperationContext::new(OperationKind::Indexing);
-    let _indexing_scope = indexing.enter();
-    let mut requested = shared.indexing.should_continue();
-    let mut startup_search_check = true;
-    if excision_config.enabled {
-        match run_automatic_excision(shared, excision_config) {
-            Ok(Some(receipt)) => {
-                match excision_publication(shared, &receipt).and_then(|revision| {
-                    indexer.reconnect()?;
-                    Ok(revision)
-                }) {
-                    Ok(revision) => {
-                        shared
-                            .indexing
-                            .publish_completed(revision, receipt.basis_t, 0, false)
-                    }
-                    Err(error) => {
-                        shared.indexing.fail_job(error);
-                        shared.accepting.store(false, Ordering::Release);
-                        return;
-                    }
-                }
-                requested = shared.indexing.should_continue();
-            }
-            Ok(None) => {}
-            Err(error) => {
-                shared.indexing.fail_job(error);
-                shared.accepting.store(false, Ordering::Release);
-                return;
-            }
-        }
-    }
-    loop {
-        if requested
-            && shared.accepting.load(Ordering::Acquire)
-            && let Some(through) = shared.indexing.begin_job()
-        {
-            let mut reconnect_before_attempt = false;
-            loop {
-                match retry_index_job(
-                    || {
-                        if reconnect_before_attempt {
-                            indexer.reconnect()?;
-                        }
-                        let result = indexer.consolidate_background_once(through);
-                        reconnect_before_attempt =
-                            result.as_ref().is_err_and(is_postgres_connection_error);
-                        result
-                    },
-                    || shared.accepting.load(Ordering::Acquire),
-                ) {
-                    Ok(Some(receipt)) => {
-                        if excision_config.enabled {
-                            match run_automatic_excision(shared, excision_config) {
-                                Ok(Some(excised)) => {
-                                    if let Err(error) = indexer.reconnect() {
-                                        shared.indexing.fail_job(error);
-                                        shared.accepting.store(false, Ordering::Release);
-                                        return;
-                                    }
-                                    let latest = (|| {
-                                        let mut client = shared
-                                            .connection
-                                            .connect_for("service/excision-publication")?;
-                                        let row=client.query_one("SELECT publication_revision FROM atomic_tree_publications WHERE database_id=$1 AND log_generation=$2 ORDER BY publication_revision DESC LIMIT 1",&[&shared.database_id,&sql_basis(excised.generation,"generation")?]).map_err(|e|postgres_error("service/excision-publication",e))?;
-                                        nonnegative_basis(row.get(0), "excision publication")
-                                    })();
-                                    match latest {
-                                        Ok(revision) => shared.indexing.complete_job(
-                                            revision,
-                                            excised.basis_t,
-                                            0,
-                                            false,
-                                        ),
-                                        Err(error) => {
-                                            shared.indexing.fail_job(error);
-                                            shared.accepting.store(false, Ordering::Release);
-                                            return;
-                                        }
-                                    }
-                                    startup_search_check = true;
-                                    break;
-                                }
-                                Ok(None) => {}
-                                Err(error) if !shared.accepting.load(Ordering::Acquire) => {
-                                    let _ = error;
-                                    return;
-                                }
-                                Err(error) => {
-                                    shared.indexing.fail_job(error);
-                                    shared.accepting.store(false, Ordering::Release);
-                                    return;
-                                }
-                            }
-                        }
-                        // Incomplete AVET publications deliberately skip the
-                        // optional build; its getter still names a prior
-                        // attempt and must not certify this new basis.
-                        if receipt.pending_avet_projections == 0 {
-                            shared
-                                .indexing
-                                .fulltext
-                                .lock()
-                                .expect("fulltext retry mutex poisoned")
-                                .record(
-                                    receipt.basis_t,
-                                    indexer.fulltext_build_error(),
-                                    false,
-                                    Instant::now(),
-                                );
-                            startup_search_check = false;
-                        }
-                        shared.indexing.complete_job(
-                            receipt.publication_revision,
-                            receipt.basis_t,
-                            receipt.pending_avet_projections,
-                            receipt.index_work_remaining,
-                        );
-                        break;
-                    }
-                    Ok(None) => {
-                        // One fixed live-set batch made durable progress.
-                        // Reselect before the next step, and observe service
-                        // shutdown between batches rather than hiding an
-                        // uninterruptible whole-database fold.
-                        if !shared.accepting.load(Ordering::Acquire) {
-                            return;
-                        }
-                        thread::yield_now();
-                    }
-                    Err(error) => {
-                        shared.indexing.fail_job(error);
-                        // A writer that can no longer consolidate its bounded
-                        // recent tier must relinquish service ownership so a
-                        // repaired standby can fence and recover. Retaining
-                        // the lease while rejecting forever creates a zombie
-                        // leader and contradicts the failover contract.
-                        shared.accepting.store(false, Ordering::Release);
-                        return;
-                    }
-                }
-            }
-            if shared.indexing.should_continue() {
-                continue;
-            }
-        }
-        if !shared.accepting.load(Ordering::Acquire) {
-            return;
-        }
-        let retry = {
-            let mut fulltext = shared
-                .indexing
-                .fulltext
-                .lock()
-                .expect("fulltext retry mutex poisoned");
-            if fulltext.retry_at.is_some_and(|at| at <= Instant::now()) {
-                fulltext.retry_at = None;
-                Some(fulltext.reconnect)
-            } else {
-                None
-            }
-        };
-        if startup_search_check || retry.is_some() {
-            let basis = shared
-                .indexing
-                .backlog
-                .lock()
-                .expect("index backlog mutex poisoned")
-                .published_basis_t;
-            let result = if retry == Some(true) {
-                indexer
-                    .reconnect()
-                    .and_then(|()| indexer.ensure_latest_fulltext())
-            } else {
-                indexer.ensure_latest_fulltext()
-            };
-            let checked_basis = result
-                .as_ref()
-                .ok()
-                .and_then(Option::as_ref)
-                .map_or(basis, |projection| projection.source_basis_t);
-            shared
-                .indexing
-                .fulltext
-                .lock()
-                .expect("fulltext retry mutex poisoned")
-                .record(
-                    checked_basis,
-                    result.as_ref().err(),
-                    !startup_search_check,
-                    Instant::now(),
-                );
-            startup_search_check = false;
-            // Only the optional projection was attempted; its error never
-            // enters fail_job, recent-tier pressure, or lease/accepting state.
-        }
-        let wait = shared
-            .indexing
-            .fulltext
-            .lock()
-            .expect("fulltext retry mutex poisoned")
-            .retry_at
-            .map(|at| at.saturating_duration_since(Instant::now()));
-        let command = match wait {
-            Some(wait) => receiver.recv_timeout(wait),
-            None => receiver
-                .recv()
-                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-        };
-        match command {
-            Ok(IndexCommand::Wake) => requested = true,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Ok(IndexCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => return,
-        }
-    }
-}
-
-fn run_automatic_excision(
-    shared: &Shared,
-    config: crate::ExcisionConfig,
-) -> Result<Option<crate::ExcisionReceipt>, SemanticError> {
-    use crate::operations::excision_worker::{ExcisionJob, ExcisionStep};
-    if shared
-        .indexing
-        .excision
-        .lock()
-        .expect("excision status mutex poisoned")
-        .1
-        .as_ref()
-        .is_some_and(|e| e.code == "excision/admission-capacity")
-    {
-        return Ok(None);
-    }
-    let mut retries = 0_u32;
-    loop {
-        let mut job = ExcisionJob::start(
-            shared.connection.clone(),
-            shared.transport_lease.clone(),
-            config,
-        )?;
-        loop {
-            if !shared.accepting.load(Ordering::Acquire) {
-                return Ok(None);
-            }
-            match job.advance() {
-                Ok(ExcisionStep::Progress(progress)) => {
-                    if progress.phase != "discover" {
-                        shared
-                            .indexing
-                            .excision
-                            .lock()
-                            .expect("excision status mutex poisoned")
-                            .0 = progress;
-                    }
-                    thread::yield_now();
-                }
-                Ok(ExcisionStep::Complete(receipt)) => {
-                    let mut stats = shared
-                        .indexing
-                        .excision
-                        .lock()
-                        .expect("excision status mutex poisoned");
-                    if receipt.is_some() {
-                        stats.0 = job.progress();
-                    }
-                    stats.1 = None;
-                    return Ok(receipt);
-                }
-                Err(error) => {
-                    {
-                        let mut stats = shared
-                            .indexing
-                            .excision
-                            .lock()
-                            .expect("excision status mutex poisoned");
-                        stats.0 = job.progress();
-                        stats.1 = Some(error.clone());
-                    }
-                    if error.code == "excision/admission-capacity" {
-                        return Ok(None);
-                    }
-                    if retries < 8
-                        && matches!(
-                            error.category,
-                            ErrorCategory::Busy | ErrorCategory::Conflict
-                        )
-                        && shared.accepting.load(Ordering::Acquire)
-                    {
-                        retries += 1;
-                        drop(job);
-                        thread::park_timeout(Duration::from_millis(50u64 << retries.min(5)));
-                        break;
-                    }
-                    return Err(error);
-                }
-            }
-        }
-    }
-}
-
-/// Only finish an already-authoritative excision before strict native writer
-/// activation. This is not permission to rebuild an ordinary missing root.
-fn resume_excision_before_activation(
-    store: &mut PostgresStore,
-    connection: &PostgresConnectionConfig,
-    lease: &TransactorLease,
-    lease_millis: u64,
-    config: crate::ExcisionConfig,
-) -> Result<Option<crate::ExcisionProgress>, SemanticError> {
-    let mut client = connection.connect_for("service/excision-startup")?;
-    let pending:bool=client.query_one("SELECT EXISTS(SELECT 1 FROM atomic_heads h JOIN atomic_log_generations g ON g.database_id=h.database_id AND g.generation=h.log_generation JOIN atomic_log_generation_activations a ON a.database_id=g.database_id AND a.generation=g.generation WHERE h.database_id=$1 AND g.build_kind=1 AND NOT EXISTS(SELECT 1 FROM atomic_log_generation_completions c WHERE c.database_id=g.database_id AND c.generation=g.generation))",&[&lease.database_id]).map_err(|e|postgres_error("service/excision-startup",e))?.get(0);
-    if !pending {
-        return Ok(None);
-    }
-    if !config.enabled {
-        return Err(SemanticError::new(
-            ErrorCategory::Unavailable,
-            "service/excision-completion-required",
-            "an activated excision needs completion before native writer startup",
-        ));
-    }
-    let mut job = crate::operations::excision_worker::ExcisionJob::start(
-        connection.clone(),
-        lease.clone(),
-        config,
-    )?;
-    loop {
-        match job.advance()? {
-            crate::operations::excision_worker::ExcisionStep::Progress(_) => {
-                store.renew_lease(lease, lease_millis)?;
-            }
-            crate::operations::excision_worker::ExcisionStep::Complete(_) => {
-                store.renew_lease(lease, lease_millis)?;
-                return Ok(Some(job.progress()));
-            }
-        }
-    }
-}
-
-fn excision_publication(
-    shared: &Shared,
-    receipt: &crate::ExcisionReceipt,
-) -> Result<u64, SemanticError> {
-    let mut client = shared
-        .connection
-        .connect_for("service/excision-publication")?;
-    let row=client.query_one("SELECT publication_revision FROM atomic_tree_publications WHERE database_id=$1 AND log_generation=$2 ORDER BY publication_revision DESC LIMIT 1",&[&shared.database_id,&sql_basis(receipt.generation,"generation")?]).map_err(|e|postgres_error("service/excision-publication",e))?;
-    nonnegative_basis(row.get(0), "excision publication")
-}
-
-/// Retry a complete immutable index selection/build/publication attempt.
-/// Recovered `process-request-index` retries the whole job twice after its
-/// initial attempt, regardless of the failure, and stops retrying during
-/// shutdown. The caller supplies the raw one-attempt indexer entry point so an
-/// internal publication retry cannot silently multiply this budget.
-fn retry_index_job<T>(
-    mut attempt: impl FnMut() -> Result<T, SemanticError>,
-    keep_running: impl Fn() -> bool,
-) -> Result<T, SemanticError> {
-    let mut retries = 0_usize;
-    loop {
-        match attempt() {
-            Err(error) if keep_running() => {
-                if retries == MAX_INDEX_JOB_RETRIES {
-                    if !matches!(
-                        error.code,
-                        "tree/publication-cas-lost" | "tree/publication-revision-conflict"
-                    ) {
-                        return Err(error);
-                    }
-                    return Err(SemanticError::new(
-                        ErrorCategory::Unavailable,
-                        "service/index-publication-race-exhausted",
-                        "background index publication exhausted its bounded CAS retry budget",
-                    )
-                    .detail("attempts", (retries + 1).to_string())
-                    .detail("cause_code", error.code)
-                    .detail("cause", error.message));
-                }
-                retries += 1;
-                thread::yield_now();
-            }
-            result => return result,
-        }
     }
 }
 
@@ -3066,65 +2093,6 @@ fn record_transaction_diagnostics(
     report.diagnostics = Some(diagnostics);
 }
 
-fn process_work(
-    store: &mut PostgresStore,
-    lease: &TransactorLease,
-    lease_millis: u64,
-    database_id: &str,
-    request: &TransactionRequest,
-    request_hash: Digest,
-) -> Result<ServiceTransactionReport, SemanticError> {
-    // This wall interval covers the authority attempt, not admission/queue
-    // waiting. Its phase children are reported separately and are inclusive.
-    let _phase = OperationContext::current_or_process().phase(OperationKind::Transaction);
-    #[cfg(not(test))]
-    let commit = store.transact_authoritative_fenced(
-        lease,
-        lease_millis,
-        database_id,
-        &request.request_key,
-        request.compare_basis_t,
-        &request.forms,
-        request.tx_instant_override,
-        request_hash,
-    )?;
-    #[cfg(test)]
-    let commit = {
-        let observation_fault = take_observation_fault(database_id, &request.request_key);
-        if observation_fault == Some(CommitObservationFault::AbsentUnknownOutcome) {
-            return Err(unknown_outcome(
-                request_hash,
-                "injected acknowledgement loss before a durable decision",
-            )
-            .detail("ambiguity_kind", "publication"));
-        }
-        let fault = match observation_fault {
-            None => crate::postgres::CommitFault::None,
-            Some(CommitObservationFault::RollbackAfterHeadUpdate) => {
-                crate::postgres::CommitFault::AfterHeadUpdate
-            }
-            Some(CommitObservationFault::AfterCommitBeforeResponse) => {
-                crate::postgres::CommitFault::AfterCommitBeforeResponse
-            }
-            Some(CommitObservationFault::AbsentUnknownOutcome) => {
-                unreachable!("the absent-outcome test fault returns before PostgreSQL publication")
-            }
-        };
-        store.transact_authoritative_fenced_with_fault(
-            lease,
-            lease_millis,
-            database_id,
-            &request.request_key,
-            request.compare_basis_t,
-            &request.forms,
-            request.tx_instant_override,
-            request_hash,
-            fault,
-        )?
-    };
-    Ok(ServiceTransactionReport::from_commit(commit))
-}
-
 fn drain_unavailable(receiver: &mpsc::Receiver<Work>, shared: &Shared) {
     while let Ok(work) = receiver.try_recv() {
         decrement_queued(shared);
@@ -3137,198 +2105,21 @@ fn decrement_queued(shared: &Shared) {
     shared.queued.fetch_sub(1, Ordering::AcqRel);
 }
 
-fn increment_queued(shared: &Shared) {
-    let _admission = shared.admission.lock().expect("admission mutex poisoned");
-    let queued = shared.queued.fetch_add(1, Ordering::AcqRel) + 1;
-    shared.max_queued.fetch_max(queued, Ordering::Relaxed);
-}
-
-fn load_indexing_seed(
-    connection: &PostgresConnectionConfig,
-    database_id: &str,
-    activated_publication_revision: u64,
-    activated_basis_t: u64,
-) -> Result<IndexingSeed, SemanticError> {
-    let mut client = connection.connect_for("service/index-seed-connect")?;
-    let row = client
-        .query_opt(
-            "SELECT h.basis_t, h.log_generation, h.tx_hash, d.lineage_id \
-               FROM atomic_heads h JOIN atomic_databases d USING (database_id) \
-              WHERE h.database_id = $1",
-            &[&database_id],
-        )
-        .map_err(|error| postgres_error("service/index-seed-head", error))?
-        .ok_or_else(|| {
-            SemanticError::new(
-                ErrorCategory::NotFound,
-                "postgres/database-not-found",
-                format!("database {database_id} does not exist"),
-            )
-        })?;
-    let target_basis_t = nonnegative_basis(row.get(0), "index target basis")?;
-    let excision_generation = nonnegative_basis(row.get(1), "index excision generation")?;
-    let target_hash = candidate_digest(row.get(2)).ok_or_else(|| {
-        SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-head-hash",
-            "index target head has an invalid transaction hash",
-        )
-    })?;
-    let lineage_id: String = row.get(3);
-    let newest_observed_revision = client
-        .query_opt(
-            "SELECT publication_revision FROM atomic_tree_publications \
-             WHERE database_id = $1 ORDER BY publication_revision DESC LIMIT 1",
-            &[&database_id],
-        )
-        .map_err(|error| postgres_error("service/index-seed-revision", error))?
-        .map(|row| nonnegative_basis(row.get(0), "newest observed publication revision"))
-        .transpose()?
-        .unwrap_or(0);
-
-    // Activation already authenticated and pinned one immutable tree value.
-    // Seed backlog accounting from exactly that publication instead of
-    // implementing a second, potentially divergent candidate selector here.
-    let publication = client
-        .query_opt(
-            "SELECT p.basis_t, p.tx_hash, m.payload, \
-                    COALESCE(l.complete, false), \
-                    EXISTS (SELECT 1 FROM atomic_tree_delta_headers delta \
-                             WHERE delta.manifest_hash = p.manifest_hash \
-                               AND delta.delta_state = 2) \
-               FROM atomic_tree_publications p \
-               JOIN atomic_tree_manifests m ON m.manifest_hash = p.manifest_hash \
-               LEFT JOIN atomic_tree_live_sets l \
-                 ON l.database_id = p.database_id AND l.manifest_hash = p.manifest_hash \
-              WHERE p.database_id = $1 AND p.publication_revision = $2 \
-                AND p.log_generation = $3",
-            &[
-                &database_id,
-                &sql_basis(
-                    activated_publication_revision,
-                    "activated publication revision",
-                )?,
-                &sql_basis(excision_generation, "index excision generation")?,
-            ],
-        )
-        .map_err(|error| postgres_error("service/index-seed-publication", error))?
-        .ok_or_else(|| {
-            SemanticError::new(
-                ErrorCategory::Fault,
-                "service/index-seed-publication-missing",
-                "the activated and pinned native publication disappeared",
-            )
-        })?;
-    let published_basis_t = nonnegative_basis(publication.get(0), "published index basis")?;
-    if published_basis_t != activated_basis_t || published_basis_t > target_basis_t {
-        return Err(SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-publication-mismatch",
-            "the activated publication disagrees with its recovered durable basis",
-        ));
-    }
-    let published_hash = candidate_digest(publication.get(1)).ok_or_else(|| {
-        SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-publication-hash",
-            "the activated publication has an invalid transaction hash",
-        )
-    })?;
-    let manifest_payload: Vec<u8> = publication.get(2);
-    let manifest = PersistentTreeManifest::decode(&manifest_payload)?;
-    if manifest.database_id != database_id
-        || manifest.publication_revision != activated_publication_revision
-        || manifest.basis_t != published_basis_t
-        || manifest.tx_hash != published_hash
-        || manifest.excision_generation != excision_generation
-    {
-        return Err(SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-manifest-mismatch",
-            "the activated publication disagrees with its canonical manifest",
-        ));
-    }
-    let pending_avet_projections = manifest.pending_avet.len() as u64;
-    let live_complete: bool = publication.get(3);
-    let live_work_pending: bool = publication.get(4);
-    let published_revision = activated_publication_revision;
-    let mut needs_publication = published_revision < newest_observed_revision
-        || pending_avet_projections != 0
-        || !live_complete
-        || live_work_pending;
-    let mut required_publication_t = 0_u64;
-
-    let rows = read_authenticated_log_range(
-        &mut client,
-        database_id,
-        excision_generation,
-        published_basis_t,
-        target_basis_t,
-        published_hash,
-    )?;
-    let observed_tail_hash = rows.last().map_or(published_hash, |row| row.tx_hash);
-    let mut pending = VecDeque::with_capacity(rows.len());
-    for row in rows {
-        let transaction = row.transaction;
-        let changes_avet_membership = transaction.tx_data.iter().any(|datom| {
-            matches!(
-                u64::from(datom.attribute),
-                crate::DB_INDEX | crate::DB_UNIQUE
-            )
-        });
-        needs_publication |= changes_avet_membership;
-        if changes_avet_membership {
-            required_publication_t = required_publication_t.max(transaction.basis_t);
-        }
-        let retained = crate::recent::retained_entry_stats(&transaction)?;
-        pending.push_back(Novelty {
-            basis_t: transaction.basis_t,
-            datoms: retained.datoms,
-            bytes: retained.accounted_bytes,
-        });
-    }
-    if observed_tail_hash != target_hash {
-        return Err(SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-seed-head-mismatch",
-            "authenticated index backlog does not reach the captured head",
-        ));
-    }
-    Ok(IndexingSeed {
-        lineage_id,
-        published_revision,
-        published_basis_t,
-        pending_avet_projections,
-        newest_observed_revision,
-        target_basis_t,
-        pending,
-        publication_work_through: (pending_avet_projections != 0
-            || !live_complete
-            || live_work_pending)
-            .then_some(published_basis_t),
-        required_publication_t,
-        needs_publication,
-    })
-}
-
-fn candidate_digest(bytes: Vec<u8>) -> Option<Digest> {
-    bytes.try_into().ok()
-}
-
-fn sql_basis(value: u64, label: &str) -> Result<i64, SemanticError> {
-    i64::try_from(value).map_err(|_| {
-        SemanticError::incorrect(
-            "service/index-basis-overflow",
-            format!("{label} is outside PostgreSQL bigint"),
-        )
-    })
-}
-
 fn note_report_commit(
     shared: &Shared,
     database_id: &str,
     report: &ServiceTransactionReport,
 ) -> Result<(), SemanticError> {
+    if report
+        .tx_data
+        .iter()
+        .any(|d| d.attribute == crate::DB_EXCISE as u32)
+    {
+        shared
+            .indexing
+            .excision_requested
+            .store(true, Ordering::Release);
+    }
     let transaction = DurableTransaction {
         database_id: database_id.to_owned(),
         basis_t: report.basis_t,
@@ -3337,7 +2128,9 @@ fn note_report_commit(
         // by the writer before this accounting-only reconstruction.
         previous_hash: [0; 32],
         eidx_frontier: report.db_after.eidx_frontier(),
-        tempids: report.tempids.clone(),
+        // Opaque log entries contain datoms/allocation checkpoints, while
+        // caller tempid names live in the separate receipt tree.
+        tempids: BTreeMap::new(),
         tx_data: report.tx_data.clone(),
     };
     let retained = crate::recent::retained_entry_stats(&transaction)?;
@@ -3356,37 +2149,6 @@ fn note_report_commit(
         changes_avet_membership,
     );
     Ok(())
-}
-
-/// Conservative upper bound for one already-admitted transaction's recent
-/// representation. Canonical transaction bytes cover every value once;
-/// resident values plus the four raw indexes/log reference can account for a
-/// second value copy and fixed metadata per operation. Saturation is safer
-/// than wrapping a configured capacity boundary.
-fn max_transaction_novelty_bytes(limits: CapacityLimits) -> u64 {
-    let transaction_bytes = u64::try_from(limits.max_transaction_bytes).unwrap_or(u64::MAX);
-    let operation_count = u64::try_from(limits.max_transaction_ops).unwrap_or(u64::MAX);
-    let locator_bytes = (size_of::<crate::recent::RecentLocator>() as u64)
-        .saturating_mul(MAX_RECENT_REFERENCES_PER_DATOM);
-    transaction_bytes.saturating_mul(2).saturating_add(
-        operation_count.saturating_mul((size_of::<Datom>() as u64).saturating_add(locator_bytes)),
-    )
-}
-
-fn nonnegative_basis(value: i64, label: &str) -> Result<u64, SemanticError> {
-    u64::try_from(value).map_err(|_| {
-        SemanticError::new(
-            ErrorCategory::Fault,
-            "service/index-negative-basis",
-            format!("{label} is negative"),
-        )
-    })
-}
-
-fn duration_millis(duration: Duration) -> Result<u64, SemanticError> {
-    u64::try_from(duration.as_millis()).map_err(|_| {
-        SemanticError::incorrect("service/duration-overflow", "lease duration is too large")
-    })
 }
 
 fn unknown_outcome(request_key_hash: Digest, message: &str) -> SemanticError {
@@ -3413,8 +2175,8 @@ fn hex_digest(digest: &Digest) -> String {
 mod tests {
     use super::*;
     use crate::{
-        Attribute, Cardinality, EntityRef, Keyword, PostgresMigrator, Schema, TxValue,
-        USER_PARTITION, Value, ValueType, make_eid,
+        Attribute, Cardinality, EntityRef, Keyword, Schema, TxValue, USER_PARTITION, Value,
+        ValueType, make_eid,
     };
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -3422,6 +2184,50 @@ mod tests {
 
     fn postgres_connection() -> Option<String> {
         std::env::var("ATOMIC_POSTGRES_URL").ok()
+    }
+
+    struct ObservationFixture {
+        admin: postgres::Client,
+        schema: String,
+        connection: String,
+        database: crate::storage::BlockDatabase,
+    }
+
+    impl Drop for ObservationFixture {
+        fn drop(&mut self) {
+            let _ = self
+                .admin
+                .batch_execute(&format!("DROP SCHEMA {} CASCADE", self.schema));
+        }
+    }
+
+    fn observation_fixture() -> Option<ObservationFixture> {
+        let connection = postgres_connection()?;
+        let schema = format!("block_service_observe_{:032x}", crate::uuid_v7().unwrap());
+        let mut admin = postgres::Client::connect(&connection, postgres::NoTls).unwrap();
+        admin
+            .batch_execute(&format!("CREATE SCHEMA {schema}"))
+            .unwrap();
+        let connection =
+            if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+                format!(
+                    "{connection}{}options=-csearch_path%3D{schema}%2Cpg_catalog",
+                    if connection.contains('?') { '&' } else { '?' }
+                )
+            } else {
+                format!("{connection} options='-csearch_path={schema},pg_catalog'")
+            };
+        let config = PostgresConnectionConfig::plaintext(&connection);
+        crate::storage::PgBlockStore::install(&config).unwrap();
+        let database =
+            crate::storage::BlockDatabase::create(&config, "observed", observation_schema())
+                .unwrap();
+        Some(ObservationFixture {
+            admin,
+            schema,
+            connection,
+            database,
+        })
     }
 
     fn unique_database(prefix: &str) -> String {
@@ -3467,7 +2273,7 @@ mod tests {
             connection: connection.to_owned(),
             database_id,
             holder_id: unique_database("unknown-observer"),
-            lease_duration: Duration::from_secs(2),
+            lease_duration: Duration::from_secs(10),
             renew_interval: Duration::from_millis(100),
             queue_capacity: 4,
             capacity_limits: CapacityLimits::default(),
@@ -3483,7 +2289,6 @@ mod tests {
 
     fn bookkeeping_seed(width: usize) -> IndexingSeed {
         IndexingSeed {
-            lineage_id: "bookkeeping-lineage".into(),
             published_revision: 7,
             published_basis_t: 1,
             pending_avet_projections: 0,
@@ -3637,29 +2442,25 @@ mod tests {
 
             assert_eq!(indexing.begin_job(), Some(target + 2));
             let before_retry = indexing.stats();
-            let mut attempts = 0;
-            retry_index_job(
-                || {
-                    attempts += 1;
-                    if attempts < 3 {
-                        Err(SemanticError::new(
-                            ErrorCategory::Conflict,
-                            "index/test-cas",
-                            "retry unchanged job",
-                        ))
-                    } else {
-                        Ok(())
-                    }
-                },
-                || true,
-            )
-            .unwrap();
-            assert_eq!(attempts, 3);
+            indexing.retry_job();
+            assert_backlog_oracle(&indexing);
+            assert_eq!(indexing.begin_job(), Some(target + 2));
+            let after_retry = indexing.stats();
             assert_eq!(
-                indexing.stats(),
-                before_retry,
-                "transient retry moved the frozen boundary"
+                (
+                    after_retry.indexing_transactions,
+                    after_retry.indexing_datoms,
+                    after_retry.indexing_bytes
+                ),
+                (
+                    before_retry.indexing_transactions,
+                    before_retry.indexing_datoms,
+                    before_retry.indexing_bytes
+                ),
+                "whole-job retry lost frozen novelty"
             );
+            assert_eq!(after_retry.total_bytes, before_retry.total_bytes);
+            assert_eq!(after_retry.jobs_started, before_retry.jobs_started + 1);
             indexing.fail_job(SemanticError::new(
                 ErrorCategory::Fault,
                 "index/test-failure",
@@ -3679,7 +2480,6 @@ mod tests {
             let seed = {
                 let backlog = indexing.backlog.lock().unwrap();
                 IndexingSeed {
-                    lineage_id: "bookkeeping-lineage".into(),
                     published_revision: backlog.published_revision,
                     published_basis_t: backlog.published_basis_t,
                     pending_avet_projections: backlog.pending_avet_projections,
@@ -3787,60 +2587,53 @@ mod tests {
     }
 
     #[test]
-    fn fulltext_idle_retry_is_bounded_and_clears_only_its_own_failure() {
+    fn projection_observations_follow_attempt_retry_and_adoption_without_idle_policy() {
         let now = Instant::now();
-        for category in [
-            ErrorCategory::Busy,
-            ErrorCategory::Unavailable,
-            ErrorCategory::Interrupted,
-        ] {
-            let error = SemanticError::new(
-                category,
-                "test/transient-search",
-                "retryable search failure",
-            );
-            let mut retry = FulltextRetry::default();
-            retry.record(3, Some(&error), false, now);
-            assert_eq!(retry.snapshot(now).retry_in, Some(FULLTEXT_RETRY_INITIAL));
-            for attempt in 1..MAX_FULLTEXT_IDLE_RETRIES {
-                retry.record(3, Some(&error), true, now);
-                assert_eq!(
-                    retry.snapshot(now).retry_in,
-                    Some(
-                        FULLTEXT_RETRY_INITIAL
-                            .saturating_mul(1 << attempt)
-                            .min(FULLTEXT_RETRY_MAX)
-                    )
-                );
-            }
-            retry.record(3, Some(&error), true, now);
-            let exhausted = retry.snapshot(now);
-            assert_eq!(exhausted.attempts, 9);
-            assert_eq!(exhausted.failures, 9);
-            assert_eq!(exhausted.idle_retries, 8);
-            assert!(exhausted.retry_exhausted);
-            assert!(exhausted.retry_in.is_none());
-            assert!(exhausted.checked_basis_t.is_none());
-            assert_eq!(exhausted.last_failure.unwrap().category, category);
+        let error =
+            SemanticError::conflict("storage/write-protection-conflict", "GC guard changed");
+        let mut observation = ProjectionObservations::default();
+        observation.started(3);
+        observation.failed(&error, Some(now + Duration::from_millis(50)), false);
+        let failed = observation.snapshot_with_messages(now, true);
+        assert_eq!(
+            (failed.attempts, failed.failures, failed.idle_retries),
+            (1, 1, 0)
+        );
+        assert_eq!(failed.attempted_basis_t, Some(3));
+        assert_eq!(failed.checked_basis_t, None);
+        assert_eq!(failed.retry_in, Some(Duration::from_millis(50)));
+        assert_eq!(failed.last_failure.unwrap().code, error.code);
+        assert!(!failed.retry_exhausted);
 
-            retry.record(4, None, false, now);
-            let recovered = retry.snapshot(now);
-            assert_eq!(recovered.checked_basis_t, Some(4));
-            assert_eq!(recovered.attempted_basis_t, Some(4));
-            assert_eq!(recovered.failures, 9);
-            assert!(recovered.last_failure.is_none());
-            assert!(!recovered.retry_exhausted);
-            assert!(recovered.retry_in.is_none());
-        }
+        observation.started(3);
+        let retrying = observation.snapshot_with_messages(now, false);
+        assert_eq!(retrying.attempts, 2);
+        assert_eq!(retrying.checked_basis_t, None);
+        assert_eq!(retrying.retry_in, None);
+        assert!(retrying.last_failure.unwrap().message.is_empty());
+        observation.adopted(3);
+        let recovered = observation.snapshot_with_messages(now, true);
+        assert_eq!(recovered.checked_basis_t, Some(3));
+        assert_eq!(recovered.failures, 1);
+        assert!(recovered.last_failure.is_none());
+
+        observation.started(4);
+        observation.failed(&error, None, true);
+        let exhausted = observation.snapshot_with_messages(now, true);
+        assert_eq!(exhausted.checked_basis_t, Some(3));
+        assert_eq!(exhausted.attempted_basis_t, Some(4));
+        assert_eq!(exhausted.idle_retries, 0);
+        assert_eq!(exhausted.retry_in, None);
+        assert!(exhausted.retry_exhausted);
+        assert_eq!(exhausted.last_failure.unwrap().message, error.message);
     }
 
     #[test]
-    fn fulltext_permanent_failure_is_visible_nonfatal_and_explicitly_retryable() {
+    fn satisfied_index_request_does_not_invent_an_idle_search_retry() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -3853,32 +2646,18 @@ mod tests {
             },
             sender,
         );
-        for category in [ErrorCategory::Fault, ErrorCategory::Incorrect] {
-            let error =
-                SemanticError::new(category, "test/permanent-search", "search needs repair");
-            indexing
-                .fulltext
-                .lock()
-                .unwrap()
-                .record(1, Some(&error), false, Instant::now());
-            let stats = indexing.stats();
-            assert_eq!(stats.fulltext.last_failure.unwrap().category, category);
-            assert!(stats.fulltext.retry_in.is_none());
-            assert!(!stats.fulltext.retry_exhausted);
-            assert_eq!(stats.jobs_failed, 0);
-            assert!(stats.last_failure.is_none());
-            assert!(!indexing.has_failure());
-            assert!(indexing.limiting_error().is_none());
-            assert_eq!(
-                indexing.request_index(),
-                IndexRequest {
-                    target_t: 1,
-                    scheduled: false
-                }
-            );
-            assert_eq!(receiver.try_recv(), Ok(IndexCommand::Wake));
-            assert!(indexing.stats().fulltext.retry_in.is_some());
-        }
+        let error = SemanticError::conflict("test/projection", "attempt failed");
+        indexing.projection_started(1);
+        indexing.projection_failed(&error, None, false);
+        assert_eq!(
+            indexing.request_index(),
+            IndexRequest {
+                target_t: 1,
+                scheduled: false
+            }
+        );
+        assert_eq!(receiver.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert_eq!(indexing.stats().fulltext.retry_in, None);
     }
 
     #[test]
@@ -3887,7 +2666,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -3993,7 +2771,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 0,
                 published_basis_t: 0,
                 pending_avet_projections: 0,
@@ -4034,7 +2811,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 0,
                 published_basis_t: 0,
                 pending_avet_projections: 0,
@@ -4090,7 +2866,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             config,
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -4130,7 +2905,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -4169,7 +2943,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -4229,7 +3002,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -4285,7 +3057,6 @@ mod tests {
         let indexing = BackgroundIndexing::new(
             test_config(),
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 2,
                 published_basis_t: 2,
                 pending_avet_projections: 0,
@@ -4321,65 +3092,6 @@ mod tests {
     }
 
     #[test]
-    fn whole_index_retry_budget_is_exact_and_finite() {
-        let mut attempts = 0_usize;
-        let exhausted = retry_index_job(
-            || {
-                attempts += 1;
-                Err::<(), _>(SemanticError::conflict(
-                    "tree/publication-cas-lost",
-                    "test contender won",
-                ))
-            },
-            || true,
-        )
-        .unwrap_err();
-        assert_eq!(attempts, 3);
-        assert_eq!(
-            (exhausted.category, exhausted.code),
-            (
-                ErrorCategory::Unavailable,
-                "service/index-publication-race-exhausted"
-            )
-        );
-        assert_eq!(exhausted.details.get("attempts"), Some(&"3".to_owned()));
-
-        let mut attempts = 0_usize;
-        let receipt = retry_index_job(
-            || {
-                attempts += 1;
-                if attempts < 3 {
-                    Err(SemanticError::conflict(
-                        "tree/publication-revision-conflict",
-                        "test contender won",
-                    ))
-                } else {
-                    Ok(42_u64)
-                }
-            },
-            || true,
-        )
-        .unwrap();
-        assert_eq!((attempts, receipt), (3, 42));
-
-        let mut attempts = 0_usize;
-        let original = retry_index_job(
-            || {
-                attempts += 1;
-                Err::<(), _>(SemanticError::new(
-                    ErrorCategory::Fault,
-                    "index/test-failure",
-                    "test whole-index failure",
-                ))
-            },
-            || true,
-        )
-        .unwrap_err();
-        assert_eq!(attempts, 3, "non-CAS job failures use the same budget");
-        assert_eq!(original.code, "index/test-failure");
-    }
-
-    #[test]
     fn tuple_of_nils_cannot_evade_novelty_backpressure() {
         let datom = Datom {
             entity: 1,
@@ -4399,7 +3111,7 @@ mod tests {
         let canonical_value_bytes = crate::encoding::encode_canonical_value(&datom.value)
             .unwrap()
             .len() as u64;
-        let locator_bytes = (size_of::<crate::recent::RecentLocator>() as u64)
+        let locator_bytes = (size_of::<crate::recent_btset::RecentDatomRef>() as u64)
             .saturating_mul(MAX_RECENT_REFERENCES_PER_DATOM);
         let canonical_only_account = (size_of::<Datom>() as u64)
             .saturating_add(canonical_value_bytes)
@@ -4415,7 +3127,6 @@ mod tests {
                 memory_index_max_bytes: canonical_only_account.saturating_add(1),
             },
             IndexingSeed {
-                lineage_id: "lineage".to_owned(),
                 published_revision: 1,
                 published_basis_t: 1,
                 pending_avet_projections: 0,
@@ -4444,22 +3155,172 @@ mod tests {
     }
 
     #[test]
+    fn unified_projection_retry_reports_adopted_search_basis() {
+        let Some(fixture) = observation_fixture() else {
+            eprintln!("SKIP unified projection retry: ATOMIC_POSTGRES_URL is unset");
+            return;
+        };
+        const TEXT: u32 = 1_001;
+        let connection = PostgresConnectionConfig::plaintext(&fixture.connection);
+        let mut schema = observation_schema();
+        schema
+            .install(
+                Attribute::new(
+                    TEXT,
+                    Keyword::new("document", "body"),
+                    ValueType::String,
+                    Cardinality::One,
+                )
+                .fulltext(),
+            )
+            .unwrap();
+        let database =
+            crate::storage::BlockDatabase::create(&connection, "projection", schema).unwrap();
+        let service = TransactionService::start_with_indexing(
+            observation_service_config(&fixture.connection, "projection".into()),
+            BackgroundIndexingConfig {
+                memory_index_threshold_bytes: 1 << 30,
+                memory_index_max_bytes: 2 << 30,
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let report = client
+            .transact(
+                TransactionRequest::new(
+                    "document",
+                    vec![TxOp::Add {
+                        entity: EntityRef::Temp("document".into()),
+                        attribute: TEXT,
+                        value: Value::String("needle coherent retry".into()).into(),
+                    }],
+                ),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        let identity = crate::storage::engine::identity_string(database.identity);
+        let (first_ready, first_release) = block_service::pause_preparation(&identity);
+        assert!(client.request_index().unwrap().scheduled);
+        first_ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let staged = client.background_indexing_stats();
+        assert_eq!(staged.fulltext.attempts, 1);
+        assert_eq!(staged.fulltext.attempted_basis_t, Some(report.basis_t));
+        assert_eq!(
+            staged.fulltext.checked_basis_t, None,
+            "staging is not adoption"
+        );
+        assert_eq!(staged.fulltext.failures, 0);
+
+        // This candidate really built the search attachment. Changing only its
+        // generic GC guard makes the actual adoption fail without corrupting
+        // objects or pretending the failure arose in the search builder.
+        let (retry_ready, retry_release) = block_service::pause_preparation(&identity);
+        let mut store = crate::storage::PgBlockStore::connect(&connection).unwrap();
+        let before_adoption = store
+            .read_ref(&database.reference_key())
+            .unwrap()
+            .unwrap()
+            .value;
+        let gc_key = crate::storage::engine::GC_REFERENCE;
+        let previous = store.read_ref(gc_key).unwrap();
+        assert!(matches!(
+            store
+                .compare_exchange(
+                    gc_key,
+                    previous.as_ref().map(|r| r.revision),
+                    Some(&1_u64.to_be_bytes()),
+                )
+                .unwrap(),
+            crate::storage::CasOutcome::Applied(_)
+        ));
+        first_release.send(()).unwrap();
+        retry_ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let retrying = client.background_indexing_stats();
+        assert_eq!(
+            (retrying.fulltext.attempts, retrying.fulltext.failures),
+            (2, 1)
+        );
+        assert_eq!(retrying.fulltext.checked_basis_t, None);
+        assert_eq!(retrying.fulltext.idle_retries, 0);
+        assert_eq!(
+            retrying.fulltext.retry_in, None,
+            "retry is running, not scheduled"
+        );
+        assert!(!retrying.fulltext.retry_exhausted);
+        let failure = retrying.fulltext.last_failure.as_ref().unwrap();
+        // Adoption checks the staged object's original guard before loading
+        // provenance or writing its new publication root.
+        assert_eq!(
+            (failure.category, failure.code),
+            (
+                ErrorCategory::Conflict,
+                "storage/index-publication-conflict",
+            )
+        );
+        assert_eq!((retrying.jobs_completed, retrying.jobs_failed), (0, 0));
+        assert_eq!(
+            store
+                .read_ref(&database.reference_key())
+                .unwrap()
+                .unwrap()
+                .value,
+            before_adoption,
+            "a stale preparation must not publish"
+        );
+        assert!(retrying.last_failure.is_none());
+        assert!(client.is_available());
+        retry_release.send(()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let recovered = loop {
+            let stats = client.background_indexing_stats();
+            if stats.published_basis_t == report.basis_t && !stats.job_in_flight {
+                break stats;
+            }
+            assert!(
+                Instant::now() < deadline && client.is_available(),
+                "{stats:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(recovered.fulltext.checked_basis_t, Some(report.basis_t));
+        assert_eq!(
+            (recovered.fulltext.attempts, recovered.fulltext.failures),
+            (2, 1)
+        );
+        assert_eq!(recovered.fulltext.idle_retries, 0);
+        assert!(recovered.fulltext.last_failure.is_none());
+        assert!(recovered.fulltext.retry_in.is_none());
+        assert!(!recovered.fulltext.retry_exhausted);
+        assert_eq!((recovered.jobs_completed, recovered.jobs_failed), (1, 0));
+        let peer = crate::Peer::connect(&fixture.connection, "projection", 64).unwrap();
+        let search = peer
+            .db()
+            .fulltext(TEXT, "needle", &crate::FulltextOptions::default())
+            .unwrap();
+        assert_eq!(search.stats.index_basis_t, report.basis_t);
+        assert_eq!(search.hits.len(), 1);
+        assert_eq!(search.hits[0].entity, report.tempids["document"]);
+        eprintln!(
+            "UNIFIED_PROJECTION basis={} attempts={} failures={} adopted_jobs={} idle_retries={}",
+            report.basis_t,
+            recovered.fulltext.attempts,
+            recovered.fulltext.failures,
+            recovered.jobs_completed,
+            recovered.fulltext.idle_retries
+        );
+        service.shutdown();
+    }
+
+    #[test]
     fn submitted_context_measures_transaction_phases_retries_and_unknown_outcomes() {
-        let Some(connection) = postgres_connection() else {
+        let Some(fixture) = observation_fixture() else {
             eprintln!("SKIPPED transaction phase integration: ATOMIC_POSTGRES_URL is unset");
             return;
         };
-        let database_id = unique_database("transaction_phase_context");
-        PostgresMigrator::connect(&connection)
-            .unwrap()
-            .migrate()
-            .unwrap();
-        PostgresStore::connect(&connection)
-            .unwrap()
-            .create_database(&database_id, observation_schema())
-            .unwrap();
+        let database_id = crate::storage::engine::identity_string(fixture.database.identity);
         let service = TransactionService::start_with_indexing(
-            observation_service_config(&connection, database_id.clone()),
+            observation_service_config(&fixture.connection, "observed".into()),
             BackgroundIndexingConfig {
                 memory_index_threshold_bytes: 1 << 30,
                 memory_index_max_bytes: 2 << 30,
@@ -4482,7 +3343,14 @@ mod tests {
             let _scope = measured.enter();
             client.submit(request.clone()).unwrap()
         };
+        assert_eq!(
+            ticket.request_key_hash,
+            crate::storage::receipts::scoped_request_key(&fixture.database.identity, "measured")
+                .unwrap()
+        );
         let first = ticket.wait(Duration::from_secs(5)).unwrap();
+        assert_eq!(first.db_before.basis_t(), service.recovery_stats().target_t);
+        assert_eq!(first.basis_t, service.recovery_stats().target_t + 1);
         let first_stats = measured.snapshot();
         for kind in [
             OperationKind::Transaction,
@@ -4495,7 +3363,8 @@ mod tests {
             assert!(first_stats.phases[&kind].invocations > 0);
             assert!(first_stats.phases[&kind].elapsed_nanos > 0);
         }
-        assert!(first_stats.by_operation[&OperationKind::TransactionAssessment].calls > 0);
+        // Assessment may be entirely cache-resident; SQL is not required to
+        // make a real semantic phase observable.
         assert!(first_stats.by_operation[&OperationKind::TransactionCommit].calls > 0);
         assert_eq!(
             callbacks.load(Ordering::Relaxed),
@@ -4520,15 +3389,11 @@ mod tests {
                 .phases
                 .contains_key(&OperationKind::TransactionReport)
         );
-        assert!(
-            replay_stats
-                .phases
-                .contains_key(&OperationKind::TransactionCommit)
-        );
         for kind in [
             OperationKind::TransactionExpansion,
             OperationKind::TransactionAssessment,
             OperationKind::TransactionEncoding,
+            OperationKind::TransactionCommit,
         ] {
             assert!(
                 !replay_stats.phases.contains_key(&kind),
@@ -4569,9 +3434,10 @@ mod tests {
                 .phases
                 .contains_key(&OperationKind::TransactionEncoding)
         );
-        assert_eq!(
-            rejected_stats.by_kind[&crate::SqlCallKind::Rollback].calls,
-            1
+        assert!(
+            !rejected_stats
+                .phases
+                .contains_key(&OperationKind::TransactionCommit)
         );
 
         let unknown_context = OperationContext::new(OperationKind::Application);
@@ -4598,36 +3464,240 @@ mod tests {
         assert!(reconciled.replayed);
         assert_eq!(reconciled.tx_hash, durable.tx_hash);
         let unknown_stats = unknown_context.snapshot();
-        assert!(unknown_stats.phases[&OperationKind::TransactionReport].invocations >= 2);
+        assert!(unknown_stats.phases[&OperationKind::TransactionReport].invocations >= 1);
         assert!(unknown_stats.by_operation[&OperationKind::TransactionReport].calls > 0);
         assert_eq!(callbacks.load(Ordering::Relaxed), 1);
         assert_eq!(service.writer_residency_stats().eager_database_values, 0);
         println!(
-            "TRANSACTION_PHASES_OK sql_calls={} phases={:?} replay_sql_calls={} rejected_rollbacks=1 unknown_reconciled=true explicit_callbacks=1",
+            "TRANSACTION_PHASES_OK sql_calls={} phases={:?} replay_sql_calls={} rejected_before_publication=true unknown_reconciled=true explicit_callbacks=1",
             first_stats.sql_calls, first_stats.phases, replay_stats.sql_calls
         );
         service.shutdown();
     }
 
     #[test]
-    fn unknown_outcome_reconciliation_notifies_once_only_for_a_durable_decision() {
-        let Some(connection) = postgres_connection() else {
+    fn block_index_preparation_does_not_replace_newer_transactions_or_receipts() {
+        let Some(fixture) = observation_fixture() else {
             return;
         };
-        let database_id = unique_database("unknown_outcome_observer");
-        let mut migrator = PostgresMigrator::connect(&connection).unwrap();
-        migrator.migrate().unwrap();
-        let mut setup = PostgresStore::connect(&connection).unwrap();
-        let initial_basis = setup
-            .create_database(&database_id, observation_schema())
+        let service = TransactionService::start_with_indexing(
+            observation_service_config(&fixture.connection, "observed".into()),
+            BackgroundIndexingConfig {
+                memory_index_threshold_bytes: 1 << 30,
+                memory_index_max_bytes: 2 << 30,
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let first_request = observation_request("index-prefix", 11);
+        let first = client
+            .transact(first_request.clone(), Duration::from_secs(10))
+            .unwrap();
+        let identity = crate::storage::engine::identity_string(fixture.database.identity);
+        let (ready, release) = block_service::pause_preparation(&identity);
+        let requested = client.request_index().unwrap();
+        assert_eq!(requested.target_t, first.basis_t);
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let newer_request = observation_request("index-newer", 22);
+        let newer = client
+            .transact(newer_request.clone(), Duration::from_secs(10))
+            .unwrap();
+        assert_eq!(newer.basis_t, first.basis_t + 1);
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client.background_indexing_stats().published_basis_t < requested.target_t {
+            assert!(
+                Instant::now() < deadline && client.is_available(),
+                "index failed: {:?}",
+                client.background_indexing_stats()
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let stats = client.background_indexing_stats();
+        assert_eq!(stats.published_basis_t, first.basis_t);
+        assert_eq!(stats.target_basis_t, newer.basis_t);
+        assert_eq!(
+            stats.total_transactions, 1,
+            "only the covered prefix retires"
+        );
+        assert_eq!(stats.jobs_completed, 1);
+        for (request, expected) in [(first_request, &first), (newer_request, &newer)] {
+            let replay = client.transact(request, Duration::from_secs(10)).unwrap();
+            assert!(replay.replayed);
+            assert_eq!(replay.tx_hash, expected.tx_hash);
+            assert_eq!(
+                replay.db_after.datoms(crate::IndexOrder::Eavt).unwrap(),
+                expected.db_after.datoms(crate::IndexOrder::Eavt).unwrap()
+            );
+        }
+        assert_eq!(
+            first
+                .db_after
+                .values(make_eid(USER_PARTITION, 42).unwrap(), OBSERVED_ITEM_COUNT)
+                .unwrap(),
+            vec![Value::Long(11)]
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn operator_index_publication_discards_a_stale_background_candidate_without_fencing() {
+        let Some(fixture) = observation_fixture() else {
+            return;
+        };
+        let service = TransactionService::start_with_indexing(
+            observation_service_config(&fixture.connection, "observed".into()),
+            BackgroundIndexingConfig {
+                memory_index_threshold_bytes: 1 << 30,
+                memory_index_max_bytes: 2 << 30,
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let request = observation_request("operator-prefix", 11);
+        let first = client
+            .transact(request.clone(), Duration::from_secs(10))
+            .unwrap();
+        let identity = crate::storage::engine::identity_string(fixture.database.route);
+        let (ready, release) = block_service::pause_preparation(&identity);
+        assert!(client.request_index().unwrap().scheduled);
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        let manual = crate::PostgresOperator::connect(&fixture.connection)
             .unwrap()
-            .basis_t();
-        drop(setup);
+            .consolidate_database(&identity);
+        // Always release the independent worker before asserting the outcome.
+        // Fixture cleanup must never race a stranded preparation thread.
+        release.send(()).unwrap();
+        assert_eq!(manual.unwrap().basis_t, first.basis_t);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let stats = loop {
+            let stats = client.background_indexing_stats();
+            if stats.published_basis_t >= first.basis_t && !stats.job_in_flight {
+                break stats;
+            }
+            assert!(
+                Instant::now() < deadline && client.is_available(),
+                "{stats:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert_eq!(stats.jobs_failed, 0);
+        assert!(
+            stats.jobs_started >= 2,
+            "stale job was not recaptured: {stats:?}"
+        );
+        assert!(stats.last_failure.is_none());
+        let replay = client.transact(request, Duration::from_secs(10)).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.tx_hash, first.tx_hash);
+        let second = client
+            .transact(
+                observation_request("after-operator", 22),
+                Duration::from_secs(10),
+            )
+            .unwrap();
+        assert_eq!(second.basis_t, first.basis_t + 1);
+        assert_eq!(
+            first
+                .db_after
+                .values(make_eid(USER_PARTITION, 42).unwrap(), OBSERVED_ITEM_COUNT)
+                .unwrap(),
+            vec![Value::Long(11)]
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn block_index_backpressure_replays_before_gate_and_invokes_parked_callback_once() {
+        let Some(fixture) = observation_fixture() else {
+            return;
+        };
+        let called = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&called);
+        let name = crate::Symbol::new("test.index.v1", "write");
+        let mut registry = crate::NativeRegistry::builder();
+        registry
+            .transaction(name.clone(), move |_, _, control| {
+                control.check(1)?;
+                counted.fetch_add(1, Ordering::SeqCst);
+                Ok(observation_request("unused", 22).forms)
+            })
+            .unwrap();
+        let service = TransactionService::start_configured_with_options(
+            observation_service_config(&fixture.connection, "observed".into()),
+            PostgresConnectionConfig::plaintext(&fixture.connection),
+            ServiceOptions {
+                indexing: BackgroundIndexingConfig {
+                    memory_index_threshold_bytes: 128,
+                    memory_index_max_bytes: 256,
+                },
+                execution: crate::TransactionExecutionOptions {
+                    native: registry.build(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let client = service.client();
+        let identity = crate::storage::engine::identity_string(fixture.database.identity);
+        let (ready, release) = block_service::pause_preparation(&identity);
+        let request = observation_request("before-pressure", 11);
+        let first = client
+            .transact(request.clone(), Duration::from_secs(10))
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert!(client.background_indexing_stats().total_bytes > 256);
+        let replay = client.transact(request, Duration::from_secs(10)).unwrap();
+        assert!(replay.replayed);
+        assert_eq!(replay.tx_hash, first.tx_hash);
+        let pending = client
+            .submit(TransactionRequest::from_forms(
+                "parked-native",
+                vec![TxForm::ProgramCall(ProgramCall {
+                    function: crate::CallableRef::Local(name),
+                    arguments: vec![],
+                })],
+            ))
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while client.background_indexing_stats().backpressure_stalls == 0 {
+            assert!(Instant::now() < deadline && client.is_available());
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            called.load(Ordering::SeqCst),
+            0,
+            "parked admission ran a callback"
+        );
+        assert_eq!(client.stats().queued, 1);
+        release.send(()).unwrap();
+        let second = pending.wait(Duration::from_secs(10)).unwrap();
+        assert_eq!(second.basis_t, first.basis_t + 1);
+        assert_eq!(called.load(Ordering::SeqCst), 1);
+        assert_eq!(client.stats().queued, 0);
+        assert!(client.background_indexing_stats().jobs_completed >= 1);
+        assert_eq!(
+            first
+                .db_after
+                .values(make_eid(USER_PARTITION, 42).unwrap(), OBSERVED_ITEM_COUNT)
+                .unwrap(),
+            vec![Value::Long(11)]
+        );
+        service.shutdown();
+    }
+
+    #[test]
+    fn unknown_outcome_reconciliation_notifies_once_only_for_a_durable_decision() {
+        let Some(fixture) = observation_fixture() else {
+            return;
+        };
+        let database_id = crate::storage::engine::identity_string(fixture.database.identity);
 
         // Keep committed novelty resident so the accounting assertions cannot
         // race a background publication which legitimately drains it.
         let service = TransactionService::start_with_indexing(
-            observation_service_config(&connection, database_id.clone()),
+            observation_service_config(&fixture.connection, "observed".into()),
             BackgroundIndexingConfig {
                 memory_index_threshold_bytes: 1 << 30,
                 memory_index_max_bytes: 2 << 30,
@@ -4636,6 +3706,8 @@ mod tests {
         .unwrap();
         let client = service.client();
         let reports = client.subscribe_reports();
+        let initial_basis = service.recovery_stats().target_t;
+        assert_eq!(initial_basis, 1, "schema installation is a transaction");
 
         let committed_request = observation_request("committed-unknown", 11);
         arm_observation_fault(
@@ -4666,22 +3738,38 @@ mod tests {
             vec![Value::Long(11)]
         );
         let committed_datoms = committed_report.tx_data.len() as u64;
-        let after_commit = client.background_indexing_stats();
-        assert_eq!(after_commit.target_basis_t, initial_basis + 1);
-        assert_eq!(after_commit.total_transactions, 1);
-        assert_eq!(after_commit.total_datoms, committed_datoms);
 
         let replay = client
             .transact(committed_request.clone(), Duration::from_secs(2))
             .unwrap();
         assert!(replay.replayed);
         assert_eq!(replay.tx_hash, committed_report.tx_hash);
-        assert!(
-            replay
-                .db_after
-                .shares_tiered_read_core(&committed_report.db_after),
-            "outcome reconciliation must install and reuse the report's native read core"
+        assert_eq!(replay.tx_data, committed_report.tx_data);
+        assert_eq!(replay.tempids, committed_report.tempids);
+        for (left, right) in [
+            (&replay.db_before, &committed_report.db_before),
+            (&replay.db_after, &committed_report.db_after),
+        ] {
+            assert_eq!(left.basis_t(), right.basis_t());
+            assert_eq!(
+                left.datoms(crate::IndexOrder::Eavt).unwrap(),
+                right.datoms(crate::IndexOrder::Eavt).unwrap()
+            );
+        }
+        let first_snapshot = committed_report.db_after.block_snapshot().unwrap();
+        let replay_snapshot = replay.db_after.block_snapshot().unwrap();
+        let cache_before = first_snapshot.cache_stats();
+        replay.db_after.datoms(crate::IndexOrder::Eavt).unwrap();
+        assert!(replay_snapshot.cache_stats().hits > cache_before.hits);
+        assert_eq!(
+            first_snapshot.cache_stats(),
+            replay_snapshot.cache_stats(),
+            "receipt values share the block reader cache, not backend-specific writer state"
         );
+        let after_commit = client.background_indexing_stats();
+        assert_eq!(after_commit.target_basis_t, initial_basis + 1);
+        assert_eq!(after_commit.total_transactions, 1);
+        assert_eq!(after_commit.total_datoms, committed_datoms);
         assert!(
             matches!(
                 reports.recv_timeout(Duration::from_millis(100)),
@@ -4768,7 +3856,7 @@ mod tests {
         arm_observation_fault(
             &database_id,
             "rolled-back",
-            CommitObservationFault::RollbackAfterHeadUpdate,
+            CommitObservationFault::BeforePublication,
         );
         let rollback_error = client
             .submit(observation_request("rolled-back", 44))
@@ -4777,7 +3865,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             (rollback_error.category, rollback_error.code),
-            (ErrorCategory::Interrupted, "postgres/injected-failure")
+            (ErrorCategory::Interrupted, "storage/injected-failure")
         );
         assert!(
             matches!(
@@ -4795,28 +3883,43 @@ mod tests {
         );
 
         service.shutdown();
-        let mut verifier = PostgresStore::connect(&connection).unwrap();
+        let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+        let mut verifier = crate::storage::BlockTransactor::claim(
+            &config,
+            fixture.database.clone(),
+            crate::storage::BlockWriterOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(verifier.db().unwrap().basis_t(), initial_basis + 2);
+        for (key, value, present) in [
+            ("committed-unknown", 11, true),
+            ("absent-unknown", 22, false),
+            ("rolled-back", 44, false),
+        ] {
+            let request = observation_request(key, value);
+            let (digest, _) = crate::encoding::canonical_submission_request(
+                &request.forms,
+                request.compare_basis_t,
+                request.tx_instant_override,
+                crate::storage::log::MAX_LOG_TRANSACTION_BYTES,
+            )
+            .unwrap();
+            assert_eq!(
+                verifier
+                    .resolve_request_outcome(key, digest)
+                    .unwrap()
+                    .is_some(),
+                present
+            );
+        }
         assert_eq!(
-            verifier.recover(&database_id).unwrap().basis_t(),
-            initial_basis + 2
+            committed_report
+                .db_after
+                .values(make_eid(USER_PARTITION, 42).unwrap(), OBSERVED_ITEM_COUNT)
+                .unwrap(),
+            vec![Value::Long(11)],
+            "captured pre-successor value remains immutable"
         );
-        assert!(
-            verifier
-                .resolve_request_outcome(&database_id, "committed-unknown")
-                .unwrap()
-                .is_some()
-        );
-        assert!(
-            verifier
-                .resolve_request_outcome(&database_id, "absent-unknown")
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            verifier
-                .resolve_request_outcome(&database_id, "rolled-back")
-                .unwrap()
-                .is_none()
-        );
+        verifier.release().unwrap();
     }
 }

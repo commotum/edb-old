@@ -200,6 +200,10 @@ impl PostgresConnectionConfig {
     pub fn ssd_cache_config(&self) -> Option<&crate::SsdCacheConfig> {
         self.ssd_cache.as_ref()
     }
+    pub(crate) fn without_ssd_cache(mut self) -> Self {
+        self.ssd_cache = None;
+        self
+    }
 
     /// Opaque access/format separation, not an authorization credential.
     /// Different raw connection parameters/trust roots intentionally cannot
@@ -353,7 +357,7 @@ impl PostgresConnectionConfig {
         match tls {
             None => config
                 .connect(NoTls)
-                .map_err(|error| crate::postgres::postgres_error(operation, error)),
+                .map_err(|error| crate::runtime::postgres_error(operation, error)),
             Some(connector) => config
                 .connect(connector)
                 .map_err(|_| Self::tls_connection_error(operation)),
@@ -581,7 +585,7 @@ mod tests {
             Err(error) => error,
         };
         let elapsed = started.elapsed();
-        assert!(crate::postgres::is_postgres_connection_error(&error));
+        assert!(crate::runtime::is_postgres_connection_error(&error));
         assert!(
             elapsed < Duration::from_millis(300),
             "unreachable host exceeded the caller's deadline envelope: {elapsed:?}"

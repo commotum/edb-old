@@ -219,7 +219,7 @@ mod tests {
     fn origin() -> SnapshotReference {
         // References are explicitly non-capability data; decoding a synthetic
         // coordinate exercises the grammar without claiming it can be reopened.
-        let mut bytes = b"ATSN\0\x01".to_vec();
+        let mut bytes = b"ATSN\0\x03".to_vec();
         for name in [b"fixture".as_slice(), b"lineage".as_slice()] {
             bytes.extend_from_slice(&(name.len() as u32).to_be_bytes());
             bytes.extend_from_slice(name);
@@ -227,9 +227,20 @@ mod tests {
         for n in [1u64, 1, 1000] {
             bytes.extend_from_slice(&n.to_be_bytes());
         }
-        for digest in [[1u8; 32], [2; 32], [3; 32]] {
+        for digest in [[1u8; 32], [2; 32]] {
             bytes.extend_from_slice(&digest);
         }
+        let root = crate::storage::root::DatabaseValueRoot {
+            identity: [1; 16],
+            basis: 1,
+            log: Some([1; 32]),
+            indexes: Some([3; 32]),
+            metadata: Some([4; 32]),
+        }
+        .encode()
+        .unwrap();
+        bytes.extend_from_slice(&(root.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&root);
         for _ in 0..2 {
             bytes.push(0);
             bytes.extend_from_slice(&0u64.to_be_bytes());

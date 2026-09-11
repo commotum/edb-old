@@ -256,10 +256,7 @@ fn configured_service_keeps_committing_while_telemetry_sink_is_blocked() {
         return;
     };
     let fixture = common::PostgresFixture::new(&url, "telemetry");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&fixture.connection).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(

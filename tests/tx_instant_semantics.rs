@@ -1,5 +1,6 @@
+mod common;
 use atomic_core::{
-    DB_TX_INSTANT, Database, EntityRef, ErrorCategory, PostgresStore, Schema, TransactionRequest,
+    DB_TX_INSTANT, Database, EntityRef, ErrorCategory, Schema, TransactionRequest,
     TransactionService, TransactionServiceConfig, TxOp, TxValue, Value, t_to_tx,
 };
 use postgres::{Client, NoTls};
@@ -123,15 +124,11 @@ fn postgres_now(client: &mut Client) -> i64 {
         .get(0)
 }
 
-fn head_basis(client: &mut Client, database_id: &str) -> u64 {
-    let basis: i64 = client
-        .query_one(
-            "SELECT basis_t FROM atomic_heads WHERE database_id = $1",
-            &[&database_id],
-        )
+fn head_basis(connection: &str, database_id: &str) -> u64 {
+    atomic_core::Connection::connect(connection, database_id, 8)
         .unwrap()
-        .get(0);
-    basis.try_into().unwrap()
+        .db()
+        .basis_t()
 }
 
 fn service_config(connection: &str, database_id: String) -> TransactionServiceConfig {
@@ -152,9 +149,8 @@ fn service_owns_time_and_enforces_inclusive_tx_instant_bounds_atomically() {
         return;
     };
     let database_id = unique("tx_instant_bounds");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     assert_eq!(
         store
             .create_database(&database_id, Schema::new())
@@ -192,7 +188,7 @@ fn service_owns_time_and_enforces_inclusive_tx_instant_bounds_atomically() {
     let second_instant = report_tx_instant(&second.tx_data);
     assert!(second_instant >= first_instant);
     let committed_basis = second.basis_t;
-    assert_eq!(head_basis(&mut observer, &database_id), committed_basis);
+    assert_eq!(head_basis(&connection, &database_id), committed_basis);
 
     let past = second_instant - 1;
     let past_error = client
@@ -208,7 +204,7 @@ fn service_owns_time_and_enforces_inclusive_tx_instant_bounds_atomically() {
         (past_error.category, past_error.code),
         (ErrorCategory::Incorrect, "transaction/past-tx-instant")
     );
-    assert_eq!(head_basis(&mut observer, &database_id), committed_basis);
+    assert_eq!(head_basis(&connection, &database_id), committed_basis);
 
     let future = postgres_now(&mut observer) + 60_000;
     let future_error = client
@@ -224,7 +220,7 @@ fn service_owns_time_and_enforces_inclusive_tx_instant_bounds_atomically() {
         (future_error.category, future_error.code),
         (ErrorCategory::Incorrect, "transaction/future-tx-instant")
     );
-    assert_eq!(head_basis(&mut observer, &database_id), committed_basis);
+    assert_eq!(head_basis(&connection, &database_id), committed_basis);
 
     let lower_bound = client
         .transact(
@@ -237,7 +233,7 @@ fn service_owns_time_and_enforces_inclusive_tx_instant_bounds_atomically() {
         .unwrap();
     assert_eq!(report_tx_instant(&lower_bound.tx_data), second_instant);
     assert_eq!(lower_bound.basis_t, committed_basis + 1);
-    assert_eq!(head_basis(&mut observer, &database_id), committed_basis + 1);
+    assert_eq!(head_basis(&connection, &database_id), committed_basis + 1);
 
     service.shutdown();
 }

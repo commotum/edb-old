@@ -1,7 +1,7 @@
 //! Untrusted, empty PostgreSQL wakeups. Only authenticated log/index reads
 //! advance a peer; disconnects and lost hints are repaired by anti-entropy.
-use crate::postgres::postgres_error;
-use crate::sql_io::SqlClient;
+use crate::runtime::postgres_error;
+use crate::storage::PgBlockStore;
 use crate::{PostgresConnectionConfig, SemanticError};
 use std::future::{Future, poll_fn};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -66,31 +66,47 @@ pub(crate) fn publish(config: &PostgresConnectionConfig, database: &str) {
     }
     let sender = PUBLISHER.get_or_init(|| {
         let (sender, receiver) = mpsc::sync_channel::<Notice>(64);
-        std::thread::Builder::new().name("atomic-notice-publisher".into()).spawn(move || {
-            let context = crate::OperationContext::new(crate::OperationKind::PeerObservation);
-            let _scope = context.enter();
-            let mut current: Option<(PostgresConnectionConfig, SqlClient)> = None;
-            while let Ok(first) = receiver.recv() {
-                let mut batch = vec![first];
-                for _ in 1..64 {
-                    let Ok(next) = receiver.try_recv() else { break; };
-                    if batch.contains(&next) { COALESCED.fetch_add(1, Ordering::Relaxed); }
-                    else { batch.push(next); }
-                }
-                for (config, database) in batch {
-                    if current.as_ref().is_none_or(|(active, client)| active != &config || client.is_closed()) {
-                        current = match config.connect_for("observation/publisher-connect") {
-                            Ok(client) => Some((config.clone(), client)),
-                            Err(_) => { FAILURES.fetch_add(1, Ordering::Relaxed); continue; }
+        std::thread::Builder::new()
+            .name("atomic-notice-publisher".into())
+            .spawn(move || {
+                let context = crate::OperationContext::new(crate::OperationKind::PeerObservation);
+                let _scope = context.enter();
+                let mut current: Option<(PostgresConnectionConfig, PgBlockStore)> = None;
+                while let Ok(first) = receiver.recv() {
+                    let mut batch = vec![first];
+                    for _ in 1..64 {
+                        let Ok(next) = receiver.try_recv() else {
+                            break;
                         };
+                        if batch.contains(&next) {
+                            COALESCED.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            batch.push(next);
+                        }
                     }
-                    let client = &mut current.as_mut().unwrap().1;
-                    let result = client.query_one("SELECT pg_catalog.pg_notify('atomic_n_' || md5(n.nspname || ':' || $1::text), '') FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid='atomic_heads'::regclass", &[&database]);
-                    if result.is_ok() { SENT.fetch_add(1, Ordering::Relaxed); }
-                    else { FAILURES.fetch_add(1, Ordering::Relaxed); current = None; }
+                    for (config, database) in batch {
+                        if current.as_ref().is_none_or(|(active, _)| active != &config) {
+                            current = match PgBlockStore::connect(&config) {
+                                Ok(client) => Some((config.clone(), client)),
+                                Err(_) => {
+                                    FAILURES.fetch_add(1, Ordering::Relaxed);
+                                    continue;
+                                }
+                            };
+                        }
+                        let client = &mut current.as_mut().unwrap().1;
+                        let result = client.notify_reference(&format!("databases/{database}"));
+                        if result.is_ok() {
+                            SENT.fetch_add(1, Ordering::Relaxed);
+                        } else {
+                            FAILURES.fetch_add(1, Ordering::Relaxed);
+                            current = None;
+                        }
+                    }
                 }
-            }
-        }).ok().map(|_| sender)
+            })
+            .ok()
+            .map(|_| sender)
     });
     if let Some(sender) = sender
         && sender
@@ -163,13 +179,11 @@ impl NoticeListener {
         config: &PostgresConnectionConfig,
         database: &str,
     ) -> Result<Self, SemanticError> {
-        let mut client = config.connect_for("observation/connect")?;
-        let channel: String = client.query_one(
-            "SELECT 'atomic_n_' || md5(n.nspname || ':' || $1::text) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE c.oid='atomic_heads'::regclass", &[&database])
-            .map_err(|e| postgres_error("observation/channel", e))?.get(0);
-        // Server-generated prefix + lowercase hex only, never caller SQL.
-        if !channel.starts_with("atomic_n_")
-            || channel.len() != 41
+        let client = PgBlockStore::connect(config)?;
+        let channel = client.notification_channel(&format!("databases/{database}"))?;
+        // Provider-generated prefix + lowercase hex only, never caller SQL.
+        if !channel.starts_with("atomic_r_")
+            || channel.len() != 57
             || !channel[9..].bytes().all(|b| b.is_ascii_hexdigit())
         {
             return Err(SemanticError::incorrect(

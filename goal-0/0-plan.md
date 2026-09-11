@@ -66,7 +66,7 @@ for already exported data, or silently weaken current guarantees to simplify GC.
 
 ## Starting evidence and preservation boundary
 
-The consolidated baseline currently has 68 tables, 92 functions and 150 explicit
+The consolidated baseline at the start had 68 tables, 92 functions and 150 explicit
 triggers, including two constraint triggers. Consolidation removed upgrade steps,
 not the architectural substitution. `goal-archive/G1/goal-3/DURABILITY.md` records
 the early substitution; the archived parent both requested recognizable Datomic
@@ -105,8 +105,8 @@ whole-database loading/replay into ordinary opens, reads, retries or small write
 Stages 1–7 map to root-level `goal-1` through `goal-7`. On execution, reconcile and
 resume the matching existing child, or use `$scaffold-goal` to create its three
 files when missing. Keep one child active. Children may break down their own work
-but must not create grandchildren or corrective parents. This turn creates only
-the parent scaffold; none of the implementation stages is complete.
+but must not create grandchildren or corrective parents. Execute each child, then
+return here; scaffolding alone does not complete a stage.
 
 Temporary development overlap is acceptable only while a named stage replaces a
 subsystem. Delete displaced implementations and tests as ownership transfers;
@@ -117,7 +117,7 @@ stock entry points must use the new path at completion, without hidden fallbacks
 
 ### 1. Storage boundary and root model
 
-**Status:** Not started.
+**Status:** Complete — `goal-1`; real object/ref PostgreSQL foundation verified.
 
 **Outcome:** A small real PostgreSQL object/reference implementation and a coherent
 Rust-owned publication, fencing and reachability model replace the old design as
@@ -136,7 +136,7 @@ will move to Rust. A design document or facade over the old schema alone is not 
 
 ### 2. Engine-owned database values and reads
 
-**Status:** Not started.
+**Status:** Complete — `goal-2`; actual block-backed consumer/selectivity checks passed.
 
 **Outcome:** Rust reconstructs immutable database values from the new roots and
 block structures without the old relational log/index catalogs.
@@ -153,7 +153,7 @@ loading on data larger than configured caches, not full replay disguised as lazi
 
 ### 3. Serialized publication, exact receipts and recovery
 
-**Status:** Not started.
+**Status:** Complete — `goal-3`; actual service, receipts, fencing and recovery verified.
 
 **Outcome:** The real transactor durably publishes coherent engine-owned state on
 the new store, including exact request outcomes, and recovers after failure.
@@ -172,7 +172,8 @@ basis and tail, with full-log verification reserved for explicit deep inspection
 
 ### 4. Incremental indexes and live applications
 
-**Status:** Not started.
+**Status:** Complete — `goal-4`; incremental indexing and live applications verified,
+including the final shared read-observation publication-race repair.
 
 **Outcome:** Background work and peer applications use the same new storage engine
 while transactions continue, without SQL publication/membership state machines.
@@ -190,7 +191,7 @@ valid, and warm resident queries demonstrate the intended peer-local behavior.
 
 ### 5. Retention, reclamation and lifecycle
 
-**Status:** Not started.
+**Status:** Complete — `goal-5`; actual lifecycle/GC/excision/operator checks passed.
 
 **Outcome:** Rust owns safe, resumable reachability and lifecycle operations; SQL
 no longer runs garbage-collection, excision or database-retirement workflows.
@@ -209,7 +210,7 @@ publish or reclaim after losing authority.
 
 ### 6. Backup, restore and administration
 
-**Status:** Not started.
+**Status:** Complete — `goal-6`; actual portable backup, restore and administration verified.
 
 **Outcome:** Current-format portable backup, selective offline reads, restore and
 administration operate entirely over the new block/reference engine.
@@ -219,6 +220,10 @@ streaming copy and authentication, explicit deep verification, resumable restore
 and conditional destination activation. Preserve operator controls, transport/role
 safety, readable diagnostics, bounded input admission and non-blocking async cleanup.
 Do not retain the old schema or backup reader as a recovery escape hatch.
+Port the deferred backup-specific regressions in `catalog_backup`,
+`reclamation_backup` and `fulltext_backup_restore`; paused/headless restore must
+retain prestaged native program dependencies and reject stale activation. These
+behaviors are not proved by the normal held-value GC tests.
 
 **Completion signal:** Actual CLI/library capture, offline query, verification,
 interrupted/retried restore and post-restore exact retries work on fresh targets.
@@ -228,7 +233,8 @@ and cleanup—not only convenient inner loops.
 
 ### 7. Full cutover, cleanup and integrated acceptance
 
-**Status:** Not started.
+**Status:** Complete — `goal-7`; full cutover, cleanup and integrated current-version
+acceptance established, including reopened owning-stage repairs.
 
 **Outcome:** One first-release product remains: the new Rust storage engine over
 thin PostgreSQL storage, with no supported or hidden old implementation.
@@ -266,7 +272,55 @@ core capability or reclassify old SQL machinery as mandatory merely to finish.
 
 ## Continuation
 
-Scaffold created; implementation has not started. Next: reconcile Stage 1 with
-current source/tests, scaffold or resume `goal-1`, and establish the thin storage
-primitives plus the shared root/publication/protection model. Update only material
-decisions, observed results and the next action here as work proceeds.
+Complete: all seven stages and integrated parent acceptance are established.
+No child remains active and no known core gap is deferred. Child plans retain
+implementation decisions; `docs/acceptance.md` records the current evidence,
+reproduction prerequisites and operating limits.
+
+The fresh PostgreSQL schema contains only `atomic_objects` and `atomic_refs`,
+with zero policy functions or user triggers, verified on PostgreSQL itself.
+Rust owns the log/index structures, receipt-first publication, writer fencing,
+reader/build protections, retention/GC, excision, lifecycle and backup/restore.
+Superseded SQL, legacy engine/readers, compatibility paths and obsolete fixtures
+are removed; useful regressions and shared Rust algorithms remain. The Datomic
+reference corpora are unchanged and unrelated databases were not reset. Deleted
+tracked files remain recoverable from Git history, not from a runtime fallback.
+
+Integration required real repairs, not scope exclusions: canonical signed-zero
+reports, program caching/protected deployment, cache accounting and bounded uploads,
+operator index controls and lease-safe publication, generation-spanning report
+handoffs, bounded excision observation, idle pin cleanup across GC, and shared
+bounded initial-pin observation for exact reports/references/inspection/backup/
+receipt lookup. The last helper retries only transient capture conflicts; it never
+resubmits a transaction or relaxes authority/corruption checks. Ordinary retained
+values do not keep an immortal chain of future-report handoffs alive.
+
+Verified final evidence: the full library run passed 438 tests (324.76 s), followed
+by the five-test protection group (4.45 s), including two new deterministic
+publication-race/bounded-retry tests. This is not a full 440-test run. The final
+10,000-entity snapshot target passed all ten tests (198.61 s). Sixteen other
+affected targets passed; the final nine-target application/operations rerun passed
+all 20 tests, including isolated TLS, automatic failover, backup roles/CLI,
+inspection, exact outcome lookup and serialized references. Earlier broad runs
+failed and one large fixture was interrupted; these failures were repaired and
+the affected paths rerun, not counted as passes. Five optional manual-cost tests
+remain opt-in, not acceptance evidence.
+
+Actual immediate-shutdown/WAL recovery passed on our disposable cluster: redo,
+acknowledged exact retry, uncommitted-reference rollback, retained values/log,
+standby takeover and a successor write (518 ms restart, 32.81 s complete fixture).
+Native and separate-process stock applications also passed. Strict all-target
+Clippy, formatting, rustdoc and final source/schema checks passed; the doctest
+command contained zero tests and is not application evidence.
+
+Measured limits: the standalone 2,048-entity live workflow completed startup through
+shutdown in 14.950 s, with 71,388 KiB process peak RSS, 9,782 driver calls,
+20,949,013 payload bytes read and 8,952,849 written; 32 warm reads took 630 µs
+with zero SQL. Selective open/query/speculation read about 470 KB of a 13.64 MB
+index in 272–285 ms. Full fixture setup is separately reported, not sold as native
+ingestion throughput. Fixed publication/retention cost remains substantial: these
+debug/local results establish measured behavior, not a production capacity SLA.
+
+The parent loop has reached its finish line. Preserve this completed state; future
+work should start from a new user objective or a concrete reproduced regression,
+not recreate the removed compatibility obligations or repeat an open-ended audit.

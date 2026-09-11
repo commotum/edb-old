@@ -24,16 +24,12 @@
 //! equivalence against a privileged publisher capable of forging both values.
 
 use crate::encoding::canonical_datom_hash;
-use crate::{
-    DB_NO_HISTORY, Database, Datom, Digest, ErrorCategory, IndexOrder, IndexPrefix, SemanticError,
-    Value, View, schema_eid_to_attr_id, tx_to_t,
-};
+use crate::{Database, Datom, Digest, ErrorCategory, IndexOrder, IndexPrefix, SemanticError, View};
 use sha2::{Digest as _, Sha256};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-const LEGACY_DOMAIN: &[u8] = b"atomic/checkpoint-state/v1\0";
+#[cfg(test)]
 const STATE_DOMAIN: &[u8] = b"atomic/semantic-state/v2\0";
 const EMPTY_DOMAIN: &[u8] = b"atomic/semantic-set/v2/empty\0";
 const LEAF_DOMAIN: &[u8] = b"atomic/semantic-set/v2/leaf\0";
@@ -81,27 +77,6 @@ pub(crate) struct CommitmentWork {
     pub(crate) node_hashes: u64,
     /// Set members actually inserted or removed.
     pub(crate) leaf_changes: u64,
-    /// Durable commitment-node rows returned by PostgreSQL. A node fetched
-    /// once and then served from the transaction-local cache is counted once.
-    pub(crate) sql_node_reads: u64,
-    /// Canonical node payload bytes returned by those reads. PostgreSQL tuple
-    /// and wire-protocol overhead is deliberately outside this stable metric.
-    pub(crate) sql_node_read_bytes: u64,
-    /// Newly inserted immutable commitment-node rows. Conflict/no-op inserts
-    /// are not writes, although their mandatory verification reads are.
-    pub(crate) sql_node_writes: u64,
-    /// Canonical node payload bytes inserted by those writes.
-    pub(crate) sql_node_write_bytes: u64,
-    /// Semantic-coordinate rows returned while publishing/verifying a root.
-    pub(crate) sql_coordinate_reads: u64,
-    /// Semantic SQL-column payload bytes returned by those reads; WHERE-key,
-    /// tuple, page, and wire overhead are excluded.
-    pub(crate) sql_coordinate_read_bytes: u64,
-    /// Newly inserted semantic-coordinate rows.
-    pub(crate) sql_coordinate_writes: u64,
-    /// Semantic SQL-column payload bytes inserted by those writes; tuple,
-    /// page, and wire overhead are excluded.
-    pub(crate) sql_coordinate_write_bytes: u64,
 }
 
 impl CommitmentWork {
@@ -115,59 +90,6 @@ impl CommitmentWork {
 
     pub(crate) fn change_leaf(&mut self) {
         self.leaf_changes = self.leaf_changes.saturating_add(1);
-    }
-
-    pub(crate) fn read_sql_node(&mut self, payload_bytes: usize) {
-        self.sql_node_reads = self.sql_node_reads.saturating_add(1);
-        self.sql_node_read_bytes = self
-            .sql_node_read_bytes
-            .saturating_add(u64::try_from(payload_bytes).unwrap_or(u64::MAX));
-    }
-
-    pub(crate) fn write_sql_node(&mut self, payload_bytes: usize) {
-        self.sql_node_writes = self.sql_node_writes.saturating_add(1);
-        self.sql_node_write_bytes = self
-            .sql_node_write_bytes
-            .saturating_add(u64::try_from(payload_bytes).unwrap_or(u64::MAX));
-    }
-
-    pub(crate) fn read_sql_coordinate(&mut self, payload_bytes: u64) {
-        self.sql_coordinate_reads = self.sql_coordinate_reads.saturating_add(1);
-        self.sql_coordinate_read_bytes =
-            self.sql_coordinate_read_bytes.saturating_add(payload_bytes);
-    }
-
-    pub(crate) fn write_sql_coordinate(&mut self, payload_bytes: u64) {
-        self.sql_coordinate_writes = self.sql_coordinate_writes.saturating_add(1);
-        self.sql_coordinate_write_bytes = self
-            .sql_coordinate_write_bytes
-            .saturating_add(payload_bytes);
-    }
-
-    pub(crate) fn absorb(&mut self, other: Self) {
-        self.node_visits = self.node_visits.saturating_add(other.node_visits);
-        self.node_hashes = self.node_hashes.saturating_add(other.node_hashes);
-        self.leaf_changes = self.leaf_changes.saturating_add(other.leaf_changes);
-        self.sql_node_reads = self.sql_node_reads.saturating_add(other.sql_node_reads);
-        self.sql_node_read_bytes = self
-            .sql_node_read_bytes
-            .saturating_add(other.sql_node_read_bytes);
-        self.sql_node_writes = self.sql_node_writes.saturating_add(other.sql_node_writes);
-        self.sql_node_write_bytes = self
-            .sql_node_write_bytes
-            .saturating_add(other.sql_node_write_bytes);
-        self.sql_coordinate_reads = self
-            .sql_coordinate_reads
-            .saturating_add(other.sql_coordinate_reads);
-        self.sql_coordinate_read_bytes = self
-            .sql_coordinate_read_bytes
-            .saturating_add(other.sql_coordinate_read_bytes);
-        self.sql_coordinate_writes = self
-            .sql_coordinate_writes
-            .saturating_add(other.sql_coordinate_writes);
-        self.sql_coordinate_write_bytes = self
-            .sql_coordinate_write_bytes
-            .saturating_add(other.sql_coordinate_write_bytes);
     }
 }
 
@@ -296,6 +218,7 @@ impl SemanticStateCommitment {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn digest(&self, basis_t: u64, eidx_frontier: u64) -> Digest {
         semantic_state_digest(self.metadata(), basis_t, eidx_frontier)
     }
@@ -496,6 +419,7 @@ pub(crate) fn semantic_node_hash(
 }
 
 /// Bind one v2 semantic-set root to the immutable database coordinate.
+#[cfg(test)]
 pub(crate) fn semantic_state_digest(
     metadata: SemanticRootMetadata,
     basis_t: u64,
@@ -534,6 +458,7 @@ fn hash_parts(domain: &[u8], parts: &[&[u8]]) -> Digest {
 /// merge, so neither transaction cutoffs nor pre-toggle preservation belong at
 /// this boundary. Changing `:db/noHistory` still does nothing immediately: the
 /// projection takes effect only when a caller actually builds a new base.
+#[cfg(test)]
 pub(crate) fn checkpoint_information(
     database: &Database,
 ) -> Result<(Vec<Datom>, Vec<Datom>), SemanticError> {
@@ -545,6 +470,7 @@ pub(crate) fn checkpoint_information(
     Ok((current, history))
 }
 
+#[cfg(test)]
 fn filter_no_history_pairs(
     schema: &crate::Schema,
     history: &[Datom],
@@ -570,184 +496,12 @@ fn filter_no_history_pairs(
     Ok(retained)
 }
 
-fn facts_at(
-    history: &[Datom],
-    attribute: u32,
-    through_t: u64,
-) -> Result<Vec<Datom>, SemanticError> {
-    let mut datoms = history
-        .iter()
-        .filter(|datom| {
-            datom.attribute == attribute && tx_to_t(datom.tx).is_ok_and(|t| t <= through_t)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    datoms.sort_by(|left, right| {
-        left.tx
-            .cmp(&right.tx)
-            .then_with(|| left.entity.cmp(&right.entity))
-            .then_with(|| left.value.stored_cmp(&right.value))
-            .then_with(|| left.added.cmp(&right.added))
-    });
-    let mut live = Vec::new();
-    for datom in datoms {
-        if datom.added {
-            if !contains_stored(&live, &datom) {
-                live.push(datom);
-            }
-        } else {
-            live.retain(|fact| !same_eav(fact, &datom));
-        }
-    }
-    Ok(live)
-}
-
-fn contains_stored(datoms: &[Datom], candidate: &Datom) -> bool {
-    datoms.iter().any(|datom| {
-        datom.tx == candidate.tx && datom.added == candidate.added && same_eav(datom, candidate)
-    })
-}
-
-fn same_eav(left: &Datom, right: &Datom) -> bool {
-    left.entity == right.entity
-        && left.attribute == right.attribute
-        && left.value.stored_eq(&right.value)
-}
-
 /// O(1) v2 digest from the roots carried by this immutable database value.
+#[cfg(test)]
 pub(crate) fn checkpoint_state_hash(database: &Database) -> Result<Digest, SemanticError> {
     Ok(database
         .semantic_state_commitment()
         .digest(database.basis_t(), database.eidx_frontier()))
-}
-
-#[allow(dead_code)] // Contract for the physical-tree range-proof integration.
-pub(crate) fn checkpoint_root_metadata(database: &Database) -> SemanticRootMetadata {
-    database.semantic_state_commitment().metadata()
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum StateHashVersion {
-    IncrementalV2,
-    LegacyV1,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StateHashVerification {
-    pub(crate) matched_version: Option<StateHashVersion>,
-    /// Number of canonical datoms hashed only when a v2 mismatch required the
-    /// explicit persisted-v1 compatibility path.
-    pub(crate) legacy_datoms_hashed: u64,
-}
-
-impl StateHashVerification {
-    pub(crate) fn matches(self) -> bool {
-        self.matched_version.is_some()
-    }
-}
-
-/// Match a persisted state hash. New values take the O(1) v2 path. A mismatch
-/// explicitly tries the former v1 full projection so databases written during
-/// the v1 development epoch remain recoverable; the returned work count makes
-/// that exceptional O(information) path visible to callers and tests.
-pub(crate) fn verify_checkpoint_state_hash(
-    database: &Database,
-    expected: Digest,
-) -> Result<StateHashVerification, SemanticError> {
-    if checkpoint_state_hash(database)? == expected {
-        return Ok(StateHashVerification {
-            matched_version: Some(StateHashVersion::IncrementalV2),
-            legacy_datoms_hashed: 0,
-        });
-    }
-    let (legacy, count) = legacy_checkpoint_state_hash(database)?;
-    Ok(StateHashVerification {
-        matched_version: (legacy == expected).then_some(StateHashVersion::LegacyV1),
-        legacy_datoms_hashed: count,
-    })
-}
-
-fn legacy_checkpoint_state_hash(database: &Database) -> Result<(Digest, u64), SemanticError> {
-    // Preserve byte-for-byte verification of rows emitted before v2. The v1
-    // projection incorrectly treated noHistory as a wholesale purge; keeping
-    // that algorithm here is compatibility, not current semantics.
-    let (current, history) = legacy_v1_information(database)?;
-    let mut commitment = Sha256::new();
-    commitment.update(LEGACY_DOMAIN);
-    commitment.update(database.basis_t().to_be_bytes());
-    commitment.update(database.eidx_frontier().to_be_bytes());
-    legacy_commit_datoms(&mut commitment, false, &current)?;
-    legacy_commit_datoms(&mut commitment, true, &history)?;
-    let count = u64::try_from(current.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(u64::try_from(history.len()).unwrap_or(u64::MAX));
-    Ok((commitment.finalize().into(), count))
-}
-
-fn legacy_v1_information(database: &Database) -> Result<(Vec<Datom>, Vec<Datom>), SemanticError> {
-    let current = database.datoms(View::Current, IndexOrder::Eavt);
-    let mut history = database.datoms(View::History, IndexOrder::Eavt);
-    let mut last_disabled = BTreeMap::<u32, u64>::new();
-    let mut mentioned = BTreeSet::<u32>::new();
-    for datom in &history {
-        if datom.attribute != DB_NO_HISTORY as u32 {
-            continue;
-        }
-        let attribute = schema_eid_to_attr_id(datom.entity)?;
-        match (&datom.value, datom.added) {
-            (Value::Bool(true), true) => {
-                mentioned.insert(attribute);
-            }
-            (Value::Bool(true), false) | (Value::Bool(false), true) => {
-                mentioned.insert(attribute);
-                let disabled_at = tx_to_t(datom.tx)?;
-                last_disabled
-                    .entry(attribute)
-                    .and_modify(|known| *known = (*known).max(disabled_at))
-                    .or_insert(disabled_at);
-            }
-            _ => {}
-        }
-    }
-    let mut boundary = BTreeMap::<u32, Vec<Datom>>::new();
-    for (&attribute, &cutoff) in &last_disabled {
-        boundary.insert(attribute, facts_at(&history, attribute, cutoff)?);
-    }
-    history.retain(|datom| {
-        if !mentioned.contains(&datom.attribute) {
-            return true;
-        }
-        let currently_forgetting = database
-            .schema()
-            .attribute(datom.attribute)
-            .is_ok_and(|attribute| attribute.no_history);
-        if currently_forgetting {
-            return datom.added && contains_stored(&current, datom);
-        }
-        match last_disabled.get(&datom.attribute) {
-            Some(cutoff) => {
-                tx_to_t(datom.tx).is_ok_and(|t| t >= *cutoff)
-                    || boundary
-                        .get(&datom.attribute)
-                        .is_some_and(|facts| datom.added && contains_stored(facts, datom))
-            }
-            None => true,
-        }
-    });
-    Ok((current, history))
-}
-
-fn legacy_commit_datoms(
-    commitment: &mut Sha256,
-    history: bool,
-    datoms: &[Datom],
-) -> Result<(), SemanticError> {
-    commitment.update([u8::from(history)]);
-    commitment.update((datoms.len() as u64).to_be_bytes());
-    for datom in datoms {
-        commitment.update(canonical_datom_hash(datom)?);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -760,7 +514,8 @@ fn oracle_v2(database: &Database) -> Result<Digest, SemanticError> {
 mod tests {
     use super::*;
     use crate::{
-        Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, ValueType, t_to_tx,
+        Attribute, Cardinality, EntityRef, Keyword, Schema, TxOp, TxValue, Value, ValueType,
+        t_to_tx,
     };
     use bigdecimal::BigDecimal;
     use std::str::FromStr;
@@ -1127,39 +882,5 @@ mod tests {
             checkpoint_state_hash(&database).unwrap(),
             oracle_v2(&database).unwrap()
         );
-    }
-
-    #[test]
-    fn legacy_v1_fallback_is_explicit_and_measured() {
-        let database = Database::bootstrap().unwrap();
-        let (legacy, count) = legacy_checkpoint_state_hash(&database).unwrap();
-        let verification = verify_checkpoint_state_hash(&database, legacy).unwrap();
-        assert_eq!(
-            verification.matched_version,
-            Some(StateHashVersion::LegacyV1)
-        );
-        assert_eq!(verification.legacy_datoms_hashed, count);
-        assert!(count > 0);
-        let v2 = verify_checkpoint_state_hash(&database, checkpoint_state_hash(&database).unwrap())
-            .unwrap();
-        assert_eq!(v2.matched_version, Some(StateHashVersion::IncrementalV2));
-        assert_eq!(v2.legacy_datoms_hashed, 0);
-    }
-
-    #[test]
-    fn streaming_legacy_compatibility_has_no_multi_datom_blob_ceiling() {
-        const VALUE_BYTES: usize = 13 * 1024 * 1024;
-        let datoms = (0_u64..5)
-            .map(|offset| Datom {
-                entity: 1_000 + offset,
-                attribute: 1_000,
-                value: Value::Bytes(vec![offset as u8; VALUE_BYTES]),
-                tx: 1,
-                added: true,
-            })
-            .collect::<Vec<_>>();
-        assert!(datoms.len() * VALUE_BYTES > 64 * 1024 * 1024);
-        let mut digest = Sha256::new();
-        legacy_commit_datoms(&mut digest, false, &datoms).unwrap();
     }
 }

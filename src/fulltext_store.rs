@@ -1,11 +1,7 @@
-//! Immutable byte-key search projection, independently derived from one pinned
-//! canonical manifest. Its Merkle pages authenticate range boundaries/absence.
+//! Immutable byte-key search projection, derived from one pinned
+//! canonical index descriptor. Its Merkle pages authenticate range boundaries/absence.
 //! It does not assign meaning to document/posting values or change datom roots.
-use crate::postgres::{postgres_error, verify_schema_compatibility};
-use crate::sql_io::{GenericClient, SqlClient};
-use crate::{
-    Digest, ErrorCategory, OperationContext, PostgresConnectionConfig, SemanticError, sha256,
-};
+use crate::{Digest, ErrorCategory, OperationContext, SemanticError, sha256};
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -19,19 +15,13 @@ const FORMAT: u32 = 1;
 // Routing-page capacity can still reject pathological combinations explicitly.
 const MAX_KEY: usize = 32 * 1024 * 1024 + 64;
 const MAX_RECORD: usize = 64 * 1024 * 1024;
-const MAX_PAGE: usize = MAX_RECORD + 16384;
+pub(crate) const MAX_PAGE: usize = MAX_RECORD + 16384;
 const FANOUT: usize = 128;
 const MAX_DEPTH: usize = 32;
 
 #[path = "fulltext_store_incremental.rs"]
-mod incremental;
+pub(crate) mod incremental;
 pub(crate) use incremental::FulltextMutation;
-
-fn projection_lock_key(source: Digest) -> i64 {
-    let mut input = b"atomic/fulltext-projection-lock/v1".to_vec();
-    input.extend_from_slice(&source);
-    i64::from_be_bytes(sha256(&input)[..8].try_into().unwrap())
-}
 
 #[cfg(test)]
 mod tests {
@@ -194,13 +184,13 @@ mod tests {
         let page = Arc::new(Page::Leaf(vec![record(b"item")]));
         let hash = sha256(&page.encode().unwrap());
         let disabled = FulltextCache::new(10, 0);
-        disabled.insert_header(projection(hash, 1));
+        disabled.insert_header_at([1; 32], projection(hash, 1));
         disabled.insert([1; 32], hash, Arc::clone(&page), 1);
         assert!(disabled.header([1; 32]).is_none());
         assert!(disabled.get([1; 32], hash).is_none());
         let cache = FulltextCache::new(1, 4096);
         cache.insert([1; 32], hash, Arc::clone(&page), 1);
-        cache.insert_header(projection(hash, 1));
+        cache.insert_header_at([1; 32], projection(hash, 1));
         assert!(cache.get([1; 32], hash).is_none());
         assert!(cache.header([1; 32]).is_some());
         let cache = FulltextCache::new(10, page.retained_bytes());
@@ -240,7 +230,7 @@ impl Default for FulltextBuildLimits {
     }
 }
 impl FulltextBuildLimits {
-    fn validate(&self) -> Result<(), SemanticError> {
+    pub(crate) fn validate(&self) -> Result<(), SemanticError> {
         if self.sort_memory_bytes == 0
             || !(1024..=1024 * 1024).contains(&self.page_bytes)
             || self.max_record_bytes == 0
@@ -274,14 +264,6 @@ pub struct FulltextBuildStats {
     /// Page payload reads, including upload verification reads.
     pub blocks_read: u64,
     pub block_bytes_read: u64,
-    pub blocks_inserted: u64,
-    /// Successfully inserted direct page-DAG references (not SQL calls).
-    pub edges_inserted: u64,
-    pub roots_inserted: u64,
-    /// Source-origin pages examined when releasing the interrupted-build guard.
-    pub retention_pages_examined: u64,
-    pub retention_candidates_added: u64,
-    pub imported_blocks: u64,
     pub source_nodes_read: u64,
     pub source_node_bytes: u64,
     pub source_datoms_examined: u64,
@@ -291,7 +273,6 @@ pub struct FulltextBuildStats {
     pub tokenized_bytes: u64,
     pub statistics_reads: u64,
     pub statistics_read_bytes: u64,
-    pub predecessor_candidates: u64,
     pub reused_projections: u64,
     /// Initial bulk construction after proving the predecessor contains only
     /// zero-valued attribute statistics and finding new canonical text.
@@ -310,7 +291,7 @@ pub struct FulltextProjection {
     pub block_count: u64,
 }
 impl FulltextProjection {
-    fn encode(&self) -> Vec<u8> {
+    pub(crate) fn encode(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(HEADER_MAGIC);
         bytes.extend_from_slice(&FORMAT.to_be_bytes());
@@ -325,7 +306,7 @@ impl FulltextProjection {
         }
         bytes
     }
-    fn decode(bytes: &[u8]) -> Result<Self, SemanticError> {
+    pub(crate) fn decode(bytes: &[u8]) -> Result<Self, SemanticError> {
         let mut d = Decoder::new(bytes);
         if d.take(4)? != HEADER_MAGIC || d.u32()? != FORMAT {
             return Err(fault("fulltext/header-format", "unsupported search header"));
@@ -385,10 +366,10 @@ pub struct FulltextReadStats {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Child {
-    first: Vec<u8>,
-    last: Vec<u8>,
-    hash: Digest,
-    count: u64,
+    pub(crate) first: Vec<u8>,
+    pub(crate) last: Vec<u8>,
+    pub(crate) hash: Digest,
+    pub(crate) count: u64,
 }
 #[derive(Clone, Debug)]
 pub(crate) enum Page {
@@ -396,7 +377,7 @@ pub(crate) enum Page {
     Branch(Vec<Child>),
 }
 impl Page {
-    fn retained_bytes(&self) -> usize {
+    pub(crate) fn retained_bytes(&self) -> usize {
         std::mem::size_of::<Self>()
             + match self {
                 Self::Leaf(records) => {
@@ -415,7 +396,7 @@ impl Page {
                 }
             }
     }
-    fn encode(&self) -> Result<Vec<u8>, SemanticError> {
+    pub(crate) fn encode(&self) -> Result<Vec<u8>, SemanticError> {
         let length = 13usize.saturating_add(match self {
             Self::Leaf(records) => records
                 .iter()
@@ -548,7 +529,7 @@ impl Page {
         d.finish()?;
         Ok(page)
     }
-    fn descriptor(&self, hash: Digest) -> Child {
+    pub(crate) fn descriptor(&self, hash: Digest) -> Child {
         match self {
             Self::Leaf(r) => Child {
                 first: r.first().map_or_else(Vec::new, |r| r.key.clone()),
@@ -659,12 +640,12 @@ impl FulltextCache {
     pub(crate) fn header(&self, source: Digest) -> Option<FulltextProjection> {
         self.0.lock().unwrap().headers.get(&source).cloned()
     }
-    pub(crate) fn insert_header(&self, p: FulltextProjection) {
+    pub(crate) fn insert_header_at(&self, key: Digest, p: FulltextProjection) {
         let mut c = self.0.lock().unwrap();
         if c.max_entries == 0 || Cache::HEADER_BYTES > c.max_bytes {
             return;
         }
-        if c.headers.insert(p.source_manifest, p).is_none() {
+        if c.headers.insert(key, p).is_none() {
             c.bytes += Cache::HEADER_BYTES;
         }
         c.evict();
@@ -839,6 +820,67 @@ impl FulltextCursor {
         }
     }
 }
+/// Synchronous selective lookup for a build worker's borrowed page source.
+/// It applies the same authentication and byte/depth limits as public cursors.
+pub(crate) fn lookup_record(
+    projection: &FulltextProjection,
+    key: &[u8],
+    mut load: impl FnMut(Digest, &mut FulltextReadStats) -> Result<Page, SemanticError>,
+) -> Result<(Option<FulltextRecord>, FulltextReadStats), SemanticError> {
+    let mut stats = FulltextReadStats::default();
+    let mut expected: Option<Child> = None;
+    let mut id = projection.root_hash;
+    for depth in 0..=MAX_DEPTH {
+        let page = load(id, &mut stats)?;
+        stats.visited_bytes = stats
+            .visited_bytes
+            .saturating_add(page.retained_bytes() as u64);
+        if stats.block_bytes.max(stats.visited_bytes) > 128 * 1024 * 1024 {
+            return Err(SemanticError::new(
+                ErrorCategory::Busy,
+                "fulltext/read-limit",
+                "Search lookup block-byte budget exhausted",
+            ));
+        }
+        if let Some(child) = &expected {
+            page.validate_child(child)?;
+        } else if page.count() != projection.record_count {
+            return Err(fault(
+                "fulltext/root-count",
+                "Search root differs from header count",
+            ));
+        }
+        match page {
+            Page::Leaf(records) => {
+                let record = records
+                    .binary_search_by(|record| record.key.as_slice().cmp(key))
+                    .ok()
+                    .map(|i| records[i].clone());
+                stats.records_examined += 1;
+                stats.records_yielded += u64::from(record.is_some());
+                return Ok((record, stats));
+            }
+            Page::Branch(children) => {
+                let Some(child) = children
+                    .into_iter()
+                    .find(|child| child.first.as_slice() <= key && child.last.as_slice() >= key)
+                else {
+                    return Ok((None, stats));
+                };
+                id = child.hash;
+                expected = Some(child);
+                if depth == MAX_DEPTH {
+                    break;
+                }
+            }
+        }
+    }
+    Err(fault(
+        "fulltext/tree-depth",
+        "Search tree depth exceeds bound",
+    ))
+}
+
 impl Iterator for FulltextCursor {
     type Item = Result<FulltextRecord, SemanticError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -858,410 +900,27 @@ impl Iterator for FulltextCursor {
     }
 }
 
-pub(crate) fn load_projection(
-    client: &mut impl GenericClient,
-    source: Digest,
-) -> Result<Option<FulltextProjection>, SemanticError> {
-    let row=client.query_opt("SELECT analyzer_version,root_hash,header_hash,header FROM atomic_fulltext_projections WHERE manifest_hash=$1", &[&&source[..]])
-        .map_err(|e|postgres_error("fulltext/read-header",e))?;
-    let Some(row) = row else { return Ok(None) };
-    let bytes: Vec<u8> = row.get(3);
-    let stored_hash: Vec<u8> = row.get(2);
-    if stored_hash.as_slice() != sha256(&bytes) {
-        return Err(fault("fulltext/header-hash", "search header hash mismatch"));
-    }
-    let projection = FulltextProjection::decode(&bytes)?;
-    let root: Vec<u8> = row.get(1);
-    let version: i32 = row.get(0);
-    if projection.source_manifest != source
-        || root.as_slice() != projection.root_hash
-        || version <= 0
-        || projection.analyzer_version != version as u32
-    {
-        return Err(fault(
-            "fulltext/header-binding",
-            "search header differs from stored source binding",
-        ));
-    }
-    Ok(Some(projection))
-}
-pub(crate) fn load_page(
-    client: &mut impl GenericClient,
-    source: Digest,
-    hash: Digest,
-    stats: &mut FulltextReadStats,
-) -> Result<Arc<Page>, SemanticError> {
-    let row = client
-        .query_opt(
-            "SELECT payload FROM atomic_fulltext_pages WHERE block_hash=$2 UNION ALL SELECT payload FROM atomic_fulltext_blocks WHERE manifest_hash=$1 AND block_hash=$2 AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_pages WHERE block_hash=$2) LIMIT 1",
-            &[&&source[..], &&hash[..]],
-        )
-        .map_err(|e| postgres_error("fulltext/read-block", e))?
-        .ok_or_else(|| {
-            fault(
-                "fulltext/missing-block",
-                "published search block is missing",
-            )
-        })?;
-    let bytes: Vec<u8> = row.get(0);
-    stats.blocks_read += 1;
-    stats.block_bytes = stats.block_bytes.saturating_add(bytes.len() as u64);
-    Ok(Arc::new(Page::decode(hash, &bytes)?))
+pub(crate) struct PageSummary {
+    pub(crate) root: Digest,
+    pub(crate) records: u64,
+    pub(crate) bytes: u64,
+    pub(crate) blocks: u64,
 }
 
-pub struct FulltextStore {
-    client: SqlClient,
-}
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum FulltextBuildFault {
-    #[default]
-    None,
-    /// Deterministic interrupted-upload seam: pages durable, header absent.
-    BeforePublication,
-}
-impl FulltextStore {
-    pub fn connect(config: &PostgresConnectionConfig) -> Result<Self, SemanticError> {
-        let mut client = config.connect_for("fulltext/connect")?;
-        verify_schema_compatibility(&mut client)?;
-        Ok(Self { client })
-    }
-    pub fn open(
-        &mut self,
-        source: Digest,
-        analyzer_version: u32,
-    ) -> Result<Option<FulltextProjection>, SemanticError> {
-        let p = load_projection(&mut self.client, source)?;
-        if p.as_ref()
-            .is_some_and(|p| p.analyzer_version != analyzer_version)
-        {
-            return Err(incorrect(
-                "fulltext/analyzer-version",
-                "search projection requires rebuild for this analyzer",
-            ));
-        }
-        Ok(p)
-    }
-
-    /// Source pin must be held by the caller for the complete iterator/build.
-    /// Failed uploads publish no header; replay regenerates deterministic pages.
-    pub fn build(
-        &mut self,
-        source: Digest,
-        source_basis_t: u64,
-        source_generation: u64,
-        analyzer_version: u32,
-        records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
-        limits: &FulltextBuildLimits,
-    ) -> Result<(FulltextProjection, FulltextBuildStats), SemanticError> {
-        self.build_with_fault(
-            source,
-            source_basis_t,
-            source_generation,
-            analyzer_version,
-            records,
-            limits,
-            FulltextBuildFault::None,
-        )
-    }
-    #[allow(clippy::too_many_arguments)]
-    pub fn build_with_fault(
-        &mut self,
-        source: Digest,
-        source_basis_t: u64,
-        source_generation: u64,
-        analyzer_version: u32,
-        records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
-        limits: &FulltextBuildLimits,
-        fault_injection: FulltextBuildFault,
-    ) -> Result<(FulltextProjection, FulltextBuildStats), SemanticError> {
-        self.lock_build(source)?;
-        let result = self.build_locked(
-            source,
-            source_basis_t,
-            source_generation,
-            analyzer_version,
-            records,
-            limits,
-            fault_injection,
-        );
-        let release = self.unlock_build(source);
-        match (result, release) {
-            (Err(error), _) => Err(error),
-            (Ok(_), Err(error)) => Err(error),
-            (Ok(result), Ok(_)) => Ok(result),
-        }
-    }
-    #[allow(clippy::too_many_arguments)]
-    fn build_locked(
-        &mut self,
-        source: Digest,
-        source_basis_t: u64,
-        source_generation: u64,
-        analyzer_version: u32,
-        records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
-        limits: &FulltextBuildLimits,
-        fault_injection: FulltextBuildFault,
-    ) -> Result<(FulltextProjection, FulltextBuildStats), SemanticError> {
-        limits.validate()?;
-        if analyzer_version == 0 || analyzer_version > i32::MAX as u32 {
-            return Err(incorrect(
-                "fulltext/analyzer-version",
-                "analyzer version must fit a positive PostgreSQL integer",
-            ));
-        }
-        let source_row = self
-            .client
-            .query_opt(
-                "SELECT basis_t,log_generation FROM atomic_tree_manifests WHERE manifest_hash=$1",
-                &[&&source[..]],
-            )
-            .map_err(|e| postgres_error("fulltext/build-source", e))?
-            .ok_or_else(|| {
-                SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "fulltext/source-unavailable",
-                    "search source manifest is not retained",
-                )
-            })?;
-        if u64::try_from(source_row.get::<_, i64>(0)).ok() != Some(source_basis_t)
-            || u64::try_from(source_row.get::<_, i64>(1)).ok() != Some(source_generation)
-        {
-            return Err(incorrect(
-                "fulltext/source-binding",
-                "search publication coordinates differ from its canonical source",
-            ));
-        }
-        if let Some(p) = self.open(source, analyzer_version)? {
-            return Ok((p, FulltextBuildStats::default()));
-        }
-        self.begin_build(source)?;
-        let mut stats = FulltextBuildStats::default();
-        let mut sorter = Sorter::new(limits);
-        for record in records {
-            let record = record?;
-            validate_record(&record, limits.max_record_bytes)?;
-            if record.key.len() > limits.max_key_bytes {
-                return Err(incorrect(
-                    "fulltext/key-size",
-                    "search key exceeds configured capacity",
-                ));
-            }
-            stats.input_records += 1;
-            if stats.input_records > limits.max_records {
-                return Err(incorrect(
-                    "fulltext/build-limit",
-                    "search record build limit exhausted",
-                ));
-            }
-            sorter.push(record, &mut stats)?;
-        }
-        let mut sorted = sorter.finish(&mut stats)?;
-        self.build_sorted(
-            source,
-            source_basis_t,
-            source_generation,
-            analyzer_version,
-            std::iter::from_fn(move || read_record(&mut sorted).transpose()),
-            limits,
-            stats,
-            fault_injection,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_sorted(
-        &mut self,
-        source: Digest,
-        source_basis_t: u64,
-        source_generation: u64,
-        analyzer_version: u32,
-        records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
-        limits: &FulltextBuildLimits,
-        mut stats: FulltextBuildStats,
-        fault_injection: FulltextBuildFault,
-    ) -> Result<(FulltextProjection, FulltextBuildStats), SemanticError> {
-        let mut levels: Vec<Vec<Child>> = Vec::new();
-        let mut leaf = Vec::new();
-        let mut leaf_bytes = 13;
-        for record in records {
-            let record = record?;
-            let bytes = record.key.len() + record.value.len() + 8;
-            if !leaf.is_empty() && (leaf.len() >= FANOUT || leaf_bytes + bytes > limits.page_bytes)
-            {
-                let page = Page::Leaf(std::mem::take(&mut leaf));
-                self.push_page(source, page, 0, &mut levels, limits, &mut stats)?;
-                leaf_bytes = 13;
-            }
-            leaf_bytes += bytes;
-            leaf.push(record);
-            stats.records += 1;
-        }
-        if !leaf.is_empty() || levels.is_empty() {
-            self.push_page(source, Page::Leaf(leaf), 0, &mut levels, limits, &mut stats)?;
-        }
-        let root = loop {
-            let nonempty: Vec<_> = levels
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| !c.is_empty())
-                .map(|(i, _)| i)
-                .collect();
-            if nonempty.len() == 1 && levels[nonempty[0]].len() == 1 {
-                break levels[nonempty[0]].pop().unwrap();
-            }
-            let level = nonempty[0];
-            let children = std::mem::take(&mut levels[level]);
-            self.push_page(
-                source,
-                Page::Branch(children),
-                level + 1,
-                &mut levels,
-                limits,
-                &mut stats,
-            )?;
-        };
-        let projection = FulltextProjection {
-            source_manifest: source,
-            source_basis_t,
-            source_generation,
-            analyzer_version,
-            root_hash: root.hash,
-            record_count: stats.records,
-            encoded_bytes: stats.encoded_bytes,
-            block_count: stats.blocks,
-        };
-        if fault_injection == FulltextBuildFault::BeforePublication {
-            return Err(SemanticError::new(
-                ErrorCategory::Interrupted,
-                "fulltext/injected-before-publication",
-                "search blocks uploaded; publication intentionally interrupted",
-            ));
-        }
-        self.publish(&projection, &mut stats)?;
-        Ok((projection, stats))
-    }
-
-    /// Explicit operator repair invalidates this source's derived search bytes.
-    /// Canonical data is untouched. Previously opened search readers may fail
-    /// cold reads until reconstruction; this is not an erasure guarantee.
-    /// Returns true once this source has no remaining reclaimable pages or
-    /// legacy blocks. Pages still shared by another root/parent are retained;
-    /// they no longer require this source's header to remain readable.
-    pub fn discard_projection(
-        &mut self,
-        source: Digest,
-        maximum_blocks: usize,
-    ) -> Result<bool, SemanticError> {
-        if !(1..=4096).contains(&maximum_blocks) {
-            return Err(incorrect(
-                "fulltext/discard-limit",
-                "repair batch must contain 1..4096 blocks",
-            ));
-        }
-        let mut tx = self
-            .client
-            .transaction()
-            .map_err(|e| postgres_error("fulltext/discard-begin", e))?;
-        let owner:bool=tx.query_one("SELECT current_user=pg_catalog.pg_get_userbyid(relowner) FROM pg_catalog.pg_class WHERE oid='atomic_fulltext_blocks'::regclass", &[])
-            .map_err(|e|postgres_error("fulltext/discard-owner",e))?.get(0);
-        if !owner {
-            return Err(SemanticError::new(
-                ErrorCategory::Forbidden,
-                "fulltext/operator-required",
-                "search repair requires the catalog owner",
-            ));
-        }
-        let gc_locked: bool = tx
-            .query_one(
-                "SELECT pg_try_advisory_xact_lock(atomic_fulltext_gc_pin_key())",
-                &[],
-            )
-            .map_err(|e| postgres_error("fulltext/discard-gc-lock", e))?
-            .get(0);
-        if !gc_locked {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "fulltext/projection-busy",
-                "search build or garbage collection already active",
-            ));
-        }
-        let locked: bool = tx
-            .query_one(
-                "SELECT pg_try_advisory_xact_lock($1)",
-                &[&projection_lock_key(source)],
-            )
-            .map_err(|e| postgres_error("fulltext/discard-lock", e))?
-            .get(0);
-        if !locked {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "fulltext/projection-busy",
-                "search projection build or repair already active",
-            ));
-        }
-        tx.execute(
-            "DELETE FROM atomic_fulltext_projections WHERE manifest_hash=$1",
-            &[&&source[..]],
-        )
-        .map_err(|e| postgres_error("fulltext/discard-header", e))?;
-        tx.execute(
-            "DELETE FROM atomic_fulltext_page_roots WHERE manifest_hash=$1",
-            &[&&source[..]],
-        )
-        .map_err(|e| postgres_error("fulltext/discard-root", e))?;
-        let removed_build = tx
-            .execute(
-                "DELETE FROM atomic_fulltext_page_builds WHERE manifest_hash=$1",
-                &[&&source[..]],
-            )
-            .map_err(|e| postgres_error("fulltext/discard-build", e))?;
-        if removed_build != 0 {
-            tx.query_one(
-                "SELECT * FROM atomic_enqueue_fulltext_source_pages($1)",
-                &[&&source[..]],
-            )
-            .map_err(|e| postgres_error("fulltext/discard-frontier", e))?;
-        }
-        tx.execute("WITH candidates AS MATERIALIZED (\
-            SELECT legacy,block_hash FROM (\
-              SELECT true AS legacy,block_hash FROM atomic_fulltext_blocks WHERE manifest_hash=$1 \
-              UNION ALL \
-              SELECT false AS legacy,p.block_hash FROM atomic_fulltext_page_garbage g \
-              JOIN atomic_fulltext_pages p ON p.block_hash=g.block_hash \
-              WHERE p.created_for=$1 \
-                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_roots r WHERE r.root_hash=p.block_hash) \
-                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_edges e WHERE e.child_hash=p.block_hash) \
-                AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_builds b WHERE b.manifest_hash=p.created_for)\
-            ) eligible ORDER BY legacy,block_hash LIMIT $2\
-          ), old AS (\
-            DELETE FROM atomic_fulltext_blocks b USING candidates c \
-            WHERE c.legacy AND b.manifest_hash=$1 AND b.block_hash=c.block_hash RETURNING 1\
-          ) DELETE FROM atomic_fulltext_pages p USING candidates c WHERE NOT c.legacy AND p.block_hash=c.block_hash", &[&&source[..],&(maximum_blocks as i64)])
-            .map_err(|e|postgres_error("fulltext/discard-blocks",e))?;
-        let complete: bool = tx
-            .query_one(
-                "SELECT NOT EXISTS(SELECT 1 FROM atomic_fulltext_blocks WHERE manifest_hash=$1) \
-                    AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_garbage g \
-                      JOIN atomic_fulltext_pages p ON p.block_hash=g.block_hash WHERE p.created_for=$1 \
-                      AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_roots r WHERE r.root_hash=p.block_hash) \
-                      AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_edges e WHERE e.child_hash=p.block_hash) \
-                      AND NOT EXISTS(SELECT 1 FROM atomic_fulltext_page_builds b WHERE b.manifest_hash=p.created_for))",
-                &[&&source[..]],
-            )
-            .map_err(|e| postgres_error("fulltext/discard-status", e))?
-            .get(0);
-        tx.commit()
-            .map_err(|e| postgres_error("fulltext/discard-commit", e))?;
-        Ok(complete)
-    }
-    fn push_page(
-        &mut self,
-        source: Digest,
+/// Shared bounded bulk packer. The sink chooses physical storage; sorted
+/// record semantics, fanout, depth and page admission stay here.
+pub(crate) fn build_pages(
+    records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
+    limits: &FulltextBuildLimits,
+    save: &mut impl FnMut(&Page) -> Result<Child, SemanticError>,
+) -> Result<PageSummary, SemanticError> {
+    fn push(
         page: Page,
         level: usize,
         levels: &mut Vec<Vec<Child>>,
         limits: &FulltextBuildLimits,
-        stats: &mut FulltextBuildStats,
+        summary: &mut PageSummary,
+        save: &mut impl FnMut(&Page) -> Result<Child, SemanticError>,
     ) -> Result<(), SemanticError> {
         if level > MAX_DEPTH {
             return Err(incorrect(
@@ -1269,7 +928,9 @@ impl FulltextStore {
                 "search build exceeds maximum depth",
             ));
         }
-        let child = self.store_page(source, &page, stats)?;
+        summary.bytes += page.encode()?.len() as u64;
+        summary.blocks += 1;
+        let child = save(&page)?;
         while levels.len() <= level {
             levels.push(Vec::new());
         }
@@ -1282,17 +943,106 @@ impl FulltextStore {
             || (levels[level].len() > 1 && estimated >= limits.page_bytes)
         {
             let children = std::mem::take(&mut levels[level]);
-            self.push_page(
-                source,
+            push(
                 Page::Branch(children),
                 level + 1,
                 levels,
                 limits,
-                stats,
+                summary,
+                save,
             )?;
         }
         Ok(())
     }
+    let mut summary = PageSummary {
+        root: [0; 32],
+        records: 0,
+        bytes: 0,
+        blocks: 0,
+    };
+    let mut levels = Vec::new();
+    let mut leaf = Vec::new();
+    let mut bytes = 13;
+    for record in records {
+        let record = record?;
+        let size = record.key.len() + record.value.len() + 8;
+        if !leaf.is_empty() && (leaf.len() >= FANOUT || bytes + size > limits.page_bytes) {
+            push(
+                Page::Leaf(std::mem::take(&mut leaf)),
+                0,
+                &mut levels,
+                limits,
+                &mut summary,
+                save,
+            )?;
+            bytes = 13;
+        }
+        bytes += size;
+        leaf.push(record);
+        summary.records += 1;
+    }
+    if !leaf.is_empty() || levels.is_empty() {
+        push(Page::Leaf(leaf), 0, &mut levels, limits, &mut summary, save)?;
+    }
+    loop {
+        let nonempty = levels
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| !c.is_empty())
+            .map(|(i, _)| i)
+            .collect::<Vec<_>>();
+        if nonempty.len() == 1 && levels[nonempty[0]].len() == 1 {
+            summary.root = levels[nonempty[0]][0].hash;
+            return Ok(summary);
+        }
+        let level = nonempty[0];
+        let children = std::mem::take(&mut levels[level]);
+        push(
+            Page::Branch(children),
+            level + 1,
+            &mut levels,
+            limits,
+            &mut summary,
+            save,
+        )?;
+    }
+}
+
+pub(crate) struct SortedRecords(File);
+
+impl Iterator for SortedRecords {
+    type Item = Result<FulltextRecord, SemanticError>;
+    fn next(&mut self) -> Option<Self::Item> {
+        read_record(&mut self.0).transpose()
+    }
+}
+
+pub(crate) fn sorted_records(
+    records: impl Iterator<Item = Result<FulltextRecord, SemanticError>>,
+    limits: &FulltextBuildLimits,
+    stats: &mut FulltextBuildStats,
+) -> Result<SortedRecords, SemanticError> {
+    limits.validate()?;
+    let mut sorter = Sorter::new(limits);
+    for record in records {
+        let record = record?;
+        validate_record(&record, limits.max_record_bytes)?;
+        if record.key.len() > limits.max_key_bytes {
+            return Err(incorrect(
+                "fulltext/key-size",
+                "search key exceeds configured capacity",
+            ));
+        }
+        stats.input_records += 1;
+        if stats.input_records > limits.max_records {
+            return Err(incorrect(
+                "fulltext/build-limit",
+                "search record build limit exhausted",
+            ));
+        }
+        sorter.push(record, stats)?;
+    }
+    Ok(SortedRecords(sorter.finish(stats)?))
 }
 
 struct Sorter<'a> {
@@ -1337,16 +1087,16 @@ impl<'a> Sorter<'a> {
         let mut run = self.file()?;
         let mut prior: Option<FulltextRecord> = None;
         for record in self.buffer.drain(..) {
-            if let Some(p) = prior.as_ref() {
-                if p.key == record.key {
-                    if p.value != record.value {
-                        return Err(incorrect(
-                            "fulltext/duplicate-key",
-                            "search records disagree on one key",
-                        ));
-                    }
-                    continue;
+            if let Some(p) = prior.as_ref()
+                && p.key == record.key
+            {
+                if p.value != record.value {
+                    return Err(incorrect(
+                        "fulltext/duplicate-key",
+                        "search records disagree on one key",
+                    ));
                 }
+                continue;
             }
             if let Some(p) = prior.replace(record) {
                 write_record(&mut run, &p, self.limits, stats)?;

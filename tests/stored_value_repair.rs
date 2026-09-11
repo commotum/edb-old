@@ -1,6 +1,6 @@
 use atomic_core::{
-    Attribute, Cardinality, Database, EntityRef, Keyword, Peer, PostgresIndexer, PostgresStore,
-    Schema, TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid,
+    Attribute, Cardinality, Database, EntityRef, Keyword, Peer, Schema, TxOp, TxValue,
+    USER_PARTITION, Value, ValueType, make_eid,
 };
 use bigdecimal::BigDecimal;
 use std::str::FromStr;
@@ -45,10 +45,12 @@ fn additions(entity: u64, reverse: bool) -> Vec<TxOp> {
         .collect()
 }
 
-fn scales(database: &Database, entity: u64) -> Vec<i64> {
+fn scales(database: &impl common::InformationSource, entity: u64) -> Vec<i64> {
     let mut scales: Vec<_> = database
-        .values(entity, AMOUNT)
+        .test_datoms(atomic_core::View::Current, atomic_core::IndexOrder::Eavt)
         .into_iter()
+        .filter(|d| d.entity == entity && d.attribute == AMOUNT)
+        .map(|d| d.value)
         .map(|value| match value {
             Value::BigDec(value) => value.fractional_digit_count(),
             other => panic!("expected BigDecimal, got {other:?}"),
@@ -84,9 +86,8 @@ fn scale_distinctions_survive_postgres_log_base_and_peer_recovery() {
     let database_id = format!("goal10_bigdec_{}_{}", std::process::id(), suffix);
     let entity = make_eid(USER_PARTITION, 42).unwrap();
 
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let created = store.create_database(&database_id, schema()).unwrap();
     let service = common::start_service(&connection, &database_id);
     common::transact(
@@ -100,10 +101,9 @@ fn scale_distinctions_survive_postgres_log_base_and_peer_recovery() {
     let recovered = store.recover(&database_id).unwrap();
     assert_eq!(scales(&recovered, entity), vec![1, 2]);
 
-    let mut indexer = PostgresIndexer::connect(&connection, &database_id).unwrap();
-    indexer.consolidate().unwrap();
+    common::consolidate(&connection, &database_id).unwrap();
     let peer = Peer::connect(&connection, &database_id, 1).unwrap();
-    assert_eq!(scales(&peer.db_compatibility(), entity), vec![1, 2]);
-    peer.db_compatibility().validate_invariants().unwrap();
+    assert_eq!(scales(&peer.db(), entity), vec![1, 2]);
+    common::assert_same_information(&peer.db(), &recovered);
     service.shutdown();
 }

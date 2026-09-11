@@ -1,7 +1,8 @@
+mod common;
 use atomic_core::{
     Attribute, AttributeRef, Cardinality, DB_IDENT, Database, EntityMap, EntityRef, Keyword,
-    MapValue, PostgresMigrator, PostgresStore, Schema, TransactionRequest, TransactionService,
-    TransactionServiceConfig, TxForm, TxFunctions, TxOp, TxValue, Unique, Value, ValueType,
+    MapValue, Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxForm,
+    TxFunctions, TxOp, TxValue, Unique, Value, ValueType,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -305,12 +306,9 @@ fn production_assessor_upserts_a_ref_valued_identity_after_restart() {
     let Some(connection) = connection() else {
         return;
     };
-    PostgresMigrator::connect(&connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&connection).unwrap();
     let database_id = unique("ref_unique_identity");
-    PostgresStore::connect(&connection)
+    common::TestStore::connect(&connection)
         .unwrap()
         .create_database(&database_id, schema())
         .unwrap();
@@ -446,7 +444,7 @@ fn production_assessor_upserts_a_ref_valued_identity_after_restart() {
     assert_eq!(value_only.code, "transaction/tempid-not-an-entity");
     restarted.shutdown();
     assert_eq!(
-        PostgresStore::connect(&connection)
+        common::TestStore::connect(&connection)
             .unwrap()
             .recover(&database_id)
             .unwrap()

@@ -1,8 +1,8 @@
 //! Generated branch/retain/discard schedules over an authenticated native base.
 //! Pure eager values remain the information oracle, never a source of writes.
 use atomic_core::{
-    Attribute, Cardinality, Database, DatabaseValue, EntityRef, IndexOrder, Keyword, Peer,
-    PostgresIndexer, PostgresMigrator, PostgresStore, Schema, TxOp, Value, ValueType,
+    Attribute, Cardinality, Database, DatabaseValue, EntityRef, IndexOrder, Keyword, Peer, Schema,
+    TxOp, Value, ValueType,
 };
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -149,17 +149,12 @@ fn generated_native_branches_preserve_exact_information_without_publication() {
     };
     let fixture = common::PostgresFixture::new(&connection, "shared_speculation");
     let connection = &fixture.connection;
-    PostgresMigrator::connect(connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(connection).unwrap();
     let database = format!("shared-speculation-{}", fixture.schema);
-    let mut store = PostgresStore::connect(connection).unwrap();
-    let eager = store.create_database(&database, schema()).unwrap();
-    PostgresIndexer::connect(connection, &database)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    let mut store = common::TestStore::connect(connection).unwrap();
+    store.create_database(&database, schema()).unwrap();
+    let eager = Database::new(schema()).unwrap();
+    common::consolidate(connection, &database).unwrap();
     let peer = Peer::connect(connection, &database, 32).unwrap();
     let before = peer.database_value();
     exercise(eager, before.clone());

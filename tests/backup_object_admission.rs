@@ -1,6 +1,8 @@
 //! Bound file admission independently of cache size, through the real reader.
 #![cfg(target_os = "linux")]
 mod common;
+use atomic_core::storage::root::DatabaseRoot;
+use atomic_core::storage::{BlockDatabase, PgBlockStore};
 use atomic_core::*;
 use std::fs;
 use std::process::Command;
@@ -64,10 +66,8 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
     };
     let start = Instant::now();
     let fixture = common::PostgresFixture::new(&url, "backup_admission");
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    PgBlockStore::install(&config).unwrap();
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -77,22 +77,30 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
             Cardinality::One,
         ))
         .unwrap();
-    let created = PostgresStore::connect(&fixture.connection)
+    let created = BlockDatabase::create(&config, "admission", schema).unwrap();
+    let mut store = PgBlockStore::connect(&config).unwrap();
+    let root_id: Digest = store
+        .read_ref(&created.reference_key())
         .unwrap()
-        .create_database("admission", schema)
+        .unwrap()
+        .value
+        .unwrap()
+        .try_into()
         .unwrap();
+    let initial = DatabaseRoot::decode(&root_id, &store.get(root_id).unwrap().unwrap()).unwrap();
+    let root_hash = initial.metadata.unwrap();
     let service = common::start_service(&fixture.connection, "admission");
     let temporary = tempfile::tempdir().unwrap();
     let small_repository = temporary.path().join("small");
     let large_repository = temporary.path().join("large");
-    let small_point = PortableBackup::connect(&fixture.connection)
+    PortableBackup::connect(&fixture.connection)
         .unwrap()
         .backup_database("admission", &small_repository)
         .unwrap();
     let report = common::transact(
         &service,
         "large",
-        created.basis_t(),
+        initial.basis,
         &[TxOp::Add {
             entity: EntityRef::Temp("large".into()),
             attribute: 1000,
@@ -101,16 +109,12 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
         1000,
     );
     service.shutdown();
-    PostgresIndexer::connect(&fixture.connection, "admission")
-        .unwrap()
-        .consolidate()
-        .unwrap();
     PortableBackup::connect(&fixture.connection)
         .unwrap()
         .backup_database("admission", &large_repository)
         .unwrap();
     let entity = report.tempids["large"];
-    drop((report, created, fixture));
+    drop((report, store, created, fixture));
 
     // Valid objects much larger than this cache budget must remain readable,
     // including the canonical log envelope as well as native leaves.
@@ -138,26 +142,8 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
     assert!(offline.cache_stats().current_bytes <= 1024);
     drop(offline);
 
-    let root_hash = fs::read_dir(small_repository.join("objects"))
-        .unwrap()
-        .find_map(|entry| {
-            let path = entry.unwrap().path();
-            let bytes = fs::read(&path).unwrap();
-            let manifest = PersistentTreeManifest::decode(&bytes).ok()?;
-            // Log lookup trees and receipt bases also have EAVT roots. Select
-            // the read tree at this backup's exact endpoint, independent of
-            // filesystem enumeration order, rather than corrupting any root.
-            (manifest.database_id == small_point.lineage_id
-                && manifest.basis_t == small_point.basis_t)
-                .then(|| {
-                    manifest
-                        .tree(IndexOrder::Eavt, false)
-                        .unwrap()
-                        .descriptor
-                        .root_hash
-                })
-        })
-        .expect("exact EAVT root is in the repository");
+    // Corrupt one exact selected metadata object; admission must fail before
+    // allocating its sparse physical payload, independently of cache limits.
     let root = small_repository.join("objects").join(
         root_hash
             .iter()
@@ -185,7 +171,7 @@ fn offline_large_values_work_and_corrupt_sparse_files_do_not_inflate_memory() {
     );
     eprintln!("{}", String::from_utf8_lossy(&output.stderr));
     eprintln!(
-        "create/transact/index/backup + source-deleted large read + sparse corruption: {:?}",
+        "create/transact/backup + source-deleted large read + sparse corruption: {:?}",
         start.elapsed()
     );
 }

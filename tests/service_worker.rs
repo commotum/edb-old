@@ -1,7 +1,11 @@
+mod common;
+#[path = "common/current_refs.rs"]
+mod current;
 use atomic_core::{
-    Attribute, AttributeRef, Cardinality, EntityMap, EntityRef, ErrorCategory, Keyword, MapValue,
-    PostgresStore, Schema, TransactionRequest, TransactionService, TransactionServiceConfig,
-    TxForm, TxOp, TxValue, USER_PARTITION, Value, ValueType, make_eid, sha256,
+    Attribute, AttributeRef, CallableRef, Cardinality, EntityMap, EntityRef, ErrorCategory,
+    Keyword, MapValue, NativeRegistry, PostgresConnectionConfig, ProgramCall, Schema,
+    SemanticError, ServiceOptions, Symbol, TransactionExecutionOptions, TransactionRequest,
+    TransactionService, TransactionServiceConfig, TxForm, TxOp, TxValue, Value, ValueType,
 };
 use postgres::{Client, NoTls};
 use std::sync::{Arc, Barrier};
@@ -11,10 +15,6 @@ const ITEM_COUNT: u32 = 1_000;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
-}
-
-fn user(eidx: u64) -> u64 {
-    make_eid(USER_PARTITION, eidx).unwrap()
 }
 
 fn unique(prefix: &str) -> String {
@@ -28,20 +28,11 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-fn pin_application_name(database_id: &str) -> String {
-    let digest = sha256(database_id.as_bytes());
-    let suffix: String = digest[..16]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect();
-    format!("atomic-pin-{suffix}")
-}
-
-fn pin_backend_count(client: &mut Client, database_id: &str) -> i64 {
+fn pin_count(client: &mut Client) -> i64 {
     client
         .query_one(
-            "SELECT count(*) FROM pg_stat_activity WHERE application_name = $1",
-            &[&pin_application_name(database_id)],
+            "SELECT count(*) FROM atomic_refs WHERE key LIKE 'pins/read/%' AND value IS NOT NULL",
+            &[],
         )
         .unwrap()
         .get(0)
@@ -63,11 +54,18 @@ fn schema() -> Schema {
 fn request(key: &str, value: i64) -> TransactionRequest {
     TransactionRequest::new(
         key,
-        vec![TxOp::Add {
-            entity: EntityRef::Id(user(42)),
-            attribute: ITEM_COUNT,
-            value: TxValue::Scalar(Value::Long(value)),
-        }],
+        vec![
+            TxOp::Add {
+                entity: EntityRef::Temp("item".into()),
+                attribute: atomic_core::DB_IDENT as u32,
+                value: Value::Keyword(Keyword::new("worker", "item")).into(),
+            },
+            TxOp::Add {
+                entity: EntityRef::Temp("item".into()),
+                attribute: ITEM_COUNT,
+                value: TxValue::Scalar(Value::Long(value)),
+            },
+        ],
     )
 }
 
@@ -89,9 +87,8 @@ fn config(
 }
 
 fn setup(connection: &str, database_id: &str) -> u64 {
-    let mut migrator = atomic_core::PostgresMigrator::connect(connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(connection).unwrap();
+    common::install(connection).unwrap();
+    let mut store = common::TestStore::connect(connection).unwrap();
     store
         .create_database(database_id, schema())
         .unwrap()
@@ -347,7 +344,9 @@ fn worker_serializes_reports_and_resolves_durable_retry() {
         (initial_basis + 1, initial_basis + 2)
     );
     assert_eq!(
-        two.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        two.db_after
+            .values(two.tempids["item"], ITEM_COUNT)
+            .unwrap(),
         vec![Value::Long(2)]
     );
     assert_eq!(
@@ -412,7 +411,10 @@ fn originating_result_is_enqueued_before_the_subscription_report() {
     assert_eq!(subscribed.tx_data, originating.tx_data);
     assert_eq!(subscribed.tempids, originating.tempids);
     assert_eq!(
-        subscribed.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        subscribed
+            .db_after
+            .values(subscribed.tempids["item"], ITEM_COUNT)
+            .unwrap(),
         vec![Value::Long(7)]
     );
     service.shutdown();
@@ -423,6 +425,8 @@ fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
     let Some(connection) = connection() else {
         return;
     };
+    let fixture = common::PostgresFixture::new(&connection, "service_report_pin");
+    let connection = fixture.connection.clone();
     let database_id = unique("service_report_pin");
     let initial_basis = setup(&connection, &database_id);
     let service =
@@ -441,26 +445,29 @@ fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
 
     // Once the service and client are gone, only the unread report owns its
     // immutable db-before/db-after values and therefore their shared native
-    // root/generation pin manager.
+    // reader-session pins.
     service.shutdown();
     drop(client);
     let mut observer = Client::connect(&connection, NoTls).unwrap();
-    assert_eq!(pin_backend_count(&mut observer, &database_id), 1);
+    assert!(pin_count(&mut observer) > 0);
 
     let queued = reports.recv_timeout(Duration::ZERO).unwrap();
     assert_eq!(reports.pending_reports(), 0);
     assert_eq!(queued.db_before.basis_t(), initial_basis);
     assert_eq!(queued.db_after.basis_t(), initial_basis + 1);
     assert_eq!(
-        queued.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        queued
+            .db_after
+            .values(queued.tempids["item"], ITEM_COUNT)
+            .unwrap(),
         vec![Value::Long(17)]
     );
-    assert_eq!(pin_backend_count(&mut observer, &database_id), 1);
+    assert!(pin_count(&mut observer) > 0);
 
     drop(queued);
     drop(reports);
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while pin_backend_count(&mut observer, &database_id) != 0 {
+    while pin_count(&mut observer) != 0 {
         assert!(
             std::time::Instant::now() < deadline,
             "dropping the last queued report did not release its pin session"
@@ -476,25 +483,67 @@ fn queue_is_bounded_and_timeout_is_unknown_then_reconcilable() {
     };
     let database_id = unique("service_bound");
     let initial_basis = setup(&connection, &database_id);
-    let service =
-        TransactionService::start(config(&connection, database_id.clone(), "one", 1)).unwrap();
+    let (entered, started) = std::sync::mpsc::sync_channel(1);
+    let (release, released) = std::sync::mpsc::sync_channel(1);
+    let released = std::sync::Mutex::new(released);
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let observed_calls = Arc::clone(&calls);
+    let function = Symbol::new("queue.fixture.v1", "pause");
+    let mut registry = NativeRegistry::builder();
+    registry
+        .transaction(function.clone(), move |_, _, control| {
+            control.check(1)?;
+            observed_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            entered.try_send(()).map_err(|_| {
+                SemanticError::new(
+                    ErrorCategory::Interrupted,
+                    "test/queue-entry",
+                    "Fixture callback entry could not be observed",
+                )
+            })?;
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .map_err(|_| {
+                    SemanticError::new(
+                        ErrorCategory::Interrupted,
+                        "test/queue-release",
+                        "Fixture callback was not released",
+                    )
+                })?;
+            control.check(1)?;
+            Ok(Vec::new())
+        })
+        .unwrap();
+    let mut service_config = config(&connection, database_id.clone(), "one", 1);
+    service_config.lease_duration = Duration::from_secs(30);
+    let service = TransactionService::start_configured_with_options(
+        service_config,
+        PostgresConnectionConfig::plaintext(&connection),
+        ServiceOptions {
+            execution: TransactionExecutionOptions {
+                native: registry.build(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    // Declared after the service: unwind disconnects the callback before
+    // service Drop joins the worker, and every callback wait is bounded.
+    let callback_release = release;
     let client = service.client();
     let slow_reports = client.subscribe_reports();
 
-    let mut blocker = Client::connect(&connection, NoTls).unwrap();
-    let mut lock = blocker.transaction().unwrap();
-    lock.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id = $1 FOR UPDATE",
-        &[&database_id],
-    )
-    .unwrap();
-    let first = client.submit(request("one", 1)).unwrap();
-    for _ in 0..100 {
-        if client.stats().queued == 0 {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    let first_request = request("one", 1).calling(ProgramCall {
+        function: CallableRef::Local(function),
+        arguments: vec![],
+    });
+    let first = client.submit(first_request.clone()).unwrap();
+    // A root-row lock can stall pre-dispatch maintenance. This entry signal
+    // proves the request is executing before filling its one waiting slot.
+    started.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(
         client.stats().queued,
         0,
@@ -511,23 +560,30 @@ fn queue_is_bounded_and_timeout_is_unknown_then_reconcilable() {
     assert!(!unknown.details.contains_key("request_key"));
     assert_eq!(unknown.details["request_key_hash"].len(), 64);
     assert_ne!(unknown.details["request_key_hash"], "one");
-    lock.commit().unwrap();
+    callback_release.send(()).unwrap();
 
     let second_report = second.wait(Duration::from_secs(2)).unwrap();
     assert_eq!(second_report.basis_t, initial_basis + 2);
     let replay = client
-        .transact(request("one", 1), Duration::from_secs(2))
+        .transact(first_request, Duration::from_secs(2))
         .unwrap();
     assert!(replay.replayed);
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let stats = client.stats();
     assert_eq!(stats.rejected_full, 1);
     assert!(stats.max_queued <= 1);
+    let first_report = slow_reports.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(first_report.basis_t, initial_basis + 1);
+    assert_eq!(replay.tx_hash, first_report.tx_hash);
+    assert_eq!(replay.tempids, first_report.tempids);
+    assert_eq!(replay.tx_data, first_report.tx_data);
     assert_eq!(
-        slow_reports
-            .recv_timeout(Duration::from_secs(1))
-            .unwrap()
-            .basis_t,
-        initial_basis + 1
+        replay.db_before.snapshot_key().unwrap(),
+        first_report.db_before.snapshot_key().unwrap()
+    );
+    assert_eq!(
+        replay.db_after.snapshot_key().unwrap(),
+        first_report.db_after.snapshot_key().unwrap()
     );
     assert_eq!(
         slow_reports
@@ -552,8 +608,8 @@ fn graceful_shutdown_settles_admitted_and_queued_requests() {
     let mut blocker = Client::connect(&connection, NoTls).unwrap();
     let mut lock = blocker.transaction().unwrap();
     lock.query_one(
-        "SELECT basis_t FROM atomic_heads WHERE database_id = $1 FOR UPDATE",
-        &[&database_id],
+        "SELECT revision FROM atomic_refs WHERE key = $1 FOR UPDATE",
+        &[&current::root_key(&connection, &database_id)],
     )
     .unwrap();
     let admitted = client.submit(request("admitted", 1)).unwrap();
@@ -585,7 +641,7 @@ fn graceful_shutdown_settles_admitted_and_queued_requests() {
     );
     shutdown.join().unwrap();
     assert_eq!(
-        PostgresStore::connect(&connection)
+        common::TestStore::connect(&connection)
             .unwrap()
             .recover(&database_id)
             .unwrap()

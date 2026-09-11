@@ -1,14 +1,15 @@
 //! Logical committed identity and bounded, non-capability snapshot references.
-use super::{
-    ExactEndpoint, Peer, TieredSnapshot, lock, read_database_lineage, read_excision_generation,
-    reconnect_peer_io, verify_database_lineage,
+use crate::storage::{
+    BlockReadConfig, BlockReader, SnapshotMetadata,
+    root::{DatabaseRoot, DatabaseValueRoot},
 };
 use crate::{DatabaseValue, Digest, ErrorCategory, PostgresConnectionConfig, SemanticError};
 use std::sync::Arc;
 
-const MAGIC: &[u8; 6] = b"ATSN\0\x01";
+const MAGIC: &[u8; 6] = b"ATSN\0\x03";
 const MAX_REFERENCE_BYTES: usize = 256 * 1024;
 const MAX_NAME_BYTES: usize = 64 * 1024;
+const MAX_VALUE_ROOT_BYTES: usize = 20 + 4 * 32 + 25;
 
 /// Inexpensive logical identity of a committed native value and supported view.
 /// Physical publications, cache allocations and the catalog address are absent.
@@ -57,16 +58,6 @@ impl SnapshotKey {
         self.history
     }
 
-    fn endpoint(&self) -> ExactEndpoint {
-        ExactEndpoint {
-            generation: self.generation,
-            basis_t: self.basis_t,
-            tx_hash: self.transaction_hash,
-            state_hash: self.state_hash,
-            eidx_frontier: self.eidx_frontier,
-        }
-    }
-
     fn view(&self, mut value: DatabaseValue) -> DatabaseValue {
         if let Some(t) = self.as_of_t {
             value = value.as_of(t);
@@ -90,9 +81,9 @@ impl SnapshotKey {
 pub struct SnapshotReference {
     database_id: Arc<str>,
     key: SnapshotKey,
-    // Retrieval/retention witness only, never logical key identity. In particular,
+    // Bounded claimed value, never logical key identity or read authority. In particular,
     // noHistory consolidation may omit old pairs at the same committed endpoint.
-    required_manifest: Digest,
+    value_root: DatabaseValueRoot,
 }
 
 impl DatabaseValue {
@@ -101,8 +92,14 @@ impl DatabaseValue {
     /// modifiers select database datoms, not log endpoints: use tx_range bounds
     /// on the returned log. Eager/speculative/opaque-filter values are unsupported.
     pub fn log_value(&self) -> Result<crate::LogValue, SemanticError> {
-        let (snapshot, ..) = self.snapshot_parts()?;
-        Ok(crate::LogValue::new(snapshot))
+        let snapshot = self.block_log_snapshot().ok_or_else(|| {
+            SemanticError::new(
+                ErrorCategory::Unsupported,
+                "database/uncommitted-log",
+                "Only exact live or repository block values have captured logs",
+            )
+        })?;
+        Ok(snapshot.log())
     }
 
     /// No SQL or fact scan. Eager fixtures, speculative values and opaque
@@ -110,15 +107,20 @@ impl DatabaseValue {
     /// An as-of view keeps its original basis/schema, so it intentionally differs
     /// from reopening the older committed value itself.
     pub fn snapshot_key(&self) -> Result<SnapshotKey, SemanticError> {
-        let (snapshot, as_of_t, since_t, history) = self.snapshot_parts()?;
-        let endpoint = snapshot.endpoint();
+        let (snapshot, as_of_t, since_t, history) = self.committed_block_parts()?;
+        let root = snapshot.captured_root();
         Ok(SnapshotKey {
-            lineage: Arc::from(snapshot.core.lineage_id.as_str()),
-            generation: endpoint.generation,
-            basis_t: endpoint.basis_t,
-            transaction_hash: endpoint.tx_hash,
-            state_hash: endpoint.state_hash,
-            eidx_frontier: endpoint.eidx_frontier,
+            lineage: Arc::from(snapshot.lineage_id()),
+            generation: snapshot.generation(),
+            basis_t: snapshot.basis_t(),
+            transaction_hash: snapshot
+                .captured_log()
+                .and_then(|log| log.latest_entry_id())
+                .unwrap_or([0; 32]),
+            // The log root changes with committed novelty, not with physical
+            // indexing. Genesis has its authenticated metadata instead.
+            state_hash: root.log.or(root.metadata).ok_or_else(invalid_reference)?,
+            eidx_frontier: snapshot.eidx_frontier(),
             as_of_t,
             since_t,
             history,
@@ -126,11 +128,11 @@ impl DatabaseValue {
     }
 
     pub fn snapshot_reference(&self) -> Result<SnapshotReference, SemanticError> {
-        let (snapshot, ..) = self.snapshot_parts()?;
+        let (snapshot, ..) = self.committed_block_parts()?;
         Ok(SnapshotReference {
-            database_id: Arc::from(snapshot.core.database_id.as_str()),
+            database_id: Arc::from(snapshot.route_id().ok_or_else(invalid_reference)?),
             key: self.snapshot_key()?,
-            required_manifest: snapshot.required_manifest_hash()?,
+            value_root: snapshot.captured_root().clone(),
         })
     }
 }
@@ -143,7 +145,7 @@ impl SnapshotReference {
         &self.key
     }
 
-    /// Bounded native v1 representation. Its checksum detects corruption, not
+    /// Bounded current-format representation. Its checksum detects corruption, not
     /// forgery; decoded coordinates are always authenticated again when opened.
     /// Reference framing limits do not change supported database identifiers.
     pub fn encode(&self) -> Result<Vec<u8>, SemanticError> {
@@ -160,7 +162,12 @@ impl SnapshotReference {
         }
         bytes.extend_from_slice(&self.key.transaction_hash);
         bytes.extend_from_slice(&self.key.state_hash);
-        bytes.extend_from_slice(&self.required_manifest);
+        let value = self.value_root.encode()?;
+        if value.len() > MAX_VALUE_ROOT_BYTES {
+            return Err(invalid_reference());
+        }
+        bytes.extend_from_slice(&(value.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(&value);
         for bound in [self.key.as_of_t, self.key.since_t] {
             bytes.push(u8::from(bound.is_some()));
             bytes.extend_from_slice(&bound.unwrap_or(0).to_be_bytes());
@@ -189,7 +196,12 @@ impl SnapshotReference {
         let eidx_frontier = input.u64()?;
         let transaction_hash = input.take(32)?.try_into().unwrap();
         let state_hash = input.take(32)?.try_into().unwrap();
-        let required_manifest = input.take(32)?.try_into().unwrap();
+        let value_length = u16::from_be_bytes(input.take(2)?.try_into().unwrap()) as usize;
+        if value_length > MAX_VALUE_ROOT_BYTES {
+            return Err(invalid_reference());
+        }
+        let value_bytes = input.take(value_length)?;
+        let value_root = DatabaseValueRoot::decode(&crate::sha256(value_bytes), value_bytes)?;
         let as_of_t = input.bound()?;
         let since_t = input.bound()?;
         let history = input.boolean()?;
@@ -198,7 +210,7 @@ impl SnapshotReference {
         }
         let reference = Self {
             database_id,
-            required_manifest,
+            value_root,
             key: SnapshotKey {
                 lineage,
                 generation,
@@ -211,7 +223,11 @@ impl SnapshotReference {
                 history,
             },
         };
-        reference.key.endpoint().validate()?;
+        crate::t_to_tx(reference.key.basis_t)?;
+        crate::identity::validate_frontier(reference.key.eidx_frontier)?;
+        if reference.key.state_hash == [0; 32] {
+            return Err(invalid_reference());
+        }
         Ok(reference)
     }
 
@@ -224,91 +240,67 @@ impl SnapshotReference {
         cache_entries: usize,
         cache_bytes: usize,
     ) -> Result<DatabaseValue, SemanticError> {
-        // Check the route before traversing any tree, then check again once the
-        // exact value owns its pins. These are observations, not an excision lock.
-        {
-            let mut client = connection.connect_for("snapshot/authorization")?;
-            self.check_authority(&mut client)?;
-        }
-        let (snapshot, _) = TieredSnapshot::open_exact_configured(
+        let reader = BlockReader::connect(
             connection,
-            self.database_id.to_string(),
-            self.key.endpoint(),
-            Some(self.required_manifest),
-            cache_entries,
-            cache_bytes,
-            crate::recent::RecentLimits::default(),
+            BlockReadConfig {
+                cache_entries,
+                cache_bytes,
+                ..BlockReadConfig::default()
+            },
         )?;
-        self.finish_open(snapshot)
+        self.open_with_reader(&reader)
     }
 
-    fn check_authority<C: crate::sql_io::GenericClient>(
+    /// Reuse an application's reader and caches without advancing its live
+    /// value. Only root/log coordinates are read from the current publication;
+    /// an unrelated large current tail is never replayed to reopen an old value.
+    pub(crate) fn open_with_reader(
         &self,
-        client: &mut C,
-    ) -> Result<(), SemanticError> {
-        // A reference embeds a stable storage ID, never a reusable catalog
-        // name. Rename leaves it valid; retirement forbids a new open even
-        // while an already pinned value remains readable.
-        crate::database_catalog::require_active_id_in(client, &self.database_id)?;
-        if read_database_lineage(client, &self.database_id)? != self.key.lineage.as_ref() {
-            return Err(wrong_identity());
-        }
-        if read_excision_generation(client, &self.database_id)? != self.key.generation {
-            return Err(SemanticError::new(
-                ErrorCategory::Unavailable,
-                "snapshot/generation-not-current",
-                "snapshot reference is not in the currently authorized excision generation",
-            ));
-        }
-        Ok(())
-    }
-
-    fn finish_open(&self, snapshot: TieredSnapshot) -> Result<DatabaseValue, SemanticError> {
-        {
-            let mut io = lock(&snapshot.core.io);
-            if io.client.is_closed() {
-                reconnect_peer_io(&snapshot.core, &mut io)?;
-            }
-            self.check_authority(&mut io.client)?;
-        }
-        let value = self.key.view(snapshot.database_value());
-        if value.snapshot_key()? != self.key {
-            return Err(wrong_identity());
-        }
-        Ok(value)
-    }
-}
-
-impl Peer {
-    /// Reopen this exact retained reference without moving the live peer. A
-    /// reference is not a pin; absent/collected data or old generations fail.
-    pub fn reopen_snapshot(
-        &self,
-        reference: &SnapshotReference,
+        reader: &BlockReader,
     ) -> Result<DatabaseValue, SemanticError> {
-        if self.core.read.database_id != reference.database_id.as_ref()
-            || self.core.read.lineage_id != reference.key.lineage.as_ref()
-        {
-            return Err(wrong_identity());
-        }
-        {
-            let mut io = lock(&self.core.read.io);
-            if io.client.is_closed() {
-                reconnect_peer_io(&self.core.read, &mut io)?;
+        let capture = reader.pin_current_reference(&format!("databases/{}", self.database_id))?;
+        let result = (|| {
+            let root_id = capture.root_id();
+            let root = DatabaseRoot::decode(&root_id, &reader.read_object(root_id)?)?;
+            if crate::storage::engine::identity_string(root.identity) != self.key.lineage.as_ref()
+                || root.basis < self.key.basis_t
+            {
+                return Err(wrong_identity());
             }
-            verify_database_lineage(
-                &mut io.client,
-                &self.core.read.database_id,
-                &self.core.read.lineage_id,
-            )?;
-            reference.check_authority(&mut io.client)?;
-        }
-        let (snapshot, _) = self.tiered_snapshot().open_exact_sharing_core(
-            &self.core.read.database_id,
-            reference.key.endpoint(),
-            Some(reference.required_manifest),
-        )?;
-        reference.finish_open(snapshot)
+            let metadata_id = root.metadata.ok_or_else(invalid_reference)?;
+            let metadata =
+                SnapshotMetadata::decode(&metadata_id, &reader.read_object(metadata_id)?)?;
+            if metadata.identity != root.identity || metadata.basis != root.basis {
+                return Err(wrong_identity());
+            }
+            if metadata.generation != self.key.generation {
+                return Err(SemanticError::new(
+                    ErrorCategory::Unavailable,
+                    "snapshot/generation-not-current",
+                    "Snapshot is outside the current excision generation",
+                ));
+            }
+            if self.key.basis_t != 0 {
+                let entry = reader
+                    .log_record(root.log.ok_or_else(invalid_reference)?, self.key.basis_t)?
+                    .ok_or_else(wrong_identity)?;
+                if entry.id != self.key.transaction_hash
+                    || entry.entry.eidx_frontier != self.key.eidx_frontier
+                {
+                    return Err(wrong_identity());
+                }
+            } else if self.key.transaction_hash != [0; 32] {
+                return Err(wrong_identity());
+            }
+            let snapshot = reader.capture_authorized(&root, &capture, &self.value_root)?;
+            let value = self.key.view(snapshot.database_value());
+            if value.snapshot_key()? != self.key {
+                return Err(wrong_identity());
+            }
+            Ok(value)
+        })();
+        let _ = capture.release();
+        result
     }
 }
 
@@ -380,7 +372,13 @@ mod tests {
     fn reference() -> SnapshotReference {
         SnapshotReference {
             database_id: Arc::from("catalog"),
-            required_manifest: [5; 32],
+            value_root: DatabaseValueRoot {
+                identity: [1; 16],
+                basis: 2,
+                log: Some([3; 32]),
+                indexes: Some([5; 32]),
+                metadata: Some([6; 32]),
+            },
             key: SnapshotKey {
                 lineage: Arc::from("lineage"),
                 generation: 1,

@@ -1,270 +1,129 @@
 # Product acceptance and operating envelope
 
-The September10,2026 capability phase completed the required native features
-and integrated acceptance. Earlier repair and September9 results below remain
-historical evidence, not new cross-version support obligations. Results distinguish
-passing coverage from individual failed/interrupted invocations.
+The Rust-owned storage cutover and integrated current-version acceptance are
+complete. Integration failures were repaired and their affected paths rerun;
+the evidence below distinguishes those results from a single clean whole-suite
+invocation. This is a first-release product, not an old-format compatibility path.
 
-## September10 final backup quality repairs
+## Architecture and preservation boundary
 
-The follow-up pass repaired three concrete defects: `create → backup` required
-an index publication; oversized corrupt repository objects were allocated before
-admission; and relative-path backup handles broke after a working-directory
-change. Capture now reconstructs a missing/damaged read index from authenticated
-canonical data without writing source repairs. File admission uses existing
-codec limits, and relative paths are anchored once without bypassing symlink or
-private-directory checks. See [backup reads](backup-reads.md) for recovery costs.
+PostgreSQL has exactly two opaque tables, `atomic_objects` and `atomic_refs`,
+with zero policy functions or triggers. The provider supplies authenticated
+immutable I/O, protected writes, reference CAS and generic locks/notifications.
+Rust owns log/index trees, receipts, allocation, writer fencing, catalog
+lifecycle, retention, collection, excision and backup/restore. See
+[operations](operations.md) for installation and trusted-role boundaries.
 
-The final optimized PostgreSQL run passed 26/26 tests, none skipped: capture
-fallback (3), copy-boundary authentication (2), file admission (1), selective
-offline reads (1), relative paths (1), backup/restore (10), semantic integrity (4)
-and maintenance controls (4). Fixtures were isolated and source schemas were
-removed before the offline-only checks. Stock CLI creation, backup and stdin EDN
-query ran without a transactor or prior consolidation. The focused library pass
-also passed 22/22 tests; the historical generation-zero upgrade test was not part
-of this current-version check. All-target compilation passed. Clippy passed with
-the same 15 library/one CLI warnings, none in the new repairs.
+Current paths cover EDN and typed transactions/queries/Pull, schema/identity,
+partitions, temporal and speculative values, entity/index navigation, native and
+portable programs, fulltext, local/TLS remote and async applications, exact
+receipts/references, change consumers and administration. Offline backups use the
+same immutable readers, with source-removal tests proving no PostgreSQL fallback.
 
-A 96 MiB sparse corrupt root was rejected with zero measured peak-RSS growth in
-an isolated, address-space-capped process. A valid 2 MiB value remained readable
-through native indexes and the log with a 1 KiB node cache; that complete fixture
-took 2.40 seconds. At 64/8,192 entities, open plus two queries/consumption/drop
-took 2.25/11.37 ms and still read 16 objects to open plus two for the selected
-query. Fresh genesis/schema-only capture, read, speculation and deep proof took
-146/135 ms. These are local observations, not universal resource guarantees.
+The legacy engine, migrations and reader/index/fulltext/backup adapters are
+removed. Useful behavioral tests were ported; old SQL-shape and historical-format
+tests were removed. Decoded program reuse, protected deployment, cache accounting,
+batched uploads, maintenance controls and report continuity were repaired during
+integration, not excluded. Existing Datomic source/documentation corpora are
+unchanged. Fresh databases are required; installation never erases or converts
+an existing database.
 
-Intermediate runs caught a new excision-record admission bound error, an
-ambiguous corrupt-root test selector, and stale restore assumptions about root
-size, lagging indexes and name/storage identity reuse. Those were corrected,
-with permanent coverage; only the complete rerun above is counted as acceptance.
-No existing database was reset and no durable format changed in these repairs.
+## Verified current-storage evidence
 
-## September10 native capability acceptance
+Configured tests used isolated schemas on disposable PostgreSQL 15.11, not mocked
+providers or old-engine results.
 
-The product now combines EDN input/results, composable immutable db/tuple/log
-reads, general query data, native application computation, schema/identity and
-partition evolution, logical database lifecycle, asynchronous operations,
-automatic standby/excision, diagnostics, selective offline backup reads,
-persistent log caching and effective maintenance controls. These reuse the native
-engines and PostgreSQL; they are not JVM/wire compatibility or a second store.
+- Broad `all2` finished with three failed cases and an interrupted
+  `block_snapshot` target; it was not a clean pass. All four were subsequently
+  repaired or completed and verified by the runs below.
+- Subsequent full library run: 438 passed in 324.76 s, including repair
+  regressions. The final five-test protection group passed in 4.45 s, including two
+  new index-publication/bounded-retry cases covering five public observation paths.
+  This is **not** a full 440-test run.
+- Final `block_snapshot`: 10 passed in 198.61 s. Sixteen other focused targets
+  passed. Later TLS application and operator inspection failures exposed a shared
+  initial-pin race; the final nine-target integration rerun passed all 20 tests
+  after that repair. It covered backup CLI/library/restricted roles, inspection,
+  remote routing/transport/application and exact snapshot references. The isolated
+  TLS application completed in 17.852 s; stock automatic failover took 4.452 s
+  (6.159 s complete workflow), retaining exact retries and held reads.
+- Separately opted-in WAL recovery: 1/1 passed in 32.81 s, including actual
+  immediate shutdown/redo, acknowledged exact retries, uncommitted-reference
+  rollback, retained values/log and writer failover. Server restart took 518 ms.
+- Strict Clippy, documentation generation and formatting checks passed.
+  Rustdoc ran zero doctests; that is not executable documentation coverage.
 
-Focused new checks and representative integrated workflows ran against isolated
-current-version PostgreSQL fixtures with durability enabled. Final integration:
+## Measured costs and limits
 
-- Stock application: 3/3, including two separate application processes across
-  writer restart, restricted roles, exact replay, held values, fulltext, planning,
-  general data, async reads and diagnostics. New CLI worker controls are exercised.
-- Stock TLS standby/crash takeover: 1/1, including cached-route recovery, exact
-  retry, automatic excision, held reads and health/readiness.
-- Operator CLI: 2/2, including repeat backup, offline verification, restore
-  preview, SIGTERM during upload followed by exact-selection retry, integrity
-  and permission guards, search repair and paced GC.
-- Native function deployment/rebinding/restart/backup/restore: 1/1, with
-  receipt-first retry that does not execute missing/replaced external code.
+These are unoptimized local Rust measurements, not production-scale capacity,
+SLAs or Datomic performance parity. Driver calls are not network round trips.
 
-These targets took 5.71/4.03/4.54/3.00 seconds respectively. The measured standby
-scenario took 3.920 seconds, including 2.083 seconds takeover. They are local
-workload observations, not availability or throughput guarantees. Unaffected
-earlier capability evidence was reused rather than repeating every test matrix.
+The standalone `block_live_costs` process passed in 15.34 s wall time with peak
+RSS 71,388 KiB. This includes Rust fixture setup and workers, not PostgreSQL or
+Cargo. Its 2,048 entities contained 1,572,864 scalar bytes against a 1 MiB cache.
+Startup through shutdown took 14.950 s: 9,782 calls, 20,949,013 payload bytes read
+and 8,952,849 written. Twenty-four writes took 3.338 s, or 6.681 s through automatic
+index completion (four jobs). Thirty-two warm reads took 630 µs and zero SQL;
+peak accounted peer-cache bytes were 715,532. Cache accounting is not process RSS.
 
-Selective backup reads passed after deleting their source schemas. At 64 and
-8,192 entities, open plus two queries/consumption/drop took 2.138/11.191 ms,
-reading 16 objects to open and two more for a three-result query at either size.
-Persistent log-cache checks transferred zero PostgreSQL payload bytes on warm
-and reopened scans while still authenticating authoritative metadata. See
-[backup reads](backup-reads.md), [log caching](native-log-cache.md) and
-[maintenance controls](maintenance-controls.md) for costs and boundaries.
-Four preparation workers were slower than one on the measured small input;
-the default remains one and no speedup is promised.
+The 10,000-entity snapshot fixture built a 13,640,218-byte index. Fixture and
+eager-oracle setup took 190.524 s; the full ten-test target took 198.61 s. This
+setup is not a native ingestion benchmark. Native open/query/`with` costs were
+measured separately:
 
-Current-format semantic/copy checks pass (4+2), including forged indexes,
-receipt bases, noHistory and missing descendants. Cancellation checks prove
-staging survives without publishing an incomplete backup point or restore head.
-Intermediate failures from an unoptimized large-seed timeout, old unisolated
-fixtures, permissions/head assumptions and a stale error-code expectation were
-corrected and affected checks rerun; those failures are not counted as passes.
+| Cache allowance | Native operation | Payload bytes read | Driver calls |
+| --- | ---: | ---: | ---: |
+| 0 | 284.658 ms | 470,408 | 135 |
+| 16 KiB | 272.162 ms | 469,593 | 134 |
 
-All-target compilation and lib/bin Clippy succeed; 15 existing library and one
-existing CLI warning remain. No existing database was reset. Backup envelope 5
-adds direct-read metadata and explicitly rejects unsupported development formats.
-Fresh databases/backups may be required across versions; current-version durable
-writes, recovery, failover, exact retries and backup/restore remain required.
-Optional gateway/UI/shared-network-cache/AWS/BI integrations and other durable
-stores are not claimed. This is scoped product acceptance, not certification of
-every Datomic feature or a commercial deployment.
+Other complete-path samples expose substantial fixed publication/retention cost:
+100 small writes took 12.569 s /31,538 calls /394,373 bytes written; reopen and
+exact retry took 330 ms. A small fulltext/program restore took 2.984 s /9,297 calls,
+reading 157,245 and writing 73,419 bytes. A 96 MiB sparse corrupt repository object
+was rejected with zero measured RSS growth; a valid 2 MiB value remained readable.
+The latter proves input admission, not a general memory bound. Foreground metrics
+exclude independent background work unless explicitly included by the measurement.
 
-## September10 repair verification
+## Final integration status
 
-Permanent regressions now cover declarative negation/disjunction and anonymous
-identity, stack-safe component traversal/recent-log ownership, exact bounded
-arbitrary-precision arithmetic/comparison, delta-sized transaction bookkeeping,
-bounded Pull/indexed query ranges, and incremental fulltext maintenance.
+Exact reports, snapshot references, inspection, backup capture and receipt lookup
+now share bounded re-observation of transient initial-pin conflicts. Permanent
+PostgreSQL regressions force publication between reference observation and pinning,
+verify all five paths and check the retry bound. Explicit one-shot captures remain
+strict; errors after successful capture are not hidden, and transactions are never
+reexecuted by this read-only retry. Final affected application reruns passed.
 
-The fulltext primary optimized PostgreSQL matrix passed at64/256/1024documents:
-nontext changes process0search records and upload0pages; fixed text edits admit5
-records and tokenize50bytes. With64-datom canonical leaves, complete foreground
-transact/consolidate/reopen/search/check/drop samples were219–230ms nontext and
-264–276ms text. Routing metadata grows; default4096-datom leaves decode larger
-changed leaves. These are scoped single-host samples, not constant-time guarantees
-or universal transaction throughput. The [fulltext guide](fulltext.md) explains
-the separate counters, empty-corpus bulk path and retention behavior.
+Other integrated repairs include lease-safe operator index publication, bounded
+excision observation, idle reader-pin cleanup across a GC race and lossless peer
+reports across generation handoffs. Five reports spanning two excision generations
+remained exact through three GC cycles (8.315 s complete handoff-cleanup fixture).
+Current-version correctness and the storage boundary are established by these
+checks; high-throughput production capacity is not established by local fixtures.
 
-The final runtime broad run finished all140targets:973passed,4failed,6ignored and
-7filtered. The four failures were resolved and the entire affected targets rerun:
-library408/408, backup/restore10/10 and service-worker9/9 pass. Thus all977normally
-executed cases have passing coverage across the broad run and clean target reruns;
-the broad command itself was not a zero-exit run. The manifest/backup fixtures now
-isolate intentional corruption from unrelated catalog-wide migration repair. The
-unchanged service target passed on the separate server after concurrent suites
-exhausted the main fixture's80connections. Final library harness concurrency was4;
-tests retain their own internal concurrency. Intermediate failures and interrupted
-polluted-catalog runs are not counted as passes.
+## Reproduce relevant checks
 
-Real migration/runtime/search checks pass, including genuine old-binary
-schema26→30 upgrades preserving original4818-/4588-byte genesis values and exact
-retries, plus TLS1.3 on both PostgreSQL listener connections. Dedicated current
-application/transactor processes pass planning/partitions/fulltext and exact
-request replay after an actual immediate PostgreSQL crash. Basis11→13, full
-current/history fingerprints, retained/as-of values and independent reopening
-agree; the pre-crash basis2 reference remains readable. Restart1015ms/replacement
-2061ms, one tail transaction/one range and zero eager materializations are scoped
-samples, not an availability or throughput guarantee. The genuine pre-repair
-direct-map and stored-program receipts still verify without changing their file
-SHA256 `e625cb49f32df376c9cf1e5135582347ad502de21dd7ff713f52f210dd123c32`.
-
-Final saved lifecycle24actions and differential48steps replay successfully,
-byte-identical to their original traces:8writes/3interrupted uploads/3exact retries/
-4consumer resumes, and36accepted/12rejected outcomes respectively. Controlled
-9→3failure reduction was separately exercised as an explicitly injected fixture.
-The seven filtered old-data/crash/generated cases use their dedicated real-fixture
-runs, not missing-environment early returns. Of six ignored cases, the subprocess
-worker is executed by its parent and old-receipt verification ran explicitly;
-four optional comparative measurement campaigns remain unclaimed for this run.
-The Unix protocol witness ran explicitly:66nodes,132/2/3driver calls and396/6/9
-completed Sync/Ready cycles for per-node/batched/compressed upload—not packets or RTT.
-
-Integration also repaired two operations defects: program GC now compares exact
-membership without changing its oldest-first512-program batch policy; a permanent
-513-aged-program case proves both batches and young-program retention. Concurrent
-administrative indexers finish the authenticated winner's pending live-set fold
-instead of rebuilding an unchanged basis. A deterministic964-datom/340-node wasted
-rebuild is eliminated; complete connect/consolidate/drop still costs115.7ms and
-87SQLcalls in that fixture. Corrupt-root reconstruction remains tested.
-
-Builds used Rust1.90, PostgreSQL15.11 with durability enabled, release profile,
-incremental compilation disabled and-j4 on the shared development host. Formatting
-and all-target Clippy pass;24pre-existing warnings remain, with no new warning from
-the repairs. This is not a warning-free or deployment certification.
-
-## September9 historical acceptance
-
-## What has been exercised
-
-All results below used actual PostgreSQL15.11 and Rust1.90 on the development
-host. Test fixtures, crash targets and network namespaces were disposable. These
-are reproducible checks and workload-specific measurements, not a deployment
-certification, an uptime SLA or Datomic wire/storage parity.
-
-| Boundary | Evidence |
-| --- | --- |
-| Supported application | Local CLI and separate application preserve fixed schema/data requests, history, safe preview/replanning, partitions/UUIDs, fulltext and exact receipts through restart. Two-process regression2/2 passed8.97s. |
-| Remote application | Two isolated network namespaces connected by veth, verified TLS, restricted roles, invalid-token rejection, writer SIGKILL/replacement/rediscovery, exact retry and cross-process snapshot reference/excision policy. Passed15.43s. |
-| Remote programs and hints | Stored query/transaction program preview agrees with commit; retry after replacement and program rebinding keeps the original receipt. Altered/stale/foreign/absent hints do not change request identity. Transport tests3/3 passed13.35s. |
-| Observation | Consumer replay/checkpoint/RLS/generation/reconnect tests6/6 passed13.26s;512-notice flood coalesced504, maximum batch64. Whole reader process0SQL over500ms idle; separate-writer observation77.117ms consumer/77.121ms peer in the final debug sample. |
-| PostgreSQL TLS | Both actual asynchronous LISTEN backends verified TLS1.3 through pg_stat_ssl; missing trust and plaintext rejected. Consumer checkpoint/peer advancement pass;120ms SQL timeout observed121.03ms. |
-| Administration | Real backup reuse, offline verification, guarded separate-target restore, SIGTERM during an observed restore node-write wait followed by identical retry, inspection, authorized GC and diagnosed missing-search-root repair.2/2 passed14.84s. |
-| Crash recovery | Separate PostgreSQL immediate shutdown/WAL recovery with fsync/synchronous_commit/full_page_writes on. Current product at basis11, acknowledged12, successor13; full current/history fingerprints, retained values/log, exact retry and independent reopen agree. |
-| Old data | Preserved pre-partition/pre-fulltext binaries created actual4588/4818-byte genesis databases. Explicit schema26→29 migration and vocabulary transactions retain genesis bytes/hash, old values and retry identity. |
-| Generated lifecycle | Final24-action V2 saved trace replays after both repairs:8writes,3interrupted uploads,3writer restarts,3exact retries and4consumer resumes. A48-step durable-versus-pure comparison preserves36accepted/12rejected outcomes across restart. Controlled failure reduces9actions→3 and passes without the injected assertion. V1 action meanings remain readable. |
-
-Usage details and scoped measurements are in the [application guide](application.md),
-[query guide](queries.md), [fulltext guide](fulltext.md),
-[consumer guide](change-consumers.md), [operator guide](operations.md) and
-[independent-reader measurements](read-load.md). Original implementation records
-remain available in Git history at commit `d1670aeabffa92ad54fd200e86aee675351eb6e3`.
-
-## Cost evidence to interpret separately
-
-- The [independent-reader campaign](read-load.md) measures real Datalog work in
-  1/2/4processes, cold openings, concurrent scans and paced writes. At2048records
-  with a1MiBdecoded-node allowance, warm throughput was79.6k/104.5k/155.2kqueries/s
-  with0foregroundSQL. Doubling data with the same cache caused thrashing and
-  reduced it to122/237/497queries/s. Smaller-cache admission failures and all
-  foreground/background SQL, CPU, RSS and latency tails are reported. This is a
-  short shared-host sample, not cross-host linear scaling or a production ceiling.
-- Authenticated bounded subtree fetching reduced commitment encoding from1109
-  to243SQL calls for four256-operation transactions. Sequential/queued wall time
-  changed258.27→238.80ms /225.57→194.39ms while returned result-cell bytes grew
-  by44944. Smaller transactions did not consistently improve; the measured
-  ordered-transactor decision remains, with no added pipeline complexity.
-- Shared authenticated replay reduced inspection of the same8192-record,
-  nine-publication source from10.591s to6.784s. Restore SQL fell152963→39198,
-  but elapsed19.315→19.247s was essentially unchanged and returned bytes rose.
-  Single-publication target inspection also did not improve. See the
-  [maintenance measurements](operations.md#goal7-maintenance-measurement--2026-09-09) for exact fixtures, CPU/memory,
-  verification and reproduction. Large restore remains a substantial broad
-  replay/validation operation; fewer driver calls are not a speed guarantee.
-- Resident native reads avoid foreground SQL; new peers and cold misses still
-  authorize, authenticate and maintain retention through PostgreSQL. A serialized
-  snapshot reference is neither a credential nor a retention pin.
-- Four thousand ninety-six speculative extensions had height14 and a selective
-  read visited24 overlay nodes. This is structural sharing, not4096 whole-database
-  copies. The16k-row numeric hash-join fixture took109ms versus125s for its
-  reference nested-loop evaluator; this is not universal query throughput.
-- Transaction hints are implemented, bounded and advisory. The measured small
-  cold/warm fixture gained no speed and added16SQL calls; use evidence from the
-  actual workload before enabling them as an optimization.
-- Compression is a versioned optional physical projection. Canonical hashes and
-  rows remain authoritative, so transfer/cache savings can add PostgreSQL storage
-  and codec CPU. The batch-upload witness measured132→2driver calls (3with
-  compression) for66nodes; driver calls are not TCP round trips.
-- Fulltext is eventual and supplied-view validated, not a basis-stable ranking
-  service. A402-document native fixture read10167search bytes cold and0SQL warm;
-  its historical build wrote1543191cumulative spill bytes. That September9
-  full-projection build is superseded by the incremental maintenance above;
-  neither sample establishes arbitrary-scale search throughput.
-- The earlier100k-record G3 import/restore/inspection values remain
-  [historical baselines](operations.md#historical-g3-integrated-acceptance--2026-09-09),
-  not measurements of the newer reader/cache/maintenance paths.
-
-## Repeat the relevant checks
-
-Use a dedicated disposable PostgreSQL database with an administrative test login,
-never production. Runtime-role tests require permission to create restricted
-test roles. Set `ATOMIC_POSTGRES_URL` and an explicit
-`ATOMIC_POSTGRES_TRANSPORT=plaintext` for a private local fixture, or use the
-configured TLS APIs. Build the executable/example before process tests, which
-intentionally invoke those prebuilt files:
+Build binaries/examples before process fixtures that invoke them:
 
 ```sh
-cargo build --offline --bin atomic --example application_workflow
-cargo test --offline --test product_cli --test remote_transport --test remote_product --test change_consumer --test admin_cli --test postgres_runtime_roles -- --nocapture --test-threads=1
-cargo test --offline --test storage_fault_replay -- --nocapture --test-threads=1
-ATOMIC_DIFFERENTIAL_SEED=42 ATOMIC_DIFFERENTIAL_STEPS=48 cargo test --offline --test transactor_differential generated_ -- --nocapture --test-threads=1
+cargo build --offline --bin atomic --examples
+ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
+  cargo test --offline --all-targets -- --nocapture --test-threads=1
 ```
 
-The Linux remote-product test additionally requires `unshare`, `nsenter`, `ip`,
-OpenSSL and permission to create isolated user/network namespaces. It does not
-modify the host network. Admin tests create separate physical PostgreSQL
-databases for destructive/recovery checks. Missing required privileges are not
-evidence of a passing acceptance run.
+Use a dedicated disposable database and administrative fixture login. Verified
+TLS/process tests also need their isolated-network and certificate prerequisites;
+see [application setup](application.md) and [transport policy](operations.md).
+Missing PostgreSQL, role, TLS or namespace prerequisites can skip real work.
+Five opt-in manual tests were ignored, not counted as acceptance.
 
-For another generated lifecycle schedule, set `ATOMIC_STORAGE_FAULT_SEED=42` and
-`ATOMIC_STORAGE_FAULT_STEPS=24`. The test prints a private saved trace path.
-Re-run it with `ATOMIC_STORAGE_FAULT_REPLAY=/absolute/saved.trace`, omitting seed/
-step overrides. Failure reduction retains a second trace and a stable failure
-signature. The controlled reducer witness is explicitly injected, not a claim
-that it discovered a production defect.
+`postgres_restart_resilience` requires its own disposable server and explicit
+`ATOMIC_ALLOW_DISPOSABLE_PG_CRASH=1`, plus `ATOMIC_RESTART_POSTGRES_URL`,
+`ATOMIC_RESTART_POSTGRES_DATA`, `ATOMIC_RESTART_PG_CTL`,
+`ATOMIC_RESTART_POSTGRES_LOG` and exact `ATOMIC_RESTART_POSTGRES_OPTIONS`.
+Run it alone, never against a shared server. See the test and
+[transport/recovery guidance](operations.md) for prerequisites.
 
-PostgreSQL TLS and server-crash tests require their separate configured fixtures;
-see [transport policy](operations.md#transport-and-failure-policy), comments in
-`tests/postgres_tls.rs`, and the guarded `examples/restart_workflow.rs` driver.
-Do not reuse the shared application server for an availability-destroying test.
-A default green test run with missing PostgreSQL/TLS/crash configuration is not
-evidence that those paths executed.
-
-The September9 supported binary/example build and all-target compile passed.
-That broad library run passed341tests with1ignored; PostgreSQL was deliberately
-unset there, so its early-return tests are not counted as live PostgreSQL proof.
-The configured suites above and the historical implementation records supply that proof. Thirty focused
-maintenance tests and ten commitment tests also passed against actual PostgreSQL.
+`transactor_differential` compares saved-seed production transactions with the
+pure kernel; `storage_fault_replay` covers interrupted index work, restart, exact
+retry and consumer checkpoints. Historical executable/SQL-upgrade matrices are
+not supported.

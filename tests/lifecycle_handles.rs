@@ -2,8 +2,8 @@
 mod common;
 use atomic_core::{
     Attribute, CapacityLimits, Cardinality, Connection, DatabaseCatalog, EntityRef, Keyword, Peer,
-    PostgresConnectionConfig, PostgresIndexer, PostgresMigrator, Schema, TransactionRequest,
-    TransactionService, TransactionServiceConfig, TransactionStandby, TxOp, Value, ValueType,
+    PostgresConnectionConfig, Schema, TransactionRequest, TransactionService,
+    TransactionServiceConfig, TransactionStandby, TxOp, Value, ValueType,
 };
 use std::time::Duration;
 
@@ -49,10 +49,10 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
         return None;
     };
     let fixture = common::PostgresFixture::new(&url, label);
-    PostgresMigrator::connect(&fixture.connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    atomic_core::storage::PgBlockStore::install(&PostgresConnectionConfig::plaintext(
+        &fixture.connection,
+    ))
+    .unwrap();
     Some(fixture)
 }
 
@@ -86,9 +86,6 @@ fn renamed_handles_and_waiting_standby_ignore_reused_public_name() {
     assert!(
         matches!(Peer::connect(connection, "original", 0), Err(error) if error.code == "catalog/name-not-found")
     );
-    assert!(
-        matches!(PostgresIndexer::connect(connection, "original"), Err(error) if error.code == "catalog/name-not-found")
-    );
     let replacement = catalog
         .create_if_absent("original", schema())
         .unwrap()
@@ -107,8 +104,9 @@ fn renamed_handles_and_waiting_standby_ignore_reused_public_name() {
     let second = late_attachment
         .transact(request("second", 22), WAIT)
         .unwrap();
-    let mut indexer = PostgresIndexer::connect(connection, "renamed").unwrap();
-    assert_eq!(indexer.consolidate().unwrap().basis_t, second.basis_t);
+    let indexing = late_attachment.request_index().unwrap();
+    assert_eq!(indexing.target_t, second.basis_t);
+    late_attachment.sync_index(indexing.target_t, WAIT).unwrap();
     assert_eq!(
         reference
             .open(&config, 0, 0)
@@ -176,11 +174,8 @@ fn retirement_forbids_new_opens_but_keeps_captured_values_and_identity_isolation
         .transact(request("before-retire", 7), WAIT)
         .unwrap();
     let eid = receipt.tempids["item"];
-    let mut indexer = PostgresIndexer::connect(connection, "items")
-        .unwrap()
-        .with_segment_datoms(4)
-        .unwrap();
-    indexer.consolidate().unwrap();
+    let indexing = attached.request_index().unwrap();
+    attached.sync_index(indexing.target_t, WAIT).unwrap();
     let cold_peer = Peer::connect(connection, "items", 0).unwrap();
     let retained = cold_peer.database_value();
     let reference = retained.snapshot_reference().unwrap();
@@ -203,9 +198,11 @@ fn retirement_forbids_new_opens_but_keeps_captured_values_and_identity_isolation
     assert!(
         matches!(attached.reopen_snapshot(&reference), Err(error) if error.code == "catalog/database-retired")
     );
-    assert_eq!(
-        indexer.consolidate().unwrap_err().code,
-        "catalog/database-retired"
+    assert!(
+        writer
+            .client()
+            .transact(request("after-retire", 8), WAIT)
+            .is_err()
     );
     assert_eq!(retained.values(eid, COUNT).unwrap(), vec![Value::Long(7)]);
     assert!(

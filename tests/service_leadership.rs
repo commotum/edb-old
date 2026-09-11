@@ -1,9 +1,11 @@
+mod common;
+#[path = "common/current_refs.rs"]
+mod current;
 use atomic_core::{
-    Attribute, CapacityLimits, Cardinality, EntityRef, ErrorCategory, Keyword, PostgresStore,
-    Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue,
-    USER_PARTITION, Value, ValueType, make_eid,
+    Attribute, CapacityLimits, Cardinality, EntityRef, ErrorCategory, Keyword, Schema,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, TxValue, Value,
+    ValueType,
 };
-use postgres::{Client, NoTls};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -11,10 +13,6 @@ const ITEM_COUNT: u32 = 1_000;
 
 fn connection() -> Option<String> {
     std::env::var("ATOMIC_POSTGRES_URL").ok()
-}
-
-fn user(eidx: u64) -> u64 {
-    make_eid(USER_PARTITION, eidx).unwrap()
 }
 
 fn unique(prefix: &str) -> String {
@@ -42,11 +40,18 @@ fn schema() -> Schema {
 }
 
 fn set(value: i64) -> Vec<TxOp> {
-    vec![TxOp::Add {
-        entity: EntityRef::Id(user(42)),
-        attribute: ITEM_COUNT,
-        value: TxValue::Scalar(Value::Long(value)),
-    }]
+    vec![
+        TxOp::Add {
+            entity: EntityRef::Temp("item".into()),
+            attribute: atomic_core::DB_IDENT as u32,
+            value: Value::Keyword(Keyword::new("leadership", "item")).into(),
+        },
+        TxOp::Add {
+            entity: EntityRef::Temp("item".into()),
+            attribute: ITEM_COUNT,
+            value: TxValue::Scalar(Value::Long(value)),
+        },
+    ]
 }
 
 fn config(connection: &str, database_id: &str, holder_id: &str) -> TransactionServiceConfig {
@@ -61,26 +66,14 @@ fn config(connection: &str, database_id: &str, holder_id: &str) -> TransactionSe
     }
 }
 
-fn lease_row(client: &mut Client, database_id: &str) -> (String, u64) {
-    let row = client
-        .query_one(
-            "SELECT holder_id, epoch FROM atomic_transactor_leases WHERE lease_scope = $1",
-            &[&database_id],
-        )
-        .unwrap();
-    let epoch: i64 = row.get(1);
-    (row.get(0), epoch.try_into().unwrap())
-}
-
 #[test]
 fn service_owns_the_lease_and_takeover_advances_its_epoch() {
     let Some(connection) = connection() else {
         return;
     };
     let database_id = unique("fenced_db");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut setup = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut setup = common::TestStore::connect(&connection).unwrap();
     let initial_basis = setup
         .create_database(&database_id, schema())
         .unwrap()
@@ -89,8 +82,7 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
 
     let first = TransactionService::start(config(&connection, &database_id, "first")).unwrap();
     let first_client = first.client();
-    let mut observer = Client::connect(&connection, NoTls).unwrap();
-    assert_eq!(lease_row(&mut observer, &database_id), ("first".into(), 1));
+    assert_eq!(current::root(&connection, &database_id).writer_epoch, 1);
 
     let duplicate = match TransactionService::start(config(&connection, &database_id, "first")) {
         Ok(service) => {
@@ -101,7 +93,7 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
     };
     assert_eq!(
         (duplicate.category, duplicate.code),
-        (ErrorCategory::Unavailable, "postgres/lease-held")
+        (ErrorCategory::Busy, "storage/writer-active")
     );
     let held = match TransactionService::start(config(&connection, &database_id, "second")) {
         Ok(service) => {
@@ -112,7 +104,7 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
     };
     assert_eq!(
         (held.category, held.code),
-        (ErrorCategory::Unavailable, "postgres/lease-held")
+        (ErrorCategory::Busy, "storage/writer-active")
     );
 
     let one = first_client
@@ -132,7 +124,7 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
     );
 
     let second = TransactionService::start(config(&connection, &database_id, "second")).unwrap();
-    assert_eq!(lease_row(&mut observer, &database_id), ("second".into(), 2));
+    assert_eq!(current::root(&connection, &database_id).writer_epoch, 2);
     let two = second
         .client()
         .transact(
@@ -142,7 +134,9 @@ fn service_owns_the_lease_and_takeover_advances_its_epoch() {
         .unwrap();
     assert_eq!(two.basis_t, initial_basis + 2);
     assert_eq!(
-        two.db_after.values(user(42), ITEM_COUNT).unwrap(),
+        two.db_after
+            .values(two.tempids["item"], ITEM_COUNT)
+            .unwrap(),
         vec![Value::Long(2)]
     );
     second.shutdown();
@@ -155,9 +149,8 @@ fn a_database_bound_service_cannot_redirect_a_request_to_another_database() {
     };
     let database_a = unique("lease_bound_a");
     let database_b = unique("lease_bound_b");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut store = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut store = common::TestStore::connect(&connection).unwrap();
     let initial_a = store
         .create_database(&database_a, schema())
         .unwrap()
@@ -189,19 +182,12 @@ fn concurrent_candidates_have_exactly_one_higher_epoch_winner() {
         return;
     };
     let database_id = unique("lease_race");
-    let mut migrator = atomic_core::PostgresMigrator::connect(&connection).unwrap();
-    migrator.migrate().unwrap();
-    let mut setup = PostgresStore::connect(&connection).unwrap();
+    common::install(&connection).unwrap();
+    let mut setup = common::TestStore::connect(&connection).unwrap();
     setup.create_database(&database_id, schema()).unwrap();
-    let mut observer = Client::connect(&connection, NoTls).unwrap();
-    observer
-        .execute(
-            "INSERT INTO atomic_transactor_leases \
-             (lease_scope, holder_id, epoch, expires_at) \
-             VALUES ($1, 'expired', 1, clock_timestamp() - interval '1 second')",
-            &[&database_id],
-        )
-        .unwrap();
+    let prior = TransactionService::start(config(&connection, &database_id, "prior")).unwrap();
+    assert_eq!(current::root(&connection, &database_id).writer_epoch, 1);
+    prior.shutdown();
 
     let barrier = Arc::new(Barrier::new(3));
     let mut handles = Vec::new();
@@ -220,18 +206,19 @@ fn concurrent_candidates_have_exactly_one_higher_epoch_winner() {
         .map(|handle| handle.join().unwrap())
         .collect();
     assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
-    assert_eq!(
-        results
-            .iter()
-            .filter_map(|result| result.as_ref().err())
-            .next()
-            .unwrap()
-            .code,
-        "postgres/lease-held"
+    let failure = results
+        .iter()
+        .filter_map(|result| result.as_ref().err())
+        .next()
+        .unwrap();
+    assert!(
+        matches!(
+            failure.category,
+            ErrorCategory::Busy | ErrorCategory::Conflict
+        ),
+        "{failure:?}"
     );
-    let (holder, epoch) = lease_row(&mut observer, &database_id);
-    assert!(["candidate-a", "candidate-b"].contains(&holder.as_str()));
-    assert_eq!(epoch, 2);
+    assert_eq!(current::root(&connection, &database_id).writer_epoch, 2);
     for service in results.into_iter().flatten() {
         service.shutdown();
     }

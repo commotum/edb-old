@@ -256,9 +256,14 @@ fn isolated_network_application_retry_replacement_and_reference_handoff() {
     // Held values remain independent of transactor uptime. Automatic excision
     // may already have activated; do not assume a new reference can still open.
     assert_eq!(held.basis_t(), held_reference.key().basis_t());
+    let route_id = atomic_core::DatabaseCatalog::connect(&fixture.admin_url)
+        .unwrap()
+        .resolve("remote-application")
+        .unwrap()
+        .database_id;
     atomic_core::PostgresOperator::connect(&fixture.admin_url)
         .unwrap()
-        .process_excision_requests("remote-application")
+        .process_excision_requests(&route_id)
         .unwrap();
     let denied = app(&lab, &fixture, &credentials)
         .arg("--reference-in")
@@ -500,14 +505,20 @@ fn stock_auto_contender_health_and_cached_route_survive_process_crash() {
         original.db_after.values(entity, attribute).unwrap(),
         [Value::Long(42)]
     );
+    let active_id = DatabaseCatalog::connect(&fixture.admin_url)
+        .unwrap()
+        .resolve("automatic")
+        .unwrap()
+        .database_id;
+    let mut operator = PostgresOperator::connect(&fixture.admin_url).unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let basis: i64 = postgres::Client::connect(&fixture.admin_url, postgres::NoTls)
+        let basis = operator
+            .inspect_database(&active_id, false)
             .unwrap()
-            .query_one("SELECT max(basis_t) FROM atomic_tree_publications", &[])
-            .unwrap()
-            .get(0);
-        if basis as u64 >= fresh.basis_t {
+            .metrics
+            .index_basis_t;
+        if basis >= fresh.basis_t {
             break;
         }
         assert!(

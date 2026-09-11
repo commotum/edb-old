@@ -1,9 +1,8 @@
 use atomic_core::{
     Aggregate, Attribute, Binding, Cardinality, Clause, DataPattern, Database, EntityRef,
-    FindElement, FindSpec, Function, InputSpec, Keyword, Peer, PostgresIndexer, PostgresMigrator,
-    PostgresStore, Predicate, PullPattern, Query, QueryControl, QueryEngine, QueryInput,
-    QueryResult, QuerySource, QueryValue, Schema, Term, TransactionRequest, TupleSpec, TxOp, Value,
-    ValueType, Variable,
+    FindElement, FindSpec, Function, InputSpec, Keyword, Peer, Predicate, PullPattern, Query,
+    QueryControl, QueryEngine, QueryInput, QueryResult, QuerySource, QueryValue, Schema, Term,
+    TransactionRequest, TupleSpec, TxOp, Value, ValueType, Variable,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -479,10 +478,7 @@ fn postgres_captured_nested_tuple_join_and_maps_work_after_new_writes_and_writer
             .unwrap()
             .as_nanos()
     );
-    PostgresMigrator::connect(&postgres)
-        .unwrap()
-        .migrate()
-        .unwrap();
+    common::install(&postgres).unwrap();
     let mut schema = Schema::new();
     for (attribute, name, kind) in [
         (NAME, "name", ValueType::String),
@@ -507,7 +503,7 @@ fn postgres_captured_nested_tuple_join_and_maps_work_after_new_writes_and_writer
     .tuple(TupleSpec::Homogeneous(ValueType::Long));
     pair.indexed = true;
     schema.install(pair).unwrap();
-    PostgresStore::connect(&postgres)
+    common::TestStore::connect(&postgres)
         .unwrap()
         .create_database(&id, schema)
         .unwrap();
@@ -540,10 +536,7 @@ fn postgres_captured_nested_tuple_join_and_maps_work_after_new_writes_and_writer
         )
         .unwrap();
     let entity = first.tempids["item"];
-    PostgresIndexer::connect(&postgres, &id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(&postgres, &id).unwrap();
     peer.sync_index(first.basis_t, timeout).unwrap();
     let old = peer.db();
     let second = writer

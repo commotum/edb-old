@@ -1,12 +1,11 @@
+use atomic_core::storage::{BlockDatabase, BlockTransactor, BlockWriterOptions};
 use atomic_core::{
     Attribute, AttributeName, Cardinality, DB_IDENT, Database, DatabaseValue, EntityIdentifier,
-    EntityRef, IndexBoundary, IndexComponents, IndexOrder, Keyword, Peer, PostgresIndexer,
-    PostgresMigrator, PostgresStore, RawIndexValue, Schema, TupleSpec, TxOp, Unique, Value,
-    ValueType,
+    EntityRef, IndexBoundary, IndexComponents, IndexOrder, Keyword, Peer, RawIndexValue, Schema,
+    TupleSpec, TxOp, Unique, Value, ValueType,
 };
-use postgres::{Client, NoTls};
+use atomic_core::{PostgresConnectionConfig, TransactionRequest};
 use std::cmp::Ordering;
-use std::time::{Duration, Instant};
 
 mod common;
 
@@ -445,45 +444,34 @@ fn postgres_retained_readiness_and_tuple_bounds_survive_physical_backfill() {
     let fixture = common::PostgresFixture::new(&connection, "read_index_authoring");
     let connection = &fixture.connection;
     let database_id = "read_index_authoring";
-    PostgresMigrator::connect(connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    let mut store = PostgresStore::connect(connection).unwrap();
+    common::install(connection).unwrap();
+    let mut store = common::TestStore::connect(connection).unwrap();
     let created = store.create_database(database_id, schema(false)).unwrap();
     let service = common::start_service(connection, database_id);
     let seeded = common::transact(&service, "seed", created.basis_t(), &seed(), 1000);
     service.shutdown();
-    PostgresIndexer::connect(connection, database_id)
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(connection, database_id).unwrap();
     let before = Peer::connect(connection, database_id, 16)
         .unwrap()
         .database_value();
     assert!(!before.has_avet(&AttributeName::Id(PAIR)).unwrap());
 
-    let mut blocker = Client::connect(connection, NoTls).unwrap();
-    let build_key: i64 = blocker
-        .query_one(
-            "SELECT atomic_tree_database_build_pin_key($1)",
-            &[&database_id],
-        )
-        .unwrap()
-        .get(0);
-    blocker
-        .query_one("SELECT pg_advisory_lock($1)", &[&build_key])
-        .unwrap();
-    let service = common::start_service(connection, database_id);
+    let config = PostgresConnectionConfig::plaintext(connection);
+    let mut writer = BlockTransactor::claim(
+        &config,
+        BlockDatabase::resolve(&config, database_id).unwrap(),
+        BlockWriterOptions::default(),
+    )
+    .unwrap();
     let mut attribute = seeded.db_after.schema().attribute(PAIR).unwrap().clone();
     attribute.indexed = true;
-    let enabled = common::transact(
-        &service,
-        "enable",
-        seeded.basis_t,
-        &[TxOp::AlterAttribute(attribute)],
-        2000,
-    );
+    let enabled = writer
+        .transact(
+            &TransactionRequest::new("enable", vec![TxOp::AlterAttribute(attribute)])
+                .comparing_basis(seeded.basis_t)
+                .with_tx_instant(2000),
+        )
+        .unwrap();
     let pending = Peer::connect(connection, database_id, 16)
         .unwrap()
         .database_value();
@@ -520,24 +508,9 @@ fn postgres_retained_readiness_and_tuple_bounds_survive_physical_backfill() {
         ))
         .unwrap();
 
-    assert!(
-        blocker
-            .query_one("SELECT pg_advisory_unlock($1)", &[&build_key])
-            .unwrap()
-            .get::<_, bool>(0)
-    );
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        let stats = service.background_indexing_stats();
-        if stats.published_basis_t >= enabled.basis_t && stats.pending_avet_projections == 0 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "AVET backfill did not complete: {stats:?}"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    writer.release().unwrap();
+    common::consolidate(connection, database_id).unwrap();
+    let service = common::start_service(connection, database_id);
     let ready = Peer::connect(connection, database_id, 16)
         .unwrap()
         .database_value();

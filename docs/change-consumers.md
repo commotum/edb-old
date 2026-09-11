@@ -70,21 +70,24 @@ consumer name deliberately to process the current retained generation; old
 events already copied by an application are not erased. Missing retained history
 and lineage replacement also fail explicitly, not by silently skipping ahead.
 
-The current schema baseline includes application checkpoint state. Initialize a
-fresh PostgreSQL catalog with `atomic migrate`; historical catalog schema upgrades
-are unsupported. Runtime provisioning gives peer/writer roles SELECT/INSERT/UPDATE
-on the checkpoint table, not canonical write powers.
-Row-level security restricts checkpoint rows to `current_user`; a name is shared
-only within one SQL login and logical database. Existing PostgreSQL schema/role
-scoping still governs database access; consumer names are not a tenant ACL.
-The catalog owner is administrative and can inspect/repair checkpoint rows.
+Checkpoints are Rust-encoded values in the same generic reference store as other
+engine coordination data, not a separate SQL table. Initialize fresh storage with
+`atomic install`; historical catalog upgrades are unsupported. The library scopes
+each checkpoint by database route, SQL login and consumer name. Different logins
+therefore do not accidentally share progress through the API.
+
+This namespacing is not SQL row-level security or a tenant ACL. Runtime credentials
+with reference-write privileges are trusted storage participants; direct SQL can
+access other references within their granted schema. Use separate PostgreSQL
+schemas/roles for storage isolation and the authenticated application boundary for
+untrusted clients. See [operations](operations.md) for the role contract.
 
 ## Focused acceptance
 
 With an authorized disposable PostgreSQL fixture configured, run
 `cargo test --test change_consumer -- --nocapture --test-threads=1`.
 The suite covers restart/replay/CAS, malformed and oversized checkpoints/events,
-listener disconnect, generation change, restricted-role isolation, and a separate
+listener disconnect, generation change, restricted-role API namespacing, and a separate
 supported writer process waking an independent peer and an already-waiting
 consumer. The process witness prints reader idle SQL and commit-to-observation
 times. These are bounded debug-build samples, not a throughput or scaling claim;

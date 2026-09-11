@@ -1,8 +1,8 @@
+mod common;
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, Cardinality, Connection, Database, DatabaseStats,
-    DatabaseValue, EntityRef, ErrorCategory, IndexOrder, Keyword, PostgresMigrator, PostgresStore,
-    QueryControl, Schema, TransactionRequest, TransactionService, TransactionServiceConfig, TxOp,
-    Value, ValueType,
+    DatabaseValue, EntityRef, ErrorCategory, IndexOrder, Keyword, QueryControl, Schema,
+    TransactionRequest, TransactionService, TransactionServiceConfig, TxOp, Value, ValueType,
 };
 use postgres::{Client, NoTls};
 use std::sync::{
@@ -192,11 +192,8 @@ fn native_stats_and_finite_index_requests_use_the_existing_worker() {
     let fixture = Fixture::new(&connection);
     let connection = &fixture.connection;
     const DATABASE: &str = "statistics";
-    PostgresMigrator::connect(connection)
-        .unwrap()
-        .migrate()
-        .unwrap();
-    PostgresStore::connect(connection)
+    common::install(connection).unwrap();
+    common::TestStore::connect(connection)
         .unwrap()
         .create_database(DATABASE, schema())
         .unwrap();

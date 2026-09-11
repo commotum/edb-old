@@ -2,9 +2,8 @@ mod common;
 
 use atomic_core::{
     Attribute, Cardinality, DB_EXCISE, Database, EntityRef, ErrorCategory, IndexOrder, Keyword,
-    OperationContext, OperationKind, Peer, PostgresConnectionConfig, PostgresIndexer,
-    PostgresMigrator, PostgresOperator, PostgresStore, Schema, SnapshotReference, TxOp, Value,
-    ValueType,
+    OperationContext, OperationKind, Peer, PostgresConnectionConfig, PostgresOperator, Schema,
+    SnapshotReference, TxOp, Value, ValueType,
 };
 use std::time::Instant;
 
@@ -46,17 +45,38 @@ fn eager_fixtures_do_not_invent_a_committed_identity() {
     );
 }
 
-// Alter the final named endpoint/witness fields, then recompute the public
-// checksum: decoding isn't authorization. Tests must reach storage validation.
+// Forge a logical endpoint or a covering-index claim using the current codec,
+// then recompute the public checksum. Decoding isn't authorization: each
+// well-formed forged reference must reach and fail storage validation.
 fn altered(reference: &SnapshotReference, witness: bool) -> SnapshotReference {
     let mut bytes = reference.encode().unwrap();
+    assert_eq!(&bytes[..6], b"ATSN\0\x03");
     let mut at = 6;
     for _ in 0..2 {
         let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
         at += 4 + size;
     }
-    at += 24 + if witness { 64 } else { 32 };
-    bytes[at] ^= 0x80;
+    if witness {
+        at += 24 + 64;
+        let length = u16::from_be_bytes(bytes[at..at + 2].try_into().unwrap()) as usize;
+        at += 2;
+        let value_bytes = &bytes[at..at + length];
+        let mut value = atomic_core::storage::root::DatabaseValueRoot::decode(
+            &atomic_core::sha256(value_bytes),
+            value_bytes,
+        )
+        .unwrap();
+        let mut index = value.indexes.expect("fixture has a covering index");
+        index[0] ^= 0x80;
+        value.indexes = Some(index);
+        let forged = value.encode().unwrap();
+        assert_eq!(forged.len(), length);
+        bytes[at..at + length].copy_from_slice(&forged);
+    } else {
+        // generation/basis/frontier, transaction hash, then logical state hash.
+        at += 24 + 32;
+        bytes[at] ^= 0x80;
+    }
     let end = bytes.len() - 32;
     let hash = atomic_core::sha256(&bytes[..end]);
     bytes[end..].copy_from_slice(&hash);
@@ -71,8 +91,8 @@ fn postgres_exact_references_preserve_basis_views_retention_and_no_history_expos
     };
     let fixture = common::PostgresFixture::new(&url, "snapshot_refs");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    let created = PostgresStore::connect(url)
+    common::install(url).unwrap();
+    let created = common::TestStore::connect(url)
         .unwrap()
         .create_database("snapshots", schema())
         .unwrap();
@@ -163,10 +183,7 @@ fn postgres_exact_references_preserve_basis_views_retention_and_no_history_expos
         vec![Value::Long(2)]
     );
 
-    PostgresIndexer::connect(url, "snapshots")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(url, "snapshots").unwrap();
     let peer = Peer::connect(url, "snapshots", 8).unwrap();
     assert_eq!(peer.db().snapshot_key().unwrap(), key);
     // noHistory is a physical retention policy, not a different logical commit.
@@ -233,21 +250,18 @@ fn postgres_exact_references_preserve_basis_views_retention_and_no_history_expos
     }
     assert!(peer.reopen_snapshot(&altered(&reference, false)).is_err());
     assert!(peer.reopen_snapshot(&altered(&reference, true)).is_err());
-    PostgresStore::connect(url)
+    common::TestStore::connect(url)
         .unwrap()
         .create_database("different", schema())
         .unwrap();
-    PostgresIndexer::connect(url, "different")
-        .unwrap()
-        .consolidate()
-        .unwrap();
+    common::consolidate(url, "different").unwrap();
     assert_eq!(
         Peer::connect(url, "different", 8)
             .unwrap()
             .reopen_snapshot(&reference)
             .unwrap_err()
             .code,
-        "snapshot/identity-mismatch"
+        "peer/identity-mismatch"
     );
     assert_eq!(peer.load_stats().compatibility_materializations, 0);
     eprintln!(
@@ -263,8 +277,8 @@ fn postgres_excision_rejects_old_references_without_revoking_retained_values() {
     };
     let fixture = common::PostgresFixture::new(&url, "snapshot_excision");
     let url = &fixture.connection;
-    PostgresMigrator::connect(url).unwrap().migrate().unwrap();
-    let created = PostgresStore::connect(url)
+    common::install(url).unwrap();
+    let created = common::TestStore::connect(url)
         .unwrap()
         .create_database("excise", schema())
         .unwrap();
@@ -291,9 +305,13 @@ fn postgres_excision_rejects_old_references_without_revoking_retained_values() {
         2000,
     );
     service.shutdown();
+    let database = atomic_core::DatabaseCatalog::connect(url)
+        .unwrap()
+        .resolve("excise")
+        .unwrap();
     PostgresOperator::connect(url)
         .unwrap()
-        .process_excision_requests("excise")
+        .process_excision_requests(&database.database_id)
         .unwrap();
     let peer = Peer::connect(url, "excise", 8).unwrap();
     assert!(peer.db().values(eid, 1000).unwrap().is_empty());
