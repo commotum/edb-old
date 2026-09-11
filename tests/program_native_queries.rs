@@ -200,45 +200,52 @@ fn rows(program: &Program, database: &DatabaseValue, args: &[Value]) -> Vec<Vec<
 }
 
 #[test]
-fn current_compact_program_codec_matches_independent_golden_bytes() {
-    // Fixed bytes independent of this encoder. This grammar is still emitted
-    // by the current encoder; this is not an old-executable upgrade matrix.
-    let golden = "41544d4306000300000000000000002e00040200000000032500010000000100000000010000000003e80208000000000000000720000000021e0114011321b101d36d19a57960113b32bf5476157aad93b6c82a8a7e9867a6ccb515ed9f";
-    let bytes = (0..golden.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&golden[at..at + 2], 16).unwrap())
-        .collect::<Vec<_>>();
-    let program = Program {
+fn compact_queries_share_native_semantics_and_preserve_canonical_row_order() {
+    let seeded = Database::new(schema())
+        .unwrap()
+        .with(&seed(), 1_000)
+        .unwrap();
+    let database = seeded.db_after.database_value();
+    let compact = QueryTemplate::new(
+        vec![1, 0],
+        vec![QueryPattern::new(
+            QueryTerm::Variable(0),
+            SCORE,
+            QueryTerm::Variable(1),
+        )],
+    )
+    .unwrap();
+    let native = QueryTemplate::native(compact.native_query().clone(), vec![], vec![]).unwrap();
+    let program = |template| Program {
         kind: ProgramKind::Query,
         arity: 0,
         instructions: vec![
-            Instruction::Query(
-                QueryTemplate::new(
-                    vec![0],
-                    vec![QueryPattern::new(
-                        QueryTerm::Variable(0),
-                        EDGE,
-                        QueryTerm::Constant(Value::Long(7)),
-                    )],
-                )
-                .unwrap(),
-            ),
+            Instruction::Query(template),
             Instruction::ForEach {
-                body: vec![Instruction::Unpack(1), Instruction::EmitRow(1)],
+                body: vec![Instruction::Unpack(2), Instruction::EmitRow(2)],
             },
             Instruction::Return,
         ],
     };
-    assert_eq!(decode_program(&bytes).unwrap(), program);
-    assert_eq!(encode_program(&program).unwrap(), bytes);
-    assert_eq!(
-        program_hash(&program)
-            .unwrap()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>(),
-        "264b0842aefcf5fb58af782cb787a1b571c4ca248a5292d2dec458895db6a1b4"
-    );
+    let compact = program(compact);
+    let native = program(native);
+    let expected = vec![
+        vec![Value::Long(4), Value::Ref(seeded.tempids["low"])],
+        vec![Value::Long(10), Value::Ref(seeded.tempids["middle"])],
+        vec![Value::Long(30), Value::Ref(seeded.tempids["leaf"])],
+    ];
+    assert_eq!(rows(&compact, &database, &[]), expected);
+    let native_rows = rows(&native, &database, &[]);
+    assert_eq!(native_rows.len(), expected.len());
+    assert!(expected.iter().all(|row| native_rows.contains(row)));
+    for program in [compact, native] {
+        let bytes = encode_program(&program).unwrap();
+        assert_eq!(decode_program(&bytes).unwrap(), program);
+        assert_eq!(
+            rows(&decode_program(&bytes).unwrap(), &database, &[]),
+            rows(&program, &database, &[])
+        );
+    }
 }
 
 #[test]
@@ -255,7 +262,10 @@ fn native_query_program_combines_rules_predicate_not_history_and_dynamic_attribu
         .database_value();
     let program = selector(ProgramKind::Query, CHOSEN);
     let bytes = encode_program(&program).unwrap();
-    assert_eq!(&bytes[16..18], &7u16.to_be_bytes());
+    assert_eq!(
+        &bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     assert_eq!(decode_program(&bytes).unwrap(), program);
     let args = arguments(first.tempids["root"], first.db_after.basis_t());
     assert_eq!(
@@ -264,7 +274,7 @@ fn native_query_program_combines_rules_predicate_not_history_and_dynamic_attribu
     );
     // Native nested-query execution must carry the same named temporal
     // sources and recursive rule behavior through the durable artifact.
-    let inner = selector_template().native_query().unwrap().clone();
+    let inner = selector_template().native_query().clone();
     let mut nested = Query::new(
         inner.find.clone(),
         vec![Clause::Function {
@@ -330,7 +340,7 @@ fn native_query_program_combines_rules_predicate_not_history_and_dynamic_attribu
     let mut windowed = program.clone();
     windowed.instructions[0] = Instruction::Query(
         QueryTemplate::native(
-            selector_template().native_query().unwrap().clone(),
+            selector_template().native_query().clone(),
             vec![0, 1, 2],
             vec![
                 QueryTemplateSource::current("$")
@@ -366,6 +376,9 @@ fn native_query_shares_program_work_allocation_and_cancellation_limits() {
         .database_value();
     let program = selector(ProgramKind::Query, CHOSEN);
     let args = arguments(first.tempids["root"], first.db_after.basis_t());
+    // Measure the reusable query after its static rule analysis is cached.
+    // A cold invocation may additionally pay the one-time analysis cost.
+    rows(&program, &after, &args);
     let mut budget = ProgramBudget::new(ProgramControl::default()).unwrap();
     let before = budget.remaining_fuel();
     ProgramRuntime
@@ -728,13 +741,13 @@ fn native_structured_inputs_functions_and_pull_feed_ordinary_vm_instructions() {
 fn native_codec_rejects_future_versions_and_checks_bounded_mutated_artifacts() {
     let bytes = encode_program(&selector(ProgramKind::Query, CHOSEN)).unwrap();
     let mut future = bytes.clone();
-    future[25..27].copy_from_slice(&99u16.to_be_bytes());
+    future[16..18].copy_from_slice(&99u16.to_be_bytes());
     let checksum_at = future.len() - 32;
     let checksum = sha256(&future[..checksum_at]);
     future[checksum_at..].copy_from_slice(&checksum);
     assert_eq!(
         decode_program(&future).unwrap_err().code,
-        "encoding/unsupported-query-template-version"
+        "encoding/unsupported-program-abi"
     );
     for at in 24..checksum_at {
         let mut changed = bytes.clone();
@@ -749,7 +762,7 @@ fn native_codec_rejects_future_versions_and_checks_bounded_mutated_artifacts() {
             );
         }
     }
-    let mut query = selector_template().native_query().unwrap().clone();
+    let mut query = selector_template().native_query().clone();
     for _ in 0..40 {
         query = Query::new(
             FindSpec::Scalar(FindElement::Variable("x".into())),

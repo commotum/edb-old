@@ -148,9 +148,9 @@ fn indexed_native_search_is_view_safe_lag_visible_and_selective() {
         BTreeSet::from([b]),
         "stale candidates must not return retracted values"
     );
-    let not_yet = find(&lagging, "juliet");
-    assert!(not_yet.hits.is_empty());
-    assert!(not_yet.stats.index_basis_t < lagging.basis_t());
+    let recent = find(&lagging, "juliet");
+    assert_eq!(ids(&recent), BTreeSet::from([a]));
+    assert!(recent.stats.index_basis_t < lagging.basis_t());
     common::consolidate(url, "search").unwrap();
     let current_peer = Connection::connect(url, "search", 512).unwrap();
     let current = current_peer.db();

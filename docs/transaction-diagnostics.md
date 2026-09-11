@@ -34,9 +34,9 @@ transaction values, credentials, or request keys in them.
 - `identity_claims`, `identity_lookups`, and `upsert_resolutions` distinguish
   temporary unique-identity assertions, exact unique-attribute lookups, and
   matches to existing entities. Repeated matching claims count repeatedly.
-- `uniqueness_checks` counts values/groups checked by the actual algorithm.
-  The eager oracle scans successor facts; the native assessor checks affected
-  groups. Their costs need not have identical counts.
+- `uniqueness_checks` counts affected value groups checked by the shared
+  selective assessor. Memory, speculative and durable transactions use the
+  same assessment algorithm.
 - `redundancy_checks` and `redundant_datoms` describe comparisons with db-before;
   `duplicate_datoms` describes duplicates removed inside the transaction.
 - `composite_candidates` counts affected entity/composite pairs computed;

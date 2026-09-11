@@ -291,7 +291,7 @@ fn unique(prefix: &str) -> String {
 
 fn service_config(connection: &str, database_id: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.to_owned(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
         database_id: database_id.to_owned(),
         holder_id: unique("ref-identity-holder"),
         lease_duration: Duration::from_secs(5),

@@ -17,19 +17,9 @@ pub type ProgramHash = Digest;
 const MAX_ARITY: u8 = 10;
 const MAX_INSTRUCTIONS: usize = 4_096;
 const MAX_BLOCK_DEPTH: usize = 32;
-// ABI 4 adds full persisted transaction-data emitters and structured cancel
-// anomalies. Existing programs without recursive input-reference literals
-// retain ABI 4 (or ABI 5 for the explicit dual-predicate representation).
-// Only programs containing the new lookup-input literals select ABI 6, so
-// all previously accepted program bytes and content identities stay intact.
-pub const PROGRAM_ABI_VERSION: u16 = 4;
-pub(crate) const DUAL_PREDICATE_PROGRAM_ABI_VERSION: u16 = 5;
-pub const QUERY_TEMPLATE_VERSION: u16 = 1;
-pub const NATIVE_QUERY_TEMPLATE_VERSION: u16 = 2;
-/// General query literals and arbitrary-width relation patterns.
-pub const GENERAL_QUERY_TEMPLATE_VERSION: u16 = 3;
-/// Native portable data/string helpers; earlier templates retain their bytes.
-pub const DATA_FUNCTION_QUERY_TEMPLATE_VERSION: u16 = 4;
+/// The single current program format, including the shared query AST.
+/// Earlier development formats require fresh databases.
+pub const PROGRAM_ABI_VERSION: u16 = 12;
 pub const MAX_QUERY_PATTERNS: usize = 64;
 pub const MAX_QUERY_VARIABLES: usize = 32;
 
@@ -256,8 +246,7 @@ fn query_term_rank(term: &QueryTerm) -> u8 {
 
 /// Restricted Datomic data-pattern clause `[e a v]`.
 ///
-/// This is the original version-1 conjunctive form. [`QueryTemplate::native`]
-/// embeds the native query AST for dynamic attributes and composable clauses.
+/// [`QueryTemplate::new`] lowers these authoring forms to the shared query AST.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryPattern {
     pub entity: QueryTerm,
@@ -282,137 +271,44 @@ impl QueryPattern {
     }
 }
 
-/// Canonical, versioned query embedded in a persisted program.
-///
-/// Version 1 stores conjunctive patterns in stable structural order and
-/// returns a canonically ordered distinct relation. Version 2 embeds the
-/// ordinary native query AST, including its find shapes and unordered
-/// relation semantics. Both use declarative clauses, not imperative scans.
+/// A persisted query over the shared native query AST and evaluator.
+/// The compact constructor is an authoring convenience with canonical row order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryTemplate {
-    version: u16,
-    find: Vec<u8>,
-    patterns: Vec<QueryPattern>,
-    native: Option<Box<native_query::NativeQueryTemplate>>,
+    native: Box<native_query::NativeQueryTemplate>,
+    pub(crate) canonical_order: bool,
 }
 
 impl QueryTemplate {
     pub fn new(find: Vec<u8>, mut patterns: Vec<QueryPattern>) -> Result<Self, SemanticError> {
         patterns.sort_by(QueryPattern::canonical_cmp);
-        let template = Self {
-            version: QUERY_TEMPLATE_VERSION,
-            find,
-            patterns,
-            native: None,
-        };
-        template.validate_static()?;
-        Ok(template)
-    }
-
-    pub fn version(&self) -> u16 {
-        self.version
-    }
-
-    /// Explicit version 2: author ordinary native query clauses/rules and bind
-    /// their inputs to program arguments. Named sources are immutable views
-    /// of this invocation's database, never connections or alternate stores.
-    pub fn native(
-        query: crate::Query,
-        input_arguments: Vec<u8>,
-        sources: Vec<QueryTemplateSource>,
-    ) -> Result<Self, SemanticError> {
-        let native = native_query::NativeQueryTemplate::new(query, input_arguments, sources)?;
-        Ok(Self {
-            version: native.version()?,
-            find: Vec::new(),
-            patterns: Vec::new(),
-            native: Some(Box::new(native)),
-        })
-    }
-
-    pub fn native_query(&self) -> Option<&crate::Query> {
-        self.native.as_ref().map(|native| &native.query)
-    }
-
-    pub(crate) fn native_spec(&self) -> Option<&native_query::NativeQueryTemplate> {
-        self.native.as_deref()
-    }
-
-    /// Legacy version-1 projection slots; empty for native version-2 queries.
-    pub fn find(&self) -> &[u8] {
-        &self.find
-    }
-
-    /// Legacy version-1 conjunction; use `native_query` for version 2.
-    pub fn patterns(&self) -> &[QueryPattern] {
-        &self.patterns
-    }
-
-    fn validate(&self, arity: u8) -> Result<(), SemanticError> {
-        self.validate_static()?;
-        if let Some(native) = &self.native {
-            return native.validate_arity(arity);
-        }
-        for term in self.terms() {
-            if let QueryTerm::Input(index) = term
-                && *index >= arity
-            {
-                return Err(incorrect(
-                    "program/query-input-index",
-                    format!("query input {index} is outside program arity {arity}"),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_static(&self) -> Result<(), SemanticError> {
-        if let Some(native) = &self.native {
-            if self.version != native.version()?
-                || !self.find.is_empty()
-                || !self.patterns.is_empty()
-            {
-                return Err(incorrect(
-                    "program/query-template-version",
-                    "native query template has inconsistent version or legacy fields",
-                ));
-            }
-            return native.validate();
-        }
-        if self.version != QUERY_TEMPLATE_VERSION {
-            return Err(incorrect(
-                "program/query-template-version",
-                format!("query template version {} is unsupported", self.version),
-            ));
-        }
-        if self.find.is_empty() || self.find.len() > MAX_QUERY_VARIABLES {
+        if find.is_empty() || find.len() > MAX_QUERY_VARIABLES {
             return Err(incorrect(
                 "program/query-find-shape",
                 format!("query find must contain 1 to {MAX_QUERY_VARIABLES} variable slots"),
             ));
         }
-        if self.patterns.is_empty() || self.patterns.len() > MAX_QUERY_PATTERNS {
+        if patterns.is_empty() || patterns.len() > MAX_QUERY_PATTERNS {
             return Err(incorrect(
                 "program/query-pattern-limit",
                 format!("query must contain 1 to {MAX_QUERY_PATTERNS} data patterns"),
             ));
         }
-        if self
-            .patterns
+        if patterns
             .windows(2)
-            .any(|patterns| patterns[0].canonical_cmp(&patterns[1]) != Ordering::Less)
+            .any(|pair| pair[0].canonical_cmp(&pair[1]) != Ordering::Less)
         {
             return Err(incorrect(
                 "program/noncanonical-query",
-                "query patterns must be unique and canonically ordered",
+                "query patterns must be unique",
             ));
         }
-
-        let variables = self
-            .terms()
+        let variables = patterns
+            .iter()
+            .flat_map(|pattern| [&pattern.entity, &pattern.value])
             .filter_map(|term| match term {
                 QueryTerm::Variable(variable) => Some(*variable),
-                QueryTerm::Input(_) | QueryTerm::Constant(_) => None,
+                _ => None,
             })
             .collect::<BTreeSet<_>>();
         if variables.len() > MAX_QUERY_VARIABLES
@@ -426,33 +322,90 @@ impl QueryTemplate {
                 "query variables must use dense slots beginning at zero",
             ));
         }
-        if self
-            .find
-            .iter()
-            .any(|variable| !variables.contains(variable))
-        {
+        if find.iter().any(|variable| !variables.contains(variable)) {
             return Err(incorrect(
                 "program/unbound-query-find",
                 "every query find slot must be bound by a data pattern",
             ));
         }
-        Ok(())
-    }
-
-    fn terms(&self) -> impl Iterator<Item = &QueryTerm> {
-        self.patterns
+        let arguments = patterns
             .iter()
             .flat_map(|pattern| [&pattern.entity, &pattern.value])
+            .filter_map(|term| match term {
+                QueryTerm::Input(index) => Some(*index),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        fn term(term: QueryTerm) -> crate::Term {
+            match term {
+                QueryTerm::Variable(index) => crate::Term::Variable(variable("v", index)),
+                QueryTerm::Input(index) => crate::Term::Variable(variable("input", index)),
+                QueryTerm::Constant(value) => crate::Term::Constant(value),
+            }
+        }
+        fn variable(prefix: &str, index: u8) -> crate::Variable {
+            crate::Variable::new(format!("{prefix}{index}")).expect("generated variable name")
+        }
+        let mut query = crate::Query::new(
+            crate::FindSpec::Relation(
+                find.into_iter()
+                    .map(|index| crate::FindElement::Variable(variable("v", index)))
+                    .collect(),
+            ),
+            patterns
+                .into_iter()
+                .map(|pattern| {
+                    crate::Clause::Pattern(Box::new(crate::DataPattern::new(
+                        term(pattern.entity),
+                        crate::Term::Constant(Value::Ref(u64::from(pattern.attribute))),
+                        term(pattern.value),
+                    )))
+                })
+                .collect(),
+        );
+        query.inputs = arguments
+            .iter()
+            .map(|index| crate::InputSpec::Scalar(variable("input", *index)))
+            .collect();
+        let mut template = Self::native(query, arguments.into_iter().collect(), vec![])?;
+        template.canonical_order = true;
+        Ok(template)
     }
 
-    fn variable_count(&self) -> usize {
-        self.terms()
-            .filter_map(|term| match term {
-                QueryTerm::Variable(variable) => Some(usize::from(*variable) + 1),
-                QueryTerm::Input(_) | QueryTerm::Constant(_) => None,
-            })
-            .max()
-            .unwrap_or(0)
+    /// Bind ordinary native query inputs to program arguments. Named sources
+    /// are immutable views of this invocation's database.
+    pub fn native(
+        query: crate::Query,
+        input_arguments: Vec<u8>,
+        sources: Vec<QueryTemplateSource>,
+    ) -> Result<Self, SemanticError> {
+        Ok(Self {
+            native: Box::new(native_query::NativeQueryTemplate::new(
+                query,
+                input_arguments,
+                sources,
+            )?),
+            canonical_order: false,
+        })
+    }
+
+    pub fn native_query(&self) -> &crate::Query {
+        &self.native.query
+    }
+
+    pub(crate) fn native_spec(&self) -> &native_query::NativeQueryTemplate {
+        &self.native
+    }
+
+    fn validate(&self, arity: u8) -> Result<(), SemanticError> {
+        if self.canonical_order && !matches!(self.native.query.find, crate::FindSpec::Relation(_)) {
+            return Err(incorrect(
+                "program/query-result-shape",
+                "canonical query ordering requires a relation",
+            ));
+        }
+        self.native.validate()?;
+        self.native.validate_arity(arity)
     }
 }
 
@@ -1066,27 +1019,6 @@ impl ProgramPrefixCursor<'_> {
 }
 
 impl<'a> ProgramRead<'a> {
-    fn schema(self) -> &'a crate::Schema {
-        match self {
-            Self::AttributePredicate => {
-                unreachable!("validated attribute predicate attempted a database read")
-            }
-            Self::Eager(database) => database.schema(),
-            Self::Exact(database) => database.schema(),
-        }
-    }
-
-    fn physical_avet_ready(self, attribute: u32) -> bool {
-        match self {
-            Self::AttributePredicate => false,
-            Self::Eager(database) => database
-                .schema()
-                .attribute(attribute)
-                .is_ok_and(|attribute| attribute.indexed || attribute.unique.is_some()),
-            Self::Exact(database) => database.physical_avet_ready(attribute),
-        }
-    }
-
     fn entid(self, ident: &Keyword) -> Option<u64> {
         match self {
             Self::AttributePredicate => {
@@ -1516,7 +1448,7 @@ impl ProgramRuntime {
     }
 
     /// General query data with the same exact database and shared accounting
-    /// as the stored-scalar compatibility entry point.
+    /// as the scalar-input query entry point.
     pub fn execute_query_general_with_budget(
         &self,
         program: &Program,
@@ -1671,7 +1603,7 @@ impl ProgramRuntime {
         })
     }
 
-    #[allow(dead_code)] // retained as the eager semantic-oracle adapter
+    #[cfg(test)]
     pub(crate) fn execute_prevalidated_with_budget(
         &self,
         program: &ValidatedProgram,
@@ -1687,12 +1619,7 @@ impl ProgramRuntime {
         self.execute_prevalidated_runtime_with_budget(program, database, &arguments, budget)
     }
 
-    /// Execute already validated persisted code against one exact immutable
-    /// database value. Unlike [`Self::execute_query`], this internal entry
-    /// point accepts every program role: transaction functions and entity
-    /// predicates need the same lazy db-before/db-after read boundary as
-    /// queries do. The eager entry above remains a compatibility adapter for
-    /// the semantic reference kernel.
+    /// Scalar test adapter for the prevalidated exact-value runtime entry point.
     #[cfg(test)]
     pub(crate) fn execute_prevalidated_exact_with_budget(
         &self,
@@ -1752,7 +1679,7 @@ impl ProgramRuntime {
         })
     }
 
-    #[allow(dead_code)] // retained as the eager semantic-oracle adapter
+    #[cfg(test)]
     pub(crate) fn execute_prevalidated_runtime_with_budget(
         &self,
         program: &ValidatedProgram,
@@ -2822,366 +2749,31 @@ fn tx_value(value: RuntimeValue) -> Result<TxValue, SemanticError> {
     }
 }
 
-type QueryBinding = Vec<Option<Value>>;
-
-/// Evaluate the persisted subset of `d/q` made available to database
-/// functions. Recovered `datomic.function/compile-clojure` imports both `q`
-/// and `db`; the transaction model likewise promises declarative Datalog on
-/// the immutable database value. This is a real indexed conjunctive join, not
-/// a name for chained `LoadMany` traversal.
 fn execute_query_template(
     database: ProgramRead<'_>,
     arguments: &[RuntimeValue],
     budget: &mut ProgramBudget<'_>,
     template: &QueryTemplate,
 ) -> Result<RuntimeValue, SemanticError> {
-    template.validate(u8::try_from(arguments.len()).map_err(|_| {
-        incorrect(
-            "program/query-input-index",
-            "program argument count does not fit the query-template ABI",
-        )
-    })?)?;
-
-    if let Some(native) = template.native_spec() {
-        return native_query::execute(database, arguments, budget, native);
-    }
-
-    let plan = plan_query_patterns(database, template)?;
-    let mut bindings = vec![vec![None; template.variable_count()]];
-    // The identity relation is itself one intermediate row.
-    budget.charge(1)?;
-
-    for pattern_index in plan {
-        let pattern = &template.patterns[pattern_index];
-        let mut next = Vec::new();
-        for binding in &bindings {
-            budget.check_cancel()?;
-            let entity =
-                resolve_query_entity(database, &pattern.entity, binding, arguments, budget)?;
-            let value = resolve_query_value(
-                database,
-                pattern.attribute,
-                &pattern.value,
-                binding,
-                arguments,
-                budget,
-            )?;
-            database.schema().attribute(pattern.attribute)?;
-
-            // Every binding-driven index access is charged, including an
-            // access which subsequently finds no datoms.
-            budget.charge(1)?;
-            let mut datoms = if let Some(entity) = entity {
-                database.prefix_cursor(&IndexPrefix::Eavt {
-                    entity,
-                    attribute: Some(pattern.attribute),
-                    value: value.clone(),
-                })?
-            } else if value.is_some() && database.physical_avet_ready(pattern.attribute) {
-                database.prefix_cursor(&IndexPrefix::Avet {
-                    attribute: pattern.attribute,
-                    value: value.clone(),
-                    entity: None,
-                })?
-            } else {
-                database.prefix_cursor(&IndexPrefix::Aevt {
-                    attribute: pattern.attribute,
-                    entity: None,
-                    value: None,
-                })?
-            };
-
-            while let Some(datom) = datoms.next_with_budget(budget)? {
-                budget.check_cancel()?;
-                // One unit for examining the datom plus its actual value
-                // width. This charges rejected candidates as real work while
-                // reserving the heap counter for values we clone/retain.
-                budget.charge(1)?;
-                budget.charge(usize_as_u64(encoded_value_bytes(&datom.value, 0)?)?)?;
-
-                let mut candidate = binding.clone();
-                if unify_query_entity(
-                    database,
-                    &pattern.entity,
-                    &mut candidate,
-                    arguments,
-                    datom.entity,
-                    budget,
-                )? && unify_query_value(
-                    database,
-                    pattern.attribute,
-                    &pattern.value,
-                    &mut candidate,
-                    arguments,
-                    &datom.value,
-                    budget,
-                )? {
-                    charge_query_binding(budget, &candidate)?;
-                    if next.len() >= budget.max_collection_items {
-                        return Err(busy(
-                            "program/query-intermediate-limit",
-                            "query exceeded its shared intermediate-row limit",
-                        ));
-                    }
-                    next.push(candidate);
-                }
-            }
-        }
-        next.sort_by(canonical_binding_cmp);
-        next.dedup();
-        bindings = next;
-        if bindings.is_empty() {
-            break;
-        }
-    }
-
-    let mut rows = Vec::new();
-    for binding in bindings {
-        let values = template
-            .find
-            .iter()
-            .map(|variable| {
-                binding[usize::from(*variable)].clone().ok_or_else(|| {
-                    incorrect(
-                        "program/unbound-query-find",
-                        format!("query variable {variable} was not bound"),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, SemanticError>>()?;
-        budget.charge(1)?;
-        for value in &values {
-            budget.charge_runtime_value(&RuntimeValue::Scalar(value.clone()))?;
-        }
-        if rows.len() >= budget.max_collection_items {
-            return Err(busy(
-                "program/query-result-limit",
-                "query exceeded its shared result-row limit",
+    let mut result = native_query::execute(database, arguments, budget, template.native_spec())?;
+    if template.canonical_order {
+        let RuntimeValue::Vector(rows) = &mut result else {
+            return Err(incorrect(
+                "program/query-result-shape",
+                "canonical query ordering requires a relation",
             ));
-        }
-        rows.push(RuntimeValue::Vector(
-            values.into_iter().map(RuntimeValue::Scalar).collect(),
-        ));
+        };
+        // Charge comparisons before sorting, including cancellation and deadline
+        // checks. The shared evaluator already admits all retained result values.
+        let comparisons = rows.len().saturating_mul(
+            usize::try_from(usize::BITS - rows.len().leading_zeros()).unwrap_or(usize::MAX),
+        );
+        budget.charge(usize_as_u64(comparisons)?)?;
+        budget.check_cancel()?;
+        rows.sort_by(RuntimeValue::canonical_cmp);
+        rows.dedup();
     }
-    rows.sort_by(RuntimeValue::canonical_cmp);
-    rows.dedup();
-    Ok(RuntimeValue::Vector(rows))
-}
-
-fn plan_query_patterns(
-    database: ProgramRead<'_>,
-    template: &QueryTemplate,
-) -> Result<Vec<usize>, SemanticError> {
-    let mut remaining = (0..template.patterns.len()).collect::<Vec<_>>();
-    let mut bound = BTreeSet::new();
-    let mut plan = Vec::with_capacity(remaining.len());
-    while !remaining.is_empty() {
-        let mut best_at = 0usize;
-        let mut best_score = 0usize;
-        for (at, pattern_index) in remaining.iter().copied().enumerate() {
-            let pattern = &template.patterns[pattern_index];
-            database.schema().attribute(pattern.attribute)?;
-            let entity_bound = query_term_bound(&pattern.entity, &bound);
-            let value_bound = query_term_bound(&pattern.value, &bound);
-            // EAVT is the strongest access path. A bound value gets nearly as
-            // much weight only when AVET actually exists for this attribute.
-            let score = usize::from(entity_bound) * 100
-                + usize::from(value_bound && database.physical_avet_ready(pattern.attribute)) * 80
-                + usize::from(value_bound) * 10;
-            if at == 0 || score > best_score {
-                best_at = at;
-                best_score = score;
-            }
-        }
-        let selected = remaining.remove(best_at);
-        let pattern = &template.patterns[selected];
-        for term in [&pattern.entity, &pattern.value] {
-            if let QueryTerm::Variable(variable) = term {
-                bound.insert(*variable);
-            }
-        }
-        plan.push(selected);
-    }
-    Ok(plan)
-}
-
-fn query_term_bound(term: &QueryTerm, bound: &BTreeSet<u8>) -> bool {
-    match term {
-        QueryTerm::Variable(variable) => bound.contains(variable),
-        QueryTerm::Input(_) | QueryTerm::Constant(_) => true,
-    }
-}
-
-fn resolve_query_entity(
-    database: ProgramRead<'_>,
-    term: &QueryTerm,
-    binding: &QueryBinding,
-    arguments: &[RuntimeValue],
-    budget: &mut ProgramBudget<'_>,
-) -> Result<Option<u64>, SemanticError> {
-    query_term_value(database, term, binding, arguments, budget)?
-        .map(|value| query_entity_id(database, &value))
-        .transpose()
-}
-
-fn query_entity_id(database: ProgramRead<'_>, value: &Value) -> Result<u64, SemanticError> {
-    match value {
-        Value::Ref(entity) => Ok(*entity),
-        Value::Long(entity) => u64::try_from(*entity).map_err(|_| {
-            incorrect(
-                "program/query-entity",
-                "query entity id must be nonnegative",
-            )
-        }),
-        Value::Keyword(ident) => database.entid(ident).ok_or_else(|| {
-            incorrect(
-                "program/query-entity",
-                format!(
-                    "query entity ident {} did not resolve",
-                    ident.qualified_name()
-                ),
-            )
-        }),
-        _ => Err(incorrect(
-            "program/query-entity",
-            "query entity term must resolve to an entity id or ident",
-        )),
-    }
-}
-
-fn resolve_query_value(
-    database: ProgramRead<'_>,
-    attribute: u32,
-    term: &QueryTerm,
-    binding: &QueryBinding,
-    arguments: &[RuntimeValue],
-    budget: &mut ProgramBudget<'_>,
-) -> Result<Option<Value>, SemanticError> {
-    query_term_value(database, term, binding, arguments, budget)?
-        .map(|value| resolve_query_attribute_value(database, attribute, value))
-        .transpose()
-}
-
-fn resolve_query_attribute_value(
-    database: ProgramRead<'_>,
-    attribute: u32,
-    value: Value,
-) -> Result<Value, SemanticError> {
-    if database.schema().attribute(attribute)?.value_type != crate::ValueType::Ref {
-        return Ok(value);
-    }
-    match value {
-        Value::Keyword(ident) => database.entid(&ident).map(Value::Ref).ok_or_else(|| {
-            incorrect(
-                "program/query-value",
-                format!("query ref ident {} did not resolve", ident.qualified_name()),
-            )
-        }),
-        Value::Long(entity) => u64::try_from(entity).map(Value::Ref).map_err(|_| {
-            incorrect(
-                "program/query-value",
-                "query ref entity id must be nonnegative",
-            )
-        }),
-        value => Ok(value),
-    }
-}
-
-fn query_term_value(
-    database: ProgramRead<'_>,
-    term: &QueryTerm,
-    binding: &QueryBinding,
-    arguments: &[RuntimeValue],
-    budget: &mut ProgramBudget<'_>,
-) -> Result<Option<Value>, SemanticError> {
-    match term {
-        QueryTerm::Variable(variable) => Ok(binding[usize::from(*variable)].clone()),
-        QueryTerm::Constant(value) => Ok(Some(value.clone())),
-        QueryTerm::Input(index) => {
-            let argument = &arguments[usize::from(*index)];
-            Ok(Some(match argument {
-                RuntimeValue::Scalar(value) => value.clone(),
-                RuntimeValue::Entity(entity) => Value::Ref(database_entity_id(
-                    database,
-                    RuntimeValue::Entity(entity.clone()),
-                    budget,
-                )?),
-                RuntimeValue::Null
-                | RuntimeValue::Vector(_)
-                | RuntimeValue::Map(_)
-                | RuntimeValue::Query(_) => {
-                    return Err(incorrect(
-                        "program/query-input-type",
-                        "query inputs must be scalar database values or resolvable entities",
-                    ));
-                }
-            }))
-        }
-    }
-}
-
-fn unify_query_entity(
-    database: ProgramRead<'_>,
-    term: &QueryTerm,
-    binding: &mut QueryBinding,
-    arguments: &[RuntimeValue],
-    entity: u64,
-    budget: &mut ProgramBudget<'_>,
-) -> Result<bool, SemanticError> {
-    if let QueryTerm::Variable(variable) = term {
-        let slot = &mut binding[usize::from(*variable)];
-        if let Some(expected) = slot {
-            return Ok(query_entity_id(database, expected)? == entity);
-        }
-        *slot = Some(Value::Ref(entity));
-        return Ok(true);
-    }
-    Ok(resolve_query_entity(database, term, binding, arguments, budget)? == Some(entity))
-}
-
-fn unify_query_value(
-    database: ProgramRead<'_>,
-    attribute: u32,
-    term: &QueryTerm,
-    binding: &mut QueryBinding,
-    arguments: &[RuntimeValue],
-    value: &Value,
-    budget: &mut ProgramBudget<'_>,
-) -> Result<bool, SemanticError> {
-    if let QueryTerm::Variable(variable) = term {
-        let slot = &mut binding[usize::from(*variable)];
-        if let Some(expected) = slot {
-            return Ok(
-                resolve_query_attribute_value(database, attribute, expected.clone())? == *value,
-            );
-        }
-        *slot = Some(value.clone());
-        return Ok(true);
-    }
-    Ok(
-        resolve_query_value(database, attribute, term, binding, arguments, budget)?.as_ref()
-            == Some(value),
-    )
-}
-
-fn charge_query_binding(
-    budget: &mut ProgramBudget<'_>,
-    binding: &QueryBinding,
-) -> Result<(), SemanticError> {
-    budget.charge(1)?;
-    for value in binding.iter().flatten() {
-        budget.charge_runtime_value(&RuntimeValue::Scalar(value.clone()))?;
-    }
-    Ok(())
-}
-
-fn canonical_binding_cmp(left: &QueryBinding, right: &QueryBinding) -> Ordering {
-    canonical_slice_cmp(left, right, |left, right| match (left, right) {
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-        (Some(left), Some(right)) => left.stored_cmp(right),
-    })
+    Ok(result)
 }
 
 fn runtime_binary_long(
@@ -4293,10 +3885,7 @@ mod tests {
         assert!(program.supports_attribute_predicate());
         assert!(program.supports_entity_predicate());
         let encoded = crate::encode_program(&program).unwrap();
-        assert_eq!(
-            &encoded[16..18],
-            &DUAL_PREDICATE_PROGRAM_ABI_VERSION.to_be_bytes()
-        );
+        assert_eq!(&encoded[16..18], &PROGRAM_ABI_VERSION.to_be_bytes());
         assert_eq!(crate::decode_program(&encoded).unwrap(), program);
 
         let program = ValidatedProgram::from_canonical(program);

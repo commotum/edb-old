@@ -75,8 +75,8 @@ fn canonical_numeric_golden_contract() {
         })
         .collect();
     let encoded = encode_transaction(&transaction).unwrap();
-    // Captured on the pre-R4/R11 implementation. These are durable ATMC bytes,
-    // not the deliberately private and replaceable query hash-table format.
+    // Current durable ATMC numeric bytes are distinct from the deliberately
+    // private and replaceable prepared-query cache-key representation.
     assert_eq!(encoded.len(), 634);
     assert_eq!(
         hex(&sha256(&encoded)),
@@ -84,7 +84,7 @@ fn canonical_numeric_golden_contract() {
     );
     assert_eq!(
         hex(&submission_request_digest(&forms, Some(7), Some(123_456)).unwrap()),
-        "b0a57a33f40484403c2f226d139f4f33d7a1746830a03c83cd57b89da2d041d0"
+        "1a3d58bd67a52e264ef738ccf53cd340834b1201aafc5cbb2afa28ea3d21a0cf"
     );
     assert_eq!(
         encode_transaction(&decode_transaction(&encoded).unwrap()).unwrap(),

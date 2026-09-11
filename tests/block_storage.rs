@@ -365,11 +365,11 @@ fn guarded_reference_batch_is_atomic_and_leaves_read_only_guards_unchanged() {
     );
     let changes = [
         change("root", Some(b"after")),
-        change("pin", Some(b"before")),
+        change("work", Some(b"before")),
     ];
     let stale = [
         condition("root", Some(root.revision)),
-        condition("pin", None),
+        condition("work", None),
         condition("authority", Some(authority.revision)),
     ];
     let BatchOutcome::Conflict(observed) = store.compare_exchange_many(&stale, &changes).unwrap()
@@ -384,12 +384,12 @@ fn guarded_reference_batch_is_atomic_and_leaves_read_only_guards_unchanged() {
         Some(&Some(next_authority.clone()))
     );
     assert_eq!(observed.get("root"), Some(&Some(root.clone())));
-    assert_eq!(observed.get("pin"), Some(&None));
+    assert_eq!(observed.get("work"), Some(&None));
     assert_eq!(store.read_ref("root").unwrap(), Some(root.clone()));
-    assert!(store.read_ref("pin").unwrap().is_none());
+    assert!(store.read_ref("work").unwrap().is_none());
     let current = [
         condition("root", Some(root.revision)),
-        condition("pin", None),
+        condition("work", None),
         condition("authority", Some(next_authority.revision)),
     ];
     let BatchOutcome::Applied(updated) = store.compare_exchange_many(&current, &changes).unwrap()
@@ -405,7 +405,7 @@ fn guarded_reference_batch_is_atomic_and_leaves_read_only_guards_unchanged() {
         Some(b"after"),
     );
     assert_reference(
-        &reopened.read_ref("pin").unwrap().unwrap(),
+        &reopened.read_ref("work").unwrap().unwrap(),
         1,
         Some(b"before"),
     );
@@ -416,7 +416,7 @@ fn guarded_reference_batch_is_atomic_and_leaves_read_only_guards_unchanged() {
 }
 
 #[test]
-fn capture_pin_and_root_transition_serialize_without_stale_pin_publication() {
+fn guarded_work_publication_serializes_with_root_transition() {
     let Some((_fixture, config)) = fixture("block_capture_race") else {
         return;
     };
@@ -424,7 +424,7 @@ fn capture_pin_and_root_transition_serialize_without_stale_pin_publication() {
     let mut store = PgBlockStore::connect(&config).unwrap();
     for attempt in 0..4 {
         let root_key = format!("root/{attempt}");
-        let pin_key = format!("pin/{attempt}");
+        let work_key = format!("work/{attempt}");
         let root = applied(
             store
                 .compare_exchange(&root_key, None, Some(b"captured-root"))
@@ -435,17 +435,17 @@ fn capture_pin_and_root_transition_serialize_without_stale_pin_publication() {
             let config = config.clone();
             let gate = Arc::clone(&gate);
             let root_key = root_key.clone();
-            let pin_key = pin_key.clone();
+            let work_key = work_key.clone();
             std::thread::spawn(move || {
-                let mut reader = PgBlockStore::connect(&config).unwrap();
+                let mut worker = PgBlockStore::connect(&config).unwrap();
                 gate.wait();
-                reader
+                worker
                     .compare_exchange_many(
                         &[
                             condition(&root_key, Some(root.revision)),
-                            condition(&pin_key, None),
+                            condition(&work_key, None),
                         ],
-                        &[change(&pin_key, Some(b"captured-root"))],
+                        &[change(&work_key, Some(b"captured-root"))],
                     )
                     .unwrap()
             })
@@ -471,10 +471,10 @@ fn capture_pin_and_root_transition_serialize_without_stale_pin_publication() {
         match capture {
             BatchOutcome::Applied(references) => {
                 assert_eq!(references.len(), 1);
-                assert_eq!(references[0].0, pin_key);
+                assert_eq!(references[0].0, work_key);
                 assert_reference(&references[0].1, 1, Some(b"captured-root"));
                 assert_eq!(
-                    store.read_ref(&pin_key).unwrap(),
+                    store.read_ref(&work_key).unwrap(),
                     Some(references[0].1.clone())
                 );
             }
@@ -484,25 +484,25 @@ fn capture_pin_and_root_transition_serialize_without_stale_pin_publication() {
                         .iter()
                         .any(|(key, value)| key == &root_key && value.as_ref() == Some(&published))
                 );
-                assert!(store.read_ref(&pin_key).unwrap().is_none());
+                assert!(store.read_ref(&work_key).unwrap().is_none());
             }
         }
-        // The post-transition ordering must always reject a new pin based on
+        // The post-transition ordering must always reject new work based on
         // the old root, regardless of which contender won the first race.
-        let stale_pin = format!("stale/{attempt}");
+        let stale_work = format!("stale/{attempt}");
         assert!(matches!(
             store
                 .compare_exchange_many(
                     &[
                         condition(&root_key, Some(root.revision)),
-                        condition(&stale_pin, None)
+                        condition(&stale_work, None)
                     ],
-                    &[change(&stale_pin, Some(b"captured-root"))],
+                    &[change(&stale_work, Some(b"captured-root"))],
                 )
                 .unwrap(),
             BatchOutcome::Conflict(_)
         ));
-        assert!(store.read_ref(&stale_pin).unwrap().is_none());
+        assert!(store.read_ref(&stale_work).unwrap().is_none());
     }
 }
 

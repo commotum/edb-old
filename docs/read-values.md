@@ -6,31 +6,22 @@ entity and native-program engines; none implicitly refreshes a connection.
 
 ## Captured-value retention
 
-Block-backed values and their cursors share one retained root pin; cloning them
-does not create more storage references. Final-owner cleanup runs off-thread in
-small batches and removes the one-use pin keys. Explicit release remains useful
-when the caller can prove it is the sole owner.
-
-A live reader holds a database-session liveness lock. Collection cannot revoke
-that session based on age alone. After connection loss or a crashed process, the
-collector first obtains the exclusive session lock and revokes the session, then
-allows five minutes before removing its pins. An abandoned session with no pins
-can be removed immediately. A reconnect may recover an unrevoked session; after
-revocation, cold reads require opening a newly authorized value. Already exported
-resident or cached bytes are not forcibly erased. This is not an indefinite
-offline-retention guarantee.
+Values and cursors retain immutable roots in memory. Capturing, cloning and
+dropping them perform no storage writes and create no reader sessions. Normal
+garbage collection retains retired objects for 30 days; choose a retention age
+that covers read and copy durations. An explicitly shorter age can invalidate
+cold reads through a held value. Already resident or cached bytes are not erased.
 
 Serialized references carry a bounded value descriptor, not a pointer to an old
 publication wrapper. Reopening checks its canonical log/metadata and published
-index authorization, then retains the trusted publication while constructing
-the value in memory. A peer needs SELECT on immutable objects, not object-write
-permission; pin/session coordination still updates reference rows.
+index authorization, then constructs the value in memory. A peer needs SELECT
+on immutable objects and references; reads require no write privileges.
 
 Serialized references also require current-generation authorization. Obsolete
 index provenance is eligible for pruning only after its publication grace and
-when no retained value, receipt, or other owner still needs that index. The final
-publication checks the same ownership proof, so a concurrent new pin prevents a
-stale prune. Logical removal and later physical collection are distinct steps.
+when no published value, receipt, or other durable owner still needs that index.
+The final publication checks the same ownership proof against concurrent
+publication. Logical removal and later physical collection are distinct steps.
 
 ## Mixed sources, lazy projections
 

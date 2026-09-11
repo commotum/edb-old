@@ -240,10 +240,10 @@ fn run_phase(phase: &str) -> Result<Fields> {
                 expected("basis")?.parse()?,
                 &database,
             )?;
-            if restored.basis_t().to_string() != expected("basis")? {
+            if restored.point.basis_t.to_string() != expected("basis")? {
                 return Err("restore returned a different basis".into());
             }
-            fields.insert("basis".into(), restored.basis_t().to_string());
+            fields.insert("basis".into(), restored.point.basis_t.to_string());
         }
         "retry" => retry_scale_request(&target, &database, &mut fields)?,
         "deep-inspect" => {
@@ -293,7 +293,7 @@ fn seed_maintenance_fixture(connection: &str, database: &str) -> Result<()> {
     let mut basis = Peer::connect(connection, database, 8)?.basis_t();
     for publication in (0..records).step_by(1024) {
         let service = TransactionService::start(TransactionServiceConfig {
-            connection: connection.to_owned(),
+            connection: atomic_core::PostgresConnectionConfig::parse(connection)?,
             database_id: database.to_owned(),
             holder_id: format!("maintenance-profile-{}", std::process::id()),
             lease_duration: Duration::from_secs(5),
@@ -414,9 +414,6 @@ fn capture_native(connection: &str, database: &str) -> Result<Fields> {
     let current = fingerprint(&value)?;
     let history = fingerprint(&value.clone().history())?;
     let stats = peer.load_stats();
-    assert_eq!(stats.compatibility_materializations, 0);
-    assert_eq!(stats.compatibility_hits, 0);
-    assert_eq!(stats.compatibility_failures, 0);
     println!(
         "operations_native_load={stats:?} cache={:?}",
         peer.cache_stats()
@@ -447,7 +444,7 @@ fn fingerprint(database: &DatabaseValue) -> Result<String> {
 
 fn retry_scale_request(connection: &str, database: &str, fields: &mut Fields) -> Result<()> {
     let writer = TransactionService::start(TransactionServiceConfig {
-        connection: connection.into(),
+        connection: atomic_core::PostgresConnectionConfig::parse(connection)?,
         database_id: database.into(),
         holder_id: format!("operations-retry-{}", std::process::id()),
         lease_duration: Duration::from_secs(10),

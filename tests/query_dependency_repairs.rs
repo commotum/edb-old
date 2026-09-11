@@ -818,6 +818,9 @@ fn negative_subqueries_share_work_and_cancellation_with_their_parent() {
         ],
     ));
     let query = query(vec![call("eligible", vec![v("e")])], rules);
+    // Static rule analysis is reusable; measure the same warm execution that
+    // the following resource-limited call will perform.
+    assert_entities(execute(&query, &sources).unwrap(), &[]);
     let unlimited = execute(&query, &sources).unwrap();
     let work = unlimited.stats.work as usize;
     assert_entities(unlimited, &[]);

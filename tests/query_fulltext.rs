@@ -531,7 +531,7 @@ fn program(q: Query) -> Program {
 }
 
 #[test]
-fn fulltext_templates_select_new_abi_in_nested_queries_and_share_program_budget() {
+fn fulltext_templates_use_shared_format_and_budget_in_nested_queries() {
     let seed = seed();
     let db = seed.db_after.database_value();
     let inner = query(true);
@@ -548,7 +548,10 @@ fn fulltext_templates_select_new_abi_in_nested_queries_and_share_program_budget(
     assert_eq!(search(&db, &outer, "jane").stats.fulltext_searches, 1);
     let p = program(outer);
     let bytes = encode_program(&p).unwrap();
-    assert_eq!(&bytes[16..18], &9u16.to_be_bytes());
+    assert_eq!(
+        &bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     assert_eq!(decode_program(&bytes).unwrap(), p);
     for version in [4u16, 5, 6, 7, 8] {
         let mut old = bytes.clone();
@@ -653,6 +656,22 @@ fn native_stored_fulltext_query_and_transaction_survive_replay_and_restart() {
     ]);
     let seeded = common::transact(&writer, "seed", created.basis_t(), &ops, 1_000);
     let connection = Connection::connect(url, "search", 32).unwrap();
+    let recent = connection.db();
+    assert_eq!(
+        entities(&rows(search(&recent, &query(true), "jane"))),
+        BTreeSet::from([seeded.tempids["a"]])
+    );
+    let recent_program = ProgramRuntime
+        .execute_query(
+            &query_program,
+            &recent,
+            &[Value::String("jane".into())],
+            ProgramControl::default(),
+        )
+        .unwrap();
+    assert!(
+        matches!(recent_program, ProgramOutput::Query(rows) if rows.len() == 1 && rows[0][0] == Value::Ref(seeded.tempids["a"]))
+    );
     let request = writer.client().request_index().unwrap();
     let captured = connection
         .sync_index(request.target_t, Duration::from_secs(20))
@@ -756,8 +775,7 @@ fn native_stored_fulltext_query_and_transaction_survive_replay_and_restart() {
         committed.db_after.snapshot_key().unwrap()
     );
     restarted.shutdown();
-    assert_eq!(connection.load_stats().compatibility_materializations, 0);
     eprintln!(
-        "actual PostgreSQL fulltext: durable ABI9 query and transaction; exact native view; speculative/committed selection; receipt replay before/after restart"
+        "actual PostgreSQL fulltext: current durable query and transaction format; exact native view; speculative/committed selection; receipt replay before/after restart"
     );
 }

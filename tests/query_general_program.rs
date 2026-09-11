@@ -79,7 +79,7 @@ fn resign(bytes: &mut [u8]) {
 }
 
 #[test]
-fn new_literals_select_only_new_template_and_abi_preserving_exact_general_output() {
+fn current_format_preserves_exact_general_output() {
     let value = mixed();
     let program = projection(
         ground(Term::QueryConstant(value.clone())),
@@ -89,8 +89,10 @@ fn new_literals_select_only_new_template_and_abi_preserving_exact_general_output
         1,
     );
     let bytes = encode_program(&program).unwrap();
-    assert_eq!(&bytes[16..18], &10u16.to_be_bytes());
-    assert_eq!(&bytes[25..27], &3u16.to_be_bytes());
+    assert_eq!(
+        &bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     let decoded = decode_program(&bytes).unwrap();
     assert_eq!(encode_program(&decoded).unwrap(), bytes);
     let result = ProgramRuntime
@@ -100,16 +102,18 @@ fn new_literals_select_only_new_template_and_abi_preserving_exact_general_output
     assert_eq!(encoded_output[16], 4);
     assert_eq!(output_rows(result), vec![vec![value]]);
 
-    let old = projection(ground(Term::Constant(Value::Long(7))), vec![], vec![], 0, 1);
-    let old_bytes = encode_program(&old).unwrap();
-    assert_eq!(&old_bytes[16..18], &7u16.to_be_bytes());
-    assert_eq!(&old_bytes[25..27], &2u16.to_be_bytes());
+    let scalar = projection(ground(Term::Constant(Value::Long(7))), vec![], vec![], 0, 1);
+    let scalar_bytes = encode_program(&scalar).unwrap();
     assert_eq!(
-        encode_program(&decode_program(&old_bytes).unwrap()).unwrap(),
-        old_bytes
+        &scalar_bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
+    assert_eq!(
+        encode_program(&decode_program(&scalar_bytes).unwrap()).unwrap(),
+        scalar_bytes
     );
     assert!(
-        matches!(ProgramRuntime.execute_query(&old, &database(), &[], ProgramControl::default()).unwrap(), ProgramOutput::Query(rows) if rows == vec![vec![Value::Long(7)]])
+        matches!(ProgramRuntime.execute_query(&scalar, &database(), &[], ProgramControl::default()).unwrap(), ProgramOutput::Query(rows) if rows == vec![vec![Value::Long(7)]])
     );
 }
 
@@ -190,7 +194,7 @@ fn persisted_wide_named_relation_retains_nil_arbitrary_keys_sets_and_tags() {
 }
 
 #[test]
-fn existing_native_input_template_accepts_general_values_without_changing_its_bytes() {
+fn native_input_template_accepts_general_values_without_changing_its_bytes() {
     let mut query = Query::new(
         FindSpec::Relation(vec![FindElement::Variable("x".into())]),
         vec![],
@@ -198,7 +202,10 @@ fn existing_native_input_template_accepts_general_values_without_changing_its_by
     query.inputs = vec![InputSpec::Scalar("x".into())];
     let program = projection(query.clone(), vec![0], vec![], 1, 1);
     let before = encode_program(&program).unwrap();
-    assert_eq!(&before[16..18], &7u16.to_be_bytes());
+    assert_eq!(
+        &before[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     for (value, expected) in [
         (QueryValue::Nil, QueryValue::Nil),
         (mixed(), mixed()),
@@ -238,7 +245,7 @@ fn existing_native_input_template_accepts_general_values_without_changing_its_by
 }
 
 #[test]
-fn new_templates_reject_downgrades_invalid_characters_and_unbounded_shapes() {
+fn templates_reject_other_abis_invalid_characters_and_unbounded_shapes() {
     let program = projection(
         ground(Term::QueryConstant(QueryValue::Char('\u{10ffff}'))),
         vec![],
@@ -247,7 +254,7 @@ fn new_templates_reject_downgrades_invalid_characters_and_unbounded_shapes() {
         1,
     );
     let bytes = encode_program(&program).unwrap();
-    for (offset, version) in [(16, 7u16), (25, 2u16)] {
+    for (offset, version) in [(16, 7u16), (16, 11u16)] {
         let mut changed = bytes.clone();
         changed[offset..offset + 2].copy_from_slice(&version.to_be_bytes());
         resign(&mut changed);
@@ -636,7 +643,7 @@ fn postgres_general_program_persists_reopens_invokes_and_keeps_speculation_inert
         vec![vec![mixed()]]
     );
     eprintln!(
-        "general persisted ABI10: initial invoke/check/drop={initial_invoke:?}; reopened invoke/check/drop={:?}; full fixture/install/speculate/reopen={:?}",
+        "general persisted query: initial invoke/check/drop={initial_invoke:?}; reopened invoke/check/drop={:?}; full fixture/install/speculate/reopen={:?}",
         operation.elapsed(),
         total.elapsed()
     );

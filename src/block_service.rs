@@ -53,10 +53,10 @@ pub(super) fn connection_unavailable(error: &SemanticError) -> bool {
 
 pub(super) fn start(
     config: TransactionServiceConfig,
-    connection: PostgresConnectionConfig,
     options: ServiceOptions,
     database: BlockDatabase,
 ) -> Result<TransactionService, SemanticError> {
+    let connection = config.connection.clone();
     TransactionService::validate_config(&config)?;
     let indexing_config = options.indexing.validate()?;
     options.excision.validate()?;

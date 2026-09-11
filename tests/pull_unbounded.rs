@@ -304,5 +304,4 @@ fn native_postgres_pull_is_deep_stack_safe_and_keeps_its_captured_value() {
         .unwrap()
         .join()
         .unwrap();
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

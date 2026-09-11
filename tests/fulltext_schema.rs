@@ -10,32 +10,32 @@ fn attribute() -> Attribute {
         Cardinality::One,
     )
 }
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
 #[test]
-fn old_attribute_request_and_program_output_bytes_stay_exact() {
-    let ops = [TxOp::InstallAttribute(attribute())];
-    let forms = ops.iter().cloned().map(TxForm::Op).collect::<Vec<_>>();
+fn attribute_requests_and_program_outputs_are_canonical_and_include_fulltext() {
+    fn encoded(attribute: Attribute) -> (Digest, Digest, Vec<u8>) {
+        let ops = [TxOp::InstallAttribute(attribute)];
+        let forms = ops.iter().cloned().map(TxForm::Op).collect::<Vec<_>>();
+        (
+            request_digest(&ops, 42, 1).unwrap(),
+            submission_request_digest(&forms, Some(1), Some(42)).unwrap(),
+            encode_program_output(&ProgramOutput::Transaction(forms)).unwrap(),
+        )
+    }
+    let first = attribute().predicate("app/nonempty").predicate("app/short");
+    let equivalent = attribute()
+        .predicate("app/short")
+        .predicate("app/nonempty")
+        .predicate("app/short");
+    assert_eq!(encoded(first.clone()), encoded(equivalent.clone()));
     assert_eq!(
-        hex(&request_digest(&ops, 42, 1).unwrap()),
-        "ba9918e553e1c7bb25a85fcd25452731195984eee05573bfc8b0f8e94c9ff82f"
+        encoded(first.clone().fulltext()),
+        encoded(equivalent.fulltext())
     );
-    assert_eq!(
-        hex(&submission_request_digest(&forms, Some(1), Some(42)).unwrap()),
-        "71a99b7092341eced50fde3b4b5cb821d869486d7fbe5f1d0e6c0ee019819a96"
-    );
-    assert_eq!(
-        hex(&sha256(
-            &encode_program_output(&ProgramOutput::Transaction(forms)).unwrap()
-        )),
-        "f3dd531804d980fed966cae6d3c0882b4825677ebd854a09712e6970bdb01354"
-    );
-    assert_ne!(
-        request_digest(&ops, 42, 1).unwrap(),
-        request_digest(&[TxOp::InstallAttribute(attribute().fulltext())], 42, 1).unwrap()
-    );
+    let plain = encoded(first.clone());
+    let fulltext = encoded(first.fulltext());
+    assert_ne!(plain.0, fulltext.0);
+    assert_ne!(plain.1, fulltext.1);
+    assert_ne!(plain.2, fulltext.2);
 }
 
 #[test]

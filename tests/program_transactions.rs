@@ -910,7 +910,7 @@ fn broken_or_wrong_role_predicate_bindings_fail_their_source_transaction() {
     .unwrap_err();
     assert_eq!(
         (missing.category, missing.code),
-        (ErrorCategory::NotFound, "program/function-not-found")
+        (ErrorCategory::NotFound, "native/deployment-not-found")
     );
 
     let wrong_role = common::try_transact(

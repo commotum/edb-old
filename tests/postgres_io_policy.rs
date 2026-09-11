@@ -69,18 +69,15 @@ fn setup(postgres: &str, prefix: &str, policy: PostgresIoPolicy) -> (String, Tra
         PostgresConnectionConfig::plaintext(parameter(postgres, "application_name", &id))
             .with_io_policy(policy)
             .unwrap();
-    let service = TransactionService::start_configured(
-        TransactionServiceConfig {
-            connection: "invalid-option=legacy-must-not-be-used".into(),
-            database_id: id.clone(),
-            holder_id: unique("io_writer"),
-            lease_duration: Duration::from_secs(15),
-            renew_interval: Duration::from_secs(5),
-            queue_capacity: 8,
-            capacity_limits: CapacityLimits::default(),
-        },
+    let service = TransactionService::start(TransactionServiceConfig {
         connection,
-    )
+        database_id: id.clone(),
+        holder_id: unique("io_writer"),
+        lease_duration: Duration::from_secs(15),
+        renew_interval: Duration::from_secs(5),
+        queue_capacity: 8,
+        capacity_limits: CapacityLimits::default(),
+    })
     .unwrap();
     (id, service)
 }

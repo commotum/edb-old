@@ -72,8 +72,7 @@ impl Drop for Advancement {
         // A pending peer read may be waiting on SQL or another snapshot's I/O.
         // Request stop without making dropping a read handle wait for it. The
         // worker owns only one peer, releases it when that operation returns,
-        // and never starts another iteration after observing stop. Its pins
-        // legitimately remain live while the in-flight read is using them.
+        // and never starts another iteration after observing stop.
     }
 }
 
@@ -98,7 +97,7 @@ impl Connection {
         cache_capacity: usize,
     ) -> Result<Self, SemanticError> {
         Self::connect_configured(
-            PostgresConnectionConfig::plaintext(connection),
+            PostgresConnectionConfig::parse(connection)?,
             database_id,
             cache_capacity,
         )
@@ -128,7 +127,7 @@ impl Connection {
         cache_bytes: usize,
     ) -> Result<Self, SemanticError> {
         Self::connect_configured_with_cache_limits(
-            PostgresConnectionConfig::plaintext(connection),
+            PostgresConnectionConfig::parse(connection)?,
             database_id,
             cache_entries,
             cache_bytes,
@@ -187,7 +186,7 @@ impl Connection {
         cache_capacity: usize,
     ) -> Result<Self, SemanticError> {
         Self::attach_configured(
-            PostgresConnectionConfig::plaintext(connection),
+            PostgresConnectionConfig::parse(connection)?,
             client,
             cache_capacity,
         )
@@ -409,26 +408,13 @@ impl Connection {
         }
         Ok(report)
     }
-    /// Start the embedded transactor and strict native peer using plaintext
-    /// PostgreSQL transport (the existing local/development policy).
+    /// Start the embedded transactor and native peer with the same typed connection.
     pub fn start(
         config: TransactionServiceConfig,
         cache_capacity: usize,
     ) -> Result<Self, SemanticError> {
-        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
-        Self::start_configured(config, connection, cache_capacity)
-    }
-
-    /// Start every connection-owned role under one explicit PostgreSQL
-    /// transport policy. The transactor is started first so the bounded fresh
-    /// database exception can publish its native basis before the strict peer
-    /// opens it.
-    pub fn start_configured(
-        config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
-        cache_capacity: usize,
-    ) -> Result<Self, SemanticError> {
-        let service = TransactionService::start_configured(config, connection.clone())?;
+        let connection = config.connection.clone();
+        let service = TransactionService::start(config)?;
         let client = service.client();
         Self::open_attached(connection, client, cache_capacity, Some(service))
     }
@@ -787,7 +773,7 @@ mod tests {
         crate::storage::BlockDatabase::create(&config, &id, crate::Schema::new()).unwrap();
         let connection = Connection::start(
             TransactionServiceConfig {
-                connection: scoped,
+                connection: config,
                 database_id: id.clone(),
                 holder_id: id,
                 lease_duration: Duration::from_secs(5),

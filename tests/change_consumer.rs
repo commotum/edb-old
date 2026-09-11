@@ -261,7 +261,7 @@ fn spoofed_notice_flood_is_coalesced_without_fabricating_transactions() {
 }
 
 #[test]
-fn generation_transition_rejects_old_checkpoints_without_a_lifetime_pin() {
+fn generation_transition_rejects_old_checkpoints() {
     let Some(fixture) = fixture("change_generation") else {
         return;
     };
@@ -275,34 +275,15 @@ fn generation_transition_rejects_old_checkpoints_without_a_lifetime_pin() {
         )
         .unwrap();
     writer.shutdown();
-    let mut admin = postgres::Client::connect(&fixture.connection, postgres::NoTls).unwrap();
-    let active_pins = |admin: &mut postgres::Client| -> std::collections::BTreeSet<String> {
-        admin
-            .query(
-                "SELECT key FROM atomic_refs WHERE key LIKE 'pins/%' AND value IS NOT NULL",
-                &[],
-            )
-            .unwrap()
-            .into_iter()
-            .map(|row| row.get(0))
-            .collect()
-    };
-    let pins_before = active_pins(&mut admin);
     let mut consumer =
         ChangeConsumer::connect(&fixture.connection, "changes", "old", Default::default()).unwrap();
     let pending = consumer.next(Duration::ZERO).unwrap().unwrap();
-    // Previously released writer pins may finish asynchronous cleanup here.
-    // Delivery must add no retained pin of its own, irrespective of those drops.
-    assert!(
-        active_pins(&mut admin).is_subset(&pins_before),
-        "delivery retained a lifetime history pin"
-    );
     let mut store = PgBlockStore::connect(&config).unwrap();
     let database = BlockDatabase::resolve(&config, "changes").unwrap();
     let reference = store.read_ref(&database.reference_key()).unwrap().unwrap();
     let id = reference.value.unwrap().as_slice().try_into().unwrap();
     let mut root = DatabaseRoot::decode(&id, &store.get(id).unwrap().unwrap()).unwrap();
-    // Fixture-only current publication transition: the Stage-5 excision worker
+    // Fixture-only current publication transition: the excision worker
     // owns redaction, while this regression isolates consumer generation fences.
     let metadata_id = root.metadata.unwrap();
     let mut metadata =
@@ -340,7 +321,6 @@ fn generation_transition_rejects_old_checkpoints_without_a_lifetime_pin() {
         ChangeConsumer::connect(&fixture.connection, "changes", "fresh", Default::default())
             .unwrap();
     assert_eq!(fresh.checkpoint().generation(), metadata.generation);
-    assert!(active_pins(&mut admin).is_subset(&pins_before));
 }
 
 #[test]
@@ -671,8 +651,8 @@ fn separate_writer_wakes_idle_peer_and_blocked_consumer_without_polling_sql() {
         Command::new(env!("CARGO_BIN_EXE_atomic"))
             .args(["transactor", "--database", "changes", "--endpoint"])
             .arg(&endpoint)
-            .env("ATOMIC_POSTGRES_URL", url)
-            .env("ATOMIC_POSTGRES_TRANSPORT", "plaintext")
+            .env("ATOMIC_POSTGRES_URL", common::plaintext_connection(url))
+            .env_remove("ATOMIC_POSTGRES_TRANSPORT")
             .env_remove("ATOMIC_SSD_CACHE_DIR")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())

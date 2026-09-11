@@ -4,8 +4,8 @@
 use crate::{PostgresConnectionConfig, PostgresIoPolicy, SemanticError};
 use std::time::Duration;
 
-/// Read `ATOMIC_POSTGRES_URL` and an explicit `ATOMIC_POSTGRES_TRANSPORT`
-/// (`tls` or `plaintext`). TLS validates certificates and hostnames; optional
+/// Read `ATOMIC_POSTGRES_URL`, whose `sslmode` selects the transport. TCP
+/// defaults to verified TLS; `sslmode=disable` explicitly selects plaintext. Optional
 /// `ATOMIC_POSTGRES_TLS_ROOT` supplies one additional PEM trust root.
 ///
 /// Optional positive integer settings: `ATOMIC_CONNECT_TIMEOUT_MS`,
@@ -35,16 +35,13 @@ fn config_from(
             .ok_or_else(|| invalid("config/environment", key))
     };
     let parameters = required("ATOMIC_POSTGRES_URL")?;
-    let mut config = match required("ATOMIC_POSTGRES_TRANSPORT")?.as_str() {
-        "tls" => PostgresConnectionConfig::require_tls(parameters),
-        "plaintext" => PostgresConnectionConfig::plaintext(parameters),
-        _ => {
-            return Err(invalid(
-                "config/postgres-transport",
-                "ATOMIC_POSTGRES_TRANSPORT",
-            ));
-        }
-    };
+    if lookup("ATOMIC_POSTGRES_TRANSPORT")?.is_some() {
+        return Err(invalid(
+            "config/use-postgres-sslmode",
+            "ATOMIC_POSTGRES_TRANSPORT",
+        ));
+    }
+    let mut config = PostgresConnectionConfig::parse(parameters)?;
     if let Some(path) = lookup("ATOMIC_POSTGRES_TLS_ROOT")? {
         if !config.tls_required() {
             return Err(invalid(
@@ -133,10 +130,7 @@ mod tests {
 
     #[test]
     fn ssd_requires_opt_in_directory_and_positive_budgets() {
-        let mut entries = vec![
-            ("ATOMIC_POSTGRES_URL", "host=localhost"),
-            ("ATOMIC_POSTGRES_TRANSPORT", "plaintext"),
-        ];
+        let mut entries = vec![("ATOMIC_POSTGRES_URL", "host=localhost sslmode=disable")];
         assert!(parse(&entries).unwrap().ssd_cache_config().is_none());
         entries.push(("ATOMIC_SSD_CACHE_ENTRIES", "12"));
         assert!(parse(&entries).is_err());
@@ -157,14 +151,15 @@ mod tests {
     #[test]
     fn explicit_transport_and_no_secret_diagnostics() {
         let secret = "host=private-host user=private-user password=private-password";
-        assert!(parse(&[("ATOMIC_POSTGRES_URL", secret)]).is_err());
-        for transport in ["tls", "plaintext"] {
-            let config = parse(&[
-                ("ATOMIC_POSTGRES_URL", secret),
-                ("ATOMIC_POSTGRES_TRANSPORT", transport),
-            ])
-            .unwrap();
-            assert_eq!(config.tls_required(), transport == "tls");
+        assert!(
+            parse(&[("ATOMIC_POSTGRES_URL", secret)])
+                .unwrap()
+                .tls_required()
+        );
+        for transport in ["require", "disable"] {
+            let parameters = format!("{secret} sslmode={transport}");
+            let config = parse(&[("ATOMIC_POSTGRES_URL", &parameters)]).unwrap();
+            assert_eq!(config.tls_required(), transport == "require");
             assert!(!format!("{config:?}").contains("private-"));
         }
         let error = parse(&[
@@ -177,10 +172,7 @@ mod tests {
 
     #[test]
     fn shares_io_policy_and_rejects_invalid_values() {
-        let mut entries = vec![
-            ("ATOMIC_POSTGRES_URL", "host=localhost"),
-            ("ATOMIC_POSTGRES_TRANSPORT", "plaintext"),
-        ];
+        let mut entries = vec![("ATOMIC_POSTGRES_URL", "host=localhost sslmode=disable")];
         entries.push(("ATOMIC_STATEMENT_TIMEOUT_MS", "12"));
         entries.push(("ATOMIC_KEEPALIVES", "false"));
         let config = parse(&entries).unwrap();
@@ -190,13 +182,12 @@ mod tests {
         );
         assert_eq!(config.io_policy().keepalives, Some(false));
         for value in ["0", "-1", "secret", "18446744073709551616"] {
-            entries[2].1 = value;
+            entries[1].1 = value;
             assert!(parse(&entries).is_err());
         }
         assert!(
             parse(&[
-                ("ATOMIC_POSTGRES_URL", "host=localhost"),
-                ("ATOMIC_POSTGRES_TRANSPORT", "plaintext"),
+                ("ATOMIC_POSTGRES_URL", "host=localhost sslmode=disable"),
                 ("ATOMIC_POSTGRES_TLS_ROOT", "/secret-path")
             ])
             .is_err()

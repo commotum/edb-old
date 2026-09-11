@@ -38,11 +38,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Instruction::Return,
         ],
     };
-    let deployment = atomic_core::PostgresOperator::connect_configured(&storage)?
-        .deploy_program(&rename_program)?;
-    let rename = deployment.hash();
+    let mut operator = atomic_core::PostgresOperator::connect_configured(&storage)?;
     let config = TransactionServiceConfig {
-        connection: postgres,
+        connection: storage.clone(),
         database_id: database_id.clone(),
         holder_id: format!("workflow-{}", std::process::id()),
         lease_duration: Duration::from_secs(5),
@@ -51,8 +49,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         capacity_limits: CapacityLimits::default(),
     };
     let writer = TransactionService::start(config.clone())?;
-    let connection = Connection::attach(&config.connection, writer.client(), 64)?;
-    let reader = Connection::connect(&config.connection, &database_id, 64)?;
+    let connection = Connection::attach_configured(config.connection.clone(), writer.client(), 64)?;
+    let reader = Connection::connect_configured(config.connection.clone(), &database_id, 64)?;
     let timeout = Duration::from_secs(10);
     let mut name_attribute = Attribute::new(
         NAME,
@@ -79,18 +77,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ]))
                     .unique(Unique::Identity),
                 ),
-                TxOp::Add {
-                    entity: EntityRef::Temp("rename".into()),
-                    attribute: atomic_core::DB_IDENT as u32,
-                    value: Value::Keyword(Keyword::new("person", "rename")).into(),
-                },
-                TxOp::Add {
-                    entity: EntityRef::Temp("rename".into()),
-                    attribute: atomic_core::DB_FN as u32,
-                    value: Value::Function(rename).into(),
-                },
             ],
         ),
+        timeout,
+    )?;
+    operator.install_program(
+        &writer.client(),
+        "install-rename",
+        Keyword::new("person", "rename"),
+        &rename_program,
+        &[],
         timeout,
     )?;
     let inserted = connection.transact(
@@ -292,7 +288,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let identity = connection.identity().clone();
     assert_eq!(names(&reader.sync_to(changed.basis_t, timeout)?)?, expected);
-    assert_eq!(reader.load_stats().compatibility_materializations, 0);
     drop(connection);
     writer.shutdown();
     // The producer is gone, but captured log/index values and prepared
@@ -342,7 +337,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(latest_transactions[1].data, changed.tx_data);
     // Reads and reopening do not acquire or retain a writer lease.
     assert_eq!(names(&reader.db())?, expected);
-    let reopened = Connection::connect(&config.connection, &database_id, 64)?;
+    let reopened = Connection::connect_configured(config.connection.clone(), &database_id, 64)?;
     assert_eq!(reopened.identity(), &identity);
     assert_eq!(reopened.db().basis_t(), changed.basis_t);
     assert_eq!(names(&reopened.db())?, expected);
@@ -367,7 +362,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         original_rows[0].get(&Value::String("name".into())),
         Some(&QueryValue::Scalar(Value::String("Ada".into())))
     );
-    assert_eq!(reopened.load_stats().compatibility_materializations, 0);
     println!(
         "PASS {database_id}: schema, controlled transact, tuple references, lookup keys, query, pull, immutable log, index-pull, deferred query transforms, return maps, history, chained native speculation, immutable values, reopen at t={}",
         changed.basis_t

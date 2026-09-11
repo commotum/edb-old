@@ -1,14 +1,13 @@
 //! Captured selective reads over opaque blocks, without relational peer state.
 //!
-//! Capture atomically guards the publication revision while creating a pin.
-//! Every cursor retains the same root pin. Final Drop queues bounded cleanup,
-//! never SQL. A live reader session protects pins; abandoned sessions must be
-//! revoked before their pins can be retired after the collection grace period.
+//! Capturing and using a value only reads immutable storage. Storage collection
+//! retains retired structures for the configured grace period; readers do not
+//! register sessions, publish pins, or coordinate with the writer.
 use super::descriptors::{IndexDescriptor, SnapshotMetadata, order_tag};
 use super::root::{
     Block, DATABASE_ROOT_KIND, DATABASE_VALUE_ROOT_KIND, DatabaseRoot, DatabaseValueRoot,
 };
-use super::{BatchOutcome, ObjectId, PgBlockStore, RefChange, RefCondition};
+use super::{ObjectId, PgBlockStore, RefCondition};
 use crate::async_client::executor::Owned;
 use crate::idents::IdentIndex;
 use crate::index::NormalizedIndexBoundary;
@@ -25,33 +24,22 @@ use crate::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-
-#[path = "read_sessions.rs"]
-mod sessions;
-pub(crate) use sessions::reap_read_session;
-use sessions::{PinCleanup, ReaderSession};
 
 /// The existing executor owns final driver cleanup; all captured snapshots
 /// from one reader share this single configured resource reservation.
 struct BlockStoreResource {
     store: Owned<Mutex<Option<PgBlockStore>>>,
-    session: Arc<ReaderSession>,
-    executor: crate::AsyncExecutor,
-    cleanup: Mutex<PinCleanup>,
 }
 impl BlockStoreResource {
     fn lock(&self) -> BlockStoreGuard<'_> {
         BlockStoreGuard {
             store: self.store.lock().unwrap_or_else(|e| e.into_inner()),
-            borrowed_session: None,
         }
     }
 }
 struct BlockStoreGuard<'a> {
     store: MutexGuard<'a, Option<PgBlockStore>>,
-    borrowed_session: Option<String>,
 }
 impl Deref for BlockStoreGuard<'_> {
     type Target = PgBlockStore;
@@ -69,18 +57,6 @@ impl super::ObjectReader for BlockStoreGuard<'_> {
         super::ObjectReader::read_object(&mut **self, id)
     }
 }
-impl Drop for BlockStoreGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(key) = self.borrowed_session.take() {
-            let _ = self
-                .store
-                .as_mut()
-                .expect("live block store")
-                .unlock_session_shared(&key);
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct BlockReadConfig {
     pub cache_entries: usize,
@@ -117,8 +93,8 @@ pub struct BlockReadStats {
 /// One exact immutable root over the block store. Methods that read cold
 /// objects are synchronous. Values captured by one reader share its connection
 /// and configured executor resource reservation. Dropping a value never
-/// closes its PostgreSQL driver or releases a pin on the calling thread.
-/// Clones share ownership; final release is deferred to the existing executor.
+/// closes its PostgreSQL driver on the calling thread; final driver cleanup
+/// is deferred to the existing executor.
 #[derive(Clone)]
 pub struct BlockSnapshot {
     inner: Arc<SnapshotInner>,
@@ -134,37 +110,16 @@ pub struct BlockReader {
     limits: BlockReadConfig,
 }
 
-/// A publication pin with no database/index/log decoding. Receipt lookup uses
-/// this before any current-state resource admission or schema precondition.
-#[derive(Clone)]
+/// An immutable publication observation. The revision is used only when a
+/// writer later conditionally publishes a successor, not for reading this value.
+#[derive(Clone, Debug)]
 pub(crate) struct RootCapture {
-    pin: Arc<RootPin>,
-    source_condition: RefCondition,
-}
-impl std::fmt::Debug for RootCapture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RootCapture")
-            .field("root_id", &self.pin.root_id)
-            .field("source", &self.source_condition)
-            .finish_non_exhaustive()
-    }
-}
-struct RootPin {
-    source: BlockNodeSource,
     root_id: ObjectId,
-    key: String,
-    revision: u64,
-    released: AtomicBool,
+    source_condition: RefCondition,
 }
 impl RootCapture {
     pub(crate) fn root_id(&self) -> ObjectId {
-        self.pin.root_id
-    }
-    pub(crate) fn condition(&self) -> RefCondition {
-        RefCondition {
-            key: self.pin.key.clone(),
-            expected: Some(self.pin.revision),
-        }
+        self.root_id
     }
     pub(crate) fn source_condition(&self) -> RefCondition {
         self.source_condition.clone()
@@ -174,45 +129,8 @@ impl RootCapture {
             .expected
             .expect("captured publication revision")
     }
-    pub(crate) fn release(self) -> Result<(), SemanticError> {
-        if Arc::strong_count(&self.pin) != 1 {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "storage/read-pin-shared",
-                "Other publication captures still retain this pin",
-            ));
-        }
-        self.pin.release()
-    }
-    fn into_pin(self) -> Arc<RootPin> {
-        self.pin
-    }
 }
-impl RootPin {
-    fn release(&self) -> Result<(), SemanticError> {
-        if self.released.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        let live = self.source.live()?;
-        sessions::release_pin_refs(
-            &mut live.store.lock(),
-            live.store.session.condition(),
-            &[(self.key.clone(), self.revision)],
-        )?;
-        self.released.store(true, Ordering::Release);
-        live.store.forget_pin(&self.key);
-        Ok(())
-    }
-}
-impl Drop for RootPin {
-    fn drop(&mut self) {
-        if !self.released.load(Ordering::Acquire)
-            && let Ok(live) = self.source.live()
-        {
-            live.store.schedule_pin_cleanup();
-        }
-    }
-}
+
 struct SnapshotInner {
     captured: DatabaseValueRoot,
     storage_root: ObjectId,
@@ -231,7 +149,6 @@ struct SnapshotInner {
     avet_unready: Arc<BTreeSet<u32>>,
     metadata_residency: crate::index_support::ResidentMetadataStats,
     root_residency: crate::index_support::ResidentTreeRootStats,
-    pin: Option<Arc<RootPin>>,
     limits: BlockReadConfig,
 }
 impl std::fmt::Debug for BlockSnapshot {
@@ -258,13 +175,12 @@ struct BlockNodeSource {
 }
 #[derive(Clone)]
 enum SourceBackend {
-    Live(LiveSource),
+    Live(Arc<LiveSource>),
     Repository(Arc<PathBuf>),
 }
 #[derive(Clone)]
 struct LiveSource {
     store: Arc<BlockStoreResource>,
-    protected_session: Arc<ReaderSession>,
     connection: PostgresConnectionConfig,
 }
 impl BlockNodeSource {
@@ -274,27 +190,8 @@ impl BlockNodeSource {
             SourceBackend::Repository(_) => Err(repository_authority()),
         }
     }
-    fn protecting(&self, pin: &RootPin) -> Self {
-        let mut source = self.clone();
-        if let SourceBackend::Live(live) = &mut source.backend
-            && let SourceBackend::Live(protected) = &pin.source.backend
-        {
-            live.protected_session = Arc::clone(&protected.protected_session);
-        }
-        source
-    }
     fn lock(&self) -> Result<BlockStoreGuard<'_>, SemanticError> {
-        let live = self.live()?;
-        let mut store = live.store.lock();
-        if live.protected_session.key != live.store.session.key {
-            store.lock_session_shared(&live.protected_session.key)?;
-            if let Err(error) = live.protected_session.validate(&mut store) {
-                let _ = store.unlock_session_shared(&live.protected_session.key);
-                return Err(error);
-            }
-            store.borrowed_session = Some(live.protected_session.key.clone());
-        }
-        Ok(store)
+        Ok(self.live()?.store.lock())
     }
     fn scoped(&self, identity: [u8; 16], generation: u64) -> Self {
         let mut source = self.clone();
@@ -467,24 +364,17 @@ impl BlockReader {
         executor: &crate::AsyncExecutor,
     ) -> Result<Self, SemanticError> {
         let retained = executor.retain(|| Mutex::new(None))?;
-        let mut store = PgBlockStore::connect(config)?;
-        let session = ReaderSession::start(&mut store)?;
+        let store = PgBlockStore::connect(config)?;
         let (ssd_cache, ssd_namespace) =
             crate::ssd_cache::open_connection_cache(config, "opaque-blocks")?;
         *retained.lock().unwrap_or_else(|e| e.into_inner()) = Some(store);
         Ok(Self {
             source: BlockNodeSource {
                 programs: Default::default(),
-                backend: SourceBackend::Live(LiveSource {
-                    store: Arc::new(BlockStoreResource {
-                        store: retained,
-                        session: Arc::clone(&session),
-                        executor: executor.clone(),
-                        cleanup: Mutex::new(PinCleanup::default()),
-                    }),
-                    protected_session: session,
+                backend: SourceBackend::Live(Arc::new(LiveSource {
+                    store: Arc::new(BlockStoreResource { store: retained }),
                     connection: config.clone(),
-                }),
+                })),
                 cache: TreeNodeCache::new(limits.cache_entries, limits.cache_bytes),
                 fulltext_cache: crate::fulltext_store::FulltextCache::new(
                     limits.cache_entries,
@@ -501,17 +391,11 @@ impl BlockReader {
         })
     }
 
-    /// Resolve a publication/value reference once and atomically pin its exact
+    /// Resolve a publication/value reference once and capture its immutable
     /// revision. A racing publication returns Conflict; it is never remapped.
     pub fn capture(&self, reference_key: &str) -> Result<BlockSnapshot, SemanticError> {
-        let capture = self.pin_reference(reference_key)?;
-        let revision = capture.source_revision();
-        let route = route_from_conditions(&[capture.source_condition()]);
-        let mut snapshot = self.open_pin(capture.into_pin())?;
-        let inner = Arc::get_mut(&mut snapshot.inner).unwrap();
-        inner.publication_revision = Some(revision);
-        inner.route = route;
-        Ok(snapshot)
+        let capture = self.capture_reference(reference_key)?;
+        self.capture_root(&capture)
     }
     fn live(&self) -> &LiveSource {
         // BlockReader has only PostgreSQL constructors. Repository values are
@@ -541,10 +425,7 @@ impl BlockReader {
         self
     }
     pub(crate) fn reconnect(&self) -> Result<(), SemanticError> {
-        let mut next = PgBlockStore::connect(self.connection())?;
-        let session = &self.live().store.session;
-        next.lock_session_shared(&session.key)?;
-        session.validate(&mut next)?;
+        let next = PgBlockStore::connect(self.connection())?;
         *self
             .live()
             .store
@@ -581,7 +462,10 @@ impl BlockReader {
             .purge_namespace(&self.source.cache_namespace(identity, generation))
     }
 
-    pub(crate) fn pin_reference(&self, reference_key: &str) -> Result<RootCapture, SemanticError> {
+    pub(crate) fn capture_reference(
+        &self,
+        reference_key: &str,
+    ) -> Result<RootCapture, SemanticError> {
         let mut store = self.source.lock()?;
         let publication = store.read_ref(reference_key)?.ok_or_else(|| {
             SemanticError::new(
@@ -614,111 +498,24 @@ impl BlockReader {
         drop(store);
         #[cfg(test)]
         protection_tests::after_reference_read(reference_key);
-        let condition = RefCondition {
-            key: reference_key.into(),
-            expected: Some(publication.revision),
-        };
-        let pin = self.pin_immutable(root_id, std::slice::from_ref(&condition))?;
         Ok(RootCapture {
-            pin,
-            source_condition: condition,
+            root_id,
+            source_condition: RefCondition {
+                key: reference_key.into(),
+                expected: Some(publication.revision),
+            },
         })
     }
 
-    /// Establish current publication authority for a read-only exact reopen.
-    /// Only the initial observation may be repeated: after a pin succeeds,
-    /// receipt, identity, generation and value validation use that fixed root.
-    /// Explicit caller-supplied revision guards never pass through this helper.
-    pub(crate) fn pin_current_reference(
-        &self,
-        reference_key: &str,
-    ) -> Result<RootCapture, SemanticError> {
-        let mut remaining_retries = 2;
-        loop {
-            match self.pin_reference(reference_key) {
-                Err(error)
-                    if remaining_retries != 0
-                        && error.category == ErrorCategory::Conflict
-                        && matches!(
-                            error.code,
-                            "storage/capture-conflict" | "storage/capture-gc-conflict"
-                        ) =>
-                {
-                    remaining_retries -= 1;
-                    std::thread::yield_now();
-                }
-                result => return result,
-            }
-        }
-    }
-
-    /// A live observer, unlike a returned database value, follows future
-    /// publications. Writers pre-create this generation token; reader roles
-    /// only acquire a normal session pin, never insert an immutable object.
-    /// The publication guard prevents registering behind an already-pruned
-    /// excision handoff after an initial capture races generation activation.
-    pub(crate) fn pin_report_observer(
-        &self,
-        reference_key: &str,
-        route: [u8; 16],
-        snapshot: &BlockSnapshot,
-    ) -> Result<RootCapture, SemanticError> {
-        let expected = super::report_handoff::token_id(
-            route,
-            snapshot.captured_root().identity,
-            snapshot.generation(),
-        )?;
-        let key = super::report_handoff::observer_key(route);
-        let reference = self.source.lock()?.read_ref(&key)?;
-        let Some(reference) =
-            reference.filter(|reference| reference.value.as_deref() == Some(expected.as_slice()))
-        else {
-            return Err(SemanticError::conflict(
-                "storage/observer-generation-changed",
-                "Live observer token differs from the captured publication",
-            ));
-        };
-        let publication = RefCondition {
-            key: reference_key.into(),
-            expected: Some(snapshot.publication_revision().ok_or_else(|| {
-                fault(
-                    "storage/observer-publication",
-                    "Observer registration requires a current publication capture",
-                )
-            })?),
-        };
-        let pin = self.pin_immutable(
-            expected,
-            &[
-                publication.clone(),
-                snapshot.pin_condition()?,
-                RefCondition {
-                    key,
-                    expected: Some(reference.revision),
-                },
-            ],
-        )?;
-        Ok(RootCapture {
-            pin,
-            source_condition: publication,
-        })
-    }
-
-    /// Borrow an already-pinned observed publication for a complete report
+    /// Reuse one observed immutable publication for a complete report
     /// batch. No per-report read may switch to a changing current head.
     pub(crate) fn report_publication(
         &self,
         reference_key: &str,
         snapshot: &BlockSnapshot,
     ) -> Result<RootCapture, SemanticError> {
-        let pin = snapshot.inner.pin.as_ref().ok_or_else(|| {
-            fault(
-                "storage/report-source",
-                "Live reports require a retained publication",
-            )
-        })?;
         Ok(RootCapture {
-            pin: Arc::clone(pin),
+            root_id: snapshot.storage_root_id(),
             source_condition: RefCondition {
                 key: reference_key.into(),
                 expected: Some(snapshot.publication_revision().ok_or_else(|| {
@@ -731,28 +528,24 @@ impl BlockReader {
         })
     }
 
-    /// This entry point is only for a connected observer holding its original
-    /// interest token. Ordinary and serialized snapshot opens never consult
-    /// handoffs, and cannot turn a historical value into new report interest.
+    /// Recover a generation's exact reports within the collection grace period.
+    /// Ordinary snapshot reads never consult report handoffs.
     pub(crate) fn report_handoff(
         &self,
-        observer: &RootCapture,
+        source: &RootCapture,
         route: [u8; 16],
         identity: [u8; 16],
-        observer_generation: u64,
+        source_generation: u64,
         generation: u64,
     ) -> Result<(RootCapture, u64), SemanticError> {
-        if generation < observer_generation
-            || observer.root_id()
-                != super::report_handoff::token_id(route, identity, observer_generation)?
-        {
+        if generation < source_generation {
             return Err(fault(
-                "storage/report-observer-coordinate",
-                "Report catchup requires the original live generation-interest token",
+                "storage/report-generation",
+                "Report catchup cannot move backwards",
             ));
         }
         let key = super::report_handoff::handoff_key(route, generation);
-        let handoff = self.pin_reference(&key).map_err(|error| {
+        let handoff = self.capture_reference(&key).map_err(|error| {
             if error.category == ErrorCategory::NotFound {
                 SemanticError::new(
                     ErrorCategory::NotFound,
@@ -764,65 +557,58 @@ impl BlockReader {
                 error
             }
         })?;
-        let result = (|| {
-            let descriptor = super::report_handoff::ReportHandoff::decode(
-                &handoff.root_id(),
-                &self.read_object(handoff.root_id())?,
-            )?;
-            if descriptor.route != route
-                || descriptor.identity != identity
-                || descriptor.generation != generation
-            {
-                return Err(fault(
-                    "storage/report-handoff-coordinate",
-                    "Report handoff belongs to a different route or generation",
-                ));
-            }
-            let root = DatabaseRoot::decode(
-                &descriptor.publication,
-                &self.read_object(descriptor.publication)?,
-            )?;
-            let metadata_id = root.metadata.ok_or_else(|| {
-                fault(
-                    "storage/report-handoff-coordinate",
-                    "Handoff has no metadata",
-                )
-            })?;
-            let metadata = SnapshotMetadata::decode(&metadata_id, &self.read_object(metadata_id)?)?;
-            if root.identity != identity
-                || root.basis != descriptor.basis
-                || metadata.identity != identity
-                || metadata.basis != root.basis
-                || metadata.generation != generation
-            {
-                return Err(fault(
-                    "storage/report-handoff-coordinate",
-                    "Handoff publication differs from its authenticated coordinates",
-                ));
-            }
-            let pin = self.pin_immutable(
-                descriptor.publication,
-                &[handoff.condition(), observer.condition()],
-            )?;
-            Ok((
-                RootCapture {
-                    pin,
-                    // Retain the route provenance, not the handoff namespace,
-                    // on returned exact before/after values.
-                    source_condition: observer.source_condition(),
-                },
-                root.basis,
-            ))
-        })();
-        let _ = handoff.release();
-        result
+        let descriptor = super::report_handoff::ReportHandoff::decode(
+            &handoff.root_id(),
+            &self.read_object(handoff.root_id())?,
+        )?;
+        if descriptor.route != route
+            || descriptor.identity != identity
+            || descriptor.generation != generation
+        {
+            return Err(fault(
+                "storage/report-handoff-coordinate",
+                "Report handoff belongs to a different route or generation",
+            ));
+        }
+        let root = DatabaseRoot::decode(
+            &descriptor.publication,
+            &self.read_object(descriptor.publication)?,
+        )?;
+        let metadata_id = root.metadata.ok_or_else(|| {
+            fault(
+                "storage/report-handoff-coordinate",
+                "Handoff has no metadata",
+            )
+        })?;
+        let metadata = SnapshotMetadata::decode(&metadata_id, &self.read_object(metadata_id)?)?;
+        if root.identity != identity
+            || root.basis != descriptor.basis
+            || metadata.identity != identity
+            || metadata.basis != root.basis
+            || metadata.generation != generation
+        {
+            return Err(fault(
+                "storage/report-handoff-coordinate",
+                "Handoff publication differs from its authenticated coordinates",
+            ));
+        }
+        Ok((
+            RootCapture {
+                root_id: descriptor.publication,
+                // Retain the route provenance, not the handoff namespace,
+                // on returned exact before/after values.
+                source_condition: source.source_condition(),
+            },
+            root.basis,
+        ))
     }
 
     pub(crate) fn capture_root(
         &self,
         capture: &RootCapture,
     ) -> Result<BlockSnapshot, SemanticError> {
-        let mut snapshot = self.capture_immutable(capture.root_id(), &[capture.condition()])?;
+        let mut snapshot =
+            self.capture_immutable(capture.root_id(), &[capture.source_condition()])?;
         let inner = Arc::get_mut(&mut snapshot.inner).unwrap();
         inner.publication_revision = Some(capture.source_revision());
         inner.route = route_from_conditions(&[capture.source_condition()]);
@@ -835,13 +621,11 @@ impl BlockReader {
     /// Reuse authenticated immutable state without borrowing another owner's
     /// driver. The caller validates identity and the observed successor first.
     pub(crate) fn adopt_snapshot(&self, snapshot: &BlockSnapshot) -> BlockSnapshot {
-        let mut source = self.source.clone();
-        if let Some(pin) = &snapshot.inner.pin {
-            source = source.protecting(pin);
-        }
         BlockSnapshot {
             inner: Arc::clone(&snapshot.inner),
-            source: source.scoped(snapshot.inner.captured.identity, snapshot.generation()),
+            source: self
+                .source
+                .scoped(snapshot.inner.captured.identity, snapshot.generation()),
         }
     }
 
@@ -850,179 +634,160 @@ impl BlockReader {
         key: &str,
         previous: &BlockSnapshot,
     ) -> Result<Option<BlockSnapshot>, SemanticError> {
-        let capture = self.pin_reference(key)?;
-        let result = (|| {
-            if capture.root_id() == previous.storage_root_id() {
-                return Ok(None);
-            }
-            let root =
-                DatabaseRoot::decode(&capture.root_id(), &self.read_object(capture.root_id())?)?;
-            let captured = DatabaseValueRoot::from(&root);
-            if captured == previous.inner.captured {
-                return Ok(None);
-            }
-            if captured.identity != previous.inner.captured.identity
-                || captured.basis < previous.basis_t()
-            {
-                return Err(fault(
-                    "storage/observation-lineage",
-                    "Live observation cannot change identity or move backwards",
-                ));
-            }
-            let metadata_id = captured
-                .metadata
-                .ok_or_else(|| fault("storage/read-metadata", "Observed root has no metadata"))?;
-            let metadata = SnapshotMetadata::decode(&metadata_id, &self.read_object(metadata_id)?)?;
-            if captured.indexes != previous.inner.captured.indexes
-                || metadata.generation != previous.generation()
-            {
-                let mut snapshot = BlockSnapshot::open_pinned(
-                    self.source.clone(),
-                    capture.root_id(),
-                    Arc::clone(&capture.pin),
-                    self.limits.clone(),
-                )?;
-                let inner = Arc::get_mut(&mut snapshot.inner).unwrap();
-                inner.publication_revision = Some(capture.source_revision());
-                inner.route = route_from_conditions(&[capture.source_condition()]);
-                return Ok(Some(snapshot));
-            }
-            if metadata.identity != captured.identity || metadata.basis != captured.basis {
-                return Err(fault(
-                    "storage/observation-metadata",
-                    "Observed metadata disagrees with its root",
-                ));
-            }
-            if captured.basis - previous.indexed_basis_t()
-                > self.limits.max_recent_transactions as u64
-            {
-                return Err(limit(
-                    "Observed recent transaction window exceeds reader admission",
-                ));
-            }
-            let (log, entries) = {
-                let mut store = self.source.lock()?;
-                let log = super::log::LogRoot::open(
-                    &mut store,
-                    captured.log.ok_or_else(|| {
-                        fault("storage/read-log", "New observations require a log")
-                    })?,
-                )?;
-                if log.basis_t() != captured.basis
-                    || log.eidx_frontier() != metadata.eidx_frontier
-                    || log.reserved_frontier() != metadata.reserved_frontier
-                {
-                    return Err(fault(
-                        "storage/observation-log",
-                        "Observed log endpoint disagrees with metadata",
-                    ));
-                }
-                // The new suffix must extend this exact captured prefix. Do
-                // not synthesize continuity merely by assigning previous_hash
-                // while constructing the in-memory transaction wrappers.
-                if let Some(previous_log) = &previous.inner.log
-                    && !log.extends_prefix(&mut store, previous_log)?
-                {
-                    return Err(fault(
-                        "storage/observation-prefix",
-                        "Observed log does not extend the captured transaction prefix",
-                    ));
-                }
-                let mut range =
-                    log.range(&mut store, previous.basis_t() + 1, captured.basis + 1)?;
-                let mut entries = Vec::new();
-                let mut hash = previous.inner.recent.stats().end_hash;
-                let mut retained = previous.inner.recent.stats().accounted_bytes;
-                let mut datoms = previous.inner.recent.stats().datoms;
-                while let Some(record) = range.next_record() {
-                    let record = record?;
-                    let transaction = DurableTransaction {
-                        database_id: previous.inner.lineage.clone(),
-                        basis_t: record.entry.basis_t,
-                        previous_hash: hash,
-                        eidx_frontier: record.entry.eidx_frontier,
-                        tempids: BTreeMap::new(),
-                        tx_data: record.entry.tx_data,
-                    };
-                    retained = retained.saturating_add(
-                        crate::recent::retained_entry_stats(&transaction)?.accounted_bytes,
-                    );
-                    datoms = datoms.saturating_add(transaction.tx_data.len() as u64);
-                    if retained > self.limits.max_recent_bytes as u64
-                        || datoms > self.limits.max_recent_datoms as u64
-                    {
-                        return Err(limit("Observed recent payload exceeds reader admission"));
-                    }
-                    hash = record.id;
-                    entries.push((record.id, transaction));
-                }
-                drop(range);
-                (log, entries)
-            };
-            if entries.len() as u64 != captured.basis - previous.basis_t() {
-                return Err(fault(
-                    "storage/observation-gap",
-                    "Observed log delta is incomplete",
-                ));
-            }
-            let (hashes, transactions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
-            let (endpoint, unready) = crate::index_support::apply_metadata_and_avet_readiness(
-                previous.endpoint_metadata(),
-                &previous.inner.avet_unready,
-                &transactions,
-                |attribute| {
-                    previous
-                        .prefix_cursor(
-                            true,
-                            &IndexPrefix::Aevt {
-                                attribute,
-                                entity: None,
-                                value: None,
-                            },
-                        )?
-                        .next()
-                        .transpose()
-                        .map(|datom| datom.is_some())
-                },
-            )?;
-            let recent = previous.inner.recent.extend_authenticated(
-                hashes.into_iter().zip(transactions),
-                EndpointProjection::from_schema(Arc::clone(&endpoint.schema)),
-            )?;
-            let metadata_residency = endpoint.resident_stats();
-            Ok(Some(BlockSnapshot {
-                source: self
-                    .source
-                    .protecting(&capture.pin)
-                    .scoped(captured.identity, metadata.generation),
-                inner: Arc::new(SnapshotInner {
-                    captured,
-                    metadata,
-                    storage_root: capture.root_id(),
-                    publication_revision: Some(capture.source_revision()),
-                    route: route_from_conditions(&[capture.source_condition()]),
-                    indexes: Arc::clone(&previous.inner.indexes),
-                    base_metadata: Arc::clone(&previous.inner.base_metadata),
-                    schema: Arc::clone(&endpoint.schema),
-                    idents: Arc::clone(&endpoint.idents),
-                    endpoint_metadata: Arc::new(endpoint),
-                    lineage: previous.inner.lineage.clone(),
-                    roots: previous.inner.roots.clone(),
-                    recent,
-                    log: Some(log),
-                    avet_unready: unready,
-                    metadata_residency,
-                    root_residency: previous.inner.root_residency,
-                    pin: Some(Arc::clone(&capture.pin)),
-                    limits: self.limits.clone(),
-                }),
-            }))
-        })();
-        // A successful successor takes ownership of this same durable pin.
-        if !matches!(&result, Ok(Some(_))) {
-            let _ = capture.release();
+        let capture = self.capture_reference(key)?;
+        if capture.root_id() == previous.storage_root_id() {
+            return Ok(None);
         }
-        result
+        let root = DatabaseRoot::decode(&capture.root_id(), &self.read_object(capture.root_id())?)?;
+        let captured = DatabaseValueRoot::from(&root);
+        if captured == previous.inner.captured {
+            return Ok(None);
+        }
+        if captured.identity != previous.inner.captured.identity
+            || captured.basis < previous.basis_t()
+        {
+            return Err(fault(
+                "storage/observation-lineage",
+                "Live observation cannot change identity or move backwards",
+            ));
+        }
+        let metadata_id = captured
+            .metadata
+            .ok_or_else(|| fault("storage/read-metadata", "Observed root has no metadata"))?;
+        let metadata = SnapshotMetadata::decode(&metadata_id, &self.read_object(metadata_id)?)?;
+        if captured.indexes != previous.inner.captured.indexes
+            || metadata.generation != previous.generation()
+        {
+            let mut snapshot = self.capture_root(&capture)?;
+            let inner = Arc::get_mut(&mut snapshot.inner).unwrap();
+            inner.publication_revision = Some(capture.source_revision());
+            inner.route = route_from_conditions(&[capture.source_condition()]);
+            return Ok(Some(snapshot));
+        }
+        if metadata.identity != captured.identity || metadata.basis != captured.basis {
+            return Err(fault(
+                "storage/observation-metadata",
+                "Observed metadata disagrees with its root",
+            ));
+        }
+        if captured.basis - previous.indexed_basis_t() > self.limits.max_recent_transactions as u64
+        {
+            return Err(limit(
+                "Observed recent transaction window exceeds reader admission",
+            ));
+        }
+        let (log, entries) = {
+            let mut store = self.source.lock()?;
+            let log = super::log::LogRoot::open(
+                &mut store,
+                captured
+                    .log
+                    .ok_or_else(|| fault("storage/read-log", "New observations require a log"))?,
+            )?;
+            if log.basis_t() != captured.basis
+                || log.eidx_frontier() != metadata.eidx_frontier
+                || log.reserved_frontier() != metadata.reserved_frontier
+            {
+                return Err(fault(
+                    "storage/observation-log",
+                    "Observed log endpoint disagrees with metadata",
+                ));
+            }
+            // The new suffix must extend this exact captured prefix. Do
+            // not synthesize continuity merely by assigning previous_hash
+            // while constructing the in-memory transaction wrappers.
+            if let Some(previous_log) = &previous.inner.log
+                && !log.extends_prefix(&mut store, previous_log)?
+            {
+                return Err(fault(
+                    "storage/observation-prefix",
+                    "Observed log does not extend the captured transaction prefix",
+                ));
+            }
+            let mut range = log.range(&mut store, previous.basis_t() + 1, captured.basis + 1)?;
+            let mut entries = Vec::new();
+            let mut hash = previous.inner.recent.stats().end_hash;
+            let mut retained = previous.inner.recent.stats().accounted_bytes;
+            let mut datoms = previous.inner.recent.stats().datoms;
+            while let Some(record) = range.next_record() {
+                let record = record?;
+                let transaction = DurableTransaction {
+                    database_id: previous.inner.lineage.clone(),
+                    basis_t: record.entry.basis_t,
+                    previous_hash: hash,
+                    eidx_frontier: record.entry.eidx_frontier,
+                    tempids: BTreeMap::new(),
+                    tx_data: record.entry.tx_data,
+                };
+                retained = retained.saturating_add(
+                    crate::recent::retained_entry_stats(&transaction)?.accounted_bytes,
+                );
+                datoms = datoms.saturating_add(transaction.tx_data.len() as u64);
+                if retained > self.limits.max_recent_bytes as u64
+                    || datoms > self.limits.max_recent_datoms as u64
+                {
+                    return Err(limit("Observed recent payload exceeds reader admission"));
+                }
+                hash = record.id;
+                entries.push((record.id, transaction));
+            }
+            drop(range);
+            (log, entries)
+        };
+        if entries.len() as u64 != captured.basis - previous.basis_t() {
+            return Err(fault(
+                "storage/observation-gap",
+                "Observed log delta is incomplete",
+            ));
+        }
+        let (hashes, transactions): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let (endpoint, unready) = crate::index_support::apply_metadata_and_avet_readiness(
+            previous.endpoint_metadata(),
+            &previous.inner.avet_unready,
+            &transactions,
+            |attribute| {
+                previous
+                    .prefix_cursor(
+                        true,
+                        &IndexPrefix::Aevt {
+                            attribute,
+                            entity: None,
+                            value: None,
+                        },
+                    )?
+                    .next()
+                    .transpose()
+                    .map(|datom| datom.is_some())
+            },
+        )?;
+        let recent = previous.inner.recent.extend_authenticated(
+            hashes.into_iter().zip(transactions),
+            EndpointProjection::from_schema(Arc::clone(&endpoint.schema)),
+        )?;
+        let metadata_residency = endpoint.resident_stats();
+        Ok(Some(BlockSnapshot {
+            source: self.source.scoped(captured.identity, metadata.generation),
+            inner: Arc::new(SnapshotInner {
+                captured,
+                metadata,
+                storage_root: capture.root_id(),
+                publication_revision: Some(capture.source_revision()),
+                route: route_from_conditions(&[capture.source_condition()]),
+                indexes: Arc::clone(&previous.inner.indexes),
+                base_metadata: Arc::clone(&previous.inner.base_metadata),
+                schema: Arc::clone(&endpoint.schema),
+                idents: Arc::clone(&endpoint.idents),
+                endpoint_metadata: Arc::new(endpoint),
+                lineage: previous.inner.lineage.clone(),
+                roots: previous.inner.roots.clone(),
+                recent,
+                log: Some(log),
+                avet_unready: unready,
+                metadata_residency,
+                root_residency: previous.inner.root_residency,
+                limits: self.limits.clone(),
+            }),
+        }))
     }
 
     pub(crate) fn exact_report(
@@ -1030,10 +795,8 @@ impl BlockReader {
         reference_key: &str,
         basis: u64,
     ) -> Result<crate::ServiceTransactionReport, SemanticError> {
-        let capture = self.pin_current_reference(reference_key)?;
-        let result = self.exact_report_from_capture(&capture, basis);
-        let _ = capture.release();
-        result
+        let capture = self.capture_reference(reference_key)?;
+        self.exact_report_from_capture(&capture, basis)
     }
 
     pub(crate) fn exact_report_from_capture(
@@ -1041,6 +804,8 @@ impl BlockReader {
         capture: &RootCapture,
         basis: u64,
     ) -> Result<crate::ServiceTransactionReport, SemanticError> {
+        let operation = crate::OperationContext::current_or_process();
+        let _report_phase = operation.phase(crate::OperationKind::TransactionReport);
         let root_id = capture.root_id();
         let root = DatabaseRoot::decode(&root_id, &self.read_object(root_id)?)?;
         if basis == 0 || basis > root.basis {
@@ -1095,8 +860,8 @@ impl BlockReader {
         receipt: super::receipts::ExactReceipt,
         replayed: bool,
     ) -> Result<crate::ServiceTransactionReport, SemanticError> {
-        let mut before = self.capture_immutable(receipt.before, &[capture.condition()])?;
-        let mut after = self.capture_immutable(receipt.after, &[capture.condition()])?;
+        let mut before = self.capture_immutable(receipt.before, &[capture.source_condition()])?;
+        let mut after = self.capture_immutable(receipt.after, &[capture.source_condition()])?;
         let route = route_from_conditions(&[capture.source_condition()]);
         Arc::get_mut(&mut before.inner).unwrap().route = route.clone();
         Arc::get_mut(&mut after.inner).unwrap().route = route;
@@ -1135,23 +900,75 @@ impl BlockReader {
         })
     }
 
-    /// Pin an exact immutable value reached through caller-held publication or
-    /// receipt protection, without resolving the changing current database head.
-    /// Callers must supply guards proving that reachability; this helper cannot
-    /// infer it from opaque reference bytes. A fresh GC revision (including an
-    /// absent GC reference) joins the same atomic pin transition.
+    pub(crate) fn resolve_request_outcome(
+        &self,
+        database: &super::BlockDatabase,
+        request_key: &str,
+        digest: Digest,
+    ) -> Result<Option<crate::ServiceTransactionReport>, SemanticError> {
+        let key = super::receipts::scoped_request_key(&database.identity, request_key)?;
+        let capture = self.capture_reference(&database.reference_key())?;
+        let root = DatabaseRoot::decode_for_identity(
+            &capture.root_id(),
+            &self.read_object(capture.root_id())?,
+            &database.identity,
+        )?;
+        let id = super::receipts::RequestIndex::from_root(root.receipts)
+            .lookup(&mut self.source.lock()?, key)?;
+        id.map(|id| self.replay_receipt(&capture, id, digest, database.identity))
+            .transpose()
+    }
+
+    pub(crate) fn replay_receipt(
+        &self,
+        capture: &RootCapture,
+        id: ObjectId,
+        digest: Digest,
+        identity: [u8; 16],
+    ) -> Result<crate::ServiceTransactionReport, SemanticError> {
+        // Every caller, including post-disconnect outcome reconciliation, uses
+        // this shared reconstruction path. Attribute its actual reads and wall
+        // time here rather than only in the writer's submission adapter.
+        let operation = crate::OperationContext::current_or_process();
+        let _report_phase = operation.phase(crate::OperationKind::TransactionReport);
+        let bytes = self.read_object(id)?;
+        super::excision::reject_tombstone_bytes(id, &bytes, &identity)?;
+        let receipt =
+            super::receipts::ExactReceipt::load_from_bytes(&mut self.source.lock()?, id, &bytes)?;
+        if receipt.identity != identity {
+            return Err(fault(
+                "storage/receipt-identity",
+                "Receipt belongs to a different database",
+            ));
+        }
+        if receipt.request_digest != digest {
+            return Err(SemanticError::conflict(
+                "postgres/idempotency-key-reused",
+                "Request key is already bound to different transaction data",
+            ));
+        }
+        self.report_from_receipt(capture, receipt, true)
+    }
+
+    /// Read an exact immutable value reached through a trusted publication or
+    /// receipt. Mutation callers separately guard their final publication.
     pub(crate) fn capture_immutable(
         &self,
         root_id: ObjectId,
         conditions: &[RefCondition],
     ) -> Result<BlockSnapshot, SemanticError> {
-        let mut snapshot = self.open_pin(self.pin_immutable(root_id, conditions)?)?;
-        Arc::get_mut(&mut snapshot.inner).unwrap().route = route_from_conditions(conditions);
-        Ok(snapshot)
+        let bytes = self.read_object(root_id)?;
+        BlockSnapshot::open_captured(
+            self.source.clone(),
+            root_id,
+            decode_captured_root(root_id, &bytes)?,
+            route_from_conditions(conditions),
+            self.limits.clone(),
+        )
     }
 
     /// Reopen an untrusted serialized reference only through committed engine
-    /// authority. The trusted publication pin retains its canonical values and
+    /// authority. The trusted publication identifies its canonical values and
     /// authorized indexes. A reader needs no immutable-object write privilege
     /// to hold their decoded value wrapper in memory.
     pub(crate) fn capture_authorized(
@@ -1168,7 +985,6 @@ impl BlockReader {
             self.source.clone(),
             candidate.id()?,
             candidate.clone(),
-            Some(Arc::clone(&capture.pin)),
             route_from_conditions(&[capture.source_condition()]),
             self.limits.clone(),
         )
@@ -1187,7 +1003,7 @@ impl BlockReader {
         log: super::log::LogRoot,
         entry_id: ObjectId,
         tx_data: Vec<Datom>,
-        conditions: &[RefCondition],
+        _conditions: &[RefCondition],
     ) -> Result<BlockSnapshot, SemanticError> {
         if captured.identity != before.inner.captured.identity
             || captured.basis != before.basis_t().saturating_add(1)
@@ -1247,9 +1063,8 @@ impl BlockReader {
             return Err(limit("Proposed recent data exceeds reader admission"));
         }
         let metadata_residency = endpoint.resident_stats();
-        let pin = self.pin_immutable(root_id, conditions)?;
         Ok(BlockSnapshot {
-            source: before.source.protecting(&pin),
+            source: before.source.clone(),
             inner: Arc::new(SnapshotInner {
                 captured,
                 storage_root: root_id,
@@ -1268,177 +1083,11 @@ impl BlockReader {
                 avet_unready: unready,
                 metadata_residency,
                 root_residency: before.inner.root_residency,
-                pin: Some(pin),
                 limits: self.limits.clone(),
             }),
         })
     }
 
-    /// Stage a complete native-code closure before giving it a session owner.
-    /// Epoch protection covers every reused dependency as well as the new root;
-    /// a collector seal invalidates the whole attempt before pin publication.
-    pub(crate) fn stage_pinned_program(
-        &self,
-        bytes: &[u8],
-        control: &crate::MaintenanceControl,
-    ) -> Result<RootCapture, SemanticError> {
-        let root_id = crate::sha256(bytes);
-        let guards = {
-            let mut store = self.source.lock()?;
-            let protection = super::engine::protection(&mut store, &[])?;
-            let guards = protection.conditions.clone();
-            store.set_write_protection(Some(protection))?;
-            let result = (|| {
-                let mut seen = std::collections::BTreeSet::new();
-                let mut pending = vec![root_id];
-                while let Some(id) = pending.pop() {
-                    control.check()?;
-                    if !seen.insert(id) {
-                        continue;
-                    }
-                    let payload = if id == root_id {
-                        bytes.to_vec()
-                    } else {
-                        store.get(id)?.ok_or_else(|| {
-                            SemanticError::new(
-                                ErrorCategory::NotFound,
-                                "program/dependency-not-found",
-                                "A fixed program dependency is absent",
-                            )
-                        })?
-                    };
-                    let program = crate::decode_program(&payload)?;
-                    crate::program_bindings::collect_fixed_program_dependencies(
-                        &program.instructions,
-                        &mut pending,
-                    );
-                    if store.put(&payload)? != id {
-                        return Err(fault(
-                            "program/content-hash",
-                            "Program identity changed during deployment",
-                        ));
-                    }
-                }
-                Ok(())
-            })();
-            let clear = store.set_write_protection(None);
-            result?;
-            clear?;
-            guards
-        };
-        // This freshly authenticated, fully protected closure is the source
-        // proof. It has no pre-existing publication/receipt/pin to inherit.
-        let pin = self.pin_proven_root(root_id, guards)?;
-        Ok(RootCapture {
-            source_condition: RefCondition {
-                key: pin.key.clone(),
-                expected: Some(pin.revision),
-            },
-            pin,
-        })
-    }
-
-    fn pin_immutable(
-        &self,
-        root_id: ObjectId,
-        conditions: &[RefCondition],
-    ) -> Result<Arc<RootPin>, SemanticError> {
-        // Bound/validate caller input before reading, copying, or creating a pin.
-        let guards = normalize_capture_conditions(conditions)?;
-        self.pin_proven_root(root_id, guards)
-    }
-
-    // Callers establish reachability either through normalize_capture_conditions
-    // or by staging the entire child-closed graph under these exact GC guards.
-    // Keep this private: a root hash by itself is never a retention proof.
-    fn pin_proven_root(
-        &self,
-        root_id: ObjectId,
-        mut guards: Vec<RefCondition>,
-    ) -> Result<Arc<RootPin>, SemanticError> {
-        self.live().store.flush_released()?;
-        let mut store = self.source.lock()?;
-        let gc_revision = store
-            .read_ref("system/gc")?
-            .map(|reference| reference.revision);
-        if let Some(guard) = guards.iter().find(|guard| guard.key == "system/gc") {
-            if guard.expected != gc_revision {
-                return Err(SemanticError::conflict(
-                    "storage/capture-gc-conflict",
-                    "Caller GC authority changed before exact snapshot capture",
-                ));
-            }
-        } else {
-            guards.push(RefCondition {
-                key: "system/gc".into(),
-                expected: gc_revision,
-            });
-        }
-        let pin = format!(
-            "{}{:032x}",
-            self.live().store.session.pin_prefix(),
-            crate::uuid_v7()?
-        );
-        guards.push(self.live().store.session.condition());
-        guards.push(RefCondition {
-            key: pin.clone(),
-            expected: None,
-        });
-        super::protocol::validate_batch(&guards, &[])?;
-        let changes = [RefChange {
-            key: pin.clone(),
-            value: Some(root_id.to_vec()),
-        }];
-        let retained = Arc::new(RootPin {
-            source: self.source.clone(),
-            root_id,
-            key: pin.clone(),
-            revision: 1,
-            released: AtomicBool::new(false),
-        });
-        self.live().store.register_pin(&retained);
-        let pin_revision = match super::ownership::publish_refs(&mut store, &guards, &changes)? {
-            BatchOutcome::Applied(refs) => {
-                refs.into_iter()
-                    .find(|(k, _)| k == &pin)
-                    .ok_or_else(|| {
-                        fault(
-                            "storage/pin-result",
-                            "Pin batch omitted its changed reference",
-                        )
-                    })?
-                    .1
-                    .revision
-            }
-            BatchOutcome::Conflict(_) => {
-                return Err(SemanticError::conflict(
-                    "storage/capture-conflict",
-                    "Publication or GC authority changed during snapshot capture",
-                ));
-            }
-        };
-        if pin_revision != retained.revision {
-            return Err(fault(
-                "storage/pin-result",
-                "Fresh pin did not receive its initial revision",
-            ));
-        }
-        Ok(retained)
-    }
-
-    fn open_pin(&self, pin: Arc<RootPin>) -> Result<BlockSnapshot, SemanticError> {
-        let result = BlockSnapshot::open_pinned(
-            pin.source.clone(),
-            pin.root_id,
-            Arc::clone(&pin),
-            self.limits.clone(),
-        );
-        if result.is_err() {
-            // This is the explicitly blocking open path, not Drop/poll.
-            let _ = pin.release();
-        }
-        result
-    }
     pub fn cache_stats(&self) -> CacheStats {
         self.source.cache.stats()
     }
@@ -1499,49 +1148,15 @@ impl BlockSnapshot {
                 "Repository read value differs from its captured publication",
             ));
         }
-        let index_id = value.indexes.ok_or_else(|| {
-            fault(
-                "backup/read-index",
-                "Repository read value has no covering index",
-            )
-        })?;
-        let indexes = IndexDescriptor::decode(&index_id, &source.read(index_id)?)?;
-        if indexes.basis != value.basis
-            || !indexes.pending_avet.is_empty()
-            || !indexes.avet_work.is_empty()
-        {
-            return Err(fault(
-                "backup/read-index",
-                "Repository read index does not cover the captured basis",
-            ));
-        }
-        Self::open_captured(source, value.id()?, value.clone(), None, None, limits)
+        Self::open_captured(source, value.id()?, value.clone(), None, limits)
     }
-    fn open_pinned(
-        source: BlockNodeSource,
-        root_id: ObjectId,
-        pin: Arc<RootPin>,
-        limits: BlockReadConfig,
-    ) -> Result<Self, SemanticError> {
-        let source = source.protecting(&pin);
-        let bytes = source.read(root_id)?;
-        let captured = decode_captured_root(root_id, &bytes)?;
-        Self::open_captured(source, root_id, captured, Some(pin), None, limits)
-    }
-
     fn open_captured(
         source: BlockNodeSource,
         root_id: ObjectId,
         captured: DatabaseValueRoot,
-        pin: Option<Arc<RootPin>>,
         route: Option<Arc<str>>,
         limits: BlockReadConfig,
     ) -> Result<Self, SemanticError> {
-        let source = if let Some(pin) = &pin {
-            source.protecting(pin)
-        } else {
-            source
-        };
         let metadata_id = captured.metadata.ok_or_else(|| {
             fault(
                 "storage/read-metadata",
@@ -1754,30 +1369,11 @@ impl BlockSnapshot {
                 avet_unready: unready,
                 metadata_residency,
                 root_residency,
-                pin,
                 limits,
             }),
         })
     }
 
-    /// Release the durable pin only when no DatabaseValue/cursor/other snapshot
-    /// shares it. Ordinary final Drop queues the same release off-thread.
-    pub fn release(self) -> Result<(), SemanticError> {
-        let Some(pin) = &self.inner.pin else {
-            return Ok(());
-        };
-        if Arc::strong_count(&self.inner) != 1 || Arc::strong_count(pin) != 1 {
-            return Err(SemanticError::new(
-                ErrorCategory::Busy,
-                "storage/read-pin-shared",
-                "Other captured values or cursors still retain this pin",
-            ));
-        }
-        pin.release()
-    }
-    pub fn pin_key(&self) -> Option<&str> {
-        self.inner.pin.as_ref().map(|pin| pin.key.as_str())
-    }
     /// Address used by the live catalog, distinct from the immutable lineage.
     /// A portable repository or unpublished build has no live catalog route.
     pub fn route_id(&self) -> Option<&str> {
@@ -1816,7 +1412,7 @@ impl BlockSnapshot {
         self.source.fulltext_cache.clone()
     }
     /// Advisory work owns a separate driver, while immutable metadata, recent
-    /// indexes, pins and bounded caches remain shared. No writer I/O mutex can
+    /// indexes and bounded caches remain shared. No writer I/O mutex can
     /// be occupied by this returned reader's cold requests.
     pub(crate) fn fork_for_hints(
         &self,
@@ -1859,19 +1455,9 @@ impl BlockSnapshot {
         source.stats = self.source.stats.clone();
         source.node_stats = self.source.node_stats.clone();
         source.cursor_stats = self.source.cursor_stats.clone();
-        if let SourceBackend::Live(next) = &mut source.backend {
-            next.protected_session = Arc::clone(&live.protected_session);
-        }
         Ok(Self {
             inner: Arc::clone(&self.inner),
             source,
-        })
-    }
-    pub(crate) fn pin_condition(&self) -> Result<RefCondition, SemanticError> {
-        let pin = self.inner.pin.as_ref().ok_or_else(repository_authority)?;
-        Ok(RefCondition {
-            key: pin.key.clone(),
-            expected: Some(pin.revision),
         })
     }
     pub(crate) fn captured_metadata(&self) -> &SnapshotMetadata {
@@ -2137,7 +1723,7 @@ impl BlockSnapshot {
             return Ok(program);
         }
         // Never retain a cache mutex across source I/O. Cold reads retain the
-        // existing live-session or repository authentication boundary.
+        // existing provider or repository authentication boundary.
         let payload = self.source.read(hash)?;
         if crate::sha256(&payload) != hash {
             return Err(fault(
@@ -2291,47 +1877,6 @@ fn decode_captured_root(
             "Reference does not name a database root",
         )),
     }
-}
-
-fn normalize_capture_conditions(
-    conditions: &[RefCondition],
-) -> Result<Vec<RefCondition>, SemanticError> {
-    super::validate_limit(conditions.len())?;
-    let mut unique = BTreeMap::<&str, Option<u64>>::new();
-    for condition in conditions {
-        super::validate_key(&condition.key)?;
-        if let Some(previous) = unique.insert(&condition.key, condition.expected)
-            && previous != condition.expected
-        {
-            return Err(SemanticError::conflict(
-                "storage/capture-guard-conflict",
-                "Exact capture received inconsistent guards for one reference",
-            ));
-        }
-    }
-    // New pin, session, ownership event/clock and (unless supplied) GC guard.
-    let additional = 4 + usize::from(!unique.contains_key("system/gc"));
-    if unique.keys().all(|key| *key == "system/gc") {
-        return Err(SemanticError::incorrect(
-            "storage/capture-source-guard",
-            "Exact capture requires a publication, receipt, or retained-pin guard",
-        ));
-    }
-    if unique.len() > super::MAX_BATCH - additional {
-        return Err(SemanticError::incorrect(
-            "storage/capture-guard-limit",
-            "Exact capture requires room for pin, session and ownership guards",
-        ));
-    }
-    let guards = unique
-        .into_iter()
-        .map(|(key, expected)| RefCondition {
-            key: key.into(),
-            expected,
-        })
-        .collect::<Vec<_>>();
-    super::protocol::validate_batch(&guards, &[])?;
-    Ok(guards)
 }
 
 #[cfg(test)]

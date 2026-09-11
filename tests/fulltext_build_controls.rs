@@ -8,9 +8,9 @@ const NAME: &str = "build-controls";
 const TEXT: u32 = 1000;
 const WAIT: Duration = Duration::from_secs(30);
 
-fn service_config() -> TransactionServiceConfig {
+fn service_config(connection: &PostgresConnectionConfig) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: String::new(),
+        connection: connection.clone(),
         database_id: NAME.into(),
         holder_id: "fulltext-controls".into(),
         lease_duration: Duration::from_secs(10),
@@ -103,9 +103,8 @@ fn invalid_search_policy_rejects_before_direct_or_standby_connection() {
     };
     let config = PostgresConnectionConfig::plaintext("not a PostgreSQL configuration");
     assert_eq!(
-        TransactionService::start_configured_with_options(
-            service_config(),
-            config.clone(),
+        TransactionService::start_with_options(
+            service_config(&config),
             options(invalid.clone(), true)
         )
         .err()
@@ -114,9 +113,8 @@ fn invalid_search_policy_rejects_before_direct_or_standby_connection() {
         "fulltext/build-limits"
     );
     assert_eq!(
-        TransactionStandby::start_configured_with_options(
-            service_config(),
-            config,
+        TransactionStandby::start_with_options(
+            service_config(&config),
             options(invalid, true),
             Duration::from_millis(10)
         )
@@ -132,12 +130,9 @@ fn background_policy_failure_is_visible_and_restart_with_larger_policy_recovers(
     let Some((fixture, config, _)) = fixture() else {
         return;
     };
-    let service = TransactionService::start_configured_with_options(
-        service_config(),
-        config.clone(),
-        options(tiny(), true),
-    )
-    .unwrap();
+    let service =
+        TransactionService::start_with_options(service_config(&config), options(tiny(), true))
+            .unwrap();
     let report = seed(&service);
     wait(|| {
         service
@@ -158,9 +153,8 @@ fn background_policy_failure_is_visible_and_restart_with_larger_policy_recovers(
             .is_none_or(|basis| basis < report.basis_t)
     );
     service.shutdown();
-    let service = TransactionService::start_configured_with_options(
-        service_config(),
-        config,
+    let service = TransactionService::start_with_options(
+        service_config(&config),
         options(Default::default(), true),
     )
     .unwrap();
@@ -192,9 +186,8 @@ fn operator_limits_cover_consolidation_rebuild_excision_and_explicit_recovery() 
     let Some((fixture, config, database)) = fixture() else {
         return;
     };
-    let service = TransactionService::start_configured_with_options(
-        service_config(),
-        config.clone(),
+    let service = TransactionService::start_with_options(
+        service_config(&config),
         options(Default::default(), false),
     )
     .unwrap();

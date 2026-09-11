@@ -37,7 +37,7 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
 
 fn config(connection: &str, holder: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.into(),
+        connection: PostgresConnectionConfig::plaintext(connection),
         database_id: "items".into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(30),
@@ -126,15 +126,12 @@ fn takeover_preserves_indexing_native_registry_partition_defaults_and_captured_i
             ..Default::default()
         })
         .unwrap();
-    // The explicit configured source, not this deliberately unusable legacy
-    // string, must survive every failed lease attempt and eventual activation.
-    let mut standby = TransactionStandby::start_configured_with_options(
-        config("host=/no-such-standby-socket", "second"),
-        connection,
-        options,
-        Duration::from_millis(10),
-    )
-    .unwrap();
+    // The connection policy survives every failed lease attempt and activation.
+    let mut standby_config = config(&fixture.connection, "second");
+    standby_config.connection = connection;
+    let mut standby =
+        TransactionStandby::start_with_options(standby_config, options, Duration::from_millis(10))
+            .unwrap();
     until(|| standby.status() == StandbyStatus::Waiting);
     let polling = OperationContext::new(OperationKind::Application);
     let scope = polling.enter();
@@ -304,9 +301,11 @@ fn cancellation_during_blocked_activation_cleans_up_after_the_driver_returns() {
     blocked
         .query_one("SELECT pg_catalog.pg_advisory_xact_lock($1)", &[&guard])
         .unwrap();
-    standby = TransactionStandby::start_configured(
-        config(&fixture.connection, "starting"),
-        connection,
+    standby = TransactionStandby::start(
+        TransactionServiceConfig {
+            connection,
+            ..config(&fixture.connection, "starting")
+        },
         Duration::from_millis(10),
     )
     .unwrap();
@@ -334,20 +333,18 @@ fn cancellation_during_blocked_activation_cleans_up_after_the_driver_returns() {
 
 #[test]
 fn invalid_standby_settings_fail_before_connecting() {
-    let connection = PostgresConnectionConfig::plaintext("host=/no-such-standby-socket");
-    let mut invalid = config("unused", "holder");
+    let mut invalid = config("host=/no-such-standby-socket", "holder");
     invalid.queue_capacity = 0;
     assert_eq!(
-        TransactionStandby::start_configured(invalid, connection.clone(), Duration::from_secs(1))
+        TransactionStandby::start(invalid, Duration::from_secs(1))
             .err()
             .unwrap()
             .code,
         "service/invalid-config"
     );
     assert_eq!(
-        TransactionStandby::start_configured(
-            config("unused", "holder"),
-            connection.clone(),
+        TransactionStandby::start(
+            config("host=/no-such-standby-socket", "holder"),
             Duration::ZERO
         )
         .err()
@@ -363,9 +360,8 @@ fn invalid_standby_settings_fail_before_connecting() {
         ..Default::default()
     };
     assert_eq!(
-        TransactionStandby::start_configured_with_options(
-            config("unused", "holder"),
-            connection,
+        TransactionStandby::start_with_options(
+            config("host=/no-such-standby-socket", "holder"),
             invalid,
             Duration::from_secs(1)
         )

@@ -209,7 +209,6 @@ fn captured_native_log_is_lazy_time_bounded_and_preserves_no_history_transaction
     assert!(cursor.next().is_none());
     assert!(cursor.next().is_none());
     assert_eq!(cursor.stats().transactions_read, 3);
-    assert_eq!(connection.load_stats().compatibility_materializations, 0);
     writer.shutdown();
     drop(connection);
     assert_eq!(
@@ -309,7 +308,6 @@ fn native_log_keeps_its_exact_generation_across_excision_recovery_and_new_writes
         newer.basis_t
     );
     assert_eq!(original.basis_t(), inserted.basis_t);
-    assert_eq!(recovered.load_stats().compatibility_materializations, 0);
     writer.shutdown();
 }
 
@@ -416,7 +414,6 @@ fn peer_role_reads_log_without_writer_privileges_or_head_lock() {
             .unwrap(),
         Some(committed.tx_data)
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(peer);
     drop(restricted);
     writer.shutdown();
@@ -501,5 +498,4 @@ fn lazy_log_authenticates_each_payload_and_fuses_on_corruption() {
         log.tx_data(IndexTransaction::T(second.basis_t)).unwrap(),
         Some(second.tx_data)
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

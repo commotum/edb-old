@@ -237,7 +237,6 @@ fn connection(postgres: &str, database: &str) -> Result<Connection> {
 }
 
 fn check_peer(connection: &Connection) {
-    assert_eq!(connection.load_stats().compatibility_materializations, 0);
     let cache = connection.cache_stats();
     assert!(cache.peak_entries <= PEER_ENTRIES);
     assert!(cache.peak_bytes <= PEER_BYTES);
@@ -338,7 +337,7 @@ fn writer(postgres: &str, database: &str) -> Result<()> {
     let service = loop {
         match TransactionService::start_with_indexing(
             TransactionServiceConfig {
-                connection: postgres.to_owned(),
+                connection: atomic_core::PostgresConnectionConfig::parse(postgres)?,
                 database_id: database.to_owned(),
                 holder_id: format!("scale-writer-{}", std::process::id()),
                 lease_duration: Duration::from_secs(5),
@@ -659,7 +658,6 @@ fn cold_warm(postgres: &str, database: &str, expected: i64, scale: bool) -> Resu
             "scaled cold access must exercise durable tree reads"
         );
     }
-    assert_eq!(warm.compatibility_materializations, 0);
     assert!(peer.cache_stats().peak_bytes <= PEER_BYTES);
     println!(
         "COLD_WARM basis={} cold_us={cold_us} warm_us={warm_us} cold_sql_reads={cold_reads} warm_sql_reads={warm_reads} cold_sql_payload_bytes={} warm_sql_payload_bytes={} cache={:?} memory={:?}",
@@ -731,7 +729,7 @@ fn main() -> Result<()> {
         ],
     };
     let deployment = PostgresOperator::connect_configured(&storage)?.deploy_program(&deployed)?;
-    let program = deployment.hash();
+    let program = deployment;
     let (mut writer, endpoint) = start_writer(&database)?;
     let observer = connection(&postgres, &database)?;
     let mut category = Attribute::new(

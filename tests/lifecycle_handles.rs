@@ -24,7 +24,7 @@ fn schema() -> Schema {
 }
 fn service_config(connection: &str, name: &str, holder: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.into(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
         database_id: name.into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(2),

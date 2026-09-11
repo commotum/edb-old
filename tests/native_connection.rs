@@ -64,9 +64,9 @@ fn await_background(connection: &Connection, basis: u64) {
 }
 
 fn manual_excision_service(postgres: &str, name: &str) -> atomic_core::TransactionService {
-    atomic_core::TransactionService::start_configured_with_options(
+    atomic_core::TransactionService::start_with_options(
         atomic_core::TransactionServiceConfig {
-            connection: postgres.into(),
+            connection: atomic_core::PostgresConnectionConfig::plaintext(postgres),
             database_id: name.into(),
             holder_id: format!("manual-excision-{name}"),
             lease_duration: Duration::from_secs(5),
@@ -74,7 +74,6 @@ fn manual_excision_service(postgres: &str, name: &str) -> atomic_core::Transacti
             queue_capacity: 32,
             capacity_limits: Default::default(),
         },
-        atomic_core::PostgresConnectionConfig::plaintext(postgres),
         atomic_core::ServiceOptions {
             excision: atomic_core::ExcisionConfig {
                 enabled: false,
@@ -130,7 +129,6 @@ fn independent_peers_observe_unwaited_and_external_commits_in_order() {
             before = report.db_after;
         }
         assert!(connection.try_next_transaction_report().is_none());
-        assert_eq!(connection.load_stats().compatibility_materializations, 0);
         assert!(connection.observation_error().is_none());
     }
     let replay = attached.transact(request("first", 1), TIMEOUT).unwrap();
@@ -281,7 +279,6 @@ fn physical_index_and_excision_sync_require_their_own_completion() {
             .unwrap(),
         vec![Value::Long(1)]
     );
-    assert_eq!(connection.load_stats().compatibility_materializations, 0);
 }
 
 #[test]
@@ -320,7 +317,6 @@ fn lagging_peer_adopts_indexed_prefix_larger_than_its_recent_limit() {
     assert_eq!(advanced.basis_t(), latest.basis_t);
     assert_eq!(peer.durable_base_t(), latest.basis_t);
     assert_eq!(peer.recent_stats().datoms, 0);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     assert!(
         old.values(latest.tempids["item"], COUNT)
             .unwrap()
@@ -375,7 +371,6 @@ fn independent_background_observer_reconnects_after_its_sql_session_is_killed() 
         old.values(first.tempids["item"], COUNT).unwrap(),
         vec![Value::Long(1)]
     );
-    assert_eq!(reader.load_stats().compatibility_materializations, 0);
     writer.shutdown();
 }
 
@@ -438,7 +433,6 @@ fn native_time_views_resolve_t_tx_and_duplicate_instants_over_postgres() {
         since.values(second.tempids["item"], COUNT).unwrap(),
         vec![Value::Long(2)]
     );
-    assert_eq!(connection.load_stats().compatibility_materializations, 0);
     writer.shutdown();
 }
 
@@ -459,8 +453,8 @@ fn a_lagging_report_queue_does_not_skip_transactions_across_excision() {
         .resolve(&id)
         .unwrap()
         .database_id;
-    // This manually advanced peer models a connected observer between polls;
-    // it retains its original generation while the background rewrite runs.
+    // This manually advanced peer models an observer catching up within the
+    // retention grace period while background rewrites run.
     let peer = atomic_core::Peer::connect(&postgres, &id, 4).unwrap();
     peer.enable_tx_reports();
     let abandoned = atomic_core::Peer::connect(&postgres, &id, 4).unwrap();
@@ -527,7 +521,9 @@ fn a_lagging_report_queue_does_not_skip_transactions_across_excision() {
     assert_eq!(objects.list_live_refs(&prefix, None, 32).unwrap().len(), 2);
     let mut collector = atomic_core::storage::ownership::BlockCollector::connect(&config).unwrap();
     settle_report_collection(&mut collector);
-    collector.prune_report_handoffs(32).unwrap();
+    collector
+        .prune_report_handoffs(atomic_core::RECOMMENDED_GARBAGE_COLLECTION_AGE, 32)
+        .unwrap();
     assert_eq!(objects.list_live_refs(&prefix, None, 32).unwrap().len(), 2);
     let current = peer.sync().unwrap();
     assert!(
@@ -561,32 +557,12 @@ fn a_lagging_report_queue_does_not_skip_transactions_across_excision() {
     assert_eq!(reports[4].tempids, newest.tempids);
     assert!(peer.sync().is_ok());
     assert!(peer.take_tx_reports().is_empty());
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
-    // The first peer has caught up, but the other connected observer still
-    // owns generation zero. It protects both skipped-generation bridges.
+    // Grace protects skipped-generation bridges without reader registrations.
     settle_report_collection(&mut collector);
-    collector.prune_report_handoffs(32).unwrap();
+    collector
+        .prune_report_handoffs(atomic_core::RECOMMENDED_GARBAGE_COLLECTION_AGE, 32)
+        .unwrap();
     assert_eq!(objects.list_live_refs(&prefix, None, 32).unwrap().len(), 2);
-    drop(abandoned);
-    let started = Instant::now();
-    let mut cycles = 0;
-    let mut last_prune = None;
-    while !objects
-        .list_live_refs(&prefix, None, 32)
-        .unwrap()
-        .is_empty()
-    {
-        assert!(
-            started.elapsed() < Duration::from_secs(60),
-            "handoffs were not reclaimed after {cycles} cycles; last prune: {last_prune:?}"
-        );
-        settle_report_collection(&mut collector);
-        last_prune = Some(collector.prune_report_handoffs(32).unwrap());
-        cycles += 1;
-        std::thread::yield_now();
-    }
-    // Tombstoning is not object reclamation: fold those release events too.
-    settle_report_collection(&mut collector);
     assert_eq!(reports[0].tempids, inserted.tempids);
     assert_eq!(
         reports[0]
@@ -603,6 +579,28 @@ fn a_lagging_report_queue_does_not_skip_transactions_across_excision() {
         vec![Value::Long(8)]
     );
     common::assert_same_information(&reports[0].db_before, &old);
+    // Explicitly expiring grace permits physical reclamation even while old
+    // database values exist in memory; callers must respect that cutoff.
+    drop(abandoned);
+    let started = Instant::now();
+    let mut cycles = 0;
+    let mut last_prune = None;
+    while !objects
+        .list_live_refs(&prefix, None, 32)
+        .unwrap()
+        .is_empty()
+    {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "handoffs were not reclaimed after {cycles} cycles; last prune: {last_prune:?}"
+        );
+        settle_report_collection(&mut collector);
+        last_prune = Some(collector.prune_report_handoffs(Duration::ZERO, 32).unwrap());
+        cycles += 1;
+        std::thread::yield_now();
+    }
+    // Tombstoning is not object reclamation: fold those release events too.
+    settle_report_collection(&mut collector);
     eprintln!(
         "REPORT_HANDOFF_RECLAIM cycles={cycles} elapsed_us={} held_reports={}",
         started.elapsed().as_micros(),

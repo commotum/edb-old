@@ -372,9 +372,12 @@ fn runtime_lookup_keys_resolve_db_before_and_are_structurally_bounded_and_ordere
 }
 
 #[test]
-fn lookup_input_literals_select_new_program_abi_without_reinterpreting_old_abis() {
+fn lookup_input_literals_use_current_format_and_reject_other_abis() {
     let plain = atomic_core::encode_program(&emitter(Instruction::EmitAdd(TUPLE), 2)).unwrap();
-    assert_eq!(&plain[16..18], &4u16.to_be_bytes());
+    assert_eq!(
+        &plain[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     let literal = lookup_input(EntityRef::Ident(Keyword::new("target", "ident")), 7);
     let programs = [
         Program {
@@ -406,7 +409,10 @@ fn lookup_input_literals_select_new_program_abi_without_reinterpreting_old_abis(
     ];
     for program in programs {
         let bytes = atomic_core::encode_program(&program).unwrap();
-        assert_eq!(&bytes[16..18], &6u16.to_be_bytes());
+        assert_eq!(
+            &bytes[16..18],
+            &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+        );
         assert_eq!(atomic_core::decode_program(&bytes).unwrap(), program);
         for old_abi in [4u16, 5] {
             let mut downgraded = bytes.clone();
@@ -416,7 +422,7 @@ fn lookup_input_literals_select_new_program_abi_without_reinterpreting_old_abis(
             downgraded[checksum_at..].copy_from_slice(&checksum);
             assert_eq!(
                 atomic_core::decode_program(&downgraded).unwrap_err().code,
-                "encoding/noncanonical-program"
+                "encoding/unsupported-program-abi"
             );
         }
     }
@@ -535,7 +541,6 @@ fn persisted_nested_function_tuple_emission_survives_socket_retry_and_writer_rec
     assert!(replay.replayed);
     assert_eq!(replay.basis_t, committed.basis_t);
     assert_eq!(replay.report.unwrap().tempids, report.tempids);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(server);
     writer.shutdown();
 }

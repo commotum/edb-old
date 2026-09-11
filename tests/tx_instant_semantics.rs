@@ -133,7 +133,7 @@ fn head_basis(connection: &str, database_id: &str) -> u64 {
 
 fn service_config(connection: &str, database_id: String) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.to_owned(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
         database_id,
         holder_id: unique("tx_instant_holder"),
         lease_duration: Duration::from_secs(2),

@@ -99,7 +99,6 @@ struct Head {
     generation: u64,
     log: crate::storage::log::LogRoot,
     publication: crate::storage::RefCondition,
-    pin: crate::storage::RefCondition,
 }
 
 fn fault(code: &'static str, message: &str) -> SemanticError {
@@ -237,91 +236,69 @@ fn required(
     })
 }
 
-/// A short capture protects only this operation. No capture, snapshot or log
-/// page is retained by the consumer between calls, including while unacked.
+/// Read one immutable publication. No snapshot or log page is retained by the
+/// consumer between calls; storage retention governs its availability.
 fn with_head<T>(
     store: &mut crate::storage::PgBlockStore,
     reader: &crate::storage::BlockReader,
     database: &crate::storage::BlockDatabase,
     f: impl FnOnce(&mut crate::storage::PgBlockStore, &Head) -> Result<T, SemanticError>,
 ) -> Result<T, SemanticError> {
-    let mut captured = None;
-    for _ in 0..MAX_PUBLICATION_RETRIES {
-        match reader.pin_reference(&database.reference_key()) {
-            Ok(capture) => {
-                captured = Some(capture);
-                break;
-            }
-            Err(error)
-                if matches!(
-                    error.code,
-                    "storage/capture-conflict" | "storage/capture-gc-conflict"
-                ) =>
-            {
-                continue;
-            }
-            Err(error)
-                if matches!(
-                    error.code,
-                    "storage/reference-not-found"
-                        | "storage/reference-retired"
-                        | "catalog/database-retired"
-                ) =>
-            {
-                return Err(unavailable(
+    let capture = reader
+        .capture_reference(&database.reference_key())
+        .map_err(|error| {
+            if matches!(
+                error.code,
+                "storage/reference-not-found"
+                    | "storage/reference-retired"
+                    | "catalog/database-retired"
+            ) {
+                unavailable(
                     "consumer/database-unavailable",
                     "Consumer database identity is no longer active",
-                ));
+                )
+            } else {
+                error
             }
-            Err(error) => return Err(error),
-        }
+        })?;
+    let id = capture.root_id();
+    let root = crate::storage::root::DatabaseRoot::decode(&id, &required(store, id)?)?;
+    if root.identity != database.identity {
+        return Err(unavailable(
+            "consumer/lineage-changed",
+            "Database publication belongs to another lineage",
+        ));
     }
-    let capture = captured.ok_or_else(busy_head)?;
-    let result = (|| {
-        let id = capture.root_id();
-        let root = crate::storage::root::DatabaseRoot::decode(&id, &required(store, id)?)?;
-        if root.identity != database.identity {
-            return Err(unavailable(
-                "consumer/lineage-changed",
-                "Database publication belongs to another lineage",
-            ));
-        }
-        let metadata = root
-            .metadata
-            .ok_or_else(|| fault("consumer/head-format", "Publication lacks metadata"))?;
-        let metadata =
-            crate::storage::SnapshotMetadata::decode(&metadata, &required(store, metadata)?)?;
-        let log = match root.log {
-            Some(id) => crate::storage::log::LogRoot::open(store, id).map_err(history_error)?,
-            None => crate::storage::log::LogRoot::empty(),
-        };
-        if metadata.identity != root.identity
-            || metadata.basis != root.basis
-            || log.basis_t() != root.basis
-            || (root.basis != 0
-                && (log.eidx_frontier() != metadata.eidx_frontier
-                    || log.reserved_frontier() != metadata.reserved_frontier))
-        {
-            return Err(fault(
-                "consumer/head-format",
-                "Publication log and metadata coordinates disagree",
-            ));
-        }
-        f(
-            store,
-            &Head {
-                identity: root.identity,
-                generation: metadata.generation,
-                log,
-                publication: capture.source_condition(),
-                pin: capture.condition(),
-            },
-        )
-    })();
-    // A cleanup transport failure conservatively retains the short pin. It
-    // must not turn a known committed checkpoint CAS into an unknown result.
-    let _ = capture.release();
-    result
+    let metadata = root
+        .metadata
+        .ok_or_else(|| fault("consumer/head-format", "Publication lacks metadata"))?;
+    let metadata =
+        crate::storage::SnapshotMetadata::decode(&metadata, &required(store, metadata)?)?;
+    let log = match root.log {
+        Some(id) => crate::storage::log::LogRoot::open(store, id).map_err(history_error)?,
+        None => crate::storage::log::LogRoot::empty(),
+    };
+    if metadata.identity != root.identity
+        || metadata.basis != root.basis
+        || log.basis_t() != root.basis
+        || (root.basis != 0
+            && (log.eidx_frontier() != metadata.eidx_frontier
+                || log.reserved_frontier() != metadata.reserved_frontier))
+    {
+        return Err(fault(
+            "consumer/head-format",
+            "Publication log and metadata coordinates disagree",
+        ));
+    }
+    f(
+        store,
+        &Head {
+            identity: root.identity,
+            generation: metadata.generation,
+            log,
+            publication: capture.source_condition(),
+        },
+    )
 }
 fn authenticate_checkpoint(
     store: &mut crate::storage::PgBlockStore,
@@ -405,7 +382,7 @@ impl ChangeConsumer {
         config: ChangeConsumerConfig,
     ) -> Result<Self, SemanticError> {
         Self::connect_configured(
-            PostgresConnectionConfig::plaintext(connection),
+            PostgresConnectionConfig::parse(connection)?,
             database,
             name,
             config,
@@ -467,7 +444,6 @@ impl ChangeConsumer {
                             expected: None,
                         },
                         head.publication.clone(),
-                        head.pin.clone(),
                     ],
                     &[RefChange {
                         key: key.clone(),
@@ -724,7 +700,6 @@ impl ChangeConsumer {
                             expected: Some(self.checkpoint.revision + 1),
                         },
                         head.publication.clone(),
-                        head.pin.clone(),
                     ];
                     let changes = [RefChange {
                         key: self.checkpoint_key.clone(),

@@ -36,7 +36,7 @@ fn fixture(label: &str) -> Option<(common::PostgresFixture, PostgresConnectionCo
 
 fn config(connection: &str, holder: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.into(),
+        connection: PostgresConnectionConfig::plaintext(connection),
         database_id: "items".into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(10),
@@ -155,6 +155,7 @@ fn queued_public_service_reports_exact_values_and_retries_before_changed_limits(
     assert!(!client.is_available());
 
     let mut restart = config(&fixture.connection, "second");
+    restart.connection = connection;
     restart.capacity_limits.max_transaction_bytes = 1;
     let options = ServiceOptions {
         execution: atomic_core::TransactionExecutionOptions {
@@ -164,8 +165,7 @@ fn queued_public_service_reports_exact_values_and_retries_before_changed_limits(
         },
         ..Default::default()
     };
-    let reopened =
-        TransactionService::start_configured_with_options(restart, connection, options).unwrap();
+    let reopened = TransactionService::start_with_options(restart, options).unwrap();
     assert_eq!(reopened.identity(), identity);
     assert_eq!(reopened.recovery_stats().target_t, initial_basis + 4);
     let retry_context = OperationContext::diagnostic(OperationKind::Application);
@@ -214,9 +214,11 @@ fn standby_takes_over_the_same_block_identity_without_starting_legacy_workers() 
     let active = TransactionService::start(config(&fixture.connection, "active")).unwrap();
     let identity = active.identity();
     let first = active.client().transact(request("first", 1), WAIT).unwrap();
-    let mut standby = TransactionStandby::start_configured_with_options(
-        config(&fixture.connection, "waiting"),
-        connection,
+    let mut standby = TransactionStandby::start_with_options(
+        TransactionServiceConfig {
+            connection,
+            ..config(&fixture.connection, "waiting")
+        },
         ServiceOptions::default(),
         Duration::from_millis(10),
     )

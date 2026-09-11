@@ -216,38 +216,10 @@ pub(crate) fn sync_requests(
     let database = operator_database(config, database_id)?;
     control.check()?;
     let reader = BlockReader::connect(config, Default::default())?;
-    let snapshot = capture_observation(control, || reader.capture(&database.reference_key()))?;
+    let snapshot = reader.capture(&database.reference_key())?;
     control.check()?;
     Ok(snapshot.basis_t() >= through_t
         && sync_complete_with_control(&snapshot, through_t, &mut || control.check())?)
-}
-
-/// Publication/GC may advance between reading a reference and admitting its
-/// exact pin. Retry that observation, never relax its guard or infer that the
-/// requested excision completed. Persistent contention remains an error.
-fn capture_observation<T>(
-    control: &crate::MaintenanceControl,
-    mut capture: impl FnMut() -> Result<T, SemanticError>,
-) -> Result<T, SemanticError> {
-    for attempt in 0..4 {
-        control.check()?;
-        match capture() {
-            Err(error)
-                if attempt < 3
-                    && error.category == ErrorCategory::Conflict
-                    && matches!(
-                        error.code,
-                        "storage/capture-conflict"
-                            | "storage/capture-gc-conflict"
-                            | "storage/read-pin-changed"
-                    ) =>
-            {
-                std::thread::yield_now();
-            }
-            result => return result,
-        }
-    }
-    unreachable!("final capture attempt returns its result")
 }
 
 fn operator_database(
@@ -311,7 +283,7 @@ impl ExcisionJob {
         if !config.enabled {
             return Ok(None);
         }
-        let capture = reader.pin_reference(&database.reference_key())?;
+        let capture = reader.capture_reference(&database.reference_key())?;
         let source_condition = capture.source_condition();
         let source = DatabaseRoot::decode_for_identity(
             &capture.root_id(),
@@ -380,14 +352,8 @@ impl ExcisionJob {
                 if state.phase >= 2 {
                     state.phase = 0;
                 }
-                let protected = protection(
-                    store,
-                    &[
-                        work_condition.clone(),
-                        source_condition.clone(),
-                        capture.condition(),
-                    ],
-                )?;
+                let protected =
+                    protection(store, &[work_condition.clone(), source_condition.clone()])?;
                 store.set_write_protection(Some(protected.clone()))?;
                 let saved = (|| {
                     let id = store.put(&state.encode()?)?;
@@ -417,7 +383,8 @@ impl ExcisionJob {
                 plan,
             }));
         }
-        let snapshot = reader.capture_immutable(capture.root_id(), &[capture.condition()])?;
+        let snapshot =
+            reader.capture_immutable(capture.root_id(), &[capture.source_condition()])?;
         let complete = completed(
             store,
             snapshot.captured_metadata().excision,
@@ -437,11 +404,7 @@ impl ExcisionJob {
             .generation()
             .checked_add(1)
             .ok_or_else(|| fault("excision/generation", "Generation overflows"))?;
-        let guards = [
-            source_condition.clone(),
-            work_condition.clone(),
-            capture.condition(),
-        ];
+        let guards = [source_condition.clone(), work_condition.clone()];
         let protected = protection(store, &guards)?;
         store.set_write_protection(Some(protected.clone()))?;
         let result = (|| {

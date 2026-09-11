@@ -41,7 +41,7 @@ fn config_with_limits(
     capacity_limits: CapacityLimits,
 ) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.into(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
         database_id: database_id.into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(2),
@@ -812,7 +812,7 @@ fn configured_budget_is_shared_by_siblings_nested_calls_predicates_and_queries()
             )
             .unwrap_err()
             .code,
-        "program/query-intermediate-limit"
+        "query/intermediate-limit"
     );
 
     assert_eq!(

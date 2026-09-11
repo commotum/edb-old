@@ -2,7 +2,7 @@
 //! preparation writes immutable objects, but never changes a database head.
 //! The serialized writer validates the source and adopts the descriptor later.
 use super::descriptors::{BlockAvetWork, IndexDescriptor};
-use super::{BlockSnapshot, ObjectId, ObjectWriter, PgBlockStore, RefCondition, WriteProtection};
+use super::{BlockSnapshot, ObjectId, ObjectWriter, PgBlockStore, WriteProtection};
 use crate::index_support::{self, IndexEavLookup, IndexNodeReader};
 use crate::persistent_tree::{TreeConfig, TreeDescriptor, TreeMergeEdits, TreeNodeSet};
 use crate::tree_cursor::MergeSource;
@@ -27,14 +27,14 @@ pub struct BlockIndexStats {
     pub peak_preparation_workers: u64,
 }
 
-/// Source capture is independent of the moving database publication. Ordinary
+/// Source capture is immutable and retained by the storage grace period. Ordinary
 /// writes may continue while a worker prepares this immutable prefix.
 pub struct IndexInput {
     pub(crate) snapshot: BlockSnapshot,
     fulltext_limits: crate::FulltextBuildLimits,
 }
 
-/// Successful preparation retains its source pin and exact protection epoch.
+/// Successful preparation retains its immutable source and exact protection epoch.
 /// A stale source or GC guard must cause adoption to discard/retry, not publish
 /// a potentially reclaimed candidate. Dropping this value never publishes it.
 pub struct PreparedIndex {
@@ -48,132 +48,6 @@ pub struct PreparedIndex {
     pub(crate) protection: WriteProtection,
     pub(crate) stats: BlockIndexStats,
     pub(crate) fulltext_stats: Option<crate::FulltextBuildStats>,
-}
-
-/// An exact read projection produced without publishing or modifying its live
-/// source. Only the index pointer differs from the captured immutable value;
-/// its canonical log, metadata, identity and basis remain unchanged.
-pub struct PreparedReadValue {
-    pub value: super::root::DatabaseValueRoot,
-    pub value_id: ObjectId,
-    pub index_stats: BlockIndexStats,
-    pub fulltext_stats: Option<crate::FulltextBuildStats>,
-}
-
-/// Finish the captured bounded tail and any resumable AVET work in an object
-/// repository. `io` reads both source and newly written objects, but all writes
-/// belong to the destination. The caller retains source protection throughout
-/// this operation and the subsequent repository graph copy/publication.
-///
-/// Existing projection steps are completed at their frozen base before the
-/// tail is applied once. New steps then finish at the endpoint, after which
-/// search is built once against those exact trees. Each projection step uses
-/// the same bounded chunk/merge machinery as the live background worker; this
-/// operation never replays the database from genesis or opens an eager value.
-pub fn prepare_read_value(
-    snapshot: &BlockSnapshot,
-    io: &mut dyn ObjectWriter,
-    config: &TreeConfig,
-    control: &mut dyn FnMut() -> Result<(), SemanticError>,
-) -> Result<PreparedReadValue, SemanticError> {
-    control()?;
-    config.validate()?;
-    let original = snapshot.index_descriptor();
-    let mut descriptor = original.clone();
-    let mut io = PreparationIo {
-        store: io,
-        control,
-        stats: BlockIndexStats::default(),
-    };
-    while has_projection(&descriptor) {
-        descriptor = advance_projection(
-            &descriptor,
-            &snapshot.base_metadata().schema,
-            &mut io,
-            config,
-        )?;
-    }
-    let unready = tail_readiness_after_base_projection(snapshot, io.control)?;
-    descriptor = prepare_tail(snapshot, &descriptor, &unready, &mut io, config, 1)?;
-    while has_projection(&descriptor) {
-        descriptor = advance_projection(
-            &descriptor,
-            &snapshot.endpoint_metadata().schema,
-            &mut io,
-            config,
-        )?;
-    }
-    if descriptor.basis != snapshot.basis_t() {
-        return Err(fault(
-            "Repository projection did not reach its captured basis",
-        ));
-    }
-    // The healthy, already exact path reuses its attachment and covering roots.
-    // Tail/projection steps clear fulltext because its source binding changed.
-    let fulltext_stats = if descriptor.fulltext.is_none()
-        && snapshot
-            .endpoint_metadata()
-            .schema
-            .attributes()
-            .any(|a| a.fulltext)
-    {
-        let (attachment, stats) = super::fulltext::build_for_descriptor_with_control(
-            io.store,
-            &descriptor,
-            &snapshot.endpoint_metadata().schema,
-            Some((original, &snapshot.base_metadata().schema)),
-            &crate::FulltextBuildLimits::default(),
-            io.control,
-        )?
-        .ok_or_else(|| fault("Fulltext schema produced no exact search attachment"))?;
-        descriptor.fulltext = Some(attachment);
-        Some(stats)
-    } else {
-        None
-    };
-    let descriptor_id = io.write(&descriptor.encode()?)?;
-    let mut value = snapshot.captured_root().clone();
-    value.indexes = Some(descriptor_id);
-    let value_id = io.write(&value.encode()?)?;
-    Ok(PreparedReadValue {
-        value,
-        value_id,
-        index_stats: io.stats,
-        fulltext_stats,
-    })
-}
-
-fn tail_readiness_after_base_projection(
-    snapshot: &BlockSnapshot,
-    control: &mut dyn FnMut() -> Result<(), SemanticError>,
-) -> Result<BTreeSet<u32>, SemanticError> {
-    let mut unready = snapshot.avet_unready().clone();
-    if snapshot.index_descriptor().pending_avet.is_empty() {
-        return Ok(unready);
-    }
-    // Finishing an old pending projection resolves its inherited unready bit,
-    // unless a later schema transition invalidated that work. Inspect every
-    // transition, including disable/re-enable with equal endpoint schemas.
-    let mut touched = BTreeSet::new();
-    let mut metadata = snapshot.base_metadata().clone();
-    for entry in snapshot.recent_tier().entries().iter() {
-        control()?;
-        let next = metadata.apply(std::slice::from_ref(&entry.transaction))?;
-        if !std::sync::Arc::ptr_eq(&metadata.schema, &next.schema) {
-            touched.extend(
-                index_support::changed_avet_attributes(&metadata.schema, &next.schema)
-                    .into_iter()
-                    .map(|change| change.0),
-            );
-        }
-        metadata = next;
-    }
-    for attribute in &snapshot.index_descriptor().pending_avet {
-        if !touched.contains(attribute) {
-            unready.remove(attribute);
-        }
-    }
-    Ok(unready)
 }
 
 impl IndexInput {
@@ -202,9 +76,6 @@ impl IndexInput {
         } else {
             self.snapshot.basis_t()
         }
-    }
-    pub fn source_condition(&self) -> Result<RefCondition, SemanticError> {
-        self.snapshot.pin_condition()
     }
     pub fn prepare(
         self,
@@ -244,7 +115,7 @@ impl IndexInput {
                 "Index worker requires an unconfigured independent store",
             ));
         }
-        let protection = super::engine::protection(store, &[self.source_condition()?])?;
+        let protection = super::engine::protection(store, &[])?;
         store.set_write_protection(Some(protection.clone()))?;
         let result = (|| {
             let through_basis = self.through_basis();

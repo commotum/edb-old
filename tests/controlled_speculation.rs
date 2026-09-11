@@ -114,7 +114,6 @@ impl Fixture {
         self.peer
             .sync_to(durable.basis_t, Duration::from_secs(30))
             .unwrap();
-        assert_eq!(self.peer.load_stats().compatibility_materializations, 0);
         pure
     }
 
@@ -387,7 +386,6 @@ fn native_controlled_generation_is_pure_same_before_and_validates_exact_after() 
         vec![Value::Long(10)]
     );
     assert_eq!(fixture.peer.sync().unwrap().basis_t(), durable.basis_t);
-    assert_eq!(fixture.peer.load_stats().compatibility_materializations, 0);
 }
 
 #[test]
@@ -486,7 +484,6 @@ fn native_predicate_activation_and_changed_bindings_match_durable_rules() {
         4_000,
         "program/not-a-database-function",
     );
-    assert_eq!(fixture.peer.load_stats().compatibility_materializations, 0);
 }
 
 #[test]
@@ -630,7 +627,6 @@ fn native_missing_transitive_code_and_resource_rejections_do_not_publish() {
     );
     assert_eq!(fixture.peer.sync().unwrap().basis_t(), before.basis_t());
     assert!(before.values(entity(), SNAPSHOT).unwrap().is_empty());
-    assert_eq!(fixture.peer.load_stats().compatibility_materializations, 0);
 }
 
 #[test]
@@ -724,5 +720,4 @@ fn speculative_code_closure_survives_chaining_cache_eviction_and_scoped_reclamat
     assert!(first.db_after.values(entity(), BALANCE).unwrap().is_empty());
     assert!(original.entid(&ident("retained-root")).is_none());
     assert_eq!(fixture.peer.sync().unwrap().basis_t(), original.basis_t());
-    assert_eq!(fixture.peer.load_stats().compatibility_materializations, 0);
 }

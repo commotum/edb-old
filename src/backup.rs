@@ -34,12 +34,19 @@ pub struct BackupVerification {
     pub database: Database,
     pub objects_read: usize,
 }
+/// The durable result of activating an immutable backup point.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RestoreResult {
+    pub point: BackupPoint,
+    pub target: String,
+    pub activated_root: Digest,
+}
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[doc(hidden)]
 pub enum BackupFault {
     #[default]
     None,
-    AfterGenerationPinned,
+    AfterPublicationCaptured,
     AfterFirstObjectStaged,
     AfterObjects,
     AfterManifestStaged,
@@ -69,7 +76,7 @@ pub(crate) struct ReadPoint {
 }
 impl PortableBackup {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
-        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+        Self::connect_configured(&PostgresConnectionConfig::parse(connection)?)
     }
     pub fn connect_configured(
         connection: &PostgresConnectionConfig,
@@ -101,7 +108,7 @@ impl PortableBackup {
         self.capture(name, directory, fault, || {})
     }
     #[doc(hidden)]
-    pub fn backup_database_with_pin_probe<F: FnOnce()>(
+    pub fn backup_database_with_capture_probe<F: FnOnce()>(
         &mut self,
         name: &str,
         directory: &Path,
@@ -120,182 +127,122 @@ impl PortableBackup {
         let directory = repository::anchor(directory)?;
         repository::admit(&directory, true)?;
         let database = BlockDatabase::resolve(&self.connection, name)?;
-        // Explicit backup may process the source's entire unindexed tail; the
-        // published offline read value will never repeat this work on open.
-        let reader = BlockReader::connect(
-            &self.connection,
-            BlockReadConfig {
-                max_recent_transactions: usize::MAX,
-                max_recent_datoms: usize::MAX,
-                max_recent_bytes: usize::MAX,
-                ..Default::default()
-            },
+        let reader = BlockReader::connect(&self.connection, BlockReadConfig::default())?;
+        let capture = reader.capture_reference(&database.reference_key())?;
+        probe();
+        inject(
+            fault_at,
+            BackupFault::AfterPublicationCaptured,
+            "backup/after-publication-captured",
         )?;
-        let capture = reader.pin_current_reference(&database.reference_key())?;
-        let result = (|| {
-            probe();
-            inject(
-                fault_at,
-                BackupFault::AfterGenerationPinned,
-                "backup/after-generation-pinned",
-            )?;
-            let mut source = PgBlockStore::connect(&self.connection)?;
-            let publication_id = capture.root_id();
-            let publication =
-                DatabaseRoot::decode(&publication_id, &source.read_object(publication_id)?)?;
-            let metadata_id = publication
-                .metadata
-                .ok_or_else(|| fault("backup/metadata", "Publication lacks metadata"))?;
-            let metadata =
-                SnapshotMetadata::decode(&metadata_id, &source.read_object(metadata_id)?)?;
-            if metadata.identity != publication.identity || metadata.basis != publication.basis {
-                return Err(fault(
-                    "backup/coordinate",
-                    "Publication and metadata disagree",
-                ));
-            }
-            repository::claim(&directory, publication.identity)?;
-            if repository::point_path(&directory, metadata.generation, publication.basis)
-                .try_exists()
-                .map_err(repository::io)?
-            {
-                let prior =
-                    load_selected(&directory, Some(metadata.generation), publication.basis)?;
-                same_information(&publication, &load_publication(&directory, &prior)?)?;
-                let reused = walk_repository(
-                    &directory,
-                    &[prior.point.manifest_hash],
-                    &self.maintenance,
-                    false,
-                )?;
-                return Ok(BackupPoint {
-                    objects_reused: reused,
-                    ..prior.point
-                });
-            }
-            let mut copy = RepositoryCopy {
-                directory: directory.clone(),
-                source,
-                written: 0,
-                reused: 0,
-            };
-            let mut seen = BTreeSet::new();
-            let mut pending = vec![publication_id];
-            while let Some(id) = pending.pop() {
-                self.maintenance.check()?;
-                if !seen.insert(id) {
-                    continue;
-                }
-                let bytes = copy.read_object(id)?;
-                pending.extend(crate::storage::ownership::object_children(
-                    &mut copy, id, &bytes,
-                )?);
-                copy.put_object(&bytes)?;
-                if seen.len() == 1 {
-                    inject(
-                        fault_at,
-                        BackupFault::AfterFirstObjectStaged,
-                        "backup/after-first-object-staged",
-                    )?;
-                }
-                if seen.len() % 128 == 0 {
-                    self.maintenance.after_batch()?;
-                }
-            }
-            self.maintenance.after_batch()?;
-            inject(fault_at, BackupFault::AfterObjects, "backup/after-objects")?;
-            let snapshot = reader.capture_root(&capture)?;
-            let read = crate::storage::indexing::prepare_read_value(
-                &snapshot,
-                &mut copy,
-                &crate::persistent_tree::TreeConfig::default(),
-                &mut || self.maintenance.check(),
-            )?;
-            if read.value.identity != publication.identity
-                || read.value.basis != publication.basis
-                || read.value.log != publication.log
-                || read.value.metadata != publication.metadata
-            {
-                return Err(fault(
-                    "backup/read-coordinate",
-                    "Read preparation changed committed information",
-                ));
-            }
-            let mut pending = vec![read.value_id];
-            while let Some(id) = pending.pop() {
-                self.maintenance.check()?;
-                if !seen.insert(id) {
-                    continue;
-                }
-                let bytes = copy.read_object(id)?;
-                pending.extend(crate::storage::ownership::object_children(
-                    &mut copy, id, &bytes,
-                )?);
-                copy.put_object(&bytes)?;
-                if seen.len() % 128 == 0 {
-                    self.maintenance.after_batch()?;
-                }
-            }
-            let mut payload = publication.identity.to_vec();
-            payload.extend_from_slice(&metadata.generation.to_be_bytes());
-            payload.extend_from_slice(&publication.basis.to_be_bytes());
-            let manifest = Block {
-                kind: POINT_KIND,
-                links: vec![publication_id, read.value_id],
-                payload,
-            }
-            .encode()?;
-            let manifest_hash = copy.put_object(&manifest)?;
-            self.maintenance.after_batch()?;
-            inject(
-                fault_at,
-                BackupFault::AfterManifestStaged,
-                "backup/after-manifest-staged",
-            )?;
-            let point = if repository::publish_point(
-                &directory,
-                metadata.generation,
-                publication.basis,
-                &manifest,
-            )? {
-                BackupPoint {
-                    lineage_id: crate::storage::engine::identity_string(publication.identity),
-                    log_generation: metadata.generation,
-                    basis_t: publication.basis,
-                    manifest_hash,
-                    objects_written: copy.written,
-                    objects_reused: copy.reused,
-                }
-            } else {
-                let prior =
-                    load_selected(&directory, Some(metadata.generation), publication.basis)?;
-                same_information(&publication, &load_publication(&directory, &prior)?)?;
-                BackupPoint {
-                    objects_written: copy.written,
-                    objects_reused: copy.reused,
-                    ..prior.point
-                }
-            };
-            inject(
-                fault_at,
-                BackupFault::AfterManifestPublished,
-                "backup/after-manifest-published",
-            )?;
-            Ok(point)
-        })();
-        let release = capture.release();
-        match (result, release) {
-            (Err(error), _) => Err(error),
-            (Ok(point), Err(error)) => Err(SemanticError::new(
-                crate::ErrorCategory::UnknownOutcome,
-                "backup/published-cleanup",
-                format!(
-                    "Backup point {}:{} was published, but source-pin cleanup failed: {error}. Repeating capture resolves the completed point.",
-                    point.log_generation, point.basis_t
-                ),
-            )),
-            (Ok(point), Ok(())) => Ok(point),
+        let mut source = PgBlockStore::connect(&self.connection)?;
+        let publication_id = capture.root_id();
+        let publication =
+            DatabaseRoot::decode(&publication_id, &source.read_object(publication_id)?)?;
+        let metadata_id = publication
+            .metadata
+            .ok_or_else(|| fault("backup/metadata", "Publication lacks metadata"))?;
+        let metadata = SnapshotMetadata::decode(&metadata_id, &source.read_object(metadata_id)?)?;
+        if metadata.identity != publication.identity || metadata.basis != publication.basis {
+            return Err(fault(
+                "backup/coordinate",
+                "Publication and metadata disagree",
+            ));
         }
+        repository::claim(&directory, publication.identity)?;
+        if repository::point_path(&directory, metadata.generation, publication.basis)
+            .try_exists()
+            .map_err(repository::io)?
+        {
+            let prior = load_selected(&directory, Some(metadata.generation), publication.basis)?;
+            same_information(&publication, &load_publication(&directory, &prior)?)?;
+            let reused = walk_repository(
+                &directory,
+                &[prior.point.manifest_hash],
+                &self.maintenance,
+                false,
+            )?;
+            return Ok(BackupPoint {
+                objects_reused: reused,
+                ..prior.point
+            });
+        }
+        let mut copy = RepositoryCopy {
+            directory: directory.clone(),
+            source,
+            written: 0,
+            reused: 0,
+        };
+        let mut seen = BTreeSet::new();
+        let mut pending = vec![publication_id];
+        while let Some(id) = pending.pop() {
+            self.maintenance.check()?;
+            if !seen.insert(id) {
+                continue;
+            }
+            let bytes = copy.read_object(id)?;
+            pending.extend(crate::storage::ownership::object_children(
+                &mut copy, id, &bytes,
+            )?);
+            copy.put_object(&bytes)?;
+            if seen.len() == 1 {
+                inject(
+                    fault_at,
+                    BackupFault::AfterFirstObjectStaged,
+                    "backup/after-first-object-staged",
+                )?;
+            }
+            if seen.len() % 128 == 0 {
+                self.maintenance.after_batch()?;
+            }
+        }
+        self.maintenance.after_batch()?;
+        inject(fault_at, BackupFault::AfterObjects, "backup/after-objects")?;
+        let mut payload = publication.identity.to_vec();
+        payload.extend_from_slice(&metadata.generation.to_be_bytes());
+        payload.extend_from_slice(&publication.basis.to_be_bytes());
+        let manifest = Block {
+            kind: POINT_KIND,
+            links: vec![publication_id],
+            payload,
+        }
+        .encode()?;
+        let manifest_hash = copy.put_object(&manifest)?;
+        self.maintenance.after_batch()?;
+        inject(
+            fault_at,
+            BackupFault::AfterManifestStaged,
+            "backup/after-manifest-staged",
+        )?;
+        let point = if repository::publish_point(
+            &directory,
+            metadata.generation,
+            publication.basis,
+            &manifest,
+        )? {
+            BackupPoint {
+                lineage_id: crate::storage::engine::identity_string(publication.identity),
+                log_generation: metadata.generation,
+                basis_t: publication.basis,
+                manifest_hash,
+                objects_written: copy.written,
+                objects_reused: copy.reused,
+            }
+        } else {
+            let prior = load_selected(&directory, Some(metadata.generation), publication.basis)?;
+            same_information(&publication, &load_publication(&directory, &prior)?)?;
+            BackupPoint {
+                objects_written: copy.written,
+                objects_reused: copy.reused,
+                ..prior.point
+            }
+        };
+        inject(
+            fault_at,
+            BackupFault::AfterManifestPublished,
+            "backup/after-manifest-published",
+        )?;
+        Ok(point)
     }
     pub fn list_backup_points(directory: &Path) -> Result<Vec<BackupPoint>, SemanticError> {
         let directory = repository::anchor(directory)?;
@@ -466,14 +413,8 @@ pub(crate) fn load_selected(
         Ok::<_, SemanticError>(bytes)
     };
     let publication = DatabaseRoot::decode(&links[0], &read(links[0])?)?;
-    let value = DatabaseValueRoot::decode(&links[1], &read(links[1])?)?;
-    if publication.identity != identity
-        || value.identity != identity
-        || publication.basis != basis
-        || value.basis != basis
-        || value.log != publication.log
-        || value.metadata != publication.metadata
-    {
+    let value = DatabaseValueRoot::from(&publication);
+    if publication.identity != identity || publication.basis != basis {
         return Err(fault(
             "backup/manifest-coordinate",
             "Backup roots disagree on committed coordinates",
@@ -491,14 +432,12 @@ pub(crate) fn load_selected(
         || metadata.basis != basis
         || metadata.generation != generation
         || indexes.identity != identity
-        || indexes.basis != basis
+        || indexes.basis > basis
         || indexes.generation != generation
-        || !indexes.pending_avet.is_empty()
-        || !indexes.avet_work.is_empty()
     {
         return Err(fault(
             "backup/read-coordinate",
-            "Offline point requires exact complete covering indexes",
+            "Backup index and metadata disagree with the captured publication",
         ));
     }
     Ok(ReadPoint {
@@ -514,15 +453,15 @@ fn point_header(
     directory: &Path,
     generation: u64,
     basis: u64,
-) -> Result<(BackupPoint, [ObjectId; 2], [u8; 16]), SemanticError> {
+) -> Result<(BackupPoint, [ObjectId; 1], [u8; 16]), SemanticError> {
     let bytes =
         repository::read_bounded(&repository::point_path(directory, generation, basis), 4096)?;
     let manifest_hash = crate::sha256(&bytes);
     let block = Block::decode(&manifest_hash, &bytes)?;
-    if block.kind != POINT_KIND || block.links.len() != 2 || block.payload.len() != 32 {
+    if block.kind != POINT_KIND || block.links.len() != 1 || block.payload.len() != 32 {
         return Err(fault(
             "backup/manifest-format",
-            "Expected a current two-root backup point",
+            "Expected a current single-root backup point",
         ));
     }
     let identity: [u8; 16] = block.payload[..16].try_into().unwrap();
@@ -547,7 +486,7 @@ fn point_header(
             objects_written: 0,
             objects_reused: 0,
         },
-        [block.links[0], block.links[1]],
+        [block.links[0]],
         identity,
     ))
 }

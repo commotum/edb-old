@@ -120,7 +120,6 @@ fn explicit_entry_and_byte_caches_preserve_old_values_and_do_not_own_attached_wr
     let after = connection.load_stats();
     assert!(after.cursor_sql_reads > before.cursor_sql_reads);
     assert!(after.cursor_sql_read_bytes > before.cursor_sql_read_bytes);
-    assert_eq!(after.compatibility_materializations, 0);
 
     // A nonzero entry budget must not override a zero or undersized byte
     // budget. Cache bypass changes I/O, never the immutable information.
@@ -137,7 +136,6 @@ fn explicit_entry_and_byte_caches_preserve_old_values_and_do_not_own_attached_wr
         assert_eq!(stats.current_entries, 0);
         assert_eq!(stats.current_bytes, 0);
         assert!(stats.oversized_bypasses > 0);
-        assert_eq!(uncached.load_stats().compatibility_materializations, 0);
     }
 
     connection.attach_writer(writer.client()).unwrap();
@@ -168,7 +166,6 @@ fn explicit_entry_and_byte_caches_preserve_old_values_and_do_not_own_attached_wr
         [Value::String("updated".into())]
     );
     assert_eq!(clone.recent_stats().end_t, updated.basis_t);
-    assert_eq!(clone.load_stats().compatibility_materializations, 0);
     drop(connection);
     drop(clone);
     // Attaching the submission endpoint never grants ownership of the writer.

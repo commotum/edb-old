@@ -263,7 +263,6 @@ fn postgres_exact_references_preserve_basis_views_retention_and_no_history_expos
             .code,
         "peer/identity-mismatch"
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     eprintln!(
         "snapshot_keys iterations=10000 construct_plus_clone_us={key_micros} foreground_sql=0 exact_reopen=true no_history_witness=true schema_preserved=true"
     );

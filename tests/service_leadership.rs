@@ -56,7 +56,7 @@ fn set(value: i64) -> Vec<TxOp> {
 
 fn config(connection: &str, database_id: &str, holder_id: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.to_owned(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
         database_id: database_id.to_owned(),
         holder_id: holder_id.to_owned(),
         lease_duration: Duration::from_secs(1),

@@ -128,7 +128,7 @@ fn native_query_walker_visits_every_literal_position_and_nested_shape() {
 }
 
 #[test]
-fn validated_abi7_and_abi10_query_closures_fail_closed_on_missing_nested_code() {
+fn validated_query_closures_fail_closed_on_missing_nested_code() {
     let dependency = Program {
         kind: ProgramKind::Transaction,
         arity: 0,
@@ -157,10 +157,10 @@ fn validated_abi7_and_abi10_query_closures_fail_closed_on_missing_nested_code() 
         );
         let code = program(query);
         let bytes = crate::encode_program(&code).unwrap();
-        assert!(matches!(
+        assert_eq!(
             u16::from_be_bytes(bytes[16..18].try_into().unwrap()),
-            7 | 10
-        ));
+            crate::PROGRAM_ABI_VERSION
+        );
         let root_hash = crate::sha256(&bytes);
         let root = Arc::new(ValidatedProgram::from_canonical(
             crate::decode_program(&bytes).unwrap(),

@@ -7,18 +7,17 @@ mod block_index_operations;
 #[path = "block_operations.rs"]
 mod block_operations;
 pub use block_index_operations::IndexMaintenanceReceipt;
-#[path = "program_deployment.rs"]
-mod program_deployment;
-pub use program_deployment::ProgramDeployment;
 #[path = "database_reclamation.rs"]
 mod database_reclamation;
+#[path = "program_deployment.rs"]
+mod program_deployment;
 pub use database_reclamation::RetiredDatabaseReclamation;
 #[path = "excision_worker.rs"]
 pub(crate) mod excision_worker;
 pub use excision_worker::{ExcisionConfig, ExcisionProgress};
 
-/// Suggested routine retention; explicit shorter ages are supported. Captured
-/// values and exact receipts remain real owners regardless of this horizon.
+/// Routine retention for retired immutable structures. Shorter ages are an
+/// explicit operator choice and can disrupt long-running readers.
 pub const RECOMMENDED_GARBAGE_COLLECTION_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Maximum graph, metadata and object steps advanced by one operator call.
 pub const MAX_COLLECTION_STEPS: usize = 4096;
@@ -114,7 +113,7 @@ pub struct PostgresOperator {
 
 impl PostgresOperator {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
-        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+        Self::connect_configured(&PostgresConnectionConfig::parse(connection)?)
     }
 
     pub fn connect_configured(
@@ -160,12 +159,35 @@ impl PostgresOperator {
     /// Validate and protect immutable native code before binding its hash in a
     /// transaction. Fixed dependencies must already exist; the complete code
     /// closure is authenticated and protected under one collector epoch.
-    /// Retain the returned handle until the binding transaction is acknowledged.
+    /// Staging survives for the collection grace period; no live handle is needed.
     pub fn deploy_program(
         &mut self,
         program: &crate::Program,
-    ) -> Result<ProgramDeployment, SemanticError> {
+    ) -> Result<crate::ProgramHash, SemanticError> {
         program_deployment::deploy(&self.connection, program, &self.maintenance)
+    }
+
+    /// Stage a program closure and bind its ident in one application operation.
+    /// Dependencies can be supplied in any order. Exact retries return the
+    /// committed outcome before touching deployment dependencies.
+    pub fn install_program(
+        &mut self,
+        client: &crate::TransactionClient,
+        request_key: &str,
+        ident: crate::Keyword,
+        program: &crate::Program,
+        dependencies: &[crate::Program],
+        timeout: Duration,
+    ) -> Result<crate::ServiceTransactionReport, SemanticError> {
+        program_deployment::install(
+            self,
+            client,
+            request_key,
+            ident,
+            program,
+            dependencies,
+            timeout,
+        )
     }
 
     /// Explicitly consolidate a captured transaction prefix. Damaged current

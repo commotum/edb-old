@@ -64,7 +64,7 @@ A cache-disabled or oversized-object run is a useful comparison, not an error
 to hide by silently raising capacity.
 
 [native_log_cache.rs](../tests/native_log_cache.rs) exercises persistent reuse,
-corruption fallback and generation separation; [block_native_log.rs](../tests/block_native_log.rs)
+corruption fallback and generation separation; [native_log.rs](../tests/native_log.rs)
 covers captured current log semantics, ranges and authentication. No historical
 relational-cache timing is a performance claim for this implementation.
 See [application cache configuration](application.md#optional-local-ssd-cache-and-compressed-blocks)

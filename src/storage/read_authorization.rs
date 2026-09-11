@@ -5,12 +5,12 @@
 //! Registry updates use the existing immutable radix-trie kernel and become
 //! authority only in the same CAS that adopts their index. No previous
 //! publication chain is retained. A collector can rebuild/prune the registry
-//! according to current values, receipts and pins without changing this codec.
+//! according to current publications and receipts without changing this codec.
 //!
 //! Membership alone is insufficient: the candidate's entire log and metadata
 //! pointers must match a canonical committed value at the requested basis.
 //! Callers retain the trusted publication while checking, then protected-put a
-//! value wrapper before pinning it. Authorization proves child reachability;
+//! value wrapper before opening it. Authorization proves child reachability;
 //! it does not make an arbitrary caller-supplied wrapper a retained object.
 
 use super::descriptors::{IndexDescriptor, SnapshotMetadata};
@@ -195,7 +195,7 @@ impl ReadAuthorization {
 
     /// Examine one bounded registry page. Retire only old indexes with no
     /// owner except their provenance witness. The settled ownership proof is
-    /// conditional on its mutation clock, so a concurrent pin/publication
+    /// conditional on its mutation clock, so a concurrent publication
     /// invalidates the caller's eventual database-root CAS.
     pub(crate) fn prune_indexes(
         store: &mut PgBlockStore,
@@ -337,8 +337,8 @@ impl ReadAuthorization {
 }
 
 /// Authenticate a candidate's semantic pointers and covering-index provenance.
-/// `publication` must come from a currently pinned, trusted database reference.
-/// This helper performs no publication, pinning, or unbounded history walk.
+/// `publication` must come from a captured, trusted database reference.
+/// This helper performs no publication or unbounded history walk.
 pub fn authorize_value(
     store: &mut PgBlockStore,
     publication: &DatabaseRoot,

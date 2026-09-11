@@ -96,9 +96,8 @@ Results are ordinary readable EDN, with custom tags remaining inert.
 
 ## Persisted native queries
 
-New general literals and wide relation patterns select query-template version 3
-and program ABI 10. Programs which do not use new representations retain their
-existing encoding and identity. `QueryTemplateSource::relation(name, argument)`
+General literals and wide relation patterns use the same current program format
+as other persisted queries. `QueryTemplateSource::relation(name, argument)`
 binds a caller-supplied general relation to a persisted query's named source.
 `ProgramRuntime::execute_query_general` accepts general arguments, and
 `ProgramOutput::GeneralQuery` preserves non-stored result cells. Scalar-only

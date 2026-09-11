@@ -64,9 +64,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     let database = &arguments[0];
-    let service = TransactionService::start_configured_with_indexing_and_execution_options(
+    let service = TransactionService::start_with_indexing_and_execution_options(
         TransactionServiceConfig {
-            connection: String::new(),
+            connection: postgres_config_from_env()?,
             database_id: database.clone(),
             holder_id: format!("native-host-{}", std::process::id()),
             lease_duration: Duration::from_secs(5),
@@ -74,7 +74,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             queue_capacity: 32,
             capacity_limits: Default::default(),
         },
-        postgres_config_from_env()?,
         BackgroundIndexingConfig::default(),
         TransactionExecutionOptions {
             native: registry()?,

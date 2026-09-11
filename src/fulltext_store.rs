@@ -1,4 +1,4 @@
-//! Immutable byte-key search projection, derived from one pinned
+//! Immutable byte-key search projection, derived from one captured
 //! canonical index descriptor. Its Merkle pages authenticate range boundaries/absence.
 //! It does not assign meaning to document/posting values or change datom roots.
 use crate::{Digest, ErrorCategory, OperationContext, SemanticError, sha256};
@@ -689,8 +689,8 @@ impl FulltextCache {
 
 type Loader =
     Box<dyn FnMut(Digest, &mut FulltextReadStats) -> Result<Arc<Page>, SemanticError> + Send>;
-/// Owned, lazy Merkle range traversal. Dropping it releases its captured source
-/// pin. Each decoded child is checked against its parent's range/count proof.
+/// Owned, lazy Merkle range traversal over a captured immutable source.
+/// Each decoded child is checked against its parent's range/count proof.
 pub struct FulltextCursor {
     loader: Loader,
     pending: Vec<(Child, usize)>,

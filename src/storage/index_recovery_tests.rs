@@ -224,7 +224,9 @@ fn cancelled_or_canonically_corrupt_recovery_never_publishes() {
         return;
     };
     let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
-    let capture = reader.pin_reference(&f.database.reference_key()).unwrap();
+    let capture = reader
+        .capture_reference(&f.database.reference_key())
+        .unwrap();
     let mut store = PgBlockStore::connect(&f.config).unwrap();
     let before = store.read_ref(&f.database.reference_key()).unwrap();
     let mut checks = 0;

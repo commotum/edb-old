@@ -12,8 +12,9 @@ cargo build --offline --bin atomic --example application_workflow
 ```
 
 Use a dedicated PostgreSQL installation and distinct administrative, writer and
-peer credentials. `ATOMIC_POSTGRES_URL` contains the connection parameters;
-`ATOMIC_POSTGRES_TRANSPORT` must explicitly be `tls` or `plaintext`. TLS verifies
+peer credentials. `ATOMIC_POSTGRES_URL` contains the connection parameters and
+owns the transport selection. TCP defaults to verified TLS; `sslmode=disable`
+explicitly selects plaintext. TLS verifies
 certificates and hostnames and optionally accepts one PEM trust root through
 `ATOMIC_POSTGRES_TLS_ROOT`. Plaintext is for an explicitly chosen local/development
 deployment. The example and CLI share `postgres_config_from_env()`.
@@ -34,7 +35,7 @@ then run the following with the object-owning administrative connection in
 [runtime credential requirements](operations.md#provisioning-and-current-storage).
 
 ```sh
-export ATOMIC_POSTGRES_TRANSPORT=plaintext
+# For this local example, include sslmode=disable in ATOMIC_POSTGRES_URL.
 target/debug/atomic install --writer-role atomic_writer --peer-role atomic_peer
 target/debug/atomic create --database application-demo
 target/debug/atomic status --database application-demo
@@ -319,7 +320,7 @@ database first. References are not credentials and do not hold retention pins.
 If GC collected the witness, reopening fails instead of substituting another
 tree. This matters especially when `noHistory` consolidation changes retained
 historical exposure while preserving the logical commit key. Existing held values
-retain their normal pin policy. New reopening of pre-excision references is
+remain subject to the configured storage retention. New reopening of pre-excision references is
 rejected, even if old artifacts remain; this does not erase already held copies.
 Cache entry/byte arguments bound the node cache, not the memory or time needed
 to replay an exact retained transaction tail. Opening a reference can perform
@@ -351,19 +352,16 @@ current canonical codecs and shared resource controls.
 ### Protected program deployment
 
 An administrator can call
-`PostgresOperator::deploy_program(&Program) -> ProgramDeployment`.
-Use `deployment.hash()` when binding or invoking the program, and retain the
-handle until the binding transaction is acknowledged. Deployment authenticates
-and protects the complete fixed-dependency closure; dependencies must already
-exist. Keep child deployment handles alive until parent deployment succeeds.
+`PostgresOperator::deploy_program(&Program) -> ProgramHash`. Deployment checks
+the fixed-dependency closure and stores a temporary staging root that expires
+according to the collection cutoff. Dependencies must already exist; callers
+receive a hash and have no deployment handle to release.
 
-`release(self)` explicitly releases protection and may perform blocking I/O.
-Dropping the handle queues cleanup on the bounded worker lane. Once a committed
-database graph references the program, ordinary graph ownership retains it.
-An unbound program can become collectable after the deployment handle is
-released; uploading bytes alone is not durable application ownership. A
-concurrent GC seal can reject deployment safely with a conflict; retry the
-deployment without dropping protection for its dependencies.
+`install_program(client, request_key, ident, &program, &dependencies, timeout)`
+stages the supplied closure and transacts the binding. An exact retry resolves
+its acknowledged receipt before requiring deployment dependencies again. Once a
+committed graph references the program, ordinary graph ownership retains it.
+Unbound staging roots expire under the configured retention policy.
 
 The read-only application example does not need this administrative capability
 for its local encode/decode demonstration.
@@ -388,7 +386,7 @@ channel, retaining the same canonical request. The application example currently
 generates hints without transporting them; the remote transport tests exercise
 valid, altered, stale and foreign hints against identical receipts.
 
-Prefetch has its own driver, pin and cold-miss lanes and shares only bounded
+Prefetch has its own driver and cold-miss lanes and shares only bounded
 authenticated RAM index cache. It does not use the SSD path. The default is one
 worker per writer; `ServiceOptions::hint_prefetch` can disable it or select up to
 eight. At most eight per process can remain active, including stalled workers
@@ -486,50 +484,30 @@ Configuration/redaction checks run without PostgreSQL. The real workflow reports
 a skip if its PostgreSQL URL is absent; that skip is not integration evidence.
 Set `ATOMIC_APPLICATION_BIN` if the example executable is in a different location.
 
-## Reproduce a generated differential check
+## Check transaction semantics across restart
 
-The existing pure-kernel/PostgreSQL differential test accepts an additional
-nonzero seed and a step count (multiples of 12, from 12 to 1200). Its default
-seed, 72 operations and two orderly restarts remain unchanged. With the same
-disposable PostgreSQL fixture configured, record and replay a smaller run:
-
-```sh
-trace_dir=$(mktemp -d /tmp/atomic-differential.XXXXXX)
-ATOMIC_DIFFERENTIAL_SEED=42 ATOMIC_DIFFERENTIAL_STEPS=36 ATOMIC_DIFFERENTIAL_TRACE="$trace_dir/seed42.trace" cargo test --offline --test transactor_differential generated_production_transactions_match_the_pure_kernel -- --exact --nocapture
-ATOMIC_DIFFERENTIAL_REPLAY="$trace_dir/seed42.trace" ATOMIC_DIFFERENTIAL_TRACE="$trace_dir/replay.trace" cargo test --offline --test transactor_differential generated_production_transactions_match_the_pure_kernel -- --exact --nocapture
-```
-
-Do not combine replay with seed/step overrides. Explicit output must be a new
-absolute filename in an existing directory; it is created private and never
-overwritten. With no output override, the test prints a retained private temporary
-trace path. The trace is saved before the campaign, including when a check later
-fails, and contains generated fixture choices rather than connection credentials.
-These checks cover semantic acceptance/rejection and orderly restart against the
-existing `Database::with` oracle, not arbitrary crash/network-fault simulation or
-automatic failure minimization. A PostgreSQL-unset skip is not a generated run.
-
-A separate seeded block-storage schedule exercises abandoned prepared indexes,
-exact outcomes, immutable values and durable consumer restart:
+The compact `transactor_differential` test compares real committed reports and
+reopened values with the pure `Database::with` kernel, including identity upserts,
+CAS rejection, retractions and schema changes. With a disposable PostgreSQL
+database configured:
 
 ```sh
-ATOMIC_BLOCK_FAULT_SEED=42 cargo test --offline --test storage_fault_replay seeded_block_schedule_preserves_publication_receipts_and_consumer_checkpoints -- --exact --nocapture
+cargo test --offline --test transactor_differential -- --nocapture
 ```
 
-This is a fixed-size seeded schedule, not a saved/reduced trace framework or a
-process-crash simulation. The PostgreSQL environment must select a disposable
-fixture. An unconfigured skip is not evidence of a live run.
+Storage publication races and abandoned prepared work have focused engine tests;
+`change_consumer` covers durable checkpoints. An unconfigured PostgreSQL skip
+is not a live run.
 
 ## Measure complete transaction and read costs
 
 Use [read-load](read-load.md) for independent readers and
 [operations](operations.md#disposable-workload-checks) for capture/restore.
 The focused `block_live_costs` fixture reports startup/capture, resident
-advancement, automatic indexing and reused-value warm queries. The opt-in
-`transaction_phases` target reports ordered transaction phase costs:
+advancement, automatic indexing and reused-value warm queries:
 
 ```sh
 cargo test --offline --release --test block_live_costs -- --nocapture --test-threads=1
-cargo test --offline --release --test transaction_phases -- --ignored --nocapture --test-threads=1
 ```
 
 Run against disposable storage and retain configuration with results. Count

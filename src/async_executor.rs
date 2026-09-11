@@ -429,7 +429,7 @@ impl<T: Send + 'static> Completion<T> {
 
 /// One result. Polling only transfers an already-completed result or registers
 /// a waker. Dropping an unconsumed result schedules worker-side disposal, even
-/// when that result contains native PostgreSQL pins. Once yielded, `T` retains
+/// when that result owns native I/O resources. Once yielded, `T` retains
 /// its ordinary native methods and destructor contract.
 pub struct AsyncOperation<T: Send + 'static> {
     cell: Option<Arc<Completion<T>>>,

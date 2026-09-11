@@ -88,7 +88,7 @@ pub struct SnapshotReference {
 
 impl DatabaseValue {
     /// Capture the authenticated transaction log through this committed basis,
-    /// with the same pins and read authority and no new connection. Temporal
+    /// with the same immutable value and read authority and no new connection. Temporal
     /// modifiers select database datoms, not log endpoints: use tx_range bounds
     /// on the returned log. Eager/speculative/opaque-filter values are unsupported.
     pub fn log_value(&self) -> Result<crate::LogValue, SemanticError> {
@@ -258,49 +258,44 @@ impl SnapshotReference {
         &self,
         reader: &BlockReader,
     ) -> Result<DatabaseValue, SemanticError> {
-        let capture = reader.pin_current_reference(&format!("databases/{}", self.database_id))?;
-        let result = (|| {
-            let root_id = capture.root_id();
-            let root = DatabaseRoot::decode(&root_id, &reader.read_object(root_id)?)?;
-            if crate::storage::engine::identity_string(root.identity) != self.key.lineage.as_ref()
-                || root.basis < self.key.basis_t
+        let capture = reader.capture_reference(&format!("databases/{}", self.database_id))?;
+        let root_id = capture.root_id();
+        let root = DatabaseRoot::decode(&root_id, &reader.read_object(root_id)?)?;
+        if crate::storage::engine::identity_string(root.identity) != self.key.lineage.as_ref()
+            || root.basis < self.key.basis_t
+        {
+            return Err(wrong_identity());
+        }
+        let metadata_id = root.metadata.ok_or_else(invalid_reference)?;
+        let metadata = SnapshotMetadata::decode(&metadata_id, &reader.read_object(metadata_id)?)?;
+        if metadata.identity != root.identity || metadata.basis != root.basis {
+            return Err(wrong_identity());
+        }
+        if metadata.generation != self.key.generation {
+            return Err(SemanticError::new(
+                ErrorCategory::Unavailable,
+                "snapshot/generation-not-current",
+                "Snapshot is outside the current excision generation",
+            ));
+        }
+        if self.key.basis_t != 0 {
+            let entry = reader
+                .log_record(root.log.ok_or_else(invalid_reference)?, self.key.basis_t)?
+                .ok_or_else(wrong_identity)?;
+            if entry.id != self.key.transaction_hash
+                || entry.entry.eidx_frontier != self.key.eidx_frontier
             {
                 return Err(wrong_identity());
             }
-            let metadata_id = root.metadata.ok_or_else(invalid_reference)?;
-            let metadata =
-                SnapshotMetadata::decode(&metadata_id, &reader.read_object(metadata_id)?)?;
-            if metadata.identity != root.identity || metadata.basis != root.basis {
-                return Err(wrong_identity());
-            }
-            if metadata.generation != self.key.generation {
-                return Err(SemanticError::new(
-                    ErrorCategory::Unavailable,
-                    "snapshot/generation-not-current",
-                    "Snapshot is outside the current excision generation",
-                ));
-            }
-            if self.key.basis_t != 0 {
-                let entry = reader
-                    .log_record(root.log.ok_or_else(invalid_reference)?, self.key.basis_t)?
-                    .ok_or_else(wrong_identity)?;
-                if entry.id != self.key.transaction_hash
-                    || entry.entry.eidx_frontier != self.key.eidx_frontier
-                {
-                    return Err(wrong_identity());
-                }
-            } else if self.key.transaction_hash != [0; 32] {
-                return Err(wrong_identity());
-            }
-            let snapshot = reader.capture_authorized(&root, &capture, &self.value_root)?;
-            let value = self.key.view(snapshot.database_value());
-            if value.snapshot_key()? != self.key {
-                return Err(wrong_identity());
-            }
-            Ok(value)
-        })();
-        let _ = capture.release();
-        result
+        } else if self.key.transaction_hash != [0; 32] {
+            return Err(wrong_identity());
+        }
+        let snapshot = reader.capture_authorized(&root, &capture, &self.value_root)?;
+        let value = self.key.view(snapshot.database_value());
+        if value.snapshot_key()? != self.key {
+            return Err(wrong_identity());
+        }
+        Ok(value)
     }
 }
 

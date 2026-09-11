@@ -848,7 +848,7 @@ fn entity_navigation_value(
 }
 
 impl Database {
-    /// Eager-oracle compatibility wrapper over one exact database value.
+    /// Resolve against the eager database's immutable value.
     pub fn resolve_entity_identifier(
         &self,
         identifier: &EntityIdentifier,

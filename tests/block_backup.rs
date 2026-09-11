@@ -148,7 +148,7 @@ fn capture_faults_never_publish_partial_points_and_retry_resolves_published_outc
     .unwrap();
     let mut backup = PortableBackup::connect(&f.connection).unwrap();
     for fault in [
-        BackupFault::AfterGenerationPinned,
+        BackupFault::AfterPublicationCaptured,
         BackupFault::AfterFirstObjectStaged,
         BackupFault::AfterObjects,
         BackupFault::AfterManifestStaged,
@@ -290,7 +290,12 @@ fn exact_numeric_values_and_earlier_receipts_survive_restore_and_rebackup() {
             matches!(value.values(report.tempids["nan"], 1001).unwrap()[0], Value::Double(n) if n.is_nan())
         );
     };
-    check(&DatabaseValue::from(restored));
+    assert_eq!(restored.point.manifest_hash, point.manifest_hash);
+    check(
+        &Peer::connect(&target.connection, "target", 8)
+            .unwrap()
+            .database_value(),
+    );
     let writer = common::start_service(&target.connection, "target");
     let replay = writer
         .client()

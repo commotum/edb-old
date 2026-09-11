@@ -446,7 +446,6 @@ fn postgres_native_index_pull_is_lazy_and_retains_old_and_temporal_values() {
     assert_eq!(projected.load(Ordering::Relaxed), 2);
     drop(cursor);
     let after = peer.load_stats();
-    assert_eq!(after.compatibility_materializations, 0);
     eprintln!(
         "native index-pull: 512 entities, offset3/limit2, projected2, cursor SQL reads={}, bytes={}, leaves={}",
         after.cursor_sql_reads - baseline.cursor_sql_reads,
@@ -501,5 +500,4 @@ fn postgres_native_index_pull_is_lazy_and_retains_old_and_temporal_values() {
         names(&current.since(seeded.basis_t), options(score_start(None))),
         ["changed"]
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

@@ -275,6 +275,16 @@ fn staged_program_dependencies_and_fulltext_survive_gc_restore_and_receipt_first
         leaf_bytes,
         "transitive program dependency is a completed owned child"
     );
+    // Once copied and checkpointed, restore resumes from destination objects.
+    // An explicit semantic audit still detects the now-incomplete source.
+    let copied_program = directory.path().join("objects").join(
+        program_id
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>(),
+    );
+    std::fs::remove_file(copied_program).unwrap();
+    assert!(PortableBackup::verify_backup(directory.path(), point.basis_t, true).is_err());
     assert_eq!(
         restore
             .restore_backup_with_fault(
@@ -320,7 +330,7 @@ fn staged_program_dependencies_and_fulltext_survive_gc_restore_and_receipt_first
         !invoked,
         "completed restore resolves before active-writer admission or callbacks"
     );
-    assert_eq!(again.basis_t(), point.basis_t);
+    assert_eq!(again.point.basis_t, point.basis_t);
     same_receipt(
         &writer.client().transact(request.clone(), WAIT).unwrap(),
         &report,

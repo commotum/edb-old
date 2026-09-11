@@ -22,9 +22,10 @@ fn command(connection: Option<&str>) -> Command {
         command.env_remove(name);
     }
     if let Some(connection) = connection {
-        command
-            .env("ATOMIC_POSTGRES_URL", connection)
-            .env("ATOMIC_POSTGRES_TRANSPORT", "plaintext");
+        command.env(
+            "ATOMIC_POSTGRES_URL",
+            common::plaintext_connection(connection),
+        );
     }
     command
 }

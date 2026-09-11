@@ -1,13 +1,12 @@
 # Persisted native queries
 
-`QueryTemplate::new` constructs the compact conjunctive query format. Use
+`QueryTemplate::new` lowers compact conjunctive authoring forms to the shared
+Rust query AST, with canonically ordered result rows. Use
 `QueryTemplate::native(query, input_arguments, sources)` to embed the ordinary
-Rust `Query` AST. The current canonical encoder selects a grammar from the
-program's features: compact forms, dual predicates, symbolic lookup inputs,
-native queries, partitions, fulltext, general query data or portable helpers.
-These are current format variants, not a historical upgrade reader. The same
-program has deterministic canonical bytes and identity; future development
-formats may require fresh databases.
+Rust `Query` AST with its ordinary result ordering. Both constructors execute
+through the same query engine and use one current program format (ABI 12).
+The same program has deterministic canonical bytes and identity. Earlier
+development formats require fresh databases.
 
 For example, this query program returns entity/value rows above a threshold;
 the attribute itself is a program argument, not a fixed schema assumption:
@@ -52,17 +51,21 @@ fn selector() -> Result<Program, SemanticError> {
 
 Invoke it with `ProgramRuntime::execute_query` and one captured `&DatabaseValue`,
 passing an attribute ref/ident and the threshold. Deploying the same artifact
-uses `PostgresOperator::deploy_program(&program)`. Keep the returned
-`ProgramDeployment` alive until a transaction has committed a `Value::Function`
-binding using its `hash()`. This protects the immutable program and its transitive
-dependencies from collection during deployment. Hold dependency deployment handles
-while deploying a program that refers to them. Once bound, database roots retain
-the code; release or drop the deployment handle. Unbound abandoned deployments
-can then be reclaimed. Missing dependencies fail rather than publishing broken
-code. Transaction-kind programs can consume
+can use `PostgresOperator::install_program(&client, request_key, ident, &program,
+&dependencies, timeout)`. This stages the complete immutable closure and submits
+ordinary `:db/ident` / `:db/fn` assertions. Dependencies may be supplied in any
+order; an exact retry resolves its durable receipt before inspecting them.
+
+For applications composing their own binding transaction,
+`PostgresOperator::deploy_program(&program)` returns a `ProgramHash`. Fixed
+dependencies must already be present. Staged code is protected for the GC grace
+period; no application-owned deployment handle or release call is necessary.
+Committed database roots retain bound code. Collection removes expired unbound
+staging roots and their otherwise-unreferenced code. Missing dependencies fail
+rather than publishing broken code. Transaction-kind programs can consume
 the query result using ordinary VM instructions and emit transaction forms;
-they still run against the transaction's immutable db-before. Deployment does
-not install a function binding: ordinary `:db/ident` and `:db/fn` assertions do.
+they still run against the transaction's immutable db-before. Staging alone does
+not install a function binding; `install_program` performs both steps.
 
 Native templates support the shared evaluator's predicates, functions, recursive
 rules, `not`/`not-join`, `or`/`or-join`, dynamic attributes, aggregates and Pull.
@@ -102,5 +105,5 @@ for named raw relation arguments. See [general query data](query-data.md).
 [The lifecycle fixture](../tests/program_native_queries.rs) combines all five
 required capabilities in one recursive selection, exercises speculative and
 committed execution, retained prior bindings, exact retries before/after restart,
-and verifies independently captured version-1 bytes. Run its actual PostgreSQL
+and verifies canonical program round trips. Run its actual PostgreSQL
 checks with `ATOMIC_POSTGRES_URL` set; it creates a disposable isolated schema.

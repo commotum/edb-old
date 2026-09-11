@@ -1,20 +1,17 @@
 //! Current-format postorder restore. Pending object IDs are weak payload data;
 //! only fully copied child-closed objects enter the checkpoint's ownership map.
-use super::{
-    PortableBackup, ReadPoint, RestoreFault, load_selected, read_object, verify_read_point,
-};
+use super::{PortableBackup, ReadPoint, RestoreFault, RestoreResult, load_selected, read_object};
 use crate::storage::catalog::{self, identity_key, lineage_key};
 use crate::storage::engine::{identity_string, name_key, protection, restore_lease_guard};
 use crate::storage::log::LogRoot;
 use crate::storage::ownership::{object_children, publish_refs};
-use crate::storage::read_authorization::ReadAuthorization;
 use crate::storage::receipts::{ExactReceipt, RequestIndex, basis_receipt_key};
 use crate::storage::root::{Block, DatabaseRoot};
 use crate::storage::{
     BatchOutcome, BlockDatabase, ObjectId, ObjectReader, PgBlockStore, RefChange, RefCondition,
     Reference,
 };
-use crate::{Database, ErrorCategory, SemanticError};
+use crate::{ErrorCategory, SemanticError};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -239,7 +236,7 @@ impl PortableBackup {
         directory: &Path,
         basis: u64,
         target: &str,
-    ) -> Result<Database, SemanticError> {
+    ) -> Result<RestoreResult, SemanticError> {
         self.restore_selected(
             directory,
             basis,
@@ -256,7 +253,7 @@ impl PortableBackup {
         basis: u64,
         generation: u64,
         target: &str,
-    ) -> Result<Database, SemanticError> {
+    ) -> Result<RestoreResult, SemanticError> {
         self.restore_selected(
             directory,
             basis,
@@ -274,7 +271,7 @@ impl PortableBackup {
         basis: u64,
         target: &str,
         fault: RestoreFault,
-    ) -> Result<Database, SemanticError> {
+    ) -> Result<RestoreResult, SemanticError> {
         self.restore_selected(directory, basis, None, target, fault, None, None)
     }
     #[doc(hidden)]
@@ -284,7 +281,7 @@ impl PortableBackup {
         basis: u64,
         target: &str,
         mut probe: F,
-    ) -> Result<Database, SemanticError> {
+    ) -> Result<RestoreResult, SemanticError> {
         self.restore_selected(
             directory,
             basis,
@@ -302,7 +299,7 @@ impl PortableBackup {
         basis: u64,
         target: &str,
         mut probe: F,
-    ) -> Result<Database, SemanticError> {
+    ) -> Result<RestoreResult, SemanticError> {
         self.restore_selected(
             directory,
             basis,
@@ -324,7 +321,7 @@ impl PortableBackup {
         fault_at: RestoreFault,
         mut activation_probe: Option<&mut dyn FnMut()>,
         mut completion_probe: Option<&mut dyn FnMut()>,
-    ) -> Result<Database, SemanticError> {
+    ) -> Result<RestoreResult, SemanticError> {
         self.maintenance.check()?;
         catalog::validate_name(target)?;
         let point = load_selected(directory, generation, basis)?;
@@ -347,14 +344,14 @@ impl PortableBackup {
                 .transpose()?,
         );
         if let Some(id) = completed.lookup(&mut store, point.point.manifest_hash)? {
-            validate_completion(&mut store, id, &database, &point)?;
+            let activated_root = validate_completion(&mut store, id, &database, &point)?;
             // Exact completion is checked before writer/precondition admission
             // and all callback hooks. It does not roll back a newer live head.
-            return Ok(verify_read_point(directory, point, true, &self.maintenance)?.database);
-        }
-        let verified = verify_read_point(directory, point.clone(), true, &self.maintenance)?;
-        if verified.point.manifest_hash != point.point.manifest_hash {
-            return Err(fault("Backup point changed during verification"));
+            return Ok(RestoreResult {
+                point: point.point,
+                target: database.name,
+                activated_root,
+            });
         }
         let work_key = work_key(&database);
         let old_work = store.read_ref(&work_key)?;
@@ -581,14 +578,6 @@ impl PortableBackup {
         self.maintenance.check()?;
         let mut guards = checkpoint.guards.clone();
         guards.push(work_guard);
-        // Live observation retention is destination-local, not copied from a
-        // backup. Publish its generation anchor with the restored head; peers
-        // remain read-only consumers of immutable objects.
-        let observer_key = crate::storage::report_handoff::observer_key(database.route);
-        guards.push(guard(
-            observer_key.clone(),
-            store.read_ref(&observer_key)?.as_ref(),
-        ));
         let protected = protection(&mut store, &guards)?;
         store.set_write_protection(Some(protected.clone()))?;
         let mut root = DatabaseRoot::decode(
@@ -603,36 +592,6 @@ impl PortableBackup {
                 .ok_or_else(|| fault("Writer epoch overflows"))?,
             None => 0,
         };
-        if point.value.identity != root.identity
-            || point.value.basis != root.basis
-            || point.value.log != root.log
-            || point.value.metadata != root.metadata
-        {
-            return Err(fault("Exact read value differs from canonical publication"));
-        }
-        root.indexes = point.value.indexes;
-        root.read_authorization = Some(ReadAuthorization::retain_index(
-            &mut store,
-            root.read_authorization
-                .ok_or_else(|| fault("Backup publication lacks read authorization"))?,
-            &root.identity,
-            root.indexes
-                .ok_or_else(|| fault("Backup read value lacks indexes"))?,
-        )?);
-        let metadata_id = root
-            .metadata
-            .ok_or_else(|| fault("Restored publication lacks metadata"))?;
-        let generation = crate::storage::SnapshotMetadata::decode(
-            &metadata_id,
-            &required(&mut store, metadata_id)?,
-        )?
-        .generation;
-        let observer = crate::storage::report_handoff::stage_token(
-            &mut store,
-            database.route,
-            root.identity,
-            generation,
-        )?;
         let activated = store.put(&root.encode()?)?;
         let mut payload = identity.to_vec();
         payload.extend_from_slice(&database.route);
@@ -658,7 +617,6 @@ impl PortableBackup {
             &[
                 changed(database.reference_key(), Some(activated)),
                 changed(database.lease_key(), None),
-                changed(observer_key, Some(observer)),
                 changed(completion_key, completions.root()),
                 changed(work_key, None),
             ],
@@ -673,7 +631,11 @@ impl PortableBackup {
             // for the incremental collector, never a SQL membership workflow.
             return Err(injected("backup/restore-after-tree-publication"));
         }
-        Ok(verified.database)
+        Ok(RestoreResult {
+            point: point.point,
+            target: database.name,
+            activated_root: activated,
+        })
     }
 }
 
@@ -682,7 +644,7 @@ fn validate_completion(
     id: ObjectId,
     database: &BlockDatabase,
     point: &ReadPoint,
-) -> Result<(), SemanticError> {
+) -> Result<ObjectId, SemanticError> {
     let block = Block::decode(&id, &required(store, id)?)?;
     if block.kind != COMPLETION_KIND
         || block.links.len() != 2
@@ -700,7 +662,7 @@ fn validate_completion(
     if current.lineage_id != point.point.lineage_id {
         return Err(stale());
     }
-    Ok(())
+    Ok(block.links[0])
 }
 
 fn validate_guards(checkpoint: &Checkpoint, database: &BlockDatabase) -> Result<(), SemanticError> {

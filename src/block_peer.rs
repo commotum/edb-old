@@ -27,9 +27,6 @@ struct Core {
     reference: String,
     route: [u8; 16],
     identity: DatabaseIdentity,
-    // Kept only by the live observer, never by returned immutable values.
-    // The update lock serializes moving this token with observed generation.
-    observer: Mutex<crate::storage::snapshot::RootCapture>,
     current: RwLock<State>,
     observed_basis: Mutex<u64>,
     state_advanced: Condvar,
@@ -59,7 +56,7 @@ impl Peer {
         cache_capacity: usize,
     ) -> Result<Self, SemanticError> {
         Self::connect_configured(
-            &PostgresConnectionConfig::plaintext(connection),
+            &PostgresConnectionConfig::parse(connection)?,
             database_id,
             cache_capacity,
         )
@@ -85,7 +82,7 @@ impl Peer {
         cache_bytes: usize,
     ) -> Result<Self, SemanticError> {
         Self::connect_configured_with_cache_limits(
-            &PostgresConnectionConfig::plaintext(connection),
+            &PostgresConnectionConfig::parse(connection)?,
             database_id,
             cache_entries,
             cache_bytes,
@@ -110,7 +107,7 @@ impl Peer {
         recent_limits: RecentLimits,
     ) -> Result<Self, SemanticError> {
         Self::connect_configured_with_limits(
-            &PostgresConnectionConfig::plaintext(connection),
+            &PostgresConnectionConfig::parse(connection)?,
             database_id,
             cache_entries,
             cache_bytes,
@@ -188,11 +185,7 @@ impl Peer {
         }
         let reader = BlockReader::connect(connection, reads)?;
         let reference = database.reference_key();
-        let (snapshot, observer) = retry_capture(|| {
-            let snapshot = reader.capture(&reference)?;
-            let observer = reader.pin_report_observer(&reference, database.route, &snapshot)?;
-            Ok((snapshot, observer))
-        })?;
+        let snapshot = reader.capture(&reference)?;
         if snapshot.captured_root().identity != database.identity {
             return Err(identity_error());
         }
@@ -209,7 +202,6 @@ impl Peer {
                 reader,
                 reference,
                 route: database.route,
-                observer: Mutex::new(observer),
                 identity: DatabaseIdentity::new(
                     crate::storage::engine::identity_string(database.route),
                     id,
@@ -402,24 +394,15 @@ impl Peer {
             )
         })?;
         let mut reports = Vec::new();
-        // Pin the new interest before retiring the old one. Initial admission
-        // and every generation transfer guard the current publication; a
-        // racing activation causes a retry, never an unprotected handoff gap.
-        let observer = if next.generation() != previous.snapshot.generation() {
-            Some(self.core.reader.pin_report_observer(
-                &self.core.reference,
-                self.core.route,
-                &next,
-            )?)
-        } else {
-            None
-        };
         if self.tx_reports_enabled() {
             let mut through = previous.snapshot.basis_t();
-            let old_observer = lock(&self.core.observer).clone();
+            let source = self
+                .core
+                .reader
+                .report_publication(&self.core.reference, &previous.snapshot)?;
             for generation in previous.snapshot.generation()..next.generation() {
                 let (source, end) = self.core.reader.report_handoff(
-                    &old_observer,
+                    &source,
                     self.core.route,
                     next.captured_root().identity,
                     previous.snapshot.generation(),
@@ -451,9 +434,6 @@ impl Peer {
             publication_revision: revision,
             observation_generation: previous.observation_generation.saturating_add(1),
         });
-        if let Some(observer) = observer {
-            *lock(&self.core.observer) = observer;
-        }
         if !reports.is_empty()
             && let Some(queue) = lock(&self.core.reports).as_mut()
         {
@@ -496,10 +476,10 @@ impl Peer {
     }
 
     pub fn sync_snapshot(&self) -> Result<PeerSnapshot, SemanticError> {
-        match retry_capture(|| self.sync_once()) {
+        match self.sync_once() {
             Err(error) if error.category == ErrorCategory::Unavailable => {
                 self.reconnect()?;
-                retry_capture(|| self.sync_once())
+                self.sync_once()
             }
             result => result,
         }
@@ -516,11 +496,10 @@ impl Peer {
     pub fn refresh_index(&self) -> Result<bool, SemanticError> {
         let _update = lock(&self.core.update);
         let previous = self.state();
-        let Some(next) = retry_capture(|| {
-            self.core
-                .reader
-                .capture_changed(&self.core.reference, &previous.snapshot)
-        })?
+        let Some(next) = self
+            .core
+            .reader
+            .capture_changed(&self.core.reference, &previous.snapshot)?
         else {
             return Ok(false);
         };
@@ -530,7 +509,6 @@ impl Peer {
             || (next.captured_root().indexes == previous.snapshot.captured_root().indexes
                 && next.generation() == previous.snapshot.generation())
         {
-            let _ = next.release();
             return Ok(false);
         }
         let revision = next.publication_revision().ok_or_else(|| {
@@ -539,23 +517,11 @@ impl Peer {
                 "Publication capture has no reference revision",
             )
         })?;
-        let observer = if next.generation() != previous.snapshot.generation() {
-            Some(self.core.reader.pin_report_observer(
-                &self.core.reference,
-                self.core.route,
-                &next,
-            )?)
-        } else {
-            None
-        };
         self.publish(State {
             snapshot: next,
             publication_revision: revision,
             observation_generation: previous.observation_generation.saturating_add(1),
         });
-        if let Some(observer) = observer {
-            *lock(&self.core.observer) = observer;
-        }
         Ok(true)
     }
     pub fn sync_to(&self, target: u64, timeout: Duration) -> Result<DatabaseValue, SemanticError> {
@@ -993,19 +959,6 @@ fn direct_report_value(value: &DatabaseValue) -> Result<BlockSnapshot, SemanticE
         ));
     }
     Ok(snapshot)
-}
-fn retry_capture<T>(
-    mut operation: impl FnMut() -> Result<T, SemanticError>,
-) -> Result<T, SemanticError> {
-    for attempt in 0..3 {
-        match operation() {
-            Err(error) if error.category == ErrorCategory::Conflict && attempt < 2 => {
-                std::thread::yield_now()
-            }
-            result => return result,
-        }
-    }
-    unreachable!()
 }
 fn fault(code: &'static str, message: &'static str) -> SemanticError {
     SemanticError::new(ErrorCategory::Fault, code, message)

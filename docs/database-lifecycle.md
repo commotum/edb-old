@@ -55,18 +55,14 @@ atomic list-databases --retired
 ```
 
 Delete removes the active name and fences its writer. New connections and exact
-snapshot reopening are rejected. Already captured, pinned immutable values remain
-readable: deletion is not mutation of a value your application already holds.
+snapshot reopening are rejected. Captured immutable values remain readable within
+storage retention: deletion does not mutate a value your application already holds.
 Retirement does not immediately erase stored facts or invalidate completed portable
-backups. Release old values/connections before expecting reclamation to proceed.
-These are live storage pins, not a promise of permanent availability for offline
-handles. A healthy reader session does not expire for being old or idle. After
-connection/server loss, a collector must acquire its exclusive liveness lock and
-explicitly revoke the session; pins remain for five minutes after revocation.
-A revoked reader cannot resurrect its old session. Reopen through the current
-authorized identity, which rejects retirement and old excision generations.
-Normal last-value/cursor Drop queues bounded cleanup without performing SQL on
-the dropping thread. Pin-release events are folded in a later collection cycle.
+backups. Readers create no storage pins or sessions, and dropping values requires
+no SQL cleanup. Normal GC keeps retired objects for 30 days; applications must
+finish their reads within the configured grace. A shorter explicit retention age
+can invalidate held values. New opening requires a current authorized identity
+and rejects retirement and old excision generations.
 
 Storage reclamation is a separate owner operation against an exact retired storage
 ID and lineage. Supply the physical PostgreSQL database and catalog schema as an

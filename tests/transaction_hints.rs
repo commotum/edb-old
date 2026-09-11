@@ -7,7 +7,7 @@ use atomic_core::{
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
-// Measurement/test-only bounded observation. Production acknowledgement never
+// Test-only bounded observation. Production acknowledgement never
 // waits for advisory completion or synchronous driver interruption.
 fn completed(execution: &atomic_core::HintExecution) -> atomic_core::HintPrefetchStats {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -301,6 +301,73 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         .unwrap()
         .create_database("blocked", schema())
         .unwrap();
+    // Readers no longer insert session rows. Gate a real reference SELECT
+    // instead, using a fixture-only row-security policy. A separate runtime
+    // role makes this effective even when the fixture owner is a superuser.
+    struct ReadGate {
+        control: postgres::Client,
+        role: String,
+        schema: String,
+    }
+    impl Drop for ReadGate {
+        fn drop(&mut self) {
+            let _ = self.control.batch_execute(&format!(
+                "REVOKE ALL ON TABLE {schema}.atomic_objects, {schema}.atomic_refs FROM {role}; \
+                 REVOKE USAGE ON SCHEMA {schema} FROM {role}; DROP ROLE {role}",
+                schema = self.schema,
+                role = self.role,
+            ));
+        }
+    }
+    let mut control = postgres::Client::connect(url, postgres::NoTls).unwrap();
+    let key: i64 = control
+        .query_one(
+            "SELECT hashtextextended(current_schema() || '/blocked-hint', 123)",
+            &[],
+        )
+        .unwrap()
+        .get(0);
+    let role = format!("{}_runtime", fixture.schema);
+    control
+        .batch_execute(&format!(
+            r#"
+        CREATE ROLE {role};
+        GRANT {role} TO CURRENT_USER;
+        GRANT USAGE ON SCHEMA {schema} TO {role};
+        GRANT SELECT, INSERT, UPDATE, DELETE ON atomic_objects, atomic_refs TO {role};
+        CREATE FUNCTION atomic_test_block_hint() RETURNS boolean LANGUAGE plpgsql AS $body$
+        BEGIN
+            IF current_setting('statement_timeout') = '1s' THEN
+                PERFORM pg_advisory_lock({key});
+                PERFORM pg_advisory_unlock({key});
+            END IF;
+            RETURN true;
+        END $body$;
+        ALTER TABLE atomic_refs ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY hint_read ON atomic_refs FOR SELECT USING (atomic_test_block_hint());
+        CREATE POLICY runtime_insert ON atomic_refs FOR INSERT WITH CHECK (true);
+        CREATE POLICY runtime_update ON atomic_refs FOR UPDATE USING (true) WITH CHECK (true);
+        CREATE POLICY runtime_delete ON atomic_refs FOR DELETE USING (true);
+    "#,
+            schema = fixture.schema,
+        ))
+        .unwrap();
+    let mut gate = ReadGate {
+        control,
+        role,
+        schema: fixture.schema.clone(),
+    };
+    let runtime_url = if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        format!(
+            "{url}&options=-csearch_path%3D{}%2Cpg_catalog%20-crole%3D{}",
+            gate.schema, gate.role,
+        )
+    } else {
+        format!(
+            "{url} options='-csearch_path={},pg_catalog -crole={}'",
+            gate.schema, gate.role,
+        )
+    };
     let (entered, started_authority) = std::sync::mpsc::sync_channel(1);
     let (release, released) = std::sync::mpsc::sync_channel(1);
     let released = std::sync::Mutex::new(released);
@@ -331,9 +398,9 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
             Ok(Vec::new())
         })
         .unwrap();
-    let service = TransactionService::start_configured_with_options(
+    let service = TransactionService::start_with_options(
         TransactionServiceConfig {
-            connection: url.clone(),
+            connection: PostgresConnectionConfig::plaintext(runtime_url),
             database_id: "blocked".into(),
             holder_id: "hint-fixture".into(),
             lease_duration: Duration::from_secs(30),
@@ -341,7 +408,6 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
             queue_capacity: 32,
             capacity_limits: Default::default(),
         },
-        PostgresConnectionConfig::plaintext(url),
         ServiceOptions {
             execution: TransactionExecutionOptions {
                 native: registry.build(),
@@ -380,35 +446,9 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         HintLimits::default(),
     )
     .unwrap();
-    let mut control = postgres::Client::connect(url, postgres::NoTls).unwrap();
-    let key: i64 = control
-        .query_one(
-            "SELECT hashtextextended(current_schema() || '/blocked-hint', 123)",
-            &[],
-        )
-        .unwrap()
-        .get(0);
+    let control = &mut gate.control;
     control
         .query_one("SELECT pg_advisory_lock($1)", &[&key])
-        .unwrap();
-    // Fixture-only scheduling gate on the generic provider. It affects only
-    // the independent hint session, identified by its one-second SQL timeout.
-    // Product installation has no functions or triggers.
-    control
-        .batch_execute(&format!(
-            r#"
-        CREATE FUNCTION atomic_test_block_hint() RETURNS trigger LANGUAGE plpgsql AS $body$
-        BEGIN
-            IF current_setting('statement_timeout') = '1s' AND NEW.key LIKE 'sessions/read/%' THEN
-                PERFORM pg_advisory_lock({key});
-                PERFORM pg_advisory_unlock({key});
-            END IF;
-            RETURN NEW;
-        END $body$;
-        CREATE TRIGGER atomic_test_hint_gate BEFORE INSERT ON atomic_refs
-        FOR EACH ROW EXECUTE FUNCTION atomic_test_block_hint();
-    "#
-        ))
         .unwrap();
     let options = HintPrefetchOptions {
         timeout: Duration::from_secs(1),
@@ -437,7 +477,7 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
         }
         assert!(
             wait.elapsed() < Duration::from_millis(800),
-            "hint did not enter the injected independent-pin wait: {:?}",
+            "hint did not enter the injected independent-reader wait: {:?}",
             first.snapshot()
         );
         std::thread::sleep(Duration::from_millis(2));
@@ -509,123 +549,7 @@ fn blocked_independent_hint_does_not_delay_authority_or_spawn_another_worker() {
     ticket.wait(Duration::from_secs(3)).unwrap();
     service.shutdown();
     eprintln!(
-        "blocked_hint independent_pin_setup=true acknowledged_two_transactions_us={acknowledgements_us} first={finished:?} second={:?} one_byte_budget={byte_stats:?}; no synchronous-call interruption claimed",
+        "blocked_hint independent_reference_read=true acknowledged_two_transactions_us={acknowledgements_us} first={finished:?} second={:?} one_byte_budget={byte_stats:?}; no synchronous-call interruption claimed",
         second.snapshot()
     );
-}
-
-#[test]
-#[ignore = "manual comparative PostgreSQL hint costs; local samples are not an SLA"]
-fn postgres_hint_cold_warm_costs() {
-    let url = std::env::var("ATOMIC_POSTGRES_URL").expect("explicit fixture URL required");
-    eprintln!(
-        "hint_cost_scope round0=first_use_peer_writer_process_caches round1=reused_caches; PostgreSQL/OS buffers are not flushed; two local observations per mode, not a speedup or SLA claim"
-    );
-    for mode in ["absent", "hinted"] {
-        let fixture = common::PostgresFixture::new(&url, "hint_costs");
-        let url = &fixture.connection;
-        common::install(url).unwrap();
-        let created = common::TestStore::connect(url)
-            .unwrap()
-            .create_database("costs", schema())
-            .unwrap();
-        let service = common::start_service(url, "costs");
-        let first = common::transact(
-            &service,
-            "seed",
-            created.basis_t(),
-            &(0..128)
-                .map(|n| add(EntityRef::Temp(format!("item{n}")), n))
-                .collect::<Vec<_>>(),
-            1000,
-        );
-        let eids = first.tempids.values().copied().collect::<Vec<_>>();
-        service.shutdown();
-        common::consolidate(url, "costs").unwrap();
-        let peer = Peer::connect(url, "costs", 256).unwrap();
-        let mut value = peer.db();
-        let service = common::start_service(url, "costs");
-        for round in 0..2 {
-            let ops = eids
-                .iter()
-                .take(32)
-                .map(|eid| add(EntityRef::Id(*eid), 500 + round))
-                .collect::<Vec<_>>();
-            let generation = OperationContext::new(OperationKind::Application);
-            let cache_before = peer.cache_stats();
-            let preview_started = Instant::now();
-            let (preview, hints, trace) = {
-                let _scope = generation.enter();
-                let forms = ops.iter().cloned().map(TxForm::Op).collect::<Vec<_>>();
-                if mode == "hinted" {
-                    let traced = value
-                        .with_forms_with_hints(
-                            &forms,
-                            2000 + round,
-                            SpeculationLimits::default(),
-                            HintLimits::default(),
-                        )
-                        .unwrap();
-                    (traced.report, traced.hints, Some(traced.stats))
-                } else {
-                    (
-                        value
-                            .with_forms_with_limits(
-                                &forms,
-                                2000 + round,
-                                SpeculationLimits::default(),
-                            )
-                            .unwrap(),
-                        None,
-                        None,
-                    )
-                }
-            };
-            let preview_us = preview_started.elapsed().as_micros();
-            let request =
-                TransactionRequest::new(format!("round{round}"), ops).with_tx_instant(2000 + round);
-            let measured = OperationContext::new(OperationKind::Application);
-            let start = Instant::now();
-            let (ticket, hint_stats) = {
-                let _scope = measured.enter();
-                if mode == "hinted" {
-                    let (ticket, stats) = service
-                        .client()
-                        .submit_with_hints(request, hints.unwrap(), HintPrefetchOptions::default())
-                        .unwrap();
-                    (ticket, Some(stats))
-                } else {
-                    (service.client().submit(request).unwrap(), None)
-                }
-            };
-            let report = ticket.wait(Duration::from_secs(15)).unwrap();
-            assert_eq!(report.tx_data, preview.tx_data);
-            let wall_us = start.elapsed().as_micros();
-            let after_ack = hint_stats.as_ref().map(|stats| stats.snapshot());
-            let final_hints = hint_stats.as_ref().map(completed);
-            let writer = service.client().writer_residency_stats();
-            if mode == "absent" && round == 0 {
-                assert!(
-                    generation.snapshot().sql_calls > 0,
-                    "first-use peer must actually miss its node cache"
-                );
-                assert!(
-                    writer.last_native_sql_reads > 0,
-                    "first-use writer must actually miss its node cache"
-                );
-            }
-            eprintln!(
-                "hint_cost mode={mode} round={round} items=128 updates=32 leaf_datoms=8 peer_preview_us={preview_us} trace={trace:?} peer_sql={} wall_us={wall_us} transaction_sql={} connect_calls={} phases={:?} hints_at_ack={after_ack:?} hints_complete={final_hints:?} peer_cache_before={cache_before:?} peer_cache_after={:?} writer={writer:?}",
-                generation.snapshot().sql_calls,
-                measured.snapshot().sql_calls,
-                measured.snapshot().connect_calls,
-                measured.snapshot().phases,
-                peer.cache_stats()
-            );
-            value = peer
-                .sync_to(report.basis_t, Duration::from_secs(5))
-                .unwrap();
-        }
-        service.shutdown();
-    }
 }

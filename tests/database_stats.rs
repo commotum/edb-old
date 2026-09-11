@@ -199,7 +199,7 @@ fn native_stats_and_finite_index_requests_use_the_existing_worker() {
         .unwrap();
     let service = TransactionService::start_with_indexing(
         TransactionServiceConfig {
-            connection: connection.clone(),
+            connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
             database_id: DATABASE.into(),
             holder_id: "stats-writer".into(),
             lease_duration: Duration::from_secs(5),
@@ -266,7 +266,6 @@ fn native_stats_and_finite_index_requests_use_the_existing_worker() {
     peer.sync_index(latest_request.target_t, WAIT).unwrap();
     assert!(!peer.request_index().unwrap().scheduled);
     assert_eq!(old.db_stats().unwrap(), old_stats);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     let reader = Connection::connect(connection, DATABASE, 8).unwrap();
     assert_eq!(
         reader.request_index().unwrap_err().code,

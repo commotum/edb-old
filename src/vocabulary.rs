@@ -80,8 +80,7 @@ pub const DB_TUPLE_DISCONTINUED: u64 = 72;
 /// Convert a schema entity ID into the compact attribute ID used by datoms.
 ///
 /// Installed attributes are restricted to partition 0 and to the recovered
-/// 2^20 schema element-vector bound.  The upper bound is inclusive, matching
-/// the Goal 11 source contract.
+/// 2^20 schema element-vector bound. The upper bound is inclusive.
 pub fn schema_eid_to_attr_id(eid: u64) -> Result<u32, SemanticError> {
     let partition = eid_to_part(eid)?;
     if partition != DB_PARTITION {

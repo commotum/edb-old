@@ -155,7 +155,7 @@ fn create_preserves_initial_schema_transaction_and_empty_genesis_contract() {
             assert_eq!(value.entid(&Keyword::new("item", "key")), Some(KEY as u64));
         }
         drop((log, value));
-        snapshot.release().unwrap();
+        drop(snapshot);
     }
 }
 
@@ -936,7 +936,7 @@ fn indexed_small_writes_and_reopened_receipts_are_selective_after_index_only_pub
             "a repeated selective read uses the configured node cache"
         );
         assert!(cache.peak_bytes <= cache_bytes);
-        snapshot.release().unwrap();
+        drop(snapshot);
         eprintln!(
             "BLOCK_INDEXED_TRANSACTION_SAMPLE entities=4096 indexed_nodes={index_nodes} indexed_bytes={index_bytes} cache_limit_bytes={cache_bytes} append_complete_ms={append_ms} append_sql_calls={} append_read_bytes={} append_write_bytes={} reopen_retry_complete_ms={reopen_retry_ms} retry_sql_calls={} retry_read_bytes={} probe_cache_peak_bytes={} probe_cache_hits={}",
             append_io.sql_calls,

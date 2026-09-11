@@ -33,6 +33,18 @@ pub fn private_directory() -> tempfile::TempDir {
     directory
 }
 
+/// These disposable local fixtures use the same explicit plaintext policy as NoTls.
+pub fn plaintext_connection(connection: &str) -> String {
+    if connection.starts_with("postgres://") || connection.starts_with("postgresql://") {
+        format!(
+            "{connection}{}sslmode=disable",
+            if connection.contains('?') { "&" } else { "?" }
+        )
+    } else {
+        format!("{connection} sslmode=disable")
+    }
+}
+
 /// Disposable schema-scoped PostgreSQL fixture. Fault tests must not mutate
 /// shared catalogs or invoke global reclamation against unrelated databases.
 pub struct PostgresFixture {
@@ -72,7 +84,7 @@ impl PostgresFixture {
         Self {
             admin,
             schema,
-            connection: scoped,
+            connection: plaintext_connection(&scoped),
         }
     }
 }
@@ -210,7 +222,7 @@ pub fn start_service_with_limits(
 ) -> TransactionService {
     let ordinal = NEXT_HOLDER.fetch_add(1, Ordering::Relaxed);
     TransactionService::start(TransactionServiceConfig {
-        connection: connection.to_owned(),
+        connection: atomic_core::PostgresConnectionConfig::parse(connection).unwrap(),
         database_id: database_id.to_owned(),
         holder_id: format!("test-{}-{ordinal}", std::process::id()),
         lease_duration: Duration::from_secs(5),

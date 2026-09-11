@@ -114,7 +114,7 @@ fn program_encoding_is_canonical_hashed_and_checked() {
     assert_eq!(program_hash(&program).unwrap(), atomic_core::sha256(&bytes));
     assert_eq!(
         hex(&program_hash(&program).unwrap()),
-        "2051644d6ff2455a4811006acee063e99b20bb9279b63e43feb6eac6604f00f2"
+        "091c8200725f0e980798ededb67a038467ec0266ac6ecfeeca85c6507366848e"
     );
 
     let mut corrupt = bytes;
@@ -661,13 +661,12 @@ fn database_functions_have_a_real_conjunctive_datalog_host() {
 }
 
 #[test]
-fn query_templates_are_canonical_versioned_and_checked() {
+fn compact_queries_lower_canonically_and_the_current_format_is_checked() {
     let first = QueryPattern::new(QueryTerm::Input(0), MEMBERS, QueryTerm::Variable(0));
     let second = QueryPattern::new(QueryTerm::Variable(0), NAME, QueryTerm::Variable(1));
     let forward = QueryTemplate::new(vec![0, 1], vec![first.clone(), second.clone()]).unwrap();
     let reverse = QueryTemplate::new(vec![0, 1], vec![second, first.clone()]).unwrap();
     assert_eq!(forward, reverse);
-    assert_eq!(forward.version(), atomic_core::QUERY_TEMPLATE_VERSION);
     assert_eq!(
         QueryTemplate::new(vec![0], vec![first.clone(), first])
             .unwrap_err()
@@ -687,21 +686,16 @@ fn query_templates_are_canonical_versioned_and_checked() {
     let bytes = encode_program(&program).unwrap();
     assert_eq!(decode_program(&bytes).unwrap(), program);
 
-    // Header (16), ABI/kind/arity (4), top-level count (4), instruction tag
-    // (1), then the query-template version.
+    // The enclosing ABI is the only format version, including embedded queries.
     let mut unsupported = bytes;
-    assert_eq!(unsupported[24], 37);
-    unsupported[25..27].copy_from_slice(&99u16.to_be_bytes());
+    unsupported[16..18].copy_from_slice(&99u16.to_be_bytes());
     let checksum_at = unsupported.len() - 32;
     let checksum = atomic_core::sha256(&unsupported[..checksum_at]);
     unsupported[checksum_at..].copy_from_slice(&checksum);
     let error = decode_program(&unsupported).unwrap_err();
     assert_eq!(
         (error.category, error.code),
-        (
-            ErrorCategory::Unsupported,
-            "encoding/unsupported-query-template-version"
-        )
+        (ErrorCategory::Fault, "encoding/unsupported-program-abi")
     );
 }
 
@@ -738,7 +732,7 @@ fn query_work_is_bounded_and_a_failed_query_does_not_reset_shared_budget() {
         .unwrap_err();
     assert_eq!(
         (error.category, error.code),
-        (ErrorCategory::Busy, "program/query-intermediate-limit")
+        (ErrorCategory::Busy, "query/intermediate-limit")
     );
     let after_failure = budget.remaining_fuel();
     assert!(after_failure < before);
@@ -767,7 +761,7 @@ fn query_work_is_bounded_and_a_failed_query_does_not_reset_shared_budget() {
         .unwrap_err();
     assert_eq!(
         (error.category, error.code),
-        (ErrorCategory::Busy, "program/fuel-exhausted")
+        (ErrorCategory::Busy, "query/work-limit")
     );
 }
 

@@ -116,33 +116,20 @@ pub fn native_deployment_attribute(id: u32) -> Attribute {
 
 pub(crate) fn validate_name(name: &Symbol) -> Result<(), SemanticError> {
     let qualified = name.qualified_name();
-    let valid = name
+    if name
         .namespace
         .as_deref()
-        .and_then(|namespace| namespace.rsplit_once(".v"))
-        .is_some_and(|(base, version)| {
-            !base.is_empty()
-                && base
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-                && version
-                    .parse::<u32>()
-                    .ok()
-                    .is_some_and(|n| n > 0 && n.to_string() == version)
-        })
+        .is_some_and(|namespace| !namespace.is_empty())
         && !name.name.is_empty()
-        && name
-            .name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '?' | '!'));
-    if valid {
+        && !name.name.contains('/')
+        && !name.namespace.as_deref().unwrap_or_default().contains('/')
+        && !qualified.chars().any(char::is_whitespace)
+    {
         Ok(())
     } else {
         Err(SemanticError::incorrect(
             "native/invalid-deployment-name",
-            format!(
-                "native deployment {qualified} must use a qualified namespace ending .vN, N a positive version"
-            ),
+            format!("native deployment {qualified} must use a fully qualified symbol"),
         ))
     }
 }

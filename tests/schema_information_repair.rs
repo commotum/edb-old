@@ -1,3 +1,5 @@
+mod common;
+
 use atomic_core::{
     Attribute, Cardinality, DB_ALTER_ATTRIBUTE, DB_CARDINALITY, DB_CARDINALITY_ONE, DB_IDENT,
     DB_INDEX, DB_TX_INSTANT, DB_TYPE_LONG, DB_UNIQUE, DB_UNIQUE_IDENTITY, DB_VALUE_TYPE, Database,
@@ -298,8 +300,7 @@ fn explicit_index_fact_is_distinct_from_unique_derived_avet_membership() {
     );
 }
 
-#[test]
-fn active_composite_constituent_ident_cannot_be_retargeted_until_discontinued() {
+fn composite_retarget_schema() -> Schema {
     let mut schema = Schema::new();
     schema
         .install(Attribute::new(
@@ -328,7 +329,12 @@ fn active_composite_constituent_ident_cannot_be_retargeted_until_discontinued() 
             .tuple(TupleSpec::Composite(vec![1_000, 1_001])),
         )
         .unwrap();
-    let database = Database::new(schema).unwrap();
+    schema
+}
+
+#[test]
+fn active_composite_constituent_ident_cannot_be_retargeted_until_discontinued() {
+    let database = Database::new(composite_retarget_schema()).unwrap();
     let retarget = || {
         vec![
             TxOp::Add {
@@ -367,6 +373,100 @@ fn active_composite_constituent_ident_cannot_be_retargeted_until_discontinued() 
             .unwrap()
             .tuple_discontinued
     );
+    let renamed = discontinued.with(&retarget()[..1], 1_500).unwrap().db_after;
+    let after_alias_retarget = renamed.with(&retarget()[1..], 2_000).unwrap().db_after;
+    for value in [&retargeted, &after_alias_retarget] {
+        value.validate_invariants().unwrap();
+        assert_eq!(
+            value.schema(),
+            value.rebuild_derived_caches().unwrap().schema(),
+            "discontinued constituent names must resolve identically on recovery"
+        );
+        let mut changed = value.schema().attribute(1_002).unwrap().clone();
+        changed.tuple = Some(TupleSpec::Composite(vec![1_001, 1_000]));
+        assert_eq!(
+            value
+                .with(&[TxOp::AlterAttribute(changed)], 3_000)
+                .unwrap_err()
+                .code,
+            "schema/tuple-definition-immutable",
+            "discontinuation does not allow editing tuple definitions"
+        );
+    }
+}
+
+#[test]
+fn native_discontinued_composite_ident_retarget_survives_indexing_and_recovery() {
+    use atomic_core::{Connection, TransactionRequest};
+    use std::time::Duration;
+
+    let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
+        eprintln!("SKIPPED native composite retarget: ATOMIC_POSTGRES_URL unset");
+        return;
+    };
+    let fixture = common::PostgresFixture::new(&url, "composite_retarget");
+    common::install(&fixture.connection).unwrap();
+    common::TestStore::connect(&fixture.connection)
+        .unwrap()
+        .create_database("composite", composite_retarget_schema())
+        .unwrap();
+    let writer = common::start_service(&fixture.connection, "composite");
+    let client = writer.client();
+    let rename = TxOp::Add {
+        entity: EntityRef::Id(1_000),
+        attribute: DB_IDENT as u32,
+        value: Value::Keyword(Keyword::new("part", "renamed-a")).into(),
+    };
+    let retarget = TxOp::Add {
+        entity: EntityRef::Id(1_001),
+        attribute: DB_IDENT as u32,
+        value: Value::Keyword(Keyword::new("part", "a")).into(),
+    };
+    let submit = |key: &str, operations: Vec<TxOp>, instant| {
+        client.transact(
+            TransactionRequest::new(key, operations).with_tx_instant(instant),
+            Duration::from_secs(10),
+        )
+    };
+    assert_eq!(
+        submit(
+            "active-retarget",
+            vec![rename.clone(), retarget.clone()],
+            1_000
+        )
+        .unwrap_err()
+        .code,
+        "schema/tuple-definition-immutable"
+    );
+    let mut composite = composite_retarget_schema()
+        .attribute(1_002)
+        .unwrap()
+        .clone();
+    composite.tuple_discontinued = true;
+    submit("discontinue", vec![TxOp::AlterAttribute(composite)], 1_000).unwrap();
+    let renamed = submit("rename", vec![rename], 1_500).unwrap().db_after;
+    let report = submit("retarget", vec![retarget], 2_000).unwrap();
+    let expected = report.db_after.schema().clone();
+    assert_eq!(
+        report.db_after.entid(&Keyword::new("part", "a")),
+        Some(1_001)
+    );
+    assert_eq!(renamed.entid(&Keyword::new("part", "a")), Some(1_000));
+    let mut edited = expected.attribute(1_002).unwrap().clone();
+    edited.tuple = Some(TupleSpec::Composite(vec![1_001, 1_000]));
+    assert_eq!(
+        submit("edit-tuple", vec![TxOp::AlterAttribute(edited)], 3_000)
+            .unwrap_err()
+            .code,
+        "schema/tuple-definition-immutable"
+    );
+    common::consolidate(&fixture.connection, "composite").unwrap();
+    writer.shutdown();
+    let reopened = common::start_service(&fixture.connection, "composite");
+    let connection = Connection::connect(&fixture.connection, "composite", 32).unwrap();
+    assert_eq!(connection.db().schema(), &expected);
+    assert_eq!(connection.db().basis_t(), report.basis_t);
+    reopened.shutdown();
 }
 
 #[test]

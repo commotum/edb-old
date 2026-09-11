@@ -285,9 +285,9 @@ fn configured_service_keeps_committing_while_telemetry_sink_is_blocked() {
     )
     .unwrap();
     let emitter = publisher.emitter();
-    let service = TransactionService::start_configured_with_options(
+    let service = TransactionService::start_with_options(
         TransactionServiceConfig {
-            connection: String::new(),
+            connection: PostgresConnectionConfig::plaintext(&fixture.connection),
             database_id: "events".into(),
             holder_id: "telemetry-writer".into(),
             lease_duration: Duration::from_secs(10),
@@ -295,7 +295,6 @@ fn configured_service_keeps_committing_while_telemetry_sink_is_blocked() {
             queue_capacity: 8,
             capacity_limits: CapacityLimits::default(),
         },
-        PostgresConnectionConfig::plaintext(&fixture.connection),
         ServiceOptions {
             telemetry: Some(emitter.clone()),
             ..Default::default()

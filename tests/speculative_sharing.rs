@@ -163,5 +163,4 @@ fn generated_native_branches_preserve_exact_information_without_publication() {
         store.recover(&database).unwrap().basis_t(),
         before.basis_t()
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

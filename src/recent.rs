@@ -685,7 +685,7 @@ impl RecentTier {
     }
 
     /// Sorted current assertions contributed by this tail at its endpoint.
-    /// This is a compatibility materializer over the lazy raw-event cursor;
+    /// This collects the lazy raw-event cursor;
     /// no endpoint copy is retained in the database value.
     pub fn current_datoms(&self, order: IndexOrder) -> Arc<[Datom]> {
         self.cursor(false, order, &RecentRange::unbounded())
@@ -740,7 +740,7 @@ impl RecentTier {
 
     /// Open a lower-bound cursor over one left-contiguous index prefix.
     ///
-    /// Unlike `datoms_with_prefix` compatibility helpers, this does not first
+    /// Unlike `datoms_with_prefix` collecting helpers, this does not first
     /// collect the recent tier. The persistent memory index seeks directly to
     /// the virtual prefix and stops as soon as the ordered stream leaves it.
     pub(crate) fn prefix_cursor(

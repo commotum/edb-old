@@ -58,6 +58,8 @@ pub struct FulltextStats {
     /// values have no such I/O. Distinct from allocation admission below.
     pub read_bytes: u64,
     pub admitted_bytes: u64,
+    /// Persisted search-index basis. Newer committed and speculative assertions
+    /// are searched from their bounded in-memory tiers in the same operation.
     pub index_basis_t: u64,
     pub truncated: bool,
 }
@@ -192,7 +194,7 @@ impl DatabaseValue {
             });
         }
         // A native value must never silently materialize its entire database
-        // when the eventual durable sidecar is not yet available.
+        // when the durable sidecar is not available.
         if let Some(snapshot) = self.block_snapshot() {
             let reader = if snapshot
                 .base_metadata()
@@ -206,9 +208,9 @@ impl DatabaseValue {
             };
             let mut report = self.search_native(attribute, &query, reader.as_ref(), &mut budget)?;
             if reader.is_none() {
-                // A recently installed attribute has no indexed corpus yet;
-                // searching only a speculative delta must not claim coverage
-                // of the committed recent tail.
+                // A recently installed attribute has no indexed corpus yet.
+                // Report physical indexing progress even though the recent
+                // and speculative tiers cover its complete assertion corpus.
                 report.stats.index_basis_t = snapshot.index_descriptor().basis;
             }
             return Ok(report);
@@ -304,31 +306,30 @@ impl DatabaseValue {
                 }
             }
         }
-        // New speculative assertions remain local; never replay the entire
-        // native durable/tail database as an accidental search fallback.
+        // Complete the persisted corpus with the bounded authenticated recent
+        // tail and speculative assertions for this attribute. Keep historical
+        // assertions as candidates too: exact-view validation below handles
+        // current retractions, temporal windows, noHistory and opaque filters.
         let mut local = Vec::new();
-        if let Some(cursor) = self.fulltext_overlay_cursor(attribute) {
-            for datom in cursor {
-                budget.charge(1, std::mem::size_of::<Document>())?;
-                if !datom.added {
-                    continue;
-                }
-                let Value::String(text) = &datom.value else {
-                    return Err(records_error("non-string speculative search datum"));
-                };
-                let tokens = budget.tokens(text)?;
-                budget.charge(tokens.len(), tokens.len().saturating_mul(128))?;
-                documents = documents.saturating_add(1);
-                total_length = total_length.saturating_add(tokens.len() as u64);
-                let unique: BTreeSet<_> = tokens.iter().map(|t| &t.term).collect();
-                for term in unique {
-                    *frequencies.entry(term.clone()).or_default() += 1;
-                }
-                local.push(Document {
-                    datom: (*datom).clone(),
-                    tokens,
-                });
+        for datom in self.fulltext_unindexed_cursor(attribute)? {
+            budget.charge(1, std::mem::size_of::<Document>())?;
+            if !datom.added {
+                continue;
             }
+            let Value::String(text) = &datom.value else {
+                return Err(records_error(
+                    "non-string recent or speculative search datum",
+                ));
+            };
+            let tokens = budget.tokens(text)?;
+            budget.charge(tokens.len(), tokens.len().saturating_mul(128))?;
+            documents = documents.saturating_add(1);
+            total_length = total_length.saturating_add(tokens.len() as u64);
+            let unique: BTreeSet<_> = tokens.iter().map(|t| &t.term).collect();
+            for term in unique {
+                *frequencies.entry(term.clone()).or_default() += 1;
+            }
+            local.push(Document { datom, tokens });
         }
         if frequencies.values().any(|frequency| *frequency > documents) {
             return Err(records_error(

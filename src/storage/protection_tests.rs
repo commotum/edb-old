@@ -1,4 +1,4 @@
-//! Scoped actual-store witnesses for attempt protection and receipt-first pins.
+//! Current publication guards, read-only capture and immutable observation.
 use super::*;
 use crate::storage::{CasOutcome, Guarded, WriteProtection};
 use std::cell::RefCell;
@@ -103,38 +103,63 @@ fn revision(outcome: CasOutcome) -> u64 {
 }
 
 #[test]
-fn capture_guards_are_bounded_consistent_and_never_gc_only() {
-    assert!(normalize_capture_conditions(&[]).is_err());
+fn ordinary_capture_fails_closed_when_a_published_covering_root_is_missing() {
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    let database = crate::storage::BlockDatabase::create(
+        &fixture.config,
+        "missing-covering-root",
+        Schema::new(),
+    )
+    .unwrap();
+    let mut store = PgBlockStore::connect(&fixture.config).unwrap();
+    let publication = store.read_ref(&database.reference_key()).unwrap().unwrap();
+    let id = publication.value.unwrap().try_into().unwrap();
+    let root = DatabaseRoot::decode(&id, &store.get(id).unwrap().unwrap()).unwrap();
+    let id = root.indexes.unwrap();
+    let indexes = IndexDescriptor::decode(&id, &store.get(id).unwrap().unwrap()).unwrap();
     assert_eq!(
-        normalize_capture_conditions(&[guard("system/gc", None)])
-            .unwrap_err()
-            .code,
-        "storage/capture-source-guard"
+        store.remove_objects(&[indexes.trees[0].root_hash]).unwrap(),
+        1
     );
-    assert_eq!(
-        normalize_capture_conditions(&[guard("database", Some(1)), guard("database", Some(2))])
-            .unwrap_err()
-            .category,
-        ErrorCategory::Conflict
-    );
-    let same = [
-        guard("database", Some(1)),
-        guard("system/gc", None),
-        guard("system/gc", None),
-    ];
-    assert_eq!(normalize_capture_conditions(&same).unwrap().len(), 2);
-    let crowded = (0..127)
-        .map(|n| guard(&format!("reference/{n}"), None))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        normalize_capture_conditions(&crowded).unwrap_err().code,
-        "storage/capture-guard-limit"
-    );
-    assert!(normalize_capture_conditions(&[guard("database", Some(0))]).is_err());
+    let reader = BlockReader::connect(&fixture.config, BlockReadConfig::default()).unwrap();
+    let error = reader.capture(&database.reference_key()).unwrap_err();
+    assert_eq!(error.code, "storage/missing-object");
+    assert_eq!(error.category, ErrorCategory::Fault);
 }
 
 #[test]
-fn exact_read_reopening_retries_index_publication_without_changing_its_requested_value() {
+fn one_reader_shares_one_connection_and_cache_across_eighty_captured_values() {
+    let Some(fixture) = fixture() else {
+        return;
+    };
+    let database =
+        crate::storage::BlockDatabase::create(&fixture.config, "shared-captures", Schema::new())
+            .unwrap();
+    let operation = crate::OperationContext::new(crate::OperationKind::Application);
+    let _scope = operation.enter();
+    let reader = BlockReader::connect(&fixture.config, BlockReadConfig::default()).unwrap();
+    let captured = (0..80)
+        .map(|_| reader.capture(&database.reference_key()).unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(operation.snapshot().connect_calls, 1);
+    let first = captured[0].database_value();
+    let last = captured[79].database_value();
+    assert_eq!(first.snapshot_key().unwrap(), last.snapshot_key().unwrap());
+    assert_eq!(
+        first.collect_datoms(IndexOrder::Eavt).unwrap(),
+        last.collect_datoms(IndexOrder::Eavt).unwrap()
+    );
+    assert!(captured[79].cache_stats().hits > 0);
+    drop((first, last, reader));
+    for snapshot in captured {
+        drop(snapshot);
+    }
+}
+
+#[test]
+fn exact_read_reopening_retains_observed_publication_without_reader_coordination() {
     enum Observation {
         Report,
         Reference,
@@ -194,7 +219,7 @@ fn exact_read_reopening_retries_index_publication_without_changing_its_requested
         let advanced_hook = advanced.clone();
         let _hook = after_read(&database.reference_key(), 1, move || {
             // Publish real covering trees at the same logical basis between
-            // the reader's current-ref lookup and its guarded pin admission.
+            // the reader's current-ref lookup and opening that immutable value.
             let receipt = crate::PostgresOperator::connect_configured(&config)
                 .unwrap()
                 .consolidate_database(&hook_route)
@@ -242,8 +267,11 @@ fn exact_read_reopening_retries_index_publication_without_changing_its_requested
                 assert!(inspected.problems.is_empty());
                 assert_eq!(inspected.database_id, route);
                 assert_eq!(inspected.metrics.basis_t, report.basis_t);
-                assert_eq!(inspected.metrics.index_basis_t, report.basis_t);
-                assert_eq!(inspected.metrics.index_lag, 0);
+                assert!(inspected.metrics.index_basis_t <= report.basis_t);
+                assert_eq!(
+                    inspected.metrics.index_lag,
+                    report.basis_t - inspected.metrics.index_basis_t
+                );
             }
             Observation::Backup => {
                 let directory = tempfile::tempdir().unwrap();
@@ -286,50 +314,6 @@ fn exact_read_reopening_retries_index_publication_without_changing_its_requested
         assert!(advanced.get());
         writer.release().unwrap();
     }
-}
-
-#[test]
-fn current_reference_observation_retry_is_bounded_and_explicit_capture_stays_strict() {
-    let Some(fixture) = fixture() else {
-        return;
-    };
-    let mut store = PgBlockStore::connect(&fixture.config).unwrap();
-    let id = store.put(b"opaque capture: no value decoding yet").unwrap();
-    revision(
-        store
-            .compare_exchange("observation", None, Some(&id))
-            .unwrap(),
-    );
-    let reader = BlockReader::connect(&fixture.config, BlockReadConfig::default()).unwrap();
-    for strict in [true, false] {
-        let mut publisher = PgBlockStore::connect(&fixture.config).unwrap();
-        let attempts = std::rc::Rc::new(std::cell::Cell::new(0));
-        let attempts_hook = attempts.clone();
-        let _hook = after_read("observation", 3, move || {
-            let previous = publisher.read_ref("observation").unwrap().unwrap();
-            revision(
-                publisher
-                    .compare_exchange("observation", Some(previous.revision), Some(&id))
-                    .unwrap(),
-            );
-            attempts_hook.set(attempts_hook.get() + 1);
-        });
-        let result = if strict {
-            reader.pin_reference("observation")
-        } else {
-            reader.pin_current_reference("observation")
-        };
-        assert_eq!(result.unwrap_err().code, "storage/capture-conflict");
-        assert_eq!(attempts.get(), if strict { 1 } else { 3 });
-    }
-    assert_eq!(
-        reader
-            .pin_current_reference("missing-reference")
-            .unwrap_err()
-            .code,
-        "storage/reference-not-found",
-        "terminal errors are not converted into capture contention"
-    );
 }
 
 #[test]
@@ -426,164 +410,4 @@ fn configured_put_refreshes_reused_objects_and_lost_guards_insert_nothing() {
         Guarded::Applied(2),
         "failed protected writes did not raise the stored epoch"
     );
-}
-
-#[test]
-fn root_capture_precedes_decoding_and_exact_values_use_its_stable_pin() {
-    let Some(fixture) = fixture() else {
-        return;
-    };
-    let mut store = PgBlockStore::connect(&fixture.config).unwrap();
-    let malformed = store.put(b"not a database descriptor").unwrap();
-    revision(
-        store
-            .compare_exchange("database", None, Some(&malformed))
-            .unwrap(),
-    );
-    let reader = BlockReader::connect(
-        &fixture.config,
-        BlockReadConfig {
-            max_recent_transactions: 0,
-            ..BlockReadConfig::default()
-        },
-    )
-    .unwrap();
-    let captured = reader.pin_reference("database").unwrap();
-    assert_eq!(captured.root_id(), malformed);
-    assert_eq!(captured.source_condition(), guard("database", Some(1)));
-    assert_eq!(captured.source_revision(), 1);
-    assert_eq!(
-        reader.read_stats().object_reads,
-        0,
-        "receipt authority capture cannot load current database objects"
-    );
-    let db = crate::Database::bootstrap().unwrap();
-    let identity = [17; 16];
-    let mut trees = Vec::new();
-    for history in [false, true] {
-        for order in [
-            IndexOrder::Eavt,
-            IndexOrder::Aevt,
-            IndexOrder::Avet,
-            IndexOrder::Vaet,
-        ] {
-            let tree = crate::persistent_tree::build_tree(
-                order,
-                history,
-                db.datoms(
-                    if history {
-                        crate::View::History
-                    } else {
-                        crate::View::Current
-                    },
-                    order,
-                ),
-                &crate::persistent_tree::TreeConfig::default(),
-            )
-            .unwrap();
-            for (hash, bytes) in tree.nodes.iter() {
-                assert_eq!(store.put(bytes).unwrap(), *hash);
-            }
-            trees.push(tree.descriptor);
-        }
-    }
-    let indexes = store
-        .put(
-            &IndexDescriptor {
-                identity,
-                basis: 0,
-                generation: 0,
-                trees,
-                pending_avet: vec![],
-                avet_work: vec![],
-                fulltext: None,
-            }
-            .encode()
-            .unwrap(),
-        )
-        .unwrap();
-    let metadata = store
-        .put(
-            &SnapshotMetadata {
-                identity,
-                basis: 0,
-                generation: 0,
-                eidx_frontier: db.eidx_frontier(),
-                reserved_frontier: crate::INITIAL_EIDX_FRONTIER,
-                last_tx_instant: None,
-                excision: None,
-            }
-            .encode()
-            .unwrap(),
-        )
-        .unwrap();
-    let valid = store
-        .put(
-            &DatabaseValueRoot {
-                identity,
-                basis: 0,
-                log: None,
-                indexes: Some(indexes),
-                metadata: Some(metadata),
-            }
-            .encode()
-            .unwrap(),
-        )
-        .unwrap();
-    revision(
-        store
-            .compare_exchange("database", Some(1), Some(&valid))
-            .unwrap(),
-    );
-    // The source revision is stale, but the retained pin is stable authority.
-    assert!(
-        reader.capture_root(&captured).is_err(),
-        "malformed original root stays malformed; newer head cannot replace it"
-    );
-    assert_eq!(
-        store
-            .read_ref(&captured.condition().key)
-            .unwrap()
-            .unwrap()
-            .revision,
-        1
-    );
-    let valid_capture = reader.pin_reference("database").unwrap();
-    revision(
-        store
-            .compare_exchange("database", Some(2), Some(&malformed))
-            .unwrap(),
-    );
-    let old = reader.capture_root(&valid_capture).unwrap();
-    assert_eq!(old.basis_t(), 0);
-    valid_capture.release().unwrap();
-    assert_eq!(
-        old.database_value().datoms(IndexOrder::Eavt).unwrap(),
-        db.datoms(crate::View::Current, IndexOrder::Eavt)
-    );
-    old.release().unwrap();
-    let before = store.list_live_refs("pins/read/", None, 128).unwrap();
-    revision(
-        store
-            .compare_exchange("system/gc", None, Some(&1u64.to_be_bytes()))
-            .unwrap(),
-    );
-    let error = reader
-        .capture_immutable(valid, &[captured.condition(), guard("system/gc", None)])
-        .err()
-        .unwrap();
-    assert_eq!(error.code, "storage/capture-gc-conflict");
-    assert!(reader.capture_immutable(valid, &[]).is_err());
-    let after = store.list_live_refs("pins/read/", None, 128).unwrap();
-    assert_eq!(
-        after.len(),
-        before.len(),
-        "stale/unguarded captures created no pins"
-    );
-    let clone = captured.clone();
-    assert_eq!(
-        captured.release().unwrap_err().category,
-        ErrorCategory::Busy
-    );
-    clone.release().unwrap();
 }

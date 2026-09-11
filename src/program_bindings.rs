@@ -76,20 +76,19 @@ pub(crate) enum PredicateBinding {
     Native(crate::Symbol),
 }
 
-/// Native deployment is explicit temporal data, never a fallback for missing
-/// or malformed content-addressed code. Retained ordinary bindings keep meaning.
+/// Unbound qualified symbols name compiled native predicates directly.
+/// Database entities can explicitly alias native or stored code; existing
+/// entities with missing or malformed bindings never fall back to native code.
 pub(crate) fn resolve_predicate_binding(
     database: &DatabaseValue,
     name: &str,
 ) -> Result<PredicateBinding, SemanticError> {
     let ident = qualified_program_ident(name)?;
-    let entity = database.entid(&ident).ok_or_else(|| {
-        SemanticError::new(
-            ErrorCategory::NotFound,
-            "program/function-not-found",
-            format!("predicate {name} is not installed"),
-        )
-    })?;
+    let Some(entity) = database.entid(&ident) else {
+        let symbol = crate::Symbol::new(ident.namespace.as_deref().unwrap(), &ident.name);
+        crate::native_registry::validate_name(&symbol)?;
+        return Ok(PredicateBinding::Native(symbol));
+    };
     let programs = database.values(entity, crate::DB_FN as u32)?;
     let native = match crate::native_registry::deployment_attribute_id(database) {
         Some(attribute) => database.values(entity, attribute)?,
@@ -110,7 +109,7 @@ pub(crate) fn resolve_predicate_binding(
         let [Value::Symbol(name)] = native.as_slice() else {
             return Err(SemanticError::incorrect(
                 "native/invalid-binding",
-                "native deployment binding must be one versioned Symbol",
+                "native deployment binding must be one qualified Symbol",
             ));
         };
         crate::native_registry::validate_name(name)?;
@@ -798,7 +797,7 @@ pub(crate) fn collect_fixed_program_dependencies(
     instructions: &[crate::program::Instruction],
     output: &mut Vec<Digest>,
 ) {
-    use crate::program::{Instruction, QueryTerm};
+    use crate::program::Instruction;
     let mut pending = instructions.iter().collect::<Vec<_>>();
     while let Some(instruction) = pending.pop() {
         match instruction {
@@ -817,16 +816,7 @@ pub(crate) fn collect_fixed_program_dependencies(
             }
             Instruction::ForEach { body } => pending.extend(body),
             Instruction::Query(query) => {
-                if let Some(native) = query.native_query() {
-                    collect_native_query_dependencies(native, output);
-                }
-                for pattern in query.patterns() {
-                    for term in [&pattern.entity, &pattern.value] {
-                        if let QueryTerm::Constant(value) = term {
-                            collect_program_hashes_vec(value, output);
-                        }
-                    }
-                }
+                collect_native_query_dependencies(query.native_query(), output);
             }
             Instruction::EmitCall { function, .. } => match function {
                 CallableRef::ExactHash(hash) => output.push(*hash),

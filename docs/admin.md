@@ -6,8 +6,8 @@ Commands do not install PostgreSQL, create PostgreSQL databases, migrate on
 startup, or silently repair a damaged database. Provision the storage service and
 credentials separately; then use the commands below for the Atomic catalog.
 
-Build with `cargo build --bin atomic`. Set `ATOMIC_POSTGRES_URL` and the explicit
-`ATOMIC_POSTGRES_TRANSPORT=tls` or `plaintext` policy as described in
+Build with `cargo build --bin atomic`. Set `ATOMIC_POSTGRES_URL`, using
+`sslmode=disable` only for an explicit plaintext connection, as described in
 [application.md](application.md). Verified TLS/root certificates and the same
 connection/statement/lock settings apply to administrative connections. Offline
 `list-backups` and `verify-backup` need no PostgreSQL credentials. Never paste
@@ -32,7 +32,7 @@ an unsupported format. `migrate` is an alias for installation, not an upgrade
 chain. See [operations.md](operations.md).
 
 `status` is a lightweight catalog-coordinate observation, not a deep integrity
-check or proof of a live transactor. `inspect` pins one immutable publication
+check or proof of a live transactor. `inspect` captures one immutable publication
 and checks its retained graph and derived data deeply by default; `--shallow`
 checks root/log/index/metadata coordinates without graph traversal and canonical
 replay. Inspection can use memory and time proportional to retained history.
@@ -67,16 +67,15 @@ published without overwriting existing content; there is no repository-wide
 SQL transaction or generation ledger. Do not mix lineages in one repository.
 Repeating capture authenticates and reuses unchanged objects. The reported
 write/reuse counts describe object operations, not saved network round trips.
-Capture pins one immutable live publication while ordinary writers continue.
+Capture reads one immutable live publication while ordinary writers continue.
 Copy success is not semantic verification. Media encryption and repository
 retention remain deployment responsibilities.
 
 [Direct backup reads](backup-reads.md) expose fixed database/log values and EDN
-query/Pull/preview commands without restore. Each point links both its canonical
-publication and a separate same-basis read value. Capture finishes any pending
-AVET work, folds the captured recent tail, and prepares exact search/index roots
-in repository files; it neither repairs nor writes the source store. Ordinary
-offline opens do not replay history.
+query/Pull/preview commands without restore. Each point links one canonical
+publication with its existing indexes and log tail. Capture copies its objects;
+offline readers handle the recent tail and index readiness as live peers do.
+Indexing and search preparation remain explicit live maintenance operations.
 
 `backup`, `restore` and `gc` accept `--maintenance-pause-ms N` (default 0).
 Capture paces at 128-object traversal boundaries and phase completion; restore
@@ -105,7 +104,7 @@ For this command, `ATOMIC_POSTGRES_URL` is the **destination connection**. The
 repository is the source; the live source need not be reachable. Explicitly
 install the current opaque-object namespace first. Stop the target writer before
 applying a restore; target, lease and catalog guards reject a concurrent change.
-Existing pinned readers can retain their captured values. The repository must
+Existing readers remain subject to the configured storage retention grace. The repository must
 remain an operator-controlled immutable source throughout verification/copy.
 
 ```sh
@@ -127,11 +126,12 @@ match the configured destination; this protects against a wrong connection or
 an earlier empty schema in `search_path`. No SQL identifiers are interpolated
 from these flags.
 
-Without `--apply`, restore only deep-verifies the selected backup and observes
+Without `--apply`, restore authenticates the selected object graph and observes
 the target catalog. It does not stage, create or activate a logical database;
 the preview explicitly leaves target-lineage compatibility to the apply-time
-guard. Apply repeats mandatory verification, persists an inactive resumable
-copy checkpoint, and conditionally activates the exact point. A new target name
+guard. Apply authenticates objects as it copies them, persists an inactive
+resumable checkpoint, and conditionally activates the exact point. Semantic
+replay is available through the separate `verify-backup` command. A new target name
 can be visible while its database is still unavailable (`backup/database-restoring`).
 Apply rejects an unrelated existing lineage, a retreating/incompatible log, or
 loss of acknowledged request identities. It cannot duplicate an active lineage
@@ -147,7 +147,9 @@ staged heads or assume process failure rolled back earlier commits. The library
 resumes persisted postorder object-copy steps. Only child-complete objects become
 strongly owned by the checkpoint; source objects not yet copied are weak pending
 identities. Publication and restore completion are one guarded atomic change.
-An exact completed retry does not roll back a newer target head or rerun hooks.
+An exact completed retry returns its recorded activated root without replaying
+history, rolling back a newer target head or rerunning hooks. The library returns
+`RestoreResult { point, target, activated_root }`; open a peer to read the result.
 After success, open new clients and test the application's current/history/query
 and exact transaction retry workflow.
 
@@ -192,7 +194,7 @@ operator. No second writer lease or transaction evaluator is introduced.
 
 The `--discard-manifest` spelling remains an explicit target guard, but no
 physical discard phase is needed: one rebuild satisfies `--batches 1`.
-Canonical facts/history and pinned old search objects are untouched. Unowned
+Canonical facts/history and retained old search objects are untouched. Unowned
 derived objects become eligible only for ordinary GC; this is neither a
 privacy-erasure guarantee nor a rollback of committed data. Cancellation and
 repeated publication conflicts return an error without weakening these guards.
@@ -214,8 +216,8 @@ and may legitimately differ after concurrent activity.
 Retention is mandatory and measured as an age in seconds. Thirty days is the
 documented normal margin; a shorter age (including zero for controlled imports
 or isolated tests) is allowed and reported as `short_retention=true`, not silently
-substituted. Connected snapshots retain existing pins, but short retention can
-break disconnected long-lived readers or unpinned snapshot references. It does
+substituted. Snapshots do not register pins; retention must cover active read
+and copy durations. A shorter age can invalidate held snapshots. It does
 not erase already observed values or live receipt-owned information.
 
 `--batches` is a positive finite number, default 1, and applies only with

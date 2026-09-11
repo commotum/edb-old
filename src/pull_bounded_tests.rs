@@ -346,7 +346,7 @@ fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
     schema.install(attribute).unwrap();
     BlockDatabase::create(&config, &database_id, schema).unwrap();
     let writer = TransactionService::start(TransactionServiceConfig {
-        connection: connection.clone(),
+        connection: config.clone(),
         database_id: database_id.clone(),
         holder_id: format!("{database_id}-writer"),
         lease_duration: Duration::from_secs(5),
@@ -467,7 +467,6 @@ fn native_superseded_prefix_is_budgeted_before_its_first_visible_output() {
     assert!(cursor.next_with_control(&mut control).is_none());
     drop(cursor);
     assert_eq!(candidates, vec![Value::Long(-1), Value::Long(count - 1)]);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     eprintln!(
         "native merge skip admission width={count}, small_work={}, complete_pull_work={}, ordered_candidates={candidates:?}",
         small.work(),

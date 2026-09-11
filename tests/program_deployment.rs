@@ -4,17 +4,21 @@ use atomic_core::storage::{BlockDatabase, PgBlockStore};
 use atomic_core::*;
 use std::time::Duration;
 
-fn cycle(collector: &mut BlockCollector) {
+fn cycle_at(collector: &mut BlockCollector, minimum_age: Duration) {
     for _ in 0..128 {
-        if collector.advance(Duration::ZERO, 4096).unwrap().phase == CollectionPhase::Complete {
+        if collector.advance(minimum_age, 4096).unwrap().phase == CollectionPhase::Complete {
             return;
         }
     }
     panic!("small deployment fixture did not finish collection");
 }
 
+fn cycle(collector: &mut BlockCollector) {
+    cycle_at(collector, RECOMMENDED_GARBAGE_COLLECTION_AGE);
+}
+
 #[test]
-fn protected_deployment_survives_concurrent_collection_then_binding_owns_exact_code() {
+fn staged_program_needs_no_live_handle_and_binding_retains_exact_code() {
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
@@ -28,35 +32,27 @@ fn protected_deployment_survives_concurrent_collection_then_binding_owns_exact_c
         instructions: vec![Instruction::Return],
     };
     let mut operator = PostgresOperator::connect_configured(&config).unwrap();
-    let leaf_handle = operator.deploy_program(&leaf).unwrap();
+    let leaf_hash = operator.deploy_program(&leaf).unwrap();
     let root = Program {
         kind: ProgramKind::Transaction,
         arity: 0,
         instructions: vec![
             Instruction::EmitCall {
-                function: CallableRef::ExactHash(leaf_handle.hash()),
+                function: CallableRef::ExactHash(leaf_hash),
                 argument_count: 0,
             },
             Instruction::Return,
         ],
     };
 
-    // The collector is genuinely concurrent with root preparation. A seal may
-    // reject an attempt; retrying authenticates and protects the closure again.
+    // Staging handles transient collector contention internally.
     let gc_config = config.clone();
     let collector = std::thread::spawn(move || {
         let mut collector = BlockCollector::connect(&gc_config).unwrap();
         cycle(&mut collector);
     });
-    let root_handle = loop {
-        match operator.deploy_program(&root) {
-            Ok(handle) => break handle,
-            Err(error) if error.category == ErrorCategory::Conflict => continue,
-            Err(error) => panic!("deployment failed: {error:?}"),
-        }
-    };
+    let root_hash = operator.deploy_program(&root).unwrap();
     collector.join().unwrap();
-    leaf_handle.release().unwrap();
     let mut collector = BlockCollector::connect(&config).unwrap();
     cycle(&mut collector);
     let mut store = PgBlockStore::connect(&config).unwrap();
@@ -71,30 +67,37 @@ fn protected_deployment_survives_concurrent_collection_then_binding_owns_exact_c
             bytes
         );
     }
-    let hash = root_handle.hash();
+    assert_eq!(root_hash, program_hash(&root).unwrap());
     let writer = common::start_service(&fixture.connection, "programs");
-    let bound = writer
-        .client()
-        .transact(
-            TransactionRequest::new(
-                "bind",
-                vec![
-                    TxOp::Add {
-                        entity: EntityRef::Temp("function".into()),
-                        attribute: DB_IDENT as u32,
-                        value: Value::Keyword(Keyword::new("deployed", "run")).into(),
-                    },
-                    TxOp::Add {
-                        entity: EntityRef::Temp("function".into()),
-                        attribute: DB_FN as u32,
-                        value: Value::Function(hash).into(),
-                    },
-                ],
-            ),
+    let bound = operator
+        .install_program(
+            &writer.client(),
+            "bind",
+            Keyword::new("deployed", "run"),
+            &root,
+            std::slice::from_ref(&leaf),
             Duration::from_secs(20),
         )
         .unwrap();
-    root_handle.release().unwrap();
+    // Exact retries resolve the committed receipt before inspecting optional
+    // deployment input. This malformed unused dependency must not be evaluated.
+    let invalid_dependency = Program {
+        kind: ProgramKind::Transaction,
+        arity: 0,
+        instructions: vec![],
+    };
+    let retry = operator
+        .install_program(
+            &writer.client(),
+            "bind",
+            Keyword::new("deployed", "run"),
+            &root,
+            &[invalid_dependency],
+            Duration::from_secs(20),
+        )
+        .unwrap();
+    assert_eq!(retry.basis_t, bound.basis_t);
+    assert!(retry.replayed);
     cycle(&mut collector);
     writer.shutdown();
     let reopened = common::start_service(&fixture.connection, "programs");
@@ -125,12 +128,26 @@ fn protected_deployment_survives_concurrent_collection_then_binding_owns_exact_c
             Instruction::Return,
         ],
     };
-    let unused = operator.deploy_program(&unused).unwrap();
-    let orphan = unused.hash();
-    unused.release().unwrap();
+    let orphan = operator.deploy_program(&unused).unwrap();
     cycle(&mut collector);
     cycle(&mut collector);
-    assert!(store.get(orphan).unwrap().is_none());
+    assert!(
+        store.get(orphan).unwrap().is_some(),
+        "unbound staging respects the grace period"
+    );
+
+    cycle_at(&mut collector, Duration::ZERO);
+    cycle_at(&mut collector, Duration::ZERO);
+    assert!(
+        store.get(orphan).unwrap().is_none(),
+        "expired unbound staging is collected"
+    );
+    assert!(
+        store
+            .list_live_refs("staging/", None, 32)
+            .unwrap()
+            .is_empty()
+    );
 
     let missing = Program {
         kind: ProgramKind::Transaction,

@@ -516,7 +516,6 @@ fn tuple_inputs_survive_native_socket_retry_and_recovery() {
     assert!(replay.replayed);
     assert_eq!(replay.basis_t, result.basis_t);
     assert_eq!(replay.report.unwrap().tempids, report.tempids);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     assert!(
         !report
             .db_after
@@ -645,7 +644,6 @@ fn tuple_maps_cas_and_retraction_cross_native_socket_without_materialization() {
     assert_eq!(replay.tx_data, mapped.tx_data);
     assert_eq!(replay.tempids, mapped.tempids);
     common::assert_same_information(&replay.db_after, &expected.db_after);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(server);
     writer.shutdown();
     common::assert_same_information(&store.recover(&id).unwrap(), &expected_after.db_after);

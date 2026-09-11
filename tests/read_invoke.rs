@@ -546,6 +546,28 @@ fn invocation_budgets_include_binding_reads_and_reuse_after_failure() {
     let db = report.db_after;
     let args = [RuntimeValue::Scalar(Value::Ref(report.tempids["item"]))];
     let function = report.tempids["count"];
+    for reference in [
+        EntityRef::Lookup {
+            attribute: KEY,
+            value: Value::String("lookup-key".into()),
+        },
+        EntityRef::LookupInput {
+            attribute: KEY,
+            value: Box::new(Value::String("lookup-key".into()).into()),
+        },
+    ] {
+        assert_eq!(
+            rows(
+                db.invoke(
+                    report.tempids["pattern"],
+                    &[RuntimeValue::Entity(reference)],
+                    Default::default()
+                )
+                .unwrap()
+            ),
+            vec![vec![Value::Long(128)]]
+        );
+    }
     for (control, expected) in [
         (
             InvokeControl {
@@ -654,7 +676,11 @@ fn invocation_budgets_include_binding_reads_and_reuse_after_failure() {
                 .invoke(report.tempids[name], &args, control)
                 .unwrap_err()
                 .code,
-            "program/cancelled"
+            if name == "pattern" {
+                "query/canceled"
+            } else {
+                "program/cancelled"
+            }
         );
         assert!(
             visits.load(Ordering::Relaxed) <= 8,
@@ -697,7 +723,11 @@ fn invocation_budgets_include_binding_reads_and_reuse_after_failure() {
                 )
                 .unwrap_err()
                 .code,
-            "program/fuel-exhausted"
+            if name == "pattern" {
+                "query/work-limit"
+            } else {
+                "program/fuel-exhausted"
+            }
         );
         assert!(
             visits.load(Ordering::Relaxed) < 32,

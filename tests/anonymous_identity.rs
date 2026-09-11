@@ -255,7 +255,7 @@ fn local_recursive_expansion_reserves_generated_explicit_names_and_runs_once() {
         let basis = db.basis_t();
         functions.register(name, move |before, _| {
             assert_eq!(before.basis_t(), basis);
-            assert!(observed_labels(&before.database_value(), LABEL).is_empty());
+            assert!(observed_labels(before, LABEL).is_empty());
             invocations.fetch_add(1, Ordering::Relaxed);
             Ok(body.clone())
         });

@@ -2,12 +2,14 @@
 //! callback registries and results never enter this cache.
 use super::*;
 use std::collections::VecDeque;
-use std::fmt::Write;
 use std::sync::{Mutex, OnceLock};
 
 #[derive(Clone, Debug)]
 pub struct PreparedQuery {
     query: Arc<Query>,
+    // Source-independent rule analysis is shared with cloned prepared values.
+    // Populate only after successful validation under an invocation's controls.
+    negation_validated: Arc<OnceLock<()>>,
 }
 
 impl PreparedQuery {
@@ -15,11 +17,21 @@ impl PreparedQuery {
         validate_query(query, query.inputs.len())?;
         Ok(Self {
             query: Arc::new(query.clone()),
+            negation_validated: Arc::new(OnceLock::new()),
         })
     }
 
     pub fn query(&self) -> &Query {
         &self.query
+    }
+
+    pub(super) fn validate_negation(&self, state: &mut State<'_>) -> Result<(), SemanticError> {
+        state.check(0)?;
+        if self.negation_validated.get().is_none() {
+            dependencies::validate_negation(self.query(), state)?;
+            let _ = self.negation_validated.set(());
+        }
+        Ok(())
     }
 
     pub fn execute(
@@ -54,7 +66,7 @@ pub struct PreparedQueryCacheStats {
 }
 
 struct Entry {
-    key: String,
+    key: Vec<u8>,
     query: PreparedQuery,
     weight: usize,
 }
@@ -87,7 +99,7 @@ impl PreparedQueryCache {
     fn prepare_key(
         &mut self,
         query: &Query,
-        key: Option<String>,
+        key: Option<Vec<u8>>,
     ) -> Result<PreparedQuery, SemanticError> {
         if let Some(key) = &key
             && let Some(index) = self.entries.iter().position(|entry| &entry.key == key)
@@ -126,225 +138,9 @@ impl PreparedQueryCache {
     }
 }
 
-// A process-local structural representation, deliberately not a persisted wire
-// encoding. Unlike Query::eq this distinguishes numeric representations and
-// decimal scales, which may be returned verbatim by ground/default expressions.
-fn structural_key(query: &Query, max: usize) -> Option<String> {
-    let float_bits = cache_material(query)?;
-    struct Bounded {
-        text: String,
-        max: usize,
-    }
-    impl Write for Bounded {
-        fn write_str(&mut self, value: &str) -> fmt::Result {
-            if self.text.len().saturating_add(value.len()) > self.max {
-                return Err(fmt::Error);
-            }
-            self.text.push_str(value);
-            Ok(())
-        }
-    }
-    let mut key = Bounded {
-        text: String::new(),
-        max,
-    };
-    write!(&mut key, "{query:?}").ok()?;
-    // Float Debug intentionally elides NaN payload/sign bits. Ground/default
-    // expressions can retain those bits, so do not reuse a different constant.
-    write!(&mut key, "/float-bits:{float_bits:?}").ok()?;
-    Some(key.text)
-}
-
-// This is admission to an optional cache, not a query semantic limit. Avoid
-// recursive Debug/Clone on deep ASTs and never retain/collide opaque callbacks.
-fn cache_material(query: &Query) -> Option<Vec<u64>> {
-    enum Node<'a> {
-        Query(&'a Query),
-        Clause(&'a Clause),
-        Value(&'a Value),
-        Pull(&'a PullPattern),
-        Output(&'a QueryValue),
-    }
-    let mut pending = vec![(Node::Query(query), 0usize)];
-    let mut count = 0usize;
-    let mut floats = Vec::new();
-    while let Some((node, depth)) = pending.pop() {
-        count += 1;
-        if depth > 48 || count > 8192 || pending.len() > 8192 {
-            return None;
-        }
-        let mut push = |node| pending.push((node, depth + 1));
-        fn term_value(term: &Term) -> Option<Node<'_>> {
-            match term {
-                Term::Constant(value) => Some(Node::Value(value)),
-                Term::QueryConstant(value) => Some(Node::Output(value)),
-                _ => None,
-            }
-        }
-        match node {
-            Node::Query(query) => {
-                if query
-                    .clauses
-                    .len()
-                    .saturating_add(
-                        query
-                            .rules
-                            .iter()
-                            .map(|rule| rule.clauses.len())
-                            .sum::<usize>(),
-                    )
-                    .saturating_add(find_elements(&query.find).len())
-                    > 8192
-                {
-                    return None;
-                }
-                for clause in &query.clauses {
-                    push(Node::Clause(clause));
-                }
-                for rule in &query.rules {
-                    for clause in &rule.clauses {
-                        push(Node::Clause(clause));
-                    }
-                }
-                for element in find_elements(&query.find) {
-                    if let FindElement::Pull { pattern, .. } = element {
-                        push(Node::Pull(pattern));
-                    }
-                    if let FindElement::CustomAggregate(call) = element {
-                        if call.args.len() > 8192 {
-                            return None;
-                        }
-                        for arg in &call.args {
-                            if let AggregateArg::Constant(value) = arg {
-                                push(Node::Output(value));
-                            }
-                        }
-                    }
-                }
-            }
-            Node::Clause(clause) => match clause {
-                Clause::RelationPattern(pattern) => {
-                    if pattern.terms.len() > 8192 {
-                        return None;
-                    }
-                    for term in &pattern.terms {
-                        if let Some(value) = term_value(term) {
-                            push(value);
-                        }
-                    }
-                }
-                Clause::Pattern(pattern) => {
-                    for term in [&pattern.entity, &pattern.attribute, &pattern.value]
-                        .into_iter()
-                        .chain(pattern.transaction.iter())
-                        .chain(pattern.added.iter())
-                    {
-                        if let Some(value) = term_value(term) {
-                            push(value);
-                        }
-                    }
-                }
-                Clause::Predicate { args, .. }
-                | Clause::Rule { args, .. }
-                | Clause::Function { args, .. } => {
-                    if args.len() > 8192 {
-                        return None;
-                    }
-                    for term in args {
-                        if let Some(value) = term_value(term) {
-                            push(value);
-                        }
-                    }
-                    if let Clause::Function {
-                        function: Function::Query(query),
-                        ..
-                    } = clause
-                    {
-                        push(Node::Query(query));
-                    }
-                }
-                Clause::Not { clauses, .. } => {
-                    if clauses.len() > 8192 {
-                        return None;
-                    }
-                    for clause in clauses {
-                        push(Node::Clause(clause));
-                    }
-                }
-                Clause::Or { branches, .. } => {
-                    if branches.len() > 8192 || branches.iter().map(Vec::len).sum::<usize>() > 8192
-                    {
-                        return None;
-                    }
-                    for branch in branches {
-                        for clause in branch {
-                            push(Node::Clause(clause));
-                        }
-                    }
-                }
-            },
-            Node::Value(value) => match value {
-                Value::Float(value) => floats.push(u64::from(value.to_bits())),
-                Value::Double(value) => floats.push(value.to_bits()),
-                Value::Tuple(values) => {
-                    if values.len() > 8192 {
-                        return None;
-                    }
-                    for value in values.iter().flatten() {
-                        push(Node::Value(value));
-                    }
-                }
-                _ => {}
-            },
-            Node::Pull(pattern) => {
-                if pattern.attributes.len() > 8192 {
-                    return None;
-                }
-                for attribute in &pattern.attributes {
-                    if matches!(
-                        attribute.transform,
-                        Some(crate::PullTransform::Function { .. })
-                    ) {
-                        return None;
-                    }
-                    if let Some(value) = &attribute.default {
-                        push(Node::Output(value));
-                    }
-                    if let Some(value) = &attribute.alias {
-                        push(Node::Output(value));
-                    }
-                    if let Some(crate::PullNested::Pattern(pattern)) = &attribute.nested {
-                        push(Node::Pull(pattern));
-                    }
-                }
-            }
-            Node::Output(value) => match value {
-                QueryValue::Scalar(value) => push(Node::Value(value)),
-                QueryValue::Nil | QueryValue::Char(_) => {}
-                QueryValue::Tagged(_, value) => push(Node::Output(value)),
-                QueryValue::Tuple(values)
-                | QueryValue::Collection(values)
-                | QueryValue::Set(values) => {
-                    if values.len() > 8192 {
-                        return None;
-                    }
-                    for value in values {
-                        push(Node::Output(value));
-                    }
-                }
-                QueryValue::Map(values) => {
-                    if values.len() > 4096 {
-                        return None;
-                    }
-                    for (key, value) in values {
-                        push(Node::Output(key));
-                        push(Node::Output(value));
-                    }
-                }
-            },
-        }
-    }
-    Some(floats)
+// Reuse the bounded AST encoder without storing callback objects or sources.
+fn structural_key(query: &Query, max: usize) -> Option<Vec<u8>> {
+    crate::encoding::query_cache_key(query, max)
 }
 
 pub(super) fn cached(query: &Query) -> Result<(Option<PreparedQuery>, bool), SemanticError> {

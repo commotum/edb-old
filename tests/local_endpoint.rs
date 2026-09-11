@@ -29,7 +29,7 @@ fn database(postgres: &str) -> String {
 
 fn writer(postgres: &str, database: &str) -> TransactionService {
     TransactionService::start(TransactionServiceConfig {
-        connection: postgres.to_owned(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(postgres),
         database_id: database.to_owned(),
         holder_id: format!("endpoint-test-{}", std::process::id()),
         lease_duration: Duration::from_secs(2),
@@ -149,7 +149,6 @@ fn configured_endpoint_restarts_and_preserves_exact_retry() {
     );
     assert_eq!(replay.report.unwrap().db_before.basis_t(), before.basis_t());
     assert_eq!(before.basis_t() + 1, first.basis_t);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(restarted);
     writer.shutdown();
     assert!(directory.path().is_dir());

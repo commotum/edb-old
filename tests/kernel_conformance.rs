@@ -385,7 +385,8 @@ fn nested_maps_enforce_ownership_and_functions_all_observe_db_before() {
                 "expected id",
             ));
         };
-        let Some(Value::Long(value)) = db.values(*entity, BALANCE).first().copied() else {
+        let values = db.values(*entity, BALANCE)?;
+        let Some(Value::Long(value)) = values.first() else {
             return Err(atomic_core::SemanticError::incorrect(
                 "test/missing",
                 "missing balance",
@@ -685,7 +686,7 @@ fn one_symbol_can_serve_both_predicate_roles_from_db_before() {
     let observed_entity_calls = Arc::clone(&entity_calls);
     functions.register_entity_predicate(predicate_name, move |db_after, entity| {
         observed_entity_calls.fetch_add(1, AtomicOrdering::SeqCst);
-        Ok(db_after.values(entity, BALANCE) == vec![&Value::Long(7)])
+        Ok(db_after.values(entity, BALANCE)? == vec![Value::Long(7)])
     });
 
     // Removing both declarations in this transaction must not suppress their

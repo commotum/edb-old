@@ -78,7 +78,7 @@ fn append(store: &mut PgBlockStore, log: &LogRoot, report: &TxReport) -> LogRoot
         &LogEntry {
             basis_t: report.db_after.basis_t(),
             eidx_frontier: report.db_after.eidx_frontier(),
-            reserved_frontier: 1003,
+            reserved_frontier: 1003.min(report.db_after.eidx_frontier()),
             tx_data: report.tx_data.clone(),
         },
     )
@@ -223,12 +223,18 @@ fn block_fulltext_is_selective_incremental_temporal_and_no_history_safe() {
     let seeded = initial.db_after.with(&ops, 20).unwrap();
     log = append(&mut store, &log, &seeded);
     publish(&mut store, &seeded.db_after, &log, &base);
+    let recent = reader.capture(ROOT).unwrap().database_value();
+    let (a, b) = (seeded.tempids["a"], seeded.tempids["b"]);
+    assert_eq!(ids(&recent, TEXT, "jane"), BTreeSet::from([a, b]));
+    assert_eq!(
+        ids(&recent, TEXT, "token0317"),
+        BTreeSet::from([seeded.tempids["doc317"]])
+    );
     let (indexed, build) = prepare(&mut store, &reader);
     assert_eq!(build.documents_added, 515);
     assert_eq!(build.empty_corpus_bulk_builds, 1);
     publish(&mut store, &seeded.db_after, &log, &indexed);
     let old = reader.capture(ROOT).unwrap().database_value();
-    let (a, b) = (seeded.tempids["a"], seeded.tempids["b"]);
     let context = OperationContext::new(OperationKind::Query);
     let start = Instant::now();
     let cold = {
@@ -255,9 +261,8 @@ fn block_fulltext_is_selective_incremental_temporal_and_no_history_safe() {
         );
     }
     assert_eq!(warm.snapshot().sql_calls, 0);
-    // Include a fresh reader's capture, query, result consumption and explicit
-    // pin release. Connection destructor cleanup remains deferred and is not
-    // mislabeled as part of this synchronous measurement.
+    // Include a fresh reader's capture, query and result consumption. Connection
+    // destructor cleanup is not part of this synchronous measurement.
     let whole = OperationContext::new(OperationKind::Query);
     let begin = Instant::now();
     let complete_bytes = {
@@ -272,12 +277,12 @@ fn block_fulltext_is_selective_incremental_temporal_and_no_history_safe() {
         assert_eq!(result.hits[0].entity, seeded.tempids["doc317"]);
         let bytes = result.stats.read_bytes;
         drop(result);
-        captured.release().unwrap();
+        drop(captured);
         bytes
     };
     assert!(complete_bytes > 0 && complete_bytes < projection.encoded_bytes);
     eprintln!(
-        "BLOCK_FULLTEXT_CAPTURE_READ_RELEASE elapsed_us={} sql_calls={} canonical_read_bytes={} search_bytes={complete_bytes} corpus_bytes={} deferred_connection_cleanup_excluded=true",
+        "BLOCK_FULLTEXT_CAPTURE_READ elapsed_us={} sql_calls={} canonical_read_bytes={} search_bytes={complete_bytes} corpus_bytes={} deferred_connection_cleanup_excluded=true",
         begin.elapsed().as_micros(),
         whole.snapshot().sql_calls,
         whole.snapshot().known_payload_read_bytes,
@@ -307,7 +312,26 @@ fn block_fulltext_is_selective_incremental_temporal_and_no_history_safe() {
     publish(&mut store, &changed.db_after, &log, &indexed);
     let lagging = reader.capture(ROOT).unwrap().database_value();
     assert_eq!(ids(&lagging, TEXT, "jane"), BTreeSet::from([b]));
-    assert!(ids(&lagging, TEXT, "juliet").is_empty());
+    assert_eq!(ids(&lagging, TEXT, "juliet"), BTreeSet::from([a]));
+    assert_eq!(
+        ids(&lagging.clone().as_of(old.basis_t()), TEXT, "jane"),
+        BTreeSet::from([a, b])
+    );
+    assert_eq!(
+        ids(&lagging.clone().history(), TEXT, "jane"),
+        BTreeSet::from([a, b])
+    );
+    assert!(ids(&lagging.clone().since(old.basis_t()), TEXT, "jane").is_empty());
+    assert_eq!(ids(&lagging, PRIVATE, "hiddennew"), BTreeSet::from([a]));
+    assert!(ids(&lagging, PRIVATE, "hiddenold").is_empty());
+    let local = lagging
+        .with(&[text(EntityRef::Id(b), TEXT, "Cobalt cliffs")], 40)
+        .unwrap()
+        .db_after;
+    assert_eq!(ids(&local, TEXT, "juliet"), BTreeSet::from([a]));
+    assert_eq!(ids(&local, TEXT, "cobalt"), BTreeSet::from([b]));
+    assert!(ids(&local, TEXT, "jane").is_empty());
+    assert_eq!(ids(&recent, TEXT, "jane"), BTreeSet::from([a, b]));
     let work = OperationContext::new(OperationKind::Query);
     let started = Instant::now();
     let (updated, delta) = {
@@ -363,6 +387,134 @@ fn block_fulltext_is_selective_incremental_temporal_and_no_history_safe() {
     assert_eq!(reused.input_records, 0);
     assert_eq!(reused.tokenized_bytes, 0);
     assert_eq!(reused.reused_projections, 1);
+}
+
+#[test]
+fn fulltext_installed_in_recent_tail_is_searchable_without_scanning_unrelated_facts() {
+    let Some((_fixture, config)) = fixture("block_fulltext_recent_schema") else {
+        return;
+    };
+    let mut store = PgBlockStore::connect(&config).unwrap();
+    let reader = BlockReader::connect(&config, Default::default()).unwrap();
+    let initial = Database::bootstrap().unwrap().with(&[], 10).unwrap();
+    let mut log = append(&mut store, &LogRoot::empty(), &initial);
+    let base = initial_index(&mut store, &initial.db_after);
+    assert!(base.fulltext.is_none());
+    let installed = initial
+        .db_after
+        .with(
+            &[
+                TxOp::InstallAttribute(
+                    Attribute::new(
+                        TEXT,
+                        Keyword::new("document", "text"),
+                        ValueType::String,
+                        Cardinality::One,
+                    )
+                    .fulltext(),
+                ),
+                TxOp::InstallAttribute(Attribute::new(
+                    PRIVATE,
+                    Keyword::new("document", "private"),
+                    ValueType::String,
+                    Cardinality::One,
+                )),
+                TxOp::InstallAttribute(Attribute::new(
+                    NUMBER,
+                    Keyword::new("document", "number"),
+                    ValueType::Long,
+                    Cardinality::One,
+                )),
+            ],
+            20,
+        )
+        .unwrap();
+    log = append(&mut store, &log, &installed);
+    let seeded = installed
+        .db_after
+        .with(
+            &[text(
+                EntityRef::Temp("document".into()),
+                TEXT,
+                "Violet river",
+            )],
+            30,
+        )
+        .unwrap();
+    log = append(&mut store, &log, &seeded);
+    publish(&mut store, &seeded.db_after, &log, &base);
+    let before = reader.capture(ROOT).unwrap().database_value();
+    let found = before
+        .fulltext(TEXT, "violet", &Default::default())
+        .unwrap();
+    assert_eq!(found.hits.len(), 1);
+    assert_eq!(found.hits[0].entity, seeded.tempids["document"]);
+    assert_eq!(
+        found.hits[0].tx,
+        t_to_tx(seeded.db_after.basis_t()).unwrap()
+    );
+    assert_eq!(found.stats.index_basis_t, base.basis);
+    assert_eq!(found.stats.read_bytes, 0);
+
+    let unrelated = seeded
+        .db_after
+        .with(
+            &(0..512)
+                .map(|n| {
+                    add(
+                        EntityRef::Temp(format!("number{n}")),
+                        NUMBER,
+                        Value::Long(n),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            40,
+        )
+        .unwrap();
+    log = append(&mut store, &log, &unrelated);
+    publish(&mut store, &unrelated.db_after, &log, &base);
+    let after = reader.capture(ROOT).unwrap().database_value();
+    let same = after.fulltext(TEXT, "violet", &Default::default()).unwrap();
+    assert_eq!(same.hits, found.hits);
+    assert_eq!(same.stats.work, found.stats.work);
+    assert_eq!(same.stats.admitted_bytes, found.stats.admitted_bytes);
+    for options in [
+        FulltextOptions {
+            max_work: found.stats.work as usize - 1,
+            ..Default::default()
+        },
+        FulltextOptions {
+            max_bytes: found.stats.admitted_bytes as usize - 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(after.fulltext(TEXT, "violet", &options).is_err());
+    }
+    let retracted = unrelated
+        .db_after
+        .with(
+            &[TxOp::Retract {
+                entity: EntityRef::Id(seeded.tempids["document"]),
+                attribute: TEXT,
+                value: None,
+            }],
+            50,
+        )
+        .unwrap();
+    log = append(&mut store, &log, &retracted);
+    publish(&mut store, &retracted.db_after, &log, &base);
+    let current = reader.capture(ROOT).unwrap().database_value();
+    assert!(ids(&current, TEXT, "violet").is_empty());
+    for retained in [
+        before,
+        current.clone().as_of(seeded.db_after.basis_t()),
+        current.history(),
+    ] {
+        assert_eq!(
+            ids(&retained, TEXT, "violet"),
+            BTreeSet::from([seeded.tempids["document"]])
+        );
+    }
 }
 
 #[test]

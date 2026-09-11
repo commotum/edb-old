@@ -104,16 +104,15 @@ fn policy_seconds(field: &'static str, duration: Duration) -> Result<u64, Semant
 
 /// One concrete PostgreSQL connection policy shared by every runtime role.
 ///
-/// The legacy string constructors remain available and deliberately select
-/// `plaintext`. Production callers can instead select `require_tls`, which
-/// forces PostgreSQL TLS negotiation even if the parameter string says
-/// `sslmode=disable`. TLS 1.2 is the minimum; server certificates and
-/// hostnames are always verified, and there is intentionally no "accept
-/// invalid certificate" switch.
+/// The parsed driver configuration owns the transport policy. TCP connections
+/// require verified TLS unless `sslmode=disable` explicitly selects plaintext;
+/// local Unix sockets need no TLS. Explicit builders reject conflicting DSN
+/// settings. TLS 1.2, certificate and hostname verification remain mandatory.
 #[derive(Clone, Eq, PartialEq)]
 pub struct PostgresConnectionConfig {
     parameters: Arc<str>,
-    root_certificates: Option<Arc<[Vec<u8>]>>,
+    parsed: Result<tokio_postgres::Config, SemanticError>,
+    root_certificates: Arc<[Vec<u8>]>,
     io_policy: PostgresIoPolicy,
     ssd_cache: Option<crate::SsdCacheConfig>,
 }
@@ -130,13 +129,7 @@ impl fmt::Debug for PostgresConnectionConfig {
                     "plaintext"
                 },
             )
-            .field(
-                "custom_root_certificates",
-                &self
-                    .root_certificates
-                    .as_ref()
-                    .map_or(0, |certificates| certificates.len()),
-            )
+            .field("custom_root_certificates", &self.root_certificates.len())
             .field("io_policy", &self.io_policy)
             .field("ssd_cache_enabled", &self.ssd_cache.is_some())
             .finish_non_exhaustive()
@@ -144,21 +137,61 @@ impl fmt::Debug for PostgresConnectionConfig {
 }
 
 impl PostgresConnectionConfig {
-    /// Preserve the existing local/development connection behavior.
-    pub fn plaintext(parameters: impl Into<String>) -> Self {
-        Self {
-            parameters: Arc::from(parameters.into()),
-            root_certificates: None,
-            io_policy: PostgresIoPolicy::default(),
-            ssd_cache: None,
-        }
+    /// Parse the DSN once, using verified TLS for TCP unless explicitly disabled.
+    pub fn parse(parameters: impl Into<String>) -> Result<Self, SemanticError> {
+        let config = Self::from_parameters(parameters.into(), None);
+        config.parsed.as_ref().map_err(Clone::clone)?;
+        Ok(config)
     }
 
-    /// Require a verified TLS session using the platform trust store.
+    /// Explicitly select plaintext, rejecting a DSN that requires TLS.
+    pub fn plaintext(parameters: impl Into<String>) -> Self {
+        Self::from_parameters(parameters.into(), Some(SslMode::Disable))
+    }
+
+    /// Require verified TLS, rejecting a DSN that explicitly disables it.
     pub fn require_tls(parameters: impl Into<String>) -> Self {
+        Self::from_parameters(parameters.into(), Some(SslMode::Require))
+    }
+
+    fn from_parameters(parameters: String, requested: Option<SslMode>) -> Self {
+        let parsed = parameters
+            .parse::<tokio_postgres::Config>()
+            .map_err(|_| {
+                SemanticError::incorrect(
+                    "postgres/invalid-connection-config",
+                    "invalid PostgreSQL connection configuration",
+                )
+            })
+            .and_then(|mut config| {
+                let mode = config.get_ssl_mode();
+                if requested.is_some_and(|requested| mode != SslMode::Prefer && mode != requested) {
+                    return Err(SemanticError::incorrect(
+                        "postgres/conflicting-transport",
+                        "PostgreSQL sslmode conflicts with the explicit transport selection",
+                    ));
+                }
+                let mode = requested.unwrap_or_else(|| match mode {
+                    SslMode::Prefer
+                        if config.get_hostaddrs().is_empty()
+                            && (config.get_hosts().is_empty()
+                                || config
+                                    .get_hosts()
+                                    .iter()
+                                    .all(|host| matches!(host, Host::Unix(_)))) =>
+                    {
+                        SslMode::Disable
+                    }
+                    SslMode::Prefer => SslMode::Require,
+                    mode => mode,
+                });
+                config.ssl_mode(mode);
+                Ok(config)
+            });
         Self {
-            parameters: Arc::from(parameters.into()),
-            root_certificates: Some(Arc::default()),
+            parameters: Arc::from(parameters),
+            parsed,
+            root_certificates: Arc::default(),
             io_policy: PostgresIoPolicy::default(),
             ssd_cache: None,
         }
@@ -172,22 +205,25 @@ impl PostgresConnectionConfig {
         mut self,
         certificate_pem: impl AsRef<[u8]>,
     ) -> Result<Self, SemanticError> {
-        let Some(certificates) = &self.root_certificates else {
+        self.parsed.as_ref().map_err(Clone::clone)?;
+        if !self.tls_required() {
             return Err(SemanticError::incorrect(
                 "postgres/tls-not-enabled",
                 "root certificates require a TLS-enabled PostgreSQL connection",
             ));
-        };
+        }
         let certificate_pem = certificate_pem.as_ref();
         Certificate::from_pem(certificate_pem).map_err(|_| invalid_root_certificate())?;
-        let mut updated = certificates.iter().cloned().collect::<Vec<_>>();
+        let mut updated = self.root_certificates.iter().cloned().collect::<Vec<_>>();
         updated.push(certificate_pem.to_vec());
-        self.root_certificates = Some(updated.into());
+        self.root_certificates = updated.into();
         Ok(self)
     }
 
     pub fn tls_required(&self) -> bool {
-        self.root_certificates.is_some()
+        self.parsed
+            .as_ref()
+            .is_ok_and(|config| config.get_ssl_mode() == SslMode::Require)
     }
 
     /// Enable disposable local block reuse. Opening a native peer validates
@@ -218,14 +254,13 @@ impl PostgresConnectionConfig {
         };
         field(self.parameters.as_bytes());
         field(lineage.as_bytes());
-        match &self.root_certificates {
-            None => field(b"plaintext"),
-            Some(roots) => {
-                field(b"verified-tls");
-                for root in roots.iter() {
-                    field(root);
-                }
-            }
+        field(if self.tls_required() {
+            b"verified-tls"
+        } else {
+            b"plaintext"
+        });
+        for root in self.root_certificates.iter() {
+            field(root);
         }
         digest.finalize().into()
     }
@@ -251,15 +286,9 @@ impl PostgresConnectionConfig {
         timeout: Option<Duration>,
     ) -> Result<tokio_postgres::Config, SemanticError> {
         let mut config = self
-            .parameters
-            .parse::<tokio_postgres::Config>()
-            .map_err(|_| {
-                SemanticError::incorrect(
-                    "postgres/invalid-connection-config",
-                    "invalid PostgreSQL connection configuration",
-                )
-                .detail("operation", operation)
-            })?;
+            .parsed
+            .clone()
+            .map_err(|error| error.detail("operation", operation))?;
         if timeout.is_some_and(|timeout| timeout.is_zero()) {
             return Err(SemanticError::new(
                 ErrorCategory::Unavailable,
@@ -371,10 +400,10 @@ impl PostgresConnectionConfig {
         operation: &'static str,
         timeout: Option<Duration>,
     ) -> Result<(tokio_postgres::Config, Option<MakeTlsConnector>), SemanticError> {
-        let mut config = self.prepared_config(operation, timeout)?;
-        let Some(root_certificates) = &self.root_certificates else {
+        let config = self.prepared_config(operation, timeout)?;
+        if config.get_ssl_mode() == SslMode::Disable {
             return Ok((config, None));
-        };
+        }
         if config
             .get_hosts()
             .iter()
@@ -386,12 +415,10 @@ impl PostgresConnectionConfig {
             )
             .detail("operation", operation));
         }
-        config.ssl_mode(SslMode::Require);
-
         let mut builder = TlsConnector::builder();
         builder.min_protocol_version(Some(Protocol::Tlsv12));
         set_postgresql_alpn(&mut builder);
-        for certificate_pem in root_certificates.iter() {
+        for certificate_pem in self.root_certificates.iter() {
             let certificate =
                 Certificate::from_pem(certificate_pem).map_err(|_| invalid_root_certificate())?;
             builder.add_root_certificate(certificate);
@@ -428,6 +455,46 @@ fn invalid_root_certificate() -> SemanticError {
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn dsn_and_builders_share_one_verified_transport_policy() {
+        for (parameters, tls) in [
+            ("host=localhost", true),
+            ("host=localhost sslmode=prefer", true),
+            ("host=localhost sslmode=require", true),
+            ("host=localhost sslmode=disable", false),
+            ("hostaddr=127.0.0.1", true),
+            ("postgresql://localhost/atomic?sslmode=require", true),
+            ("postgresql://localhost/atomic?sslmode=disable", false),
+            ("host=/tmp", false),
+        ] {
+            let config = PostgresConnectionConfig::parse(parameters).unwrap();
+            assert_eq!(config.tls_required(), tls);
+            let (driver, connector) = config.listener_connection_parts("test", None).unwrap();
+            assert_eq!(connector.is_some(), tls);
+            assert_eq!(
+                driver.get_ssl_mode(),
+                if tls {
+                    SslMode::Require
+                } else {
+                    SslMode::Disable
+                }
+            );
+        }
+        for config in [
+            PostgresConnectionConfig::require_tls(
+                "host=private-host password=secret sslmode=disable",
+            ),
+            PostgresConnectionConfig::plaintext(
+                "host=private-host password=secret sslmode=require",
+            ),
+        ] {
+            let error = config.prepared_config("test", None).unwrap_err();
+            assert_eq!(error.code, "postgres/conflicting-transport");
+            assert!(!format!("{config:?} {error:?}").contains("secret"));
+            assert!(!format!("{config:?} {error:?}").contains("private-host"));
+        }
+    }
 
     #[test]
     fn remaining_deadlines_never_extend_configured_connection_caps() {

@@ -117,8 +117,8 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         let config = PostgresConnectionConfig::plaintext(&connection);
         PgBlockStore::install(&config).unwrap();
         let created = BlockDatabase::create(&config, "offline", schema()).unwrap();
-        // No service/index worker runs: backup must prepare its covering read
-        // value locally from a genuinely unindexed recent tail.
+        // Index explicitly before capturing the selective-read fixture. Backup
+        // copies this publication; the role fixture separately covers a raw tail.
         let mut writer = BlockTransactor::claim(
             &config,
             created,
@@ -174,6 +174,8 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         let first = writer
             .transact(&TransactionRequest::new("seed", operations).with_tx_instant(1000))
             .unwrap();
+        writer.release().unwrap();
+        common::consolidate(&connection, "offline").unwrap();
         let target_index = size / 2;
         let target = first.tempids[&format!("e{target_index}")];
         let backup_dir = directory();
@@ -216,6 +218,12 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         }
         let mut backup = PortableBackup::connect(&connection).unwrap();
         let first_point = backup.backup_database("offline", &backup_dir).unwrap();
+        let mut writer = BlockTransactor::claim(
+            &config,
+            BlockDatabase::resolve(&config, "offline").unwrap(),
+            BlockWriterOptions::default(),
+        )
+        .unwrap();
         let second = writer
             .transact(
                 &TransactionRequest::new(
@@ -230,6 +238,8 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
                 .with_tx_instant(2000),
             )
             .unwrap();
+        writer.release().unwrap();
+        common::consolidate(&connection, "offline").unwrap();
         let second_point = backup.backup_database("offline", &backup_dir).unwrap();
         let expected_query = second
             .db_after
@@ -249,7 +259,6 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
         let expected_logs = [first.tx_data.clone(), second.tx_data.clone()];
         let first_t = first.basis_t;
         let second_t = second.basis_t;
-        writer.release().unwrap();
         drop((first, second, backup));
         // All source relations are actually gone. An online reconnect or
         // compatibility materialization cannot satisfy any following read.

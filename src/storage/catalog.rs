@@ -346,7 +346,7 @@ pub(crate) fn route_entry(
 
 impl DatabaseCatalog {
     pub fn connect(connection: &str) -> Result<Self, SemanticError> {
-        Self::connect_configured(&PostgresConnectionConfig::plaintext(connection))
+        Self::connect_configured(&PostgresConnectionConfig::parse(connection)?)
     }
     pub fn connect_configured(config: &PostgresConnectionConfig) -> Result<Self, SemanticError> {
         Ok(Self {
@@ -611,7 +611,6 @@ impl DatabaseCatalog {
             let route = current.database.route;
             let root_key = current.database.reference_key();
             let lease_key = current.database.lease_key();
-            let observer_key = super::report_handoff::observer_key(route);
             let excision_key = super::excision::work_key(&route);
             let restore_key = format!("restores/{}", identity_string(route));
             let completions_key = format!("restores/completed/{}", identity_string(route));
@@ -625,7 +624,6 @@ impl DatabaseCatalog {
             for key in [
                 &root_key,
                 &lease_key,
-                &observer_key,
                 &excision_key,
                 &restore_key,
                 &completions_key,
@@ -644,7 +642,6 @@ impl DatabaseCatalog {
                     change(listing, None),
                     change(root_key, None),
                     change(lease_key, None),
-                    change(observer_key, None),
                     change(excision_key, None),
                     change(restore_key, None),
                     change(completions_key, None),

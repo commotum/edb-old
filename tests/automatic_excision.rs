@@ -73,9 +73,9 @@ impl Drop for RuntimeRoles {
     }
 }
 fn start(url: &str, name: &str, excision: ExcisionConfig) -> TransactionService {
-    TransactionService::start_configured_with_options(
+    TransactionService::start_with_options(
         TransactionServiceConfig {
-            connection: String::new(),
+            connection: PostgresConnectionConfig::plaintext(url),
             database_id: name.into(),
             holder_id: format!("writer-{name}"),
             lease_duration: Duration::from_secs(5),
@@ -83,7 +83,6 @@ fn start(url: &str, name: &str, excision: ExcisionConfig) -> TransactionService 
             queue_capacity: 8,
             capacity_limits: CapacityLimits::default(),
         },
-        PostgresConnectionConfig::plaintext(url),
         ServiceOptions {
             excision,
             ..Default::default()

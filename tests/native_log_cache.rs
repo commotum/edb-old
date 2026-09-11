@@ -114,7 +114,7 @@ fn native_log_payload_cache_is_restart_hot_bounded_and_not_membership_authority(
     assert_eq!(warm_stats.postgres_payload_bytes_read, 0);
     assert_eq!(
         warm_sql.sql_calls, 0,
-        "captured root pin already owns the authenticated cached closure"
+        "captured root identifies the authenticated cached closure"
     );
     assert!(warm_sql.result_cell_bytes < cold_sql.result_cell_bytes / 10);
     let limits = peer.ssd_cache_stats();

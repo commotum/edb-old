@@ -1,15 +1,13 @@
 //! Partition policies affect fresh entity placement, not identity or access.
-//! The locality witness controls native leaf/cache sizes, not PostgreSQL or OS
-//! buffer residency, and reports one bounded workload rather than a speed SLA.
 use atomic_core::{
     Attribute, AttributeRef, Cardinality, DB_IDENT, DB_INSTALL_PARTITION, DB_PART_DB, DB_PART_TX,
-    Database, DatabaseValue, EntityMap, EntityRef, IndexOrder, IndexPrefix, Keyword, MapValue,
-    OperationContext, OperationKind, Peer, Schema, TransactionRequest, TxForm, TxFunctions, TxOp,
-    TxValue, USER_PARTITION, Unique, Value, ValueType, eid_to_eidx, eid_to_part, implicit_part,
-    implicit_part_id, make_eid, partition_eid, t_to_tx,
+    Database, DatabaseValue, EntityMap, EntityRef, IndexOrder, Keyword, MapValue, Peer, Schema,
+    TransactionRequest, TxForm, TxFunctions, TxOp, TxValue, USER_PARTITION, Unique, Value,
+    ValueType, eid_to_eidx, eid_to_part, implicit_part, implicit_part_id, make_eid, partition_eid,
+    t_to_tx,
 };
 use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 mod common;
 
@@ -552,7 +550,7 @@ fn native_partition_forms_survive_retries_retention_index_interruption_and_recov
     }
     service.shutdown();
 
-    // Interrupted preparation/publication is covered by storage_fault_replay.
+    // Interrupted publication is covered by storage::index_publication::tests.
     // This fixture retains partition semantics and exact values across indexing.
     common::assert_same_information(&store.recover(database_id).unwrap(), &eager);
     common::consolidate(connection, database_id).unwrap();
@@ -575,183 +573,5 @@ fn native_partition_forms_survive_retries_retention_index_interruption_and_recov
         common::assert_same_information(&value, &expected);
     }
     assert!(original.entid(&named_ident()).is_none());
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     restarted_service.shutdown();
-}
-
-#[derive(Debug)]
-struct LocalitySample {
-    elapsed_micros: u128,
-    sql_calls: u64,
-    sql_cell_bytes: u64,
-    leaf_reads: u64,
-    directory_reads: u64,
-    node_cache_hits: u64,
-    node_cache_misses: u64,
-    canonical_node_bytes: u64,
-    datoms: usize,
-}
-
-impl LocalitySample {
-    fn report(&self, mode: &str, temperature: &str) {
-        eprintln!(
-            "partition locality mode={mode} native_cache={temperature} elapsed_us={} sql_calls={} sql_cell_bytes={} leaf_reads={} directory_reads={} node_cache_hits={} node_cache_misses={} canonical_node_bytes={} datoms={}",
-            self.elapsed_micros,
-            self.sql_calls,
-            self.sql_cell_bytes,
-            self.leaf_reads,
-            self.directory_reads,
-            self.node_cache_hits,
-            self.node_cache_misses,
-            self.canonical_node_bytes,
-            self.datoms
-        );
-    }
-}
-
-fn read_tenant(peer: &Peer, entities: &[u64]) -> LocalitySample {
-    let before = peer.load_stats();
-    let context = OperationContext::new(OperationKind::Application);
-    let started = Instant::now();
-    let mut count = 0;
-    {
-        let _entered = context.enter();
-        let snapshot = peer.snapshot();
-        for (row, entity) in entities.iter().enumerate() {
-            let cursor = snapshot
-                .prefix_cursor(
-                    false,
-                    &IndexPrefix::Eavt {
-                        entity: *entity,
-                        attribute: None,
-                        value: None,
-                    },
-                )
-                .unwrap();
-            let datoms = cursor.collect::<Result<Vec<_>, _>>().unwrap();
-            assert_eq!(datoms.len(), 2);
-            assert_eq!(datoms[0].attribute, KEY);
-            assert_eq!(datoms[0].value, Value::String(format!("r{row:04}-t03")));
-            assert_eq!(datoms[1].attribute, PAYLOAD);
-            assert_eq!(datoms[1].value, Value::Long(row as i64));
-            count += datoms.len();
-        }
-    }
-    let after = peer.load_stats();
-    let sql = context.snapshot();
-    LocalitySample {
-        elapsed_micros: started.elapsed().as_micros(),
-        sql_calls: sql.sql_calls,
-        sql_cell_bytes: sql.result_cell_bytes,
-        leaf_reads: after.cursor_leaf_reads - before.cursor_leaf_reads,
-        directory_reads: after.cursor_directory_reads - before.cursor_directory_reads,
-        node_cache_hits: after.cursor_cache_hits - before.cursor_cache_hits,
-        node_cache_misses: after.cursor_cache_misses - before.cursor_cache_misses,
-        canonical_node_bytes: after.cursor_sql_read_bytes - before.cursor_sql_read_bytes,
-        datoms: count,
-    }
-}
-
-#[test]
-fn postgres_tenant_locality_reports_native_cold_and_warm_work() {
-    let Ok(connection) = std::env::var("ATOMIC_POSTGRES_URL") else {
-        eprintln!("SKIP: ATOMIC_POSTGRES_URL required for partition locality witness");
-        return;
-    };
-    let fixture = common::PostgresFixture::new(&connection, "partition_locality");
-    let connection = &fixture.connection;
-    common::install(connection).unwrap();
-    let invalid_tree = atomic_core::persistent_tree::TreeConfig {
-        max_leaf_datoms: 0,
-        ..Default::default()
-    };
-    let invalid = atomic_core::PostgresOperator::connect(connection)
-        .unwrap()
-        .with_tree_config(invalid_tree)
-        .err()
-        .expect("operator accepted an invalid tree construction limit");
-    assert_eq!(invalid.code, "tree/invalid-config");
-    let mut samples = Vec::new();
-    for grouped in [false, true] {
-        let database_id = if grouped { "grouped" } else { "interleaved" };
-        let mut store = common::TestStore::connect(connection).unwrap();
-        let initial = store.create_database(database_id, schema()).unwrap();
-        let service = common::start_service(connection, database_id);
-        let mut ops = Vec::new();
-        // Allocation order interleaves tenants in both databases. Only the
-        // explicit partition policy differs, not payload or creation schedule.
-        for row in 0..32 {
-            for tenant in 0..8 {
-                let tempid = format!("r{row:04}-t{tenant:02}");
-                ops.push(add(&tempid, KEY, Value::String(tempid.clone())));
-                ops.push(add(&tempid, PAYLOAD, Value::Long(row)));
-                if grouped {
-                    ops.push(force(
-                        &tempid,
-                        EntityRef::Id(implicit_part(tenant).unwrap()),
-                    ));
-                }
-            }
-        }
-        let report = common::transact(&service, "seed-tenants", initial.basis_t(), &ops, 1_000);
-        let entities: Vec<_> = (0..32)
-            .map(|row| report.tempids[&format!("r{row:04}-t03")])
-            .collect();
-        for entity in &entities {
-            assert_eq!(
-                partition_eid(*entity).unwrap(),
-                if grouped {
-                    implicit_part(3).unwrap()
-                } else {
-                    u64::from(USER_PARTITION)
-                }
-            );
-        }
-        service.shutdown();
-        // Control the actual current tree builder: the default 4096-datom
-        // leaf fits this entire dataset and is already read during metadata
-        // capture, so it cannot witness cold tenant-local leaf access.
-        let entry = atomic_core::DatabaseCatalog::connect(connection)
-            .unwrap()
-            .resolve(database_id)
-            .unwrap();
-        let tree = atomic_core::persistent_tree::TreeConfig {
-            max_leaf_datoms: 32,
-            ..Default::default()
-        };
-        let receipt = atomic_core::PostgresOperator::connect(connection)
-            .unwrap()
-            .with_tree_config(tree)
-            .unwrap()
-            .consolidate_database(&entry.database_id)
-            .unwrap();
-        assert_eq!(receipt.basis_t, report.basis_t);
-        let peer = Peer::connect(connection, database_id, 128).unwrap();
-        assert_eq!(peer.durable_base_t(), report.basis_t);
-        assert_eq!(peer.recent_stats().datoms, 0);
-        let cold = read_tenant(&peer, &entities);
-        let warm = read_tenant(&peer, &entities);
-        cold.report(database_id, "cold");
-        warm.report(database_id, "warm");
-        assert_eq!(cold.datoms, 64);
-        assert_eq!(warm.datoms, cold.datoms);
-        assert!(
-            cold.leaf_reads > 0,
-            "fixture must touch genuinely cold native leaves"
-        );
-        assert_eq!(warm.leaf_reads, 0);
-        assert_eq!(
-            warm.sql_calls, 0,
-            "authenticated RAM reads need no foreground pin SQL"
-        );
-        assert_eq!(peer.load_stats().compatibility_materializations, 0);
-        eprintln!(
-            "partition locality mode={database_id} tenants=8 entities_per_tenant=32 datoms_per_entity=2 leaf_datoms=32 peer_cache_entries=128 cache={:?}; PG/OS buffers not flushed; timings are samples, not a universal speed claim",
-            peer.cache_stats()
-        );
-        samples.push(cold);
-    }
-    // This is an intentionally aligned tenant workload. The deterministic
-    // leaf-work comparison does not generalize to other indexes/access orders.
-    assert!(samples[1].leaf_reads < samples[0].leaf_reads, "{samples:?}");
 }

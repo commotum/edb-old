@@ -1,7 +1,7 @@
 # Query a backup directly
 
 `BackupConnection::open(path)` opens the latest published point without a
-transactor, PostgreSQL connection, restore or full replay. `open_point(path,
+transactor, PostgreSQL connection, restore or replay from genesis. `open_point(path,
 &point)` selects an exact `BackupPoint` from `PortableBackup::list_backup_points`.
 `db()` and `log()` keep that fixed point even when later backups are published.
 Relative repository paths are anchored when opened; changing the process's
@@ -31,21 +31,20 @@ omit `:log` for a database source, or both coordinates for the latest point.
 
 ## Cost and integrity
 
-The current manifest retains the canonical publication and a separate exact
-covering read value. Both use the live engine's object formats. Capture folds
-any recent tail and completes pending AVET projections through the shared index
-preparer, writing new objects only into the repository. The canonical
-publication and exact receipts are unchanged. Fulltext attachments use the same
-builder; log seeks use authenticated page/skip links rather than a second
-backup-specific log index. Preparation adds capture-time work and can retain
-the admitted tail; ordinary offline opening does not replay it.
+The manifest retains one canonical publication with its existing index roots,
+log and unindexed tail. Capture copies those immutable objects without indexing
+or rebuilding search. Offline opening uses the live reader's tail handling and
+admission limits. Pending AVET or fulltext work has the same readiness behavior
+as the captured live value. Index the live database before capture when a backup
+needs those indexes ready. Log seeks use the shared authenticated page/skip links.
 
 A fresh database can be backed up immediately after `atomic create`, including
 an empty basis. Required canonical, receipt-base and program objects must be
 available; missing provenance is an error, not permission to drop exact retries.
 
-Opening reads root and schema/ident metadata; data leaves and log payloads are
-loaded on demand and authenticated against their immutable references. Missing
+Opening reads root and schema/ident metadata and loads the admitted recent tail;
+indexed data leaves and older log payloads are loaded on demand and authenticated
+against their immutable references. Missing
 or corrupt required files return errors, and failed cursors fuse. A previously
 authenticated cached value remains valid. Direct reading is not a substitute
 for deep semantic backup verification.

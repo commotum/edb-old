@@ -1010,8 +1010,8 @@ fn fulltext_workflow(connection: &Connection, endpoint: &AppEndpoint) -> Result<
     };
     let encoded = encode_program(&program)?;
     require(
-        encoded[16..18] == 9u16.to_be_bytes(),
-        "fulltext program did not select its new ABI",
+        encoded[16..18] == atomic_core::PROGRAM_ABI_VERSION.to_be_bytes(),
+        "fulltext program did not use the current program format",
     )?;
     let ProgramOutput::Query(program_rows) = ProgramRuntime.execute_query(
         &decode_program(&encoded)?,
@@ -1301,11 +1301,6 @@ fn run() -> Result<()> {
         "native/fixture history statistics mismatch",
     )?;
     let load = connection.load_stats();
-    require(
-        load.compatibility_materializations == 0
-            && reopened.load_stats().compatibility_materializations == 0,
-        "ordinary application materialized an eager database",
-    )?;
     println!(
         "APPLICATION_OK basis_t={} old_basis_t={} seed_replayed={} update_replayed={} projects=2 old_hours=8 current_hours=12 history_events=3",
         current.basis_t(),

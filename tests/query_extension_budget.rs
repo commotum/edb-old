@@ -422,5 +422,4 @@ fn native_postgres_deployed_extensions_share_query_work_at_captured_basis() {
             .code,
         "query/work-limit"
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

@@ -1,18 +1,17 @@
 //! Generic authority guards for Rust-owned publication and protection.
 //!
-//! Capturing a reader means comparing the database descriptor's revision and
-//! creating its pin reference in the same guarded batch. Publishing a successor
-//! likewise compares the descriptor carrying the writer epoch. Persistent
+//! Publishing a successor compares the descriptor carrying the writer epoch.
+//! Readers capture immutable values without mutating references. Persistent
 //! reference tombstones prevent delete/recreate ABA; absence is not a tombstone.
 //!
 //! The Rust collector announces an epoch through an opaque reference. Root
 //! mutations atomically append before/after ownership changes under that guard.
 //! Sealing fixes the change set for incremental reachability accounting.
 //! Protected puts refresh even reused objects; guarded deletion checks
-//! the collector's authority and an older protection epoch. Reader/build pins
-//! and those barriers protect objects without holding a global lock during graph
+//! the collector's authority and an older protection epoch. Durable roots,
+//! retention grace and those barriers protect objects without a global lock during graph
 //! traversal. This module supplies validation, not GC orchestration or policy:
-//! the engine classifies roots, accounts for reachability, and manages pin lifetimes.
+//! the engine classifies roots and accounts for reachability and retention.
 
 use super::{MAX_BATCH, MAX_REF_BYTES, Reference, validate_key, validate_limit};
 use crate::SemanticError;
@@ -133,9 +132,13 @@ mod tests {
 
     #[test]
     fn guarded_capture_tombstone_and_guard_only_batches_are_valid() {
-        let guards = [guard("db/root", Some(7)), guard("pin/new", None)];
-        validate_batch(&guards, &[change("pin/new", Some(vec![1, 2, 3]))]).unwrap();
-        validate_batch(&[guard("pin/new", Some(1))], &[change("pin/new", None)]).unwrap();
+        let guards = [guard("db/root", Some(7)), guard("staging/new", None)];
+        validate_batch(&guards, &[change("staging/new", Some(vec![1, 2, 3]))]).unwrap();
+        validate_batch(
+            &[guard("staging/new", Some(1))],
+            &[change("staging/new", None)],
+        )
+        .unwrap();
         validate_batch(&guards, &[]).unwrap();
         validate_batch(&[guard("revision/last", Some(i64::MAX as u64))], &[]).unwrap();
     }

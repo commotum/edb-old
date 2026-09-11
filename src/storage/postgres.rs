@@ -11,7 +11,7 @@ use std::time::Instant;
 #[path = "object_batch.rs"]
 mod object_batch;
 
-const FORMAT: &[u8] = b"atomic/opaque-storage/1";
+const FORMAT: &[u8] = b"atomic/opaque-storage/2";
 
 /// Actual payload reads on this connection, including re-put authentication.
 /// Physical bytes are transferred payload bytes, not PostgreSQL disk usage;
@@ -121,7 +121,7 @@ impl PgBlockStore {
     /// Add provider-level runtime grants to pre-existing dedicated roles.
     /// Writers may insert/protect objects, but only operators may delete them.
     /// Peers read objects; both roles maintain opaque references, including
-    /// physical pin cleanup. These are trusted storage credentials, not
+    /// ephemeral reference cleanup. These are trusted storage credentials, not
     /// per-database authorization. Existing grants and role memberships can
     /// broaden access; this helper neither audits nor revokes them.
     pub fn grant_runtime_privileges(
@@ -173,8 +173,9 @@ impl PgBlockStore {
              GRANT USAGE ON SCHEMA {namespace} TO {writer}, {peer}; \
              GRANT SELECT, INSERT, UPDATE ON TABLE {} TO {writer}; \
              GRANT SELECT ON TABLE {} TO {peer}; \
-             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {writer}, {peer}",
-            self.objects, self.objects, self.refs,
+             GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE {} TO {writer}; \
+             GRANT SELECT ON TABLE {} TO {peer}",
+            self.objects, self.objects, self.refs, self.refs,
         ))
         .map_err(read_error)?;
         tx.commit().map_err(commit_error)
@@ -186,45 +187,6 @@ impl PgBlockStore {
             ..Default::default()
         });
     }
-    /// Namespace-scoped session coordination. The caller owns the meaning of
-    /// the key; PostgreSQL only holds/releases the advisory lock with this
-    /// connection. A lost connection loses the lock, never renews it silently.
-    pub(crate) fn lock_session_shared(&mut self, key: &str) -> Result<(), SemanticError> {
-        validate_key(key)?;
-        let id = lock_id(&self.namespace, &format!("session/{key}"));
-        self.client
-            .query_one("SELECT pg_catalog.pg_advisory_lock_shared($1)", &[&id])
-            .map_err(read_error)?;
-        Ok(())
-    }
-
-    pub(crate) fn try_lock_session_exclusive(&mut self, key: &str) -> Result<bool, SemanticError> {
-        validate_key(key)?;
-        let id = lock_id(&self.namespace, &format!("session/{key}"));
-        self.client
-            .query_one("SELECT pg_catalog.pg_try_advisory_lock($1)", &[&id])
-            .map(|row| row.get(0))
-            .map_err(read_error)
-    }
-
-    pub(crate) fn unlock_session_shared(&mut self, key: &str) -> Result<(), SemanticError> {
-        validate_key(key)?;
-        let id = lock_id(&self.namespace, &format!("session/{key}"));
-        self.client
-            .query_one("SELECT pg_catalog.pg_advisory_unlock_shared($1)", &[&id])
-            .map_err(read_error)?;
-        Ok(())
-    }
-
-    pub(crate) fn unlock_session_exclusive(&mut self, key: &str) -> Result<(), SemanticError> {
-        validate_key(key)?;
-        let id = lock_id(&self.namespace, &format!("session/{key}"));
-        self.client
-            .query_one("SELECT pg_catalog.pg_advisory_unlock($1)", &[&id])
-            .map_err(read_error)?;
-        Ok(())
-    }
-
     /// The authenticated PostgreSQL principal for application-level namespaces.
     /// This is connection identity, not an engine-specific authorization rule.
     pub(crate) fn principal(&mut self) -> Result<String, SemanticError> {
@@ -260,7 +222,7 @@ impl PgBlockStore {
 
     pub fn install(config: &PostgresConnectionConfig) -> Result<(), SemanticError> {
         let mut client = config.connect_for("storage/install-connect")?;
-        let namespace = pin_namespace(&mut client)?;
+        let namespace = storage_namespace(&mut client)?;
         let quoted = quote(&namespace);
         let mut tx = client
             .build_transaction()
@@ -319,7 +281,7 @@ impl PgBlockStore {
 
     pub fn connect(config: &PostgresConnectionConfig) -> Result<Self, SemanticError> {
         let mut client = config.connect_for("storage/connect")?;
-        let namespace = pin_namespace(&mut client)?;
+        let namespace = storage_namespace(&mut client)?;
         let objects = format!("{}.atomic_objects", quote(&namespace));
         let refs = format!("{}.atomic_refs", quote(&namespace));
         let row = client
@@ -762,7 +724,7 @@ impl PgBlockStore {
     /// Forget one-use coordination keys after their owner has revoked them.
     /// Unlike ordinary CAS tombstones this is physical removal: the engine must
     /// guarantee these tokens are never reused, and guard any late creator by
-    /// a displaced epoch/session. Public reusable keys must retain tombstones.
+    /// a displaced collection epoch. Public reusable keys must retain tombstones.
     pub(crate) fn forget_ephemeral_refs(
         &mut self,
         keys: &[String],
@@ -870,7 +832,7 @@ fn decode_ref(row: postgres::Row) -> Result<Reference, SemanticError> {
     })
 }
 
-fn pin_namespace(client: &mut SqlClient) -> Result<String, SemanticError> {
+fn storage_namespace(client: &mut SqlClient) -> Result<String, SemanticError> {
     let namespace: Option<String> = client
         .query_one("SELECT pg_catalog.current_schema()::text", &[])
         .map_err(read_error)?

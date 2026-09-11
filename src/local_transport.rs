@@ -317,7 +317,7 @@ fn endpoint_busy() -> SemanticError {
 #[derive(Clone, Copy, Debug)]
 pub struct LocalTransportConfig {
     pub max_in_flight: usize,
-    /// Total deadline for one request/response/pin handoff, including clients
+    /// Total deadline for one request/response exchange, including clients
     /// that trickle bytes. Expiry after admission has an unknown outcome.
     pub request_timeout: Duration,
     pub max_frame_bytes: usize,
@@ -593,10 +593,6 @@ impl Connection {
                 let tx_hash = wire.after.tx_hash;
                 let replayed = wire.replayed;
                 let report = self.open_socket_report(*wire);
-                // The server retains both source root/generation pins until
-                // this handoff or its deadline. Successfully opened values now
-                // own peer-local pins. ACK loss cannot undo the known commit.
-                let _ = transfer(&mut stream, &mut [1], deadline, true);
                 Ok(CommittedTransaction {
                     basis_t,
                     tx_hash,
@@ -630,12 +626,6 @@ fn serve(
         return Err(io::Error::other("response exceeds configured frame policy"));
     }
     write_frame(&mut stream, &bytes, deadline)?;
-    if result.is_ok() {
-        let mut ack = [0];
-        let _ = transfer(&mut stream, &mut ack, deadline, false);
-    }
-    // Keep the exact report values (and their pins) alive through the ACK.
-    drop(result);
     Ok(())
 }
 
@@ -961,7 +951,7 @@ mod tests {
             .unwrap();
         crate::storage::BlockDatabase::create(&storage, &database, schema).unwrap();
         let writer = TransactionService::start(TransactionServiceConfig {
-            connection: postgres.clone(),
+            connection: storage,
             database_id: database.clone(),
             holder_id: database.clone(),
             lease_duration: Duration::from_secs(5),
@@ -983,6 +973,29 @@ mod tests {
                 value: Value::String("durable".into()).into(),
             }],
         )
+    }
+
+    #[test]
+    fn committed_response_closes_without_a_reader_acknowledgment() {
+        let Some((_, _, writer, _)) = fixture() else {
+            return;
+        };
+        let server = LocalTransactionServer::start(writer.client(), Default::default()).unwrap();
+        let mut stream = UnixStream::connect(server.endpoint()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let bytes = encode_submission(&writer.client().identity(), &request()).unwrap();
+        write_frame(&mut stream, &bytes, deadline).unwrap();
+        let response = read_frame(&mut stream, MAX_FRAME, deadline).unwrap();
+        assert!(matches!(
+            decode_submission_outcome(&response).unwrap(),
+            WireOutcome::Committed(_)
+        ));
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(stream.read(&mut [0]).unwrap(), 0);
+        drop(server);
+        writer.shutdown();
     }
 
     #[test]
@@ -1072,8 +1085,6 @@ mod tests {
             let checksum = crate::sha256(&bytes[..checksum_offset]);
             bytes[checksum_offset..].copy_from_slice(&checksum);
             write_frame(&mut stream, &bytes, deadline).unwrap();
-            let mut ack = [0];
-            let _ = transfer(&mut stream, &mut ack, deadline, false);
             committed
         });
         let outcome = connection

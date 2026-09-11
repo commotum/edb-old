@@ -382,82 +382,8 @@ fn tx_value_rank(value: &TxValue) -> u8 {
     }
 }
 
-/// New-input grammar is selected only when needed, preserving all existing
-/// request hashes rather than globally bumping the idempotency domain.
-pub(crate) fn forms_have_extended_inputs(forms: &[TxForm]) -> bool {
-    fn entity(input: &EntityRef) -> bool {
-        matches!(input, EntityRef::LookupInput { .. })
-    }
-    fn value(value: &TxValue) -> bool {
-        matches!(
-            value,
-            TxValue::Tuple(_) | TxValue::Entity(EntityRef::LookupInput { .. })
-        )
-    }
-    fn map(input: &EntityMap) -> bool {
-        input.id.as_ref().is_some_and(entity)
-            || input.attributes.iter().any(|(_, input)| map_value(input))
-    }
-    fn map_value(input: &MapValue) -> bool {
-        match input {
-            MapValue::Value(input) => value(input),
-            MapValue::Nested(input) => map(input),
-            MapValue::Many(inputs) => inputs.iter().any(map_value),
-        }
-    }
-    forms.iter().any(|form| match form {
-        TxForm::Op(TxOp::Add {
-            entity: id,
-            value: input,
-            ..
-        }) => entity(id) || value(input),
-        TxForm::Op(TxOp::Retract {
-            entity: id,
-            value: input,
-            ..
-        }) => entity(id) || input.as_ref().is_some_and(value),
-        TxForm::Op(TxOp::Cas {
-            entity: id,
-            old,
-            new,
-            ..
-        }) => entity(id) || old.as_ref().is_some_and(value) || value(new),
-        TxForm::Op(TxOp::RetractEntity(id)) => entity(id),
-        TxForm::Op(TxOp::Ensure { entity: id, spec }) => entity(id) || entity(spec),
-        TxForm::Op(TxOp::ForcePartition { partition, .. }) => entity(partition),
-        TxForm::Op(TxOp::MatchPartition { entity: id, .. }) => entity(id),
-        TxForm::EntityMap(input) => map(input),
-        TxForm::ProgramCall(call) => {
-            matches!(&call.function, CallableRef::Database(input) if entity(input))
-                || call.arguments.iter().any(runtime_has_extended_inputs)
-        }
-        TxForm::Call(call) => call.arguments.iter().any(value),
-        _ => false,
-    })
-}
-
-pub(crate) fn forms_have_partition_directives(forms: &[TxForm]) -> bool {
-    forms.iter().any(|form| {
-        matches!(
-            form,
-            TxForm::Op(TxOp::ForcePartition { .. } | TxOp::MatchPartition { .. })
-        )
-    })
-}
-
 pub(crate) fn forms_have_edn(forms: &[TxForm]) -> bool {
     forms.iter().any(|form| matches!(form, TxForm::Edn(_)))
-}
-
-pub(crate) fn runtime_has_extended_inputs(input: &RuntimeValue) -> bool {
-    match input {
-        RuntimeValue::Entity(EntityRef::LookupInput { .. }) => true,
-        RuntimeValue::Vector(values) => values.iter().any(runtime_has_extended_inputs),
-        RuntimeValue::Map(values) => values
-            .iter()
-            .any(|(_, input)| runtime_has_extended_inputs(input)),
-        _ => false,
-    }
 }
 
 fn compare_value(left: &Value, right: &Value) -> Ordering {
@@ -655,18 +581,10 @@ where
 }
 
 type NativeFunction =
-    dyn Fn(&Database, &[TxValue]) -> Result<Vec<TxForm>, SemanticError> + Send + Sync;
+    dyn Fn(&DatabaseValue, &[TxValue]) -> Result<Vec<TxForm>, SemanticError> + Send + Sync;
 type NativePredicate = dyn Fn(&crate::Value) -> Result<RuntimeValue, SemanticError> + Send + Sync;
 type NativeEntityPredicate =
-    dyn Fn(&Database, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync;
-type ExactEntityPredicate =
     dyn Fn(&DatabaseValue, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync;
-
-#[derive(Clone)]
-enum RegisteredEntityPredicate {
-    Eager(Arc<NativeEntityPredicate>),
-    Exact(Arc<ExactEntityPredicate>),
-}
 
 /// Process-local deterministic transaction functions.
 ///
@@ -677,7 +595,7 @@ enum RegisteredEntityPredicate {
 pub struct TxFunctions {
     functions: BTreeMap<String, Arc<NativeFunction>>,
     predicates: BTreeMap<String, Arc<NativePredicate>>,
-    entity_predicates: BTreeMap<String, RegisteredEntityPredicate>,
+    entity_predicates: BTreeMap<String, Arc<NativeEntityPredicate>>,
 }
 
 impl fmt::Debug for TxFunctions {
@@ -701,7 +619,10 @@ impl TxFunctions {
 
     pub fn register<F>(&mut self, name: impl Into<String>, function: F)
     where
-        F: Fn(&Database, &[TxValue]) -> Result<Vec<TxForm>, SemanticError> + Send + Sync + 'static,
+        F: Fn(&DatabaseValue, &[TxValue]) -> Result<Vec<TxForm>, SemanticError>
+            + Send
+            + Sync
+            + 'static,
     {
         self.functions.insert(name.into(), Arc::new(function));
     }
@@ -736,13 +657,13 @@ impl TxFunctions {
     /// resolved entity id, while the spec itself was resolved in db-before.
     pub fn register_entity_predicate<F>(&mut self, name: impl Into<String>, predicate: F)
     where
-        F: Fn(&Database, u64) -> Result<bool, SemanticError> + Send + Sync + 'static,
+        F: Fn(&DatabaseValue, u64) -> Result<bool, SemanticError> + Send + Sync + 'static,
     {
         self.entity_predicates.insert(
             name.into(),
-            RegisteredEntityPredicate::Eager(Arc::new(move |database, entity| {
+            Arc::new(move |database, entity| {
                 predicate(database, entity).map(|value| RuntimeValue::Scalar(Value::Bool(value)))
-            })),
+            }),
         );
     }
 
@@ -753,10 +674,8 @@ impl TxFunctions {
     ) where
         F: Fn(&DatabaseValue, u64) -> Result<RuntimeValue, SemanticError> + Send + Sync + 'static,
     {
-        self.entity_predicates.insert(
-            name.into(),
-            RegisteredEntityPredicate::Exact(Arc::new(predicate)),
-        );
+        self.entity_predicates
+            .insert(name.into(), Arc::new(predicate));
     }
 
     pub(crate) fn validate_attribute_predicate(
@@ -782,32 +701,6 @@ impl TxFunctions {
     pub(crate) fn validate_entity_predicate(
         &self,
         name: &str,
-        db_after: &Database,
-        entity: u64,
-    ) -> Result<RuntimeValue, SemanticError> {
-        let predicate = self.entity_predicates.get(name).ok_or_else(|| {
-            SemanticError::incorrect(
-                "transaction/unknown-entity-predicate",
-                format!("unknown entity predicate {name}"),
-            )
-        })?;
-        catch_unwind(AssertUnwindSafe(|| match predicate {
-            RegisteredEntityPredicate::Eager(predicate) => predicate(db_after, entity),
-            RegisteredEntityPredicate::Exact(predicate) => {
-                predicate(&db_after.database_value(), entity)
-            }
-        }))
-        .map_err(|_| entity_predicate_panic(name))?
-    }
-
-    /// Validate a persisted entity predicate against the exact proposed
-    /// db-after without materializing it. Process-local Rust callbacks retain
-    /// their historical `&Database` API and therefore remain intentionally
-    /// confined to the eager speculative kernel.
-    #[allow(dead_code)] // consumed by the bounded assessor introduced in the next Goal 16 step
-    pub(crate) fn validate_entity_predicate_exact(
-        &self,
-        name: &str,
         db_after: &DatabaseValue,
         entity: u64,
     ) -> Result<RuntimeValue, SemanticError> {
@@ -817,17 +710,15 @@ impl TxFunctions {
                 format!("unknown entity predicate {name}"),
             )
         })?;
-        let RegisteredEntityPredicate::Exact(predicate) = predicate else {
-            return Err(SemanticError::incorrect(
-                "transaction/eager-entity-predicate",
-                "process-local entity predicates require the eager speculative Database API",
-            ));
-        };
         catch_unwind(AssertUnwindSafe(|| predicate(db_after, entity)))
             .map_err(|_| entity_predicate_panic(name))?
     }
 
-    fn invoke(&self, db_before: &Database, call: &TxCall) -> Result<Vec<TxForm>, SemanticError> {
+    fn invoke(
+        &self,
+        db_before: &DatabaseValue,
+        call: &TxCall,
+    ) -> Result<Vec<TxForm>, SemanticError> {
         crate::transaction_stats::count(|work| &mut work.function_calls, 1);
         let function = self.functions.get(&call.function).ok_or_else(|| {
             SemanticError::incorrect(
@@ -872,7 +763,7 @@ impl Database {
         max_primitive_ops: usize,
     ) -> Result<Vec<TxOp>, SemanticError> {
         normalize_forms_against(
-            NormalizerRead::Eager(self),
+            &self.database_value(),
             forms,
             Some(functions),
             max_primitive_ops,
@@ -887,8 +778,12 @@ impl Database {
         functions: &TxFunctions,
         tx_instant: i64,
     ) -> Result<TxReport, SemanticError> {
-        let ops = self.normalize_forms(forms, functions)?;
-        self.with_function_context(&ops, functions, tx_instant)
+        self.with_forms_with_defaults(
+            forms,
+            functions,
+            tx_instant,
+            &crate::TransactionDefaults::default(),
+        )
     }
 
     pub fn with_forms_with_defaults(
@@ -899,11 +794,52 @@ impl Database {
         defaults: &crate::TransactionDefaults,
     ) -> Result<TxReport, SemanticError> {
         let ops = self.normalize_forms(forms, functions)?;
-        self.with_function_context_and_defaults(&ops, functions, tx_instant, defaults)
+        let assessed = assess_operations(
+            &self.database_value(),
+            &ops,
+            tx_instant,
+            defaults,
+            Some(functions),
+        )?;
+        self.materialize_assessment(assessed)
     }
 }
 
 impl DatabaseValue {
+    /// Apply process-local callbacks to this exact value using the same
+    /// transaction assessor as memory and durable transactions.
+    pub fn with_functions(
+        &self,
+        forms: &[TxForm],
+        functions: &TxFunctions,
+        tx_instant: i64,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        self.with_functions_and_defaults(
+            forms,
+            functions,
+            tx_instant,
+            &crate::TransactionDefaults::default(),
+        )
+    }
+
+    pub fn with_functions_and_defaults(
+        &self,
+        forms: &[TxForm],
+        functions: &TxFunctions,
+        tx_instant: i64,
+        defaults: &crate::TransactionDefaults,
+    ) -> Result<crate::SpeculativeTransactionReport, SemanticError> {
+        let base = self.speculation_base()?;
+        let ops = normalize_forms_against(&base, forms, Some(functions), usize::MAX)?;
+        let assessed = assess_operations(&base, &ops, tx_instant, defaults, Some(functions))?;
+        Ok(crate::SpeculativeTransactionReport {
+            db_before: self.clone(),
+            db_after: assessed.db_after.with_speculation_view(self),
+            tx_data: assessed.tx_data,
+            tempids: assessed.tempids,
+        })
+    }
+
     /// Speculate using explicit allocation defaults, never environment state.
     pub fn with_defaults(
         &self,
@@ -920,7 +856,7 @@ impl DatabaseValue {
     }
 
     /// Apply primitive transaction information without persisting it. The
-    /// caller supplies time, as for the eager `Database::with` oracle.
+    /// caller supplies time, as for `Database::with`.
     pub fn with(
         &self,
         ops: &[TxOp],
@@ -1015,14 +951,39 @@ impl DatabaseValue {
     /// Normalize already expanded persistent transaction forms against one
     /// exact db-before. Entity-map attribute resolution consults only the
     /// immutable schema/ident caches; primitive forms pass through unchanged.
-    /// Process-local callbacks deliberately remain on `Database::with_forms`.
+    /// Process-local calls are expanded before entering this primitive normalizer.
     pub(crate) fn normalize_persisted_forms_with_limit(
         &self,
         forms: &[TxForm],
         max_primitive_ops: usize,
     ) -> Result<Vec<TxOp>, SemanticError> {
-        normalize_forms_against(NormalizerRead::Exact(self), forms, None, max_primitive_ops)
+        normalize_forms_against(self, forms, None, max_primitive_ops)
     }
+}
+
+/// Assess normalized operations independently of their storage representation.
+/// Local callbacks and persisted callbacks share this exact semantic boundary.
+pub(crate) fn assess_operations(
+    base: &DatabaseValue,
+    ops: &[TxOp],
+    tx_instant: i64,
+    defaults: &crate::TransactionDefaults,
+    functions: Option<&TxFunctions>,
+) -> Result<crate::tiered_assessor::TieredAssessment, SemanticError> {
+    let mut assessed = crate::tiered_assessor::assess_tiered_with_remaining_limits_and_defaults(
+        base,
+        ops,
+        tx_instant,
+        crate::tiered_assessor::AssessmentLimits {
+            max_read_datoms: u64::MAX,
+            max_read_bytes: u64::MAX,
+        },
+        defaults,
+    )?;
+    assessed.validate_exact(functions)?;
+    assessed.db_before = assessed.db_before.without_transaction_read_context();
+    assessed.db_after = assessed.db_after.without_transaction_read_context();
+    Ok(assessed)
 }
 
 /// Receipt-free outcome of the shared selective semantic pipeline. These are
@@ -1316,51 +1277,15 @@ impl Default for SpeculationLimits {
     }
 }
 
-#[derive(Clone, Copy)]
-enum NormalizerRead<'a> {
-    Eager(&'a Database),
-    Exact(&'a DatabaseValue),
-}
-
-impl<'a> NormalizerRead<'a> {
-    fn schema(self) -> &'a crate::Schema {
-        match self {
-            Self::Eager(database) => database.schema(),
-            Self::Exact(database) => database.schema(),
-        }
-    }
-
-    fn entid(self, ident: &Keyword) -> Option<u64> {
-        match self {
-            Self::Eager(database) => database.entid(ident),
-            Self::Exact(database) => database.entid(ident),
-        }
-    }
-
-    fn eager(self) -> Option<&'a Database> {
-        match self {
-            Self::Eager(database) => Some(database),
-            Self::Exact(_) => None,
-        }
-    }
-}
-
 fn normalize_forms_against(
-    db_before: NormalizerRead<'_>,
+    db_before: &DatabaseValue,
     forms: &[TxForm],
     functions: Option<&TxFunctions>,
     max_primitive_ops: usize,
 ) -> Result<Vec<TxOp>, SemanticError> {
     let lowered;
     let forms = if forms_have_edn(forms) {
-        lowered = match db_before {
-            NormalizerRead::Eager(database) => {
-                crate::edn_transaction::lower_forms(&database.database_value(), forms)?
-            }
-            NormalizerRead::Exact(database) => {
-                crate::edn_transaction::lower_forms(database, forms)?
-            }
-        };
+        lowered = crate::edn_transaction::lower_forms(db_before, forms)?;
         lowered.as_slice()
     } else {
         forms
@@ -1416,7 +1341,7 @@ fn normalize_forms_against(
 /// depth-first form order so noncolliding requests retain their allocations.
 /// Persisted calls have already expanded at the authoritative boundary.
 fn expand_local_calls(
-    db_before: NormalizerRead<'_>,
+    db_before: &DatabaseValue,
     functions: Option<&TxFunctions>,
     forms: Vec<TxForm>,
     depth: usize,
@@ -1432,13 +1357,13 @@ fn expand_local_calls(
         }
         match form {
             TxForm::Call(call) => {
-                let (Some(database), Some(functions)) = (db_before.eager(), functions) else {
+                let Some(functions) = functions else {
                     return Err(SemanticError::incorrect(
-                        "transaction/process-local-function-requires-eager-db",
-                        "process-local Rust transaction callbacks require the eager speculative Database API",
+                        "transaction/missing-function-context",
+                        "process-local transaction callbacks require an explicit function registry",
                     ));
                 };
-                let mut generated = functions.invoke(database, &call)?;
+                let mut generated = functions.invoke(db_before, &call)?;
                 validate_forms_input(&generated)?;
                 generated.sort_by(compare_tx_form);
                 expand_local_calls(
@@ -1567,7 +1492,7 @@ fn explicit_tempids(forms: &[TxForm]) -> BTreeSet<String> {
 }
 
 struct Normalizer<'a> {
-    db_before: NormalizerRead<'a>,
+    db_before: &'a DatabaseValue,
     explicit_tempids: BTreeSet<String>,
     next_anonymous: u64,
     primitive_count: usize,
@@ -2387,7 +2312,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_database_value_normalizes_entity_maps_like_the_eager_oracle() {
+    fn exact_entity_map_normalizer_preserves_nested_identity() {
         let mut schema = crate::Schema::new();
         schema
             .install(
@@ -2423,24 +2348,24 @@ mod tests {
             )],
         })];
 
-        let eager = database
-            .normalize_forms_with_limit(&forms, &TxFunctions::new(), 16)
-            .unwrap();
         let exact = database
             .database_value()
             .normalize_persisted_forms_with_limit(&forms, 16)
             .unwrap();
-        assert_eq!(eager.len(), exact.len());
-        assert!(
-            eager
-                .iter()
-                .zip(&exact)
-                .all(|(eager, exact)| compare_tx_op(eager, exact) == Ordering::Equal)
-        );
+        assert_eq!(exact.len(), 2);
+        let child = exact.iter().find_map(|op| match op {
+            TxOp::Add { entity: EntityRef::Temp(child), attribute, value }
+                if *attribute == KEY && matches!(value, TxValue::Scalar(Value::String(value)) if value == "child-key") => Some(child),
+            _ => None,
+        }).expect("nested identity assertion");
+        assert!(exact.iter().any(|op| matches!(op,
+            TxOp::Add { entity: EntityRef::Temp(parent), attribute, value: TxValue::Entity(EntityRef::Temp(reference)) }
+                if parent == "parent" && *attribute == CHILD && reference == child
+        )));
     }
 
     #[test]
-    fn exact_normalizer_rejects_process_local_callbacks() {
+    fn local_callbacks_require_an_explicit_registry() {
         let database = Database::bootstrap().unwrap().database_value();
         let error = database
             .normalize_persisted_forms_with_limit(
@@ -2451,14 +2376,11 @@ mod tests {
                 16,
             )
             .unwrap_err();
-        assert_eq!(
-            error.code,
-            "transaction/process-local-function-requires-eager-db"
-        );
+        assert_eq!(error.code, "transaction/missing-function-context");
     }
 
     #[test]
-    fn persisted_entity_predicate_accepts_eager_and_exact_database_values() {
+    fn entity_predicate_uses_one_exact_value_interface() {
         let database = Database::bootstrap().unwrap();
         let mut functions = TxFunctions::new();
         functions.register_entity_value_predicate("test/exists", |database, entity| {
@@ -2470,19 +2392,103 @@ mod tests {
 
         assert_eq!(
             functions
-                .validate_entity_predicate("test/exists", &database, system_entity)
+                .validate_entity_predicate("test/exists", &database.database_value(), system_entity)
                 .unwrap(),
             RuntimeValue::Scalar(Value::Bool(true))
         );
+        let overlay = database
+            .database_value()
+            .with_functions(&[], &TxFunctions::new(), 1)
+            .unwrap()
+            .db_after;
         assert_eq!(
             functions
-                .validate_entity_predicate_exact(
-                    "test/exists",
-                    &database.database_value(),
-                    system_entity,
-                )
+                .validate_entity_predicate("test/exists", &overlay, system_entity,)
                 .unwrap(),
             RuntimeValue::Scalar(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn local_callbacks_share_one_assessor_across_memory_and_speculative_values() {
+        let mut schema = crate::Schema::new();
+        schema
+            .install(Attribute::new(
+                1_000,
+                Keyword::new("account", "balance"),
+                ValueType::Long,
+                Cardinality::One,
+            ))
+            .unwrap();
+        let entity = crate::make_eid(crate::USER_PARTITION, 42).unwrap();
+        let memory = Database::new(schema)
+            .unwrap()
+            .with(
+                &[TxOp::Add {
+                    entity: EntityRef::Id(entity),
+                    attribute: 1_000,
+                    value: Value::Long(10).into(),
+                }],
+                1,
+            )
+            .unwrap()
+            .db_after;
+        let mut functions = TxFunctions::new();
+        functions.register("account/increment", move |before, _| {
+            let values = before.values(entity, 1_000)?;
+            let [Value::Long(value)] = values.as_slice() else {
+                panic!("one balance")
+            };
+            Ok(vec![TxForm::Op(TxOp::Cas {
+                entity: EntityRef::Id(entity),
+                attribute: 1_000,
+                old: Some(Value::Long(*value).into()),
+                new: Value::Long(value + 1).into(),
+            })])
+        });
+        let forms = [TxForm::Call(TxCall {
+            function: "account/increment".into(),
+            arguments: vec![],
+        })];
+        let exact = memory.database_value();
+        let memory_report = memory.with_forms(&forms, &functions, 2).unwrap();
+        let overlay_report = exact.with_functions(&forms, &functions, 2).unwrap();
+        assert_eq!(memory_report.tx_data, overlay_report.tx_data);
+        assert_eq!(
+            overlay_report.db_after.values(entity, 1_000).unwrap(),
+            vec![Value::Long(11)]
+        );
+        assert_eq!(exact.values(entity, 1_000).unwrap(), vec![Value::Long(10)]);
+        assert!(overlay_report.db_after.transaction_read_context().is_none());
+        let branch = overlay_report
+            .db_after
+            .with_functions(&forms, &functions, 3)
+            .unwrap();
+        assert_eq!(
+            branch.db_after.values(entity, 1_000).unwrap(),
+            vec![Value::Long(12)]
+        );
+        assert_eq!(
+            overlay_report.db_after.values(entity, 1_000).unwrap(),
+            vec![Value::Long(11)]
+        );
+        let conflict = [TxForm::Op(TxOp::Cas {
+            entity: EntityRef::Id(entity),
+            attribute: 1_000,
+            old: Some(Value::Long(10).into()),
+            new: Value::Long(99).into(),
+        })];
+        assert_eq!(
+            memory_report
+                .db_after
+                .with_forms(&conflict, &functions, 3)
+                .unwrap_err()
+                .code,
+            overlay_report
+                .db_after
+                .with_functions(&conflict, &functions, 3)
+                .unwrap_err()
+                .code,
         );
     }
 }

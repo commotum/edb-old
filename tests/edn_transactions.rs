@@ -640,7 +640,6 @@ fn postgres_socket_schema_maps_and_receipt_replay_precede_ident_resolution() {
         rejected.details.get("remote_code").map(String::as_str),
         Some("postgres/idempotency-key-reused")
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(server);
     writer.shutdown();
 }

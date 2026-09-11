@@ -469,9 +469,9 @@ impl LastTxInstantMemo {
 
 /// One exact immutable database value used by read-side APIs.
 ///
-/// The two basis representations are deliberate rather than an extensible
-/// storage abstraction: an eager semantic-kernel value, or a native
-/// PostgreSQL peer snapshot backed by its persistent tree and recent tier.
+/// Its basis may be an eager memory value, an immutable block snapshot, or a
+/// speculative delta. Each representation supports the same selective reads
+/// and transaction assessor.
 /// Temporal and custom filters belong to this value, so every consumer sees
 /// the same information instead of receiving a detached `View` hint.
 #[derive(Clone)]
@@ -836,7 +836,7 @@ impl OverlayDeltaCursor {
 /// Lazy current-index cursor over one exact point-in-time database value.
 ///
 /// Eager values borrow their immutable index slice. Native values own a
-/// root-pinned peer cursor which lower-bound seeks both the durable tree and
+/// immutable peer cursor which lower-bound seeks both the durable tree and
 /// its recent tier. Every yielded item is owned so callers cannot retain a
 /// cache or tree-node borrow across cursor advancement.
 pub struct DatabaseValuePrefixCursor<'a> {
@@ -1479,22 +1479,38 @@ impl DatabaseValue {
         )
     }
 
-    pub(crate) fn fulltext_overlay_cursor(&self, attribute: u32) -> Option<OverlayIndexCursor> {
-        let ReadBasis::TransactionOverlay(overlay) = &self.basis else {
-            return None;
-        };
+    /// Assertion candidates not covered by the captured search attachment.
+    /// The authenticated recent tier starts after the exact canonical index
+    /// basis to which that attachment is bound; speculative indexes are the
+    /// disjoint continuation after the committed value. Attribute-prefix seeks
+    /// avoid scanning unrelated facts or materializing the durable database.
+    pub(crate) fn fulltext_unindexed_cursor(
+        &self,
+        attribute: u32,
+    ) -> Result<impl Iterator<Item = Datom>, SemanticError> {
         let prefix = IndexPrefix::Aevt {
             attribute,
             entity: None,
             value: None,
         };
-        Some(overlay.indexes.cursor(
-            true,
-            IndexOrder::Aevt,
-            |datom| compare_prefix(datom, &prefix),
-            false,
-            Some(prefix.clone()),
-        ))
+        let recent = self
+            .block_snapshot()
+            .map(|snapshot| snapshot.recent_tier().prefix_cursor(true, &prefix))
+            .transpose()?;
+        let local = match &self.basis {
+            ReadBasis::TransactionOverlay(overlay) => Some(overlay.indexes.cursor(
+                true,
+                IndexOrder::Aevt,
+                |datom| compare_prefix(datom, &prefix),
+                false,
+                Some(prefix.clone()),
+            )),
+            _ => None,
+        };
+        Ok(recent
+            .into_iter()
+            .flatten()
+            .chain(local.into_iter().flatten().map(|datom| (*datom).clone())))
     }
 
     /// Build an exact db-after for assessment or pure speculation. Chained
@@ -2472,7 +2488,7 @@ impl DatabaseValue {
     }
 
     /// Coordinate retained by a queued native transaction report. This is
-    /// observability for root/generation pin pressure, not a read capability.
+    /// observability for queued root/generation retention, not a read capability.
     pub(crate) fn native_retention_coordinate(&self) -> Option<(u64, Option<crate::Digest>)> {
         match &self.basis {
             ReadBasis::Eager(_) => None,

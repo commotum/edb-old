@@ -129,7 +129,9 @@ fn operator_staging_tolerates_same_writer_renewal_but_owned_lease_stays_exact() 
             .prepare(&mut store, &crate::persistent_tree::TreeConfig::default())
             .unwrap();
         let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
-        let capture = reader.pin_reference(&f.database.reference_key()).unwrap();
+        let capture = reader
+            .capture_reference(&f.database.reference_key())
+            .unwrap();
         let before = current(&mut store, &f.database);
         let lease_key = f.database.lease_key();
         let lease = store.read_ref(&lease_key).unwrap().unwrap();
@@ -216,7 +218,9 @@ fn moving_publication_fences_staged_root_and_retry_preserves_the_newer_tail() {
         .prepare(&mut store, &crate::persistent_tree::TreeConfig::default())
         .unwrap();
     let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
-    let capture = reader.pin_reference(&f.database.reference_key()).unwrap();
+    let capture = reader
+        .capture_reference(&f.database.reference_key())
+        .unwrap();
     let before = current(&mut store, &f.database);
     let epoch = writer.borrow().writer_epoch();
     let commit = Rc::clone(&writer);
@@ -250,7 +254,9 @@ fn moving_publication_fences_staged_root_and_retry_preserves_the_newer_tail() {
         retained.indexes, before.indexes,
         "stale staging did not publish"
     );
-    let latest = reader.pin_reference(&f.database.reference_key()).unwrap();
+    let latest = reader
+        .capture_reference(&f.database.reference_key())
+        .unwrap();
     let publication = publish_index_as_operator(
         &mut store,
         &reader,

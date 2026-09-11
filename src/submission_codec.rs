@@ -13,7 +13,7 @@ use crate::{DatabaseIdentity, ServiceTransactionReport, TransactionRequest};
 
 const REQUEST: u8 = 11;
 const RESPONSE: u8 = 12;
-const VERSION: u8 = 1;
+pub(super) const VERSION: u8 = 6;
 
 pub(crate) struct WireReport {
     pub before: ExactEndpoint,
@@ -52,16 +52,6 @@ pub(crate) fn encode_submission(
         encode_persistent_tx_form(&mut bytes, form)?;
         put_framed_bytes(&mut body, &bytes)?;
     }
-    // Form encoding has already enforced shape/depth limits before this walk.
-    if crate::transaction::forms_have_edn(&request.forms) {
-        body[0] = 5;
-    } else if forms_have_fulltext_attributes(&request.forms) {
-        body[0] = 4;
-    } else if crate::transaction::forms_have_partition_directives(&request.forms) {
-        body[0] = 3;
-    } else if crate::transaction::forms_have_extended_inputs(&request.forms) {
-        body[0] = 2;
-    }
     encode_blob(REQUEST, &body)
 }
 
@@ -70,7 +60,7 @@ pub(crate) fn decode_submission(
 ) -> Result<(DatabaseIdentity, TransactionRequest), SemanticError> {
     let mut cursor = Cursor::new(decode_blob(bytes, REQUEST)?);
     let version = cursor.u8()?;
-    if ![1, 2, 3, 4, 5].contains(&version) {
+    if version != VERSION {
         return Err(fault(
             "transport/version",
             "unsupported native submission version",
@@ -96,30 +86,6 @@ pub(crate) fn decode_submission(
         form.finish()?;
     }
     cursor.finish()?;
-    if version < 5 && crate::transaction::forms_have_edn(&forms) {
-        return Err(fault(
-            "transport/version",
-            "EDN forms require native submission version 5",
-        ));
-    }
-    if version < 4 && forms_have_fulltext_attributes(&forms) {
-        return Err(fault(
-            "transport/version",
-            "fulltext attribute descriptors require native submission version 4",
-        ));
-    }
-    if version < 3 && crate::transaction::forms_have_partition_directives(&forms) {
-        return Err(fault(
-            "transport/version",
-            "partition directives require native submission version 3",
-        ));
-    }
-    if version == 1 && crate::transaction::forms_have_extended_inputs(&forms) {
-        return Err(fault(
-            "transport/version",
-            "structured transaction inputs require native submission version 2",
-        ));
-    }
     Ok((
         identity,
         TransactionRequest {
@@ -129,11 +95,6 @@ pub(crate) fn decode_submission(
             tx_instant_override,
         },
     ))
-}
-
-fn forms_have_fulltext_attributes(forms: &[TxForm]) -> bool {
-    forms.iter().any(|form| matches!(form,
-        TxForm::Op(TxOp::InstallAttribute(attribute) | TxOp::AlterAttribute(attribute)) if attribute.fulltext))
 }
 
 fn framed<'a>(cursor: &mut Cursor<'a>) -> Result<&'a [u8], SemanticError> {
@@ -208,8 +169,6 @@ fn decode_op(cursor: &mut Cursor<'_>) -> Result<TxOp, SemanticError> {
         },
         5 => TxOp::InstallAttribute(decode_attribute(cursor)?),
         6 => TxOp::AlterAttribute(decode_attribute(cursor)?),
-        9 => TxOp::InstallAttribute(decode_attribute(cursor)?.fulltext()),
-        10 => TxOp::AlterAttribute(decode_attribute(cursor)?.fulltext()),
         7 => TxOp::ForcePartition {
             tempid: cursor.string()?,
             partition: decode_entity_ref(cursor)?,
@@ -285,6 +244,7 @@ fn decode_attribute(cursor: &mut Cursor<'_>) -> Result<Attribute, SemanticError>
     attribute.indexed = cursor.boolean()?;
     attribute.component = cursor.boolean()?;
     attribute.no_history = cursor.boolean()?;
+    attribute.fulltext = cursor.boolean()?;
     attribute.tuple = match cursor.u8()? {
         0 => None,
         1 => Some(TupleSpec::Homogeneous(decode_value_type(cursor)?)),
@@ -442,9 +402,6 @@ pub(crate) fn encode_submission_outcome(
             bytes.push(u8::from(error.anomaly.is_some()));
             if let Some(anomaly) = &error.anomaly {
                 encode_runtime_value(&mut bytes, anomaly, 0)?;
-                if crate::transaction::runtime_has_extended_inputs(anomaly) {
-                    bytes[0] = 2;
-                }
             }
         }
     }
@@ -470,7 +427,7 @@ fn categories() -> [ErrorCategory; 10] {
 pub(crate) fn decode_submission_outcome(bytes: &[u8]) -> Result<WireOutcome, SemanticError> {
     let mut cursor = Cursor::new(decode_blob(bytes, RESPONSE)?);
     let version = cursor.u8()?;
-    if ![1, 2].contains(&version) {
+    if version != VERSION {
         return Err(fault(
             "transport/version",
             "unsupported native outcome version",
@@ -523,17 +480,6 @@ pub(crate) fn decode_submission_outcome(bytes: &[u8]) -> Result<WireOutcome, Sem
             error.details.insert("remote_code".into(), remote_code);
             if cursor.boolean()? {
                 error.anomaly = Some(Box::new(decode_runtime(&mut cursor, 0)?));
-                if version == 1
-                    && error
-                        .anomaly
-                        .as_deref()
-                        .is_some_and(crate::transaction::runtime_has_extended_inputs)
-                {
-                    return Err(fault(
-                        "transport/version",
-                        "structured reference anomalies require native outcome version 2",
-                    ));
-                }
             }
             WireOutcome::Rejected(error)
         }
@@ -548,12 +494,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn edn_forms_have_additive_transport_and_keep_unresolved_request_identity() {
+    fn edn_forms_use_current_transport_and_keep_unresolved_request_identity() {
         let identity = DatabaseIdentity::new("catalog", "lineage");
         let request =
             TransactionRequest::from_edn("edn", "[{:unknown/a 1 :unknown/b #{3 2}}]").unwrap();
         let bytes = encode_submission(&identity, &request).unwrap();
-        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], 5);
+        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], VERSION);
         let (_, decoded) = decode_submission(&bytes).unwrap();
         assert_eq!(encode_submission(&identity, &decoded).unwrap(), bytes);
         assert_eq!(
@@ -590,12 +536,12 @@ mod tests {
         );
         assert_eq!(
             decode_blob(&encode_submission(&identity, &typed).unwrap(), REQUEST).unwrap()[0],
-            1
+            VERSION
         );
     }
 
     #[test]
-    fn partition_directives_use_new_wire_grammar_and_preserve_request_identity() {
+    fn partition_directives_use_current_wire_grammar_and_preserve_request_identity() {
         let identity = DatabaseIdentity::new("catalog", "lineage");
         let forms = vec![
             TxForm::Op(TxOp::ForcePartition {
@@ -628,7 +574,7 @@ mod tests {
             tx_instant_override: Some(100),
         };
         let bytes = encode_submission(&identity, &request).unwrap();
-        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], 3);
+        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], VERSION);
         let (_, decoded) = decode_submission(&bytes).unwrap();
         assert_eq!(encode_submission(&identity, &decoded).unwrap(), bytes);
         assert_eq!(
@@ -670,39 +616,11 @@ mod tests {
     }
 
     #[test]
-    fn tuple_input_versions_are_explicit_and_old_receipt_hashes_remain_stable() {
-        // Actual pre-extension receipt hashes from the Goal 2 independent-
-        // process workflow, not expectations computed by this new encoder.
-        for (name, expected) in [
-            (
-                "Ada",
-                "71acc726c2c5243f67e09eb7afa4d8482790a579d51eec4949d9b22732e50133",
-            ),
-            (
-                "Grace",
-                "d1dc8d55e6f0dd4c14d14114486f366a503fa22dcd2265bdfaf6b14aa7ca41d9",
-            ),
-        ] {
-            let form = TxForm::EntityMap(EntityMap {
-                id: Some(EntityRef::Temp("person".into())),
-                attributes: vec![(
-                    AttributeRef::Ident(Keyword::new("person", "name")),
-                    MapValue::Value(Value::String(name.into()).into()),
-                )],
-            });
-            let digest = submission_request_digest(&[form], None, None).unwrap();
-            assert_eq!(
-                digest
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>(),
-                expected
-            );
-        }
+    fn tuple_inputs_use_current_wire_grammar_and_preserve_request_identity() {
         let identity = DatabaseIdentity::new("catalog", "lineage");
-        let old = TransactionRequest::new("old", vec![]);
-        let old_bytes = encode_submission(&identity, &old).unwrap();
-        assert_eq!(decode_blob(&old_bytes, REQUEST).unwrap()[0], 1);
+        let empty = TransactionRequest::new("empty", vec![]);
+        let empty_bytes = encode_submission(&identity, &empty).unwrap();
+        assert_eq!(decode_blob(&empty_bytes, REQUEST).unwrap()[0], VERSION);
         let new = TransactionRequest::new(
             "tuple",
             vec![TxOp::Add {
@@ -715,7 +633,7 @@ mod tests {
             }],
         );
         let bytes = encode_submission(&identity, &new).unwrap();
-        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], 2);
+        assert_eq!(decode_blob(&bytes, REQUEST).unwrap()[0], VERSION);
         let (_, decoded) = decode_submission(&bytes).unwrap();
         assert_eq!(
             submission_request_digest(&new.forms, None, None).unwrap(),
@@ -865,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn fulltext_descriptors_require_new_wire_grammar_but_false_keeps_old_bytes() {
+    fn fulltext_descriptors_round_trip_in_the_current_wire_grammar() {
         let identity = DatabaseIdentity::new("catalog", "lineage");
         let attribute = Attribute::new(
             1_000,
@@ -873,32 +791,39 @@ mod tests {
             ValueType::String,
             Cardinality::One,
         );
-        let old = TransactionRequest::new("old", vec![TxOp::InstallAttribute(attribute.clone())]);
-        let encoded = encode_submission(&identity, &old).unwrap();
-        assert_eq!(decode_blob(&encoded, REQUEST).unwrap()[0], 1);
-        let (_, decoded) = decode_submission(&encoded).unwrap();
-        assert!(
-            matches!(&decoded.forms[0], TxForm::Op(TxOp::InstallAttribute(attribute)) if !attribute.fulltext)
-        );
-        let new =
-            TransactionRequest::new("new", vec![TxOp::InstallAttribute(attribute.fulltext())]);
-        let encoded = encode_submission(&identity, &new).unwrap();
-        let body = decode_blob(&encoded, REQUEST).unwrap();
-        assert_eq!(body[0], 4);
-        let (_, decoded) = decode_submission(&encoded).unwrap();
-        assert!(
-            matches!(&decoded.forms[0], TxForm::Op(TxOp::InstallAttribute(attribute)) if attribute.fulltext)
-        );
-        for version in [1, 2, 3] {
-            let mut downgraded = body.to_vec();
-            downgraded[0] = version;
-            assert_eq!(
-                decode_submission(&encode_blob(REQUEST, &downgraded).unwrap())
-                    .err()
-                    .unwrap()
-                    .code,
-                "transport/version"
+        for attribute in [attribute.clone(), attribute.fulltext()] {
+            let request = TransactionRequest::new(
+                "descriptor",
+                vec![
+                    TxOp::InstallAttribute(attribute.clone()),
+                    TxOp::AlterAttribute(attribute.clone()),
+                ],
             );
+            let encoded = encode_submission(&identity, &request).unwrap();
+            let body = decode_blob(&encoded, REQUEST).unwrap();
+            assert_eq!(body[0], VERSION);
+            let (_, decoded) = decode_submission(&encoded).unwrap();
+            assert_eq!(decoded.forms.len(), 2);
+            for form in &decoded.forms {
+                let TxForm::Op(TxOp::InstallAttribute(decoded) | TxOp::AlterAttribute(decoded)) =
+                    form
+                else {
+                    panic!("expected an attribute descriptor");
+                };
+                assert_eq!(decoded, &attribute);
+            }
+            assert_eq!(encode_submission(&identity, &decoded).unwrap(), encoded);
+            for version in 1..VERSION {
+                let mut downgraded = body.to_vec();
+                downgraded[0] = version;
+                assert_eq!(
+                    decode_submission(&encode_blob(REQUEST, &downgraded).unwrap())
+                        .err()
+                        .unwrap()
+                        .code,
+                    "transport/version"
+                );
+            }
         }
     }
 
@@ -939,7 +864,7 @@ mod tests {
         let bytes =
             encode_submission(&DatabaseIdentity::new("catalog", "lineage"), &request).unwrap();
         let mut body = decode_blob(&bytes, REQUEST).unwrap().to_vec();
-        assert_eq!(body[0], 2);
+        assert_eq!(body[0], VERSION);
         let (_, decoded) = decode_submission(&bytes).unwrap();
         assert_eq!(
             submission_request_digest(&request.forms, None, None).unwrap(),
@@ -959,7 +884,7 @@ mod tests {
         )])));
         let bytes = encode_submission_outcome(&Err(error.clone())).unwrap();
         let mut body = decode_blob(&bytes, RESPONSE).unwrap().to_vec();
-        assert_eq!(body[0], 2);
+        assert_eq!(body[0], VERSION);
         let WireOutcome::Rejected(decoded) = decode_submission_outcome(&bytes).unwrap() else {
             panic!("expected rejection")
         };

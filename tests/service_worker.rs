@@ -28,16 +28,6 @@ fn unique(prefix: &str) -> String {
     )
 }
 
-fn pin_count(client: &mut Client) -> i64 {
-    client
-        .query_one(
-            "SELECT count(*) FROM atomic_refs WHERE key LIKE 'pins/read/%' AND value IS NOT NULL",
-            &[],
-        )
-        .unwrap()
-        .get(0)
-}
-
 fn schema() -> Schema {
     let mut schema = Schema::new();
     schema
@@ -76,7 +66,7 @@ fn config(
     capacity: usize,
 ) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.into(),
+        connection: PostgresConnectionConfig::plaintext(connection),
         database_id,
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(2),
@@ -268,8 +258,8 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
         retained.oldest_queued_report_basis_t,
         Some(initial_basis + 1)
     );
-    assert_eq!(retained.distinct_pinned_roots, 1);
-    assert_eq!(retained.distinct_pinned_generations, 1);
+    assert_eq!(retained.distinct_report_roots, 1);
+    assert_eq!(retained.distinct_report_generations, 1);
 
     for ordinal in 0..REPORTS {
         assert_eq!(
@@ -288,8 +278,8 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
     assert_eq!(drained.queued_report_payload_bytes, 0);
     assert!(drained.max_queued_report_payload_bytes > 0);
     assert_eq!(drained.oldest_queued_report_basis_t, None);
-    assert_eq!(drained.distinct_pinned_roots, 0);
-    assert_eq!(drained.distinct_pinned_generations, 0);
+    assert_eq!(drained.distinct_report_roots, 0);
+    assert_eq!(drained.distinct_report_generations, 0);
 
     drop(reports);
     let abandoned = client.subscribe_reports();
@@ -307,15 +297,15 @@ fn report_subscription_is_lossless_beyond_the_previous_bounded_buffer() {
         retained.oldest_queued_report_basis_t,
         Some(initial_basis + REPORTS + 1)
     );
-    assert_eq!(retained.distinct_pinned_roots, 1);
-    assert_eq!(retained.distinct_pinned_generations, 1);
+    assert_eq!(retained.distinct_report_roots, 1);
+    assert_eq!(retained.distinct_report_generations, 1);
     drop(abandoned);
     let abandoned = client.stats();
     assert_eq!(abandoned.queued_reports, 0);
     assert_eq!(abandoned.queued_report_payload_bytes, 0);
     assert_eq!(abandoned.oldest_queued_report_basis_t, None);
-    assert_eq!(abandoned.distinct_pinned_roots, 0);
-    assert_eq!(abandoned.distinct_pinned_generations, 0);
+    assert_eq!(abandoned.distinct_report_roots, 0);
+    assert_eq!(abandoned.distinct_report_generations, 0);
     service.shutdown();
 }
 
@@ -421,21 +411,21 @@ fn originating_result_is_enqueued_before_the_subscription_report() {
 }
 
 #[test]
-fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
+fn unread_reports_remain_readable_after_shutdown() {
     let Some(connection) = connection() else {
         return;
     };
-    let fixture = common::PostgresFixture::new(&connection, "service_report_pin");
+    let fixture = common::PostgresFixture::new(&connection, "service_report_read");
     let connection = fixture.connection.clone();
-    let database_id = unique("service_report_pin");
+    let database_id = unique("service_report_read");
     let initial_basis = setup(&connection, &database_id);
     let service =
-        TransactionService::start(config(&connection, database_id.clone(), "report-pin", 2))
+        TransactionService::start(config(&connection, database_id.clone(), "report-read", 2))
             .unwrap();
     let client = service.client();
     let reports = client.subscribe_reports();
     let direct = client
-        .transact(request("report-pin", 17), Duration::from_secs(2))
+        .transact(request("report-read", 17), Duration::from_secs(2))
         .unwrap();
     assert_eq!(direct.basis_t, initial_basis + 1);
     drop(direct);
@@ -443,13 +433,10 @@ fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
     assert_eq!(client.stats().queued_reports, 1);
     assert_eq!(client.stats().max_queued_reports, 1);
 
-    // Once the service and client are gone, only the unread report owns its
-    // immutable db-before/db-after values and therefore their shared native
-    // reader-session pins.
+    // Immutable report values do not register reader lifetimes in storage;
+    // ordinary reachability and retention grace keep their blocks readable.
     service.shutdown();
     drop(client);
-    let mut observer = Client::connect(&connection, NoTls).unwrap();
-    assert!(pin_count(&mut observer) > 0);
 
     let queued = reports.recv_timeout(Duration::ZERO).unwrap();
     assert_eq!(reports.pending_reports(), 0);
@@ -462,18 +449,9 @@ fn unread_report_owns_native_pins_after_service_shutdown_until_it_is_dropped() {
             .unwrap(),
         vec![Value::Long(17)]
     );
-    assert!(pin_count(&mut observer) > 0);
 
     drop(queued);
     drop(reports);
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while pin_count(&mut observer) != 0 {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "dropping the last queued report did not release its pin session"
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[test]
@@ -518,9 +496,8 @@ fn queue_is_bounded_and_timeout_is_unknown_then_reconcilable() {
         .unwrap();
     let mut service_config = config(&connection, database_id.clone(), "one", 1);
     service_config.lease_duration = Duration::from_secs(30);
-    let service = TransactionService::start_configured_with_options(
+    let service = TransactionService::start_with_options(
         service_config,
-        PostgresConnectionConfig::plaintext(&connection),
         ServiceOptions {
             execution: TransactionExecutionOptions {
                 native: registry.build(),

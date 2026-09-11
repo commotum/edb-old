@@ -1,15 +1,12 @@
 //! Reclaimable report continuity across excision generations.
 //!
-//! The current observer anchor and connected peers own interest tokens; captured
-//! database values do not. Handoff g retains the last publication in g and the interest token for
-//! g+1, never its own token: a lagging peer keeps intermediate handoffs alive
-//! without making the chain retain itself after the peer advances or drops.
+//! A generation handoff retains its final publication for the configured grace
+//! period. Readers never register interest or mutate these references.
 use super::root::{Block, DatabaseRoot};
 use super::{BatchOutcome, ObjectId, PgBlockStore, RefChange, RefCondition};
 use crate::{ErrorCategory, SemanticError};
 use std::collections::BTreeMap;
 
-const TOKEN_KIND: u16 = 90;
 const HANDOFF_KIND: u16 = 91;
 const PREFIX: &str = "handoffs/";
 const CURSOR: &str = "ownership/handoff-prune";
@@ -18,38 +15,7 @@ const CURSOR: &str = "ownership/handoff-prune";
 pub struct ReportHandoffMaintenance {
     pub examined: usize,
     pub removed: usize,
-    pub unsettled: bool,
     pub complete: bool,
-}
-
-pub(crate) fn token_bytes(
-    route: [u8; 16],
-    identity: [u8; 16],
-    generation: u64,
-) -> Result<Vec<u8>, SemanticError> {
-    if route == [0; 16] || identity == [0; 16] {
-        return Err(invalid(
-            "Report interest requires an issued route and lineage",
-        ));
-    }
-    let mut payload = Vec::with_capacity(40);
-    payload.extend_from_slice(&route);
-    payload.extend_from_slice(&identity);
-    payload.extend_from_slice(&generation.to_be_bytes());
-    Block {
-        kind: TOKEN_KIND,
-        links: Vec::new(),
-        payload,
-    }
-    .encode()
-}
-
-pub(crate) fn token_id(
-    route: [u8; 16],
-    identity: [u8; 16],
-    generation: u64,
-) -> Result<ObjectId, SemanticError> {
-    Ok(crate::sha256(&token_bytes(route, identity, generation)?))
 }
 
 pub(crate) fn handoff_key(route: [u8; 16], generation: u64) -> String {
@@ -59,51 +25,6 @@ pub(crate) fn handoff_key(route: [u8; 16], generation: u64) -> String {
     )
 }
 
-pub(crate) fn observer_key(route: [u8; 16]) -> String {
-    format!("observers/{}", super::engine::identity_string(route))
-}
-
-pub(crate) fn stage_token(
-    store: &mut PgBlockStore,
-    route: [u8; 16],
-    identity: [u8; 16],
-    generation: u64,
-) -> Result<ObjectId, SemanticError> {
-    if store.write_protection().is_none() {
-        return Err(invalid("Report interest staging requires write protection"));
-    }
-    store.put(&token_bytes(route, identity, generation)?)
-}
-
-/// Create/restore prepares this alongside its exact database-root transition.
-/// Peers only pin the precreated token: their object privilege remains SELECT.
-pub(crate) fn prepare_observer_anchor(
-    store: &mut PgBlockStore,
-    route: [u8; 16],
-    identity: [u8; 16],
-    generation: u64,
-) -> Result<(RefCondition, RefChange), SemanticError> {
-    let key = observer_key(route);
-    let previous = store.read_ref(&key)?;
-    if previous.as_ref().is_some_and(|r| r.value.is_none()) {
-        return Err(SemanticError::conflict(
-            "storage/report-handoff-conflict",
-            "A retired observer route cannot be reactivated",
-        ));
-    }
-    let id = stage_token(store, route, identity, generation)?;
-    Ok((
-        RefCondition {
-            key: key.clone(),
-            expected: previous.map(|r| r.revision),
-        },
-        RefChange {
-            key,
-            value: Some(id.to_vec()),
-        },
-    ))
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReportHandoff {
     pub route: [u8; 16],
@@ -111,20 +32,21 @@ pub(crate) struct ReportHandoff {
     pub generation: u64,
     pub basis: u64,
     pub publication: ObjectId,
-    pub next_token: ObjectId,
+    pub created_ms: u64,
 }
 
 impl ReportHandoff {
     fn encode(&self) -> Result<Vec<u8>, SemanticError> {
         self.validate()?;
-        let mut payload = Vec::with_capacity(48);
+        let mut payload = Vec::with_capacity(56);
         payload.extend_from_slice(&self.route);
         payload.extend_from_slice(&self.identity);
         payload.extend_from_slice(&self.generation.to_be_bytes());
         payload.extend_from_slice(&self.basis.to_be_bytes());
+        payload.extend_from_slice(&self.created_ms.to_be_bytes());
         Block {
             kind: HANDOFF_KIND,
-            links: vec![self.publication, self.next_token],
+            links: vec![self.publication],
             payload,
         }
         .encode()
@@ -132,11 +54,11 @@ impl ReportHandoff {
 
     pub(crate) fn decode(id: &ObjectId, bytes: &[u8]) -> Result<Self, SemanticError> {
         // Fixed-size codec admission precedes Block's payload/link allocations.
-        if bytes.len() != 20 + 64 + 48 {
+        if bytes.len() != 20 + 32 + 56 {
             return Err(invalid("Invalid report handoff length"));
         }
         let block = Block::decode(id, bytes)?;
-        if block.kind != HANDOFF_KIND || block.links.len() != 2 || block.payload.len() != 48 {
+        if block.kind != HANDOFF_KIND || block.links.len() != 1 || block.payload.len() != 56 {
             return Err(invalid("Invalid report handoff shape"));
         }
         let result = Self {
@@ -145,20 +67,16 @@ impl ReportHandoff {
             generation: u64::from_be_bytes(block.payload[32..40].try_into().unwrap()),
             basis: u64::from_be_bytes(block.payload[40..48].try_into().unwrap()),
             publication: block.links[0],
-            next_token: block.links[1],
+            created_ms: u64::from_be_bytes(block.payload[48..56].try_into().unwrap()),
         };
         result.validate()?;
         Ok(result)
     }
 
     fn validate(&self) -> Result<(), SemanticError> {
-        let next = self
-            .generation
-            .checked_add(1)
-            .ok_or_else(|| invalid("Report generation overflows"))?;
-        if self.next_token != token_id(self.route, self.identity, next)? {
+        if self.route == [0; 16] || self.identity == [0; 16] || self.generation == u64::MAX {
             return Err(invalid(
-                "Report handoff must retain the next generation's interest token",
+                "Report handoff requires a valid route, lineage and generation",
             ));
         }
         Ok(())
@@ -196,19 +114,6 @@ pub(crate) fn prepare_handoff(
     {
         return Err(invalid("Report handoff differs from its final publication"));
     }
-    let next = generation
-        .checked_add(1)
-        .ok_or_else(|| invalid("Report generation overflows"))?;
-    let anchor_key = observer_key(route);
-    let anchor = store.read_ref(&anchor_key)?;
-    let current_token = token_id(route, identity, generation)?;
-    if anchor.as_ref().and_then(|r| r.value.as_deref()) != Some(&current_token[..]) {
-        return Err(SemanticError::conflict(
-            "storage/report-handoff-conflict",
-            "Current report interest anchor differs from the excision generation",
-        ));
-    }
-    let next_token = stage_token(store, route, identity, next)?;
     let id = store.put(
         &ReportHandoff {
             route,
@@ -216,36 +121,25 @@ pub(crate) fn prepare_handoff(
             generation,
             basis,
             publication,
-            next_token,
+            created_ms: now_ms()?,
         }
         .encode()?,
     )?;
     Ok((
-        vec![
-            RefCondition {
-                key: key.clone(),
-                expected: None,
-            },
-            RefCondition {
-                key: anchor_key.clone(),
-                expected: anchor.map(|r| r.revision),
-            },
-        ],
-        vec![
-            RefChange {
-                key,
-                value: Some(id.to_vec()),
-            },
-            RefChange {
-                key: anchor_key,
-                value: Some(next_token.to_vec()),
-            },
-        ],
+        vec![RefCondition {
+            key: key.clone(),
+            expected: None,
+        }],
+        vec![RefChange {
+            key,
+            value: Some(id.to_vec()),
+        }],
     ))
 }
 
 pub(crate) fn prune(
     store: &mut PgBlockStore,
+    minimum_age: std::time::Duration,
     maximum: usize,
     control: &mut dyn FnMut() -> Result<(), SemanticError>,
 ) -> Result<ReportHandoffMaintenance, SemanticError> {
@@ -256,6 +150,8 @@ pub(crate) fn prune(
         ));
     }
     control()?;
+    let cutoff =
+        now_ms()?.saturating_sub(u64::try_from(minimum_age.as_millis()).unwrap_or(u64::MAX));
     let cursor = store.read_ref(CURSOR)?;
     let after = cursor
         .as_ref()
@@ -286,21 +182,7 @@ pub(crate) fn prune(
             return Err(invalid("Report handoff differs from its reference key"));
         }
         report.examined += 1;
-        let interest = token_id(handoff.route, handoff.identity, handoff.generation)?;
-        let Some((count, proof)) = super::ownership::settled_count(store, interest)? else {
-            report.unsettled = true;
-            report.complete = false;
-            report.removed = 0;
-            return Ok(report);
-        };
-        for condition in proof {
-            if let Some(old) = guards.insert(condition.key, condition.expected)
-                && old != condition.expected
-            {
-                return Err(stale());
-            }
-        }
-        if count == 0 {
+        if handoff.created_ms < cutoff {
             guards.insert(key.clone(), Some(reference.revision));
             changes.push(RefChange {
                 key: key.clone(),
@@ -344,34 +226,27 @@ fn stale() -> SemanticError {
     )
 }
 
+fn now_ms() -> Result<u64, SemanticError> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| invalid("Clock precedes Unix epoch"))?
+        .as_millis();
+    u64::try_from(now).map_err(|_| invalid("Clock exceeds storage time range"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn interest_tokens_bind_route_lineage_and_generation_without_graph_edges() {
-        let id = token_id([1; 16], [2; 16], 3).unwrap();
-        for (route, identity, generation) in [
-            ([4; 16], [2; 16], 3),
-            ([1; 16], [4; 16], 3),
-            ([1; 16], [2; 16], 4),
-        ] {
-            assert_ne!(id, token_id(route, identity, generation).unwrap());
-        }
-        let token = Block::decode(&id, &token_bytes([1; 16], [2; 16], 3).unwrap()).unwrap();
-        assert!(token.links.is_empty());
-        assert!(token_id([0; 16], [2; 16], 3).is_err());
-    }
-
-    #[test]
-    fn handoffs_are_bounded_and_cannot_keep_their_own_interest_alive() {
+    fn handoffs_authenticate_one_publication_and_reject_invalid_coordinates() {
         let handoff = ReportHandoff {
             route: [1; 16],
             identity: [2; 16],
             generation: 3,
             basis: 7,
             publication: [4; 32],
-            next_token: token_id([1; 16], [2; 16], 4).unwrap(),
+            created_ms: 1,
         };
         let bytes = handoff.encode().unwrap();
         assert_eq!(
@@ -382,11 +257,11 @@ mod tests {
             let bad = vec![0; size];
             assert!(ReportHandoff::decode(&crate::sha256(&bad), &bad).is_err());
         }
-        let mut own = handoff;
-        own.next_token = token_id(own.route, own.identity, own.generation).unwrap();
-        assert!(own.encode().is_err());
+        let mut invalid_route = handoff;
+        invalid_route.route = [0; 16];
+        assert!(invalid_route.encode().is_err());
         let mut forged = Block::decode(&crate::sha256(&bytes), &bytes).unwrap();
-        forged.links[1] = own.next_token;
+        forged.payload[..16].fill(0);
         let forged = forged.encode().unwrap();
         assert!(ReportHandoff::decode(&crate::sha256(&forged), &forged).is_err());
     }

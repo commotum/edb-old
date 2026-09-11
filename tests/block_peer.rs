@@ -34,7 +34,7 @@ fn live_peer_reports_index_adoption_and_restart_cache_use_the_same_block_values(
     BlockDatabase::create(&config, "items", schema).unwrap();
     let started = Instant::now();
     let service = TransactionService::start(TransactionServiceConfig {
-        connection: fixture.connection.clone(),
+        connection: PostgresConnectionConfig::plaintext(&fixture.connection),
         database_id: "items".into(),
         holder_id: "peer-test".into(),
         lease_duration: Duration::from_secs(10),
@@ -165,7 +165,6 @@ fn live_peer_reports_index_adoption_and_restart_cache_use_the_same_block_values(
     let after = peer.load_stats();
     assert!(after.cursor_ranges > before.cursor_ranges);
     assert!(after.cursor_cache_hits > before.cursor_cache_hits);
-    assert_eq!(after.compatibility_materializations, 0);
 
     let directory = tempfile::tempdir().unwrap();
     std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -240,7 +239,7 @@ fn committed_windows_survive_changed_writer_policy_but_explicit_reader_limits_ap
         .unwrap();
     let database = BlockDatabase::create(&config, "items", schema).unwrap();
     let settings = |holder: &str, capacity_limits| TransactionServiceConfig {
-        connection: fixture.connection.clone(),
+        connection: PostgresConnectionConfig::plaintext(&fixture.connection),
         database_id: "items".into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(10),
@@ -305,9 +304,11 @@ fn committed_windows_survive_changed_writer_policy_but_explicit_reader_limits_ap
         max_transaction_bytes: 1,
         ..Default::default()
     };
-    let restarted = TransactionService::start_configured_with_options(
-        settings("smaller", capacity),
-        config,
+    let restarted = TransactionService::start_with_options(
+        TransactionServiceConfig {
+            connection: config,
+            ..settings("smaller", capacity)
+        },
         atomic_core::ServiceOptions {
             indexing: atomic_core::BackgroundIndexingConfig {
                 memory_index_threshold_bytes: 1,

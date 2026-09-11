@@ -310,11 +310,8 @@ fn reader(database: &str, records: usize, payload: usize) -> Result<()> {
             }
         }
         let cache = connection.cache_stats();
-        if cache.peak_entries > CACHE_ENTRIES
-            || cache.peak_bytes > cache_bytes
-            || connection.load_stats().compatibility_materializations != 0
-        {
-            return Err("native cache/materialization invariant failed".into());
+        if cache.peak_entries > CACHE_ENTRIES || cache.peak_bytes > cache_bytes {
+            return Err("native cache invariant failed".into());
         }
         window.finish(mode, &samples, &context.snapshot(), &format!(
             "cache_entries={} cache_bytes={} cache_peak_bytes={} cache_hits={} cache_misses={} cache_evictions={} cache_oversized_bypasses={} sample_cap={} scan_payload_bytes={}",
@@ -333,9 +330,9 @@ fn reader(database: &str, records: usize, payload: usize) -> Result<()> {
 fn writer(database: &str, records: usize, payload: usize) -> Result<()> {
     let lifetime = Window::new();
     let config = postgres_config_from_env()?;
-    let service = TransactionService::start_configured_with_indexing(
+    let service = TransactionService::start_with_indexing(
         TransactionServiceConfig {
-            connection: String::new(),
+            connection: config.clone(),
             database_id: database.to_owned(),
             holder_id: format!("read-load-{}", std::process::id()),
             lease_duration: Duration::from_secs(5),
@@ -347,7 +344,6 @@ fn writer(database: &str, records: usize, payload: usize) -> Result<()> {
                 ..CapacityLimits::default()
             },
         },
-        config.clone(),
         BackgroundIndexingConfig {
             memory_index_threshold_bytes: 2 * 1024 * 1024,
             memory_index_max_bytes: 8 * 1024 * 1024,

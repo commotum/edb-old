@@ -601,7 +601,7 @@ fn postgres_captured_reads_dropped_transaction_retry_restart_and_cleanup() {
             connection.load_stats().cursor_sql_reads > read_before.cursor_sql_reads,
             "zero-cache indexed query performs actual worker PostgreSQL reads"
         );
-        // Leave a completed pinned value unconsumed, then abandon it. Its
+        // Leave a completed immutable value unconsumed, then abandon it. Its
         // operation slot is released only after worker-side destruction.
         let abandoned = client.db().unwrap();
         until(|| executor.stats().queued == 0 && executor.stats().running == 0).await;

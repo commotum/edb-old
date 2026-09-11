@@ -12,8 +12,7 @@ Build once, then run that same optimized executable for both sizes:
 cargo build --release --example read_load
 sha256sum target/release/examples/read_load
 for read_load_records in 2048 4096; do
-  ATOMIC_POSTGRES_URL='host=... user=... dbname=...' \
-  ATOMIC_POSTGRES_TRANSPORT=plaintext \
+  ATOMIC_POSTGRES_URL='host=... user=... dbname=... sslmode=disable' \
   ATOMIC_CONNECT_TIMEOUT_MS=5000 \
   ATOMIC_STATEMENT_TIMEOUT_MS=30000 \
   ATOMIC_LOCK_TIMEOUT_MS=10000 \
@@ -75,7 +74,7 @@ separate latency populations; `_all` populations mix operation kinds and are
 useful primarily for aggregate costs, not a query latency claim.
 
 `foreground_sql` comes from an explicit Query operation context. `sql` is the
-whole-process driver-call count, including connections' observation, pins,
+whole-process driver-call count, including connections' observation,
 writer lease maintenance, indexing and notification publication. Connection
 handshakes and control calls are also shown separately. `attribution` contains
 `OperationKind:calls:errors:elapsed_us`; parent/child attribution is inclusive,
@@ -127,9 +126,7 @@ give four times the useful throughput. An idle writer still incurs renewal and
 observation costs, while indexing may overlap mixed-phase commits. Summed driver
 wall time can exceed elapsed phase time because operations overlap.
 
-These instructions describe the current campaign, not a recorded performance
-result. The removed relational-engine measurements do not predict this engine's
-cache boundary, SQL count, throughput or recovery behavior. Consult
-[acceptance](acceptance.md) for separately recorded current runs, including
-configuration and failures. Missing PostgreSQL configuration or an unrun example
-is not successful integration evidence.
+These instructions describe a measurement workflow, not a recorded performance
+result. Measure cache boundaries, SQL calls, throughput and recovery on the
+intended workload. See [acceptance](acceptance.md) for verification boundaries.
+Missing PostgreSQL configuration or an unrun example is not integration evidence.

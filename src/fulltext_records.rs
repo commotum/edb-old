@@ -223,7 +223,7 @@ impl Iterator for Records<'_> {
     }
 }
 
-/// Caller owns an authenticated, unfiltered native source and retains its pin
+/// Caller owns an authenticated, unfiltered native source and retains that value
 /// throughout building. No full database or expanded posting list is collected.
 #[cfg(test)]
 pub(crate) fn fulltext_records(db: &DatabaseValue) -> Result<Records<'_>, SemanticError> {

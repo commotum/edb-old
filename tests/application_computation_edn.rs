@@ -123,11 +123,13 @@ fn count_program(function: Function, sources: Vec<QueryTemplateSource>) -> Progr
 }
 
 #[test]
-fn portable_function_programs_are_additively_versioned_and_match_direct_edn() {
+fn portable_function_programs_use_shared_format_and_match_direct_edn() {
     let program = count_program(Function::Count, vec![]);
     let bytes = encode_program(&program).unwrap();
-    assert_eq!(&bytes[16..18], &11u16.to_be_bytes());
-    assert_eq!(&bytes[25..27], &4u16.to_be_bytes());
+    assert_eq!(
+        &bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     let decoded = decode_program(&bytes).unwrap();
     assert_eq!(encode_program(&decoded).unwrap(), bytes);
     let database = Database::new(Schema::new()).unwrap().database_value();
@@ -140,19 +142,24 @@ fn portable_function_programs_are_additively_versioned_and_match_direct_edn() {
         )
         .unwrap();
     assert!(matches!(output, ProgramOutput::Query(rows) if rows == vec![vec![Value::Long(3)]]));
-    // A general relation source must not demote an otherwise newer template.
+    // General relation sources use the same format as other native queries.
     let wide = count_program(
         Function::Count,
         vec![QueryTemplateSource::relation("$rows", 0)],
     );
-    assert_eq!(&encode_program(&wide).unwrap()[25..27], &4u16.to_be_bytes());
-    let legacy = count_program(Function::Tuple, vec![]);
-    let legacy_bytes = encode_program(&legacy).unwrap();
-    assert_eq!(&legacy_bytes[16..18], &7u16.to_be_bytes());
-    assert_eq!(&legacy_bytes[25..27], &2u16.to_be_bytes());
     assert_eq!(
-        encode_program(&decode_program(&legacy_bytes).unwrap()).unwrap(),
-        legacy_bytes
+        decode_program(&encode_program(&wide).unwrap()).unwrap(),
+        wide
+    );
+    let tuple = count_program(Function::Tuple, vec![]);
+    let tuple_bytes = encode_program(&tuple).unwrap();
+    assert_eq!(
+        &tuple_bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
+    assert_eq!(
+        encode_program(&decode_program(&tuple_bytes).unwrap()).unwrap(),
+        tuple_bytes
     );
 }
 
@@ -266,7 +273,7 @@ fn portable_helper_program_is_durable_and_invokes_after_reopen() {
     drop(database);
     drop(connection);
     println!(
-        "PORTABLE_PROGRAM_OK abi=11 canonical_bytes=true reopen_resolve_execute_check_drop_us={}",
+        "PORTABLE_PROGRAM_OK current_abi=true canonical_bytes=true reopen_resolve_execute_check_drop_us={}",
         started.elapsed().as_micros()
     );
 }

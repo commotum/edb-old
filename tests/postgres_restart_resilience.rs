@@ -84,9 +84,9 @@ impl Drop for DisposableServer {
         }
     }
 }
-fn writer_config(holder: &str) -> TransactionServiceConfig {
+fn writer_config(connection: &PostgresConnectionConfig, holder: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: String::new(),
+        connection: connection.clone(),
         database_id: "wal".into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(3),
@@ -144,9 +144,7 @@ fn immediate_postgres_crash_preserves_acknowledged_receipts_and_live_immutable_v
         .history()
         .collect_datoms(IndexOrder::Eavt)
         .unwrap();
-    let writer =
-        TransactionService::start_configured(writer_config("before-crash"), config.clone())
-            .unwrap();
+    let writer = TransactionService::start(writer_config(&config, "before-crash")).unwrap();
     let attached = Connection::attach_configured(config.clone(), writer.client(), 8).unwrap();
     let request = TransactionRequest::new(
         "acknowledged",
@@ -175,9 +173,8 @@ fn immediate_postgres_crash_preserves_acknowledged_receipts_and_live_immutable_v
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     assert_eq!(logged.len(), 1);
-    let standby = TransactionStandby::start_configured(
-        writer_config("after-crash"),
-        config.clone(),
+    let standby = TransactionStandby::start(
+        writer_config(&config, "after-crash"),
         Duration::from_millis(20),
     )
     .unwrap();
@@ -292,7 +289,6 @@ fn immediate_postgres_crash_preserves_acknowledged_receipts_and_live_immutable_v
     replacement.shutdown();
     let reopened = Connection::connect_configured(config.clone(), "wal", 0).unwrap();
     common::assert_same_information(&reopened.db(), &current);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     eprintln!(
         "BLOCK_WAL_RESTART immediate_crash=true durability_settings=on restart_ms={restarted_ms} exact_retry=true uncommitted_reference_rolled_back=true retained_values_and_log=true"
     );

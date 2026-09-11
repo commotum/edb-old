@@ -71,7 +71,7 @@ pub struct QueryStepWork {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryClauseStep {
-    /// Start order, unlike the legacy plan's completion order.
+    /// Clause start order.
     pub id: usize,
     pub phase_id: usize,
     pub schedule_position: usize,

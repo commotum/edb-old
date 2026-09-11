@@ -147,11 +147,13 @@ let writer = TransactionService::start_with_defaults(config, defaults)?;
 ```
 
 `Database` and `DatabaseValue` both provide `with_defaults`,
-`with_forms_with_defaults`, and `with_edn_with_defaults`. The eager forms method
-also accepts its existing `TxFunctions` argument. Native speculation additionally
+`with_forms_with_defaults`, and `with_edn_with_defaults`. The memory forms method
+accepts `TxFunctions`; `DatabaseValue::with_functions_and_defaults` accepts the
+same callbacks for any exact snapshot. Callbacks receive `DatabaseValue` and
+use the shared selective transaction assessor. Native speculation additionally
 provides `with_forms_with_limits_and_defaults` to configure allocation and resource
 limits independently. The complete service constructor is
-`start_configured_with_indexing_and_defaults(config, connection, indexing, defaults)`;
+`start_with_indexing_and_defaults(config, indexing, defaults)`;
 the connection keeps its explicit PostgreSQL/TLS policy.
 
 The stock CLI accepts `--default-partition :part/orders` on `atomic transactor`

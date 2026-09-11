@@ -146,7 +146,7 @@ fn shared_decoded_cache_is_bounded_and_never_supplies_open_or_retry_authority() 
     restarted.shutdown();
 
     // A warm program does not reopen a retired database. The previously held
-    // immutable value remains valid under its existing root pin.
+    // immutable value remains readable within its GC grace period.
     DatabaseCatalog::connect_configured(&config)
         .unwrap()
         .retire("program-cache")

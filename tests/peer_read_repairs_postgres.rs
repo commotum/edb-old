@@ -106,10 +106,6 @@ fn print_cost(
         after.cursor_leaf_reads - before.cursor_leaf_reads,
         elapsed.as_micros(),
     );
-    assert_eq!(
-        after.compatibility_materializations,
-        before.compatibility_materializations
-    );
 }
 
 fn check_reads(url: &str, database: &str, size: usize, root: u64) {

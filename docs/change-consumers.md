@@ -63,7 +63,7 @@ Cancellation/timeout bound idle waits; already-issued SQL is subject to the
 configured PostgreSQL I/O policy. No background event-prefetch thread exists.
 
 Checkpoints are not retention pins or part of backups' canonical database data.
-Each read takes only a transaction-scoped generation pin. Excision changes the
+Reads capture immutable values without registration. Excision changes the
 generation: existing consumers and old checkpoints fail explicitly with
 `consumer/generation-changed`, even when old bytes remain retained. Choose a new
 consumer name deliberately to process the current retained generation; old

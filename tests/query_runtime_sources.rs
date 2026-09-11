@@ -626,63 +626,6 @@ fn raw_tuple_rules_inherit_sources_and_history_components_remain_literal() {
     );
 }
 
-/// Run each mode/size in its own process for meaningful VmHWM/getrusage peak
-/// memory. This is a local workload measurement, never a universal throughput claim.
-#[test]
-#[ignore = "opt-in fresh-process query work/memory/CPU measurement"]
-fn measured_query_runtime_scaling() {
-    let count: i64 = std::env::var("ATOMIC_QUERY_BENCH_ROWS")
-        .unwrap_or_else(|_| "1000".into())
-        .parse()
-        .unwrap();
-    assert!((1..=100_000).contains(&count), "measurement fixture bound");
-    let mode = std::env::var("ATOMIC_QUERY_BENCH_MODE").unwrap_or_else(|_| "hash".into());
-    assert!(matches!(mode.as_str(), "hash" | "reference"));
-    let usage = || {
-        let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
-        assert_eq!(
-            unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) },
-            0
-        );
-        unsafe { usage.assume_init() }
-    };
-    let cpu = |usage: &libc::rusage| {
-        (usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) * 1_000_000
-            + usage.ru_utime.tv_usec
-            + usage.ru_stime.tv_usec
-    };
-    let inputs = relation_inputs(count);
-    let io = OperationContext::new(OperationKind::Query);
-    let start_usage = usage();
-    let start = Instant::now();
-    let outcome = {
-        let _scope = io.enter();
-        QueryEngine::execute_sources(
-            &relation_query(),
-            &[],
-            &inputs,
-            &QueryControl {
-                force_scan: mode == "reference",
-                ..Default::default()
-            },
-        )
-        .unwrap()
-    };
-    let wall_us = start.elapsed().as_micros();
-    let finish = usage();
-    assert_eq!(outcome.stats.rows_produced, count as u64);
-    assert_eq!(io.snapshot().sql_calls, 0);
-    eprintln!(
-        "query_measure mode={mode} rows={count} wall_us={wall_us} cpu_us={} peak_rss_kib={} work={} candidates={} join_table_peak_bytes={} accounted_value_bytes={} sql_calls=0",
-        cpu(&finish) - cpu(&start_usage),
-        finish.ru_maxrss,
-        outcome.stats.work,
-        outcome.stats.join_candidates,
-        outcome.stats.peak_join_bytes,
-        outcome.stats.allocated_value_bytes
-    );
-}
-
 #[test]
 fn chunked_raw_sources_keep_repeated_variables_duplicates_and_control_limits() {
     let query = Query::new(
@@ -927,7 +870,7 @@ fn log_functions_join_provenance_and_keep_captured_basis_on_actual_postgres() {
         assert_eq!(
             warm.snapshot().sql_calls,
             0,
-            "warm query must not run foreground SQL health/pin probes"
+            "warm query must not run foreground SQL probes"
         );
         eprintln!(
             "query PostgreSQL grouped requests={count} matches={} seeks={} datoms={} sql_calls=0 wall_us={} cold_sql_calls={}",

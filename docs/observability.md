@@ -87,7 +87,7 @@ let publication = TelemetryPublisher::start(
 )?;
 let emitter = publication.emitter();
 let options = ServiceOptions { telemetry: Some(emitter.clone()), ..Default::default() };
-// Pass options to TransactionService::start_configured_with_options or standby.
+// Pass options to TransactionService::start_with_options or standby.
 
 // From an existing lifecycle loop: disabled/not-due calls do not capture stats.
 emitter.publish_if_due(|| TelemetrySnapshot::capture(

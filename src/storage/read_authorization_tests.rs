@@ -228,7 +228,7 @@ fn registry_batch_matches_sequential_updates_without_intermediate_writes() {
 }
 
 #[test]
-fn pruning_respects_age_shared_owners_and_atomic_new_pin_guards() {
+fn pruning_respects_age_shared_owners_and_atomic_new_owner_guards() {
     use crate::storage::ownership::{BlockCollector, CollectionPhase, publish_refs, settled_count};
     use crate::storage::{BatchOutcome, RefChange};
     use std::time::Duration;
@@ -293,19 +293,20 @@ fn pruning_respects_age_shared_owners_and_atomic_new_pin_guards() {
         ..DatabaseValueRoot::from(&publication)
     };
     let captured_id = store.put(&captured.encode().unwrap()).unwrap();
-    let pin = format!("pins/test/{:032x}", crate::uuid_v7().unwrap());
-    let pin_change = |value| RefChange {
-        key: pin.clone(),
+    // Restore/publication roots own objects; merely reading a value does not.
+    let owner = format!("restores/test/{:032x}", crate::uuid_v7().unwrap());
+    let owner_change = |value| RefChange {
+        key: owner.clone(),
         value,
     };
     assert!(matches!(
         publish_refs(
             &mut store,
             &[RefCondition {
-                key: pin.clone(),
+                key: owner.clone(),
                 expected: None
             }],
-            &[pin_change(Some(captured_id.to_vec()))]
+            &[owner_change(Some(captured_id.to_vec()))]
         )
         .unwrap(),
         BatchOutcome::Applied(_)
@@ -358,15 +359,18 @@ fn pruning_respects_age_shared_owners_and_atomic_new_pin_guards() {
         32,
     )
     .unwrap();
-    assert_eq!(held.removed, 0, "a held value owns its covering index");
-    let pin_revision = store.read_ref(&pin).unwrap().unwrap().revision;
+    assert_eq!(
+        held.removed, 0,
+        "an explicitly published owner retains its covering index"
+    );
+    let owner_revision = store.read_ref(&owner).unwrap().unwrap().revision;
     publish_refs(
         &mut store,
         &[RefCondition {
-            key: pin.clone(),
-            expected: Some(pin_revision),
+            key: owner.clone(),
+            expected: Some(owner_revision),
         }],
-        &[pin_change(None)],
+        &[owner_change(None)],
     )
     .unwrap();
     settle(&mut collector);
@@ -390,24 +394,24 @@ fn pruning_respects_age_shared_owners_and_atomic_new_pin_guards() {
     .unwrap();
     assert_eq!(candidate.removed, 1);
     assert!(!candidate.unsettled);
-    // The prior pin was released and collected, so the exact value wrapper
-    // may no longer exist. Real capture re-stages it under root/GC protection
-    // before publishing the new pin; copying only its old hash is not capture.
+    // An explicit restore owner participates in publication ownership. Once
+    // released, its value wrapper may be collected. Re-stage the wrapper
+    // under root/GC protection before publishing a new owner.
     let protection =
         super::super::engine::protection(&mut store, std::slice::from_ref(&condition)).unwrap();
-    let mut pin_guards = protection.conditions.clone();
+    let mut owner_guards = protection.conditions.clone();
     store.set_write_protection(Some(protection)).unwrap();
     assert_eq!(store.put(&captured.encode().unwrap()).unwrap(), captured_id);
     store.set_write_protection(None).unwrap();
-    let pin_revision = store.read_ref(&pin).unwrap().unwrap().revision;
-    pin_guards.push(RefCondition {
-        key: pin.clone(),
-        expected: Some(pin_revision),
+    let owner_revision = store.read_ref(&owner).unwrap().unwrap().revision;
+    owner_guards.push(RefCondition {
+        key: owner.clone(),
+        expected: Some(owner_revision),
     });
     publish_refs(
         &mut store,
-        &pin_guards,
-        &[pin_change(Some(captured_id.to_vec()))],
+        &owner_guards,
+        &[owner_change(Some(captured_id.to_vec()))],
     )
     .unwrap();
     assert!(
@@ -425,14 +429,14 @@ fn pruning_respects_age_shared_owners_and_atomic_new_pin_guards() {
         ),
         "a concurrent new owner invalidates the prune proof at publication"
     );
-    let pin_revision = store.read_ref(&pin).unwrap().unwrap().revision;
+    let owner_revision = store.read_ref(&owner).unwrap().unwrap().revision;
     publish_refs(
         &mut store,
         &[RefCondition {
-            key: pin.clone(),
-            expected: Some(pin_revision),
+            key: owner.clone(),
+            expected: Some(owner_revision),
         }],
-        &[pin_change(None)],
+        &[owner_change(None)],
     )
     .unwrap();
     settle(&mut collector);
@@ -490,7 +494,7 @@ fn collector_checkpoints_folded_owners_before_destructive_phases() {
             .unwrap(),
         )
         .unwrap();
-    let key = format!("pins/test/{:032x}", crate::uuid_v7().unwrap());
+    let key = format!("restores/test/{:032x}", crate::uuid_v7().unwrap());
     publish_refs(
         &mut store,
         &[RefCondition {
@@ -730,7 +734,7 @@ fn readonly_peer_reopens_embedded_value_after_old_publication_wrapper_is_collect
     drop(second);
     drop(first);
     drop(value);
-    snapshot.release().unwrap();
+    drop(snapshot);
     writer.release().unwrap();
 
     let peer =

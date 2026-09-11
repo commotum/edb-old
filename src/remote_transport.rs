@@ -114,7 +114,7 @@ impl RemoteClientConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct RemoteTransportConfig {
     pub max_in_flight: usize,
-    /// Cumulative handshake/request/response/receipt handoff deadline.
+    /// Cumulative handshake/request/response deadline.
     pub request_timeout: Duration,
     pub max_frame_bytes: usize,
     pub max_hint_bytes: usize,
@@ -570,7 +570,6 @@ impl Connection {
                 let tx_hash = wire.after.tx_hash;
                 let replayed = wire.replayed;
                 let report = self.open_socket_report(*wire);
-                let _ = tls.write_all(&[1]);
                 Ok(CommittedTransaction {
                     basis_t,
                     tx_hash,
@@ -672,11 +671,6 @@ fn serve(
         ));
     }
     write_frame(&mut tls, &outcome)?;
-    if result.is_ok() {
-        let mut ack = [0];
-        let _ = tls.read_exact(&mut ack);
-    }
-    drop(result);
     Ok(())
 }
 fn write_frame(stream: &mut impl Write, bytes: &[u8]) -> io::Result<()> {

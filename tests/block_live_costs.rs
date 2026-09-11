@@ -104,9 +104,9 @@ fn complete_live_writes_and_automatic_indexes_exceed_cache_while_warm_values_nee
     let complete_started = Instant::now();
     let complete_context = OperationContext::new(OperationKind::Application);
     let _complete_scope = complete_context.enter();
-    let service = TransactionService::start_configured_with_options(
+    let service = TransactionService::start_with_options(
         TransactionServiceConfig {
-            connection: fixture.connection.clone(),
+            connection: connection.clone(),
             database_id: "live-costs".into(),
             holder_id: "cost-sample".into(),
             lease_duration: Duration::from_secs(60),
@@ -118,7 +118,6 @@ fn complete_live_writes_and_automatic_indexes_exceed_cache_while_warm_values_nee
                 ..CapacityLimits::default()
             },
         },
-        connection.clone(),
         ServiceOptions {
             index_preparation_parallelism: 2,
             // Every nonempty novelty triggers the automatic scheduler. There
@@ -241,7 +240,7 @@ fn complete_live_writes_and_automatic_indexes_exceed_cache_while_warm_values_nee
     );
 
     // Warm exactly the reused immutable value. No sync, snapshot reopening,
-    // report reconstruction, or pin admission is hidden inside this interval.
+    // or report reconstruction is hidden inside this interval.
     assert_eq!(
         current.values(probe, SCORE).unwrap(),
         vec![Value::Long(1536)]

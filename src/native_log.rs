@@ -1,7 +1,7 @@
 //! An immutable log endpoint and a lazy, authenticated transaction cursor.
 //!
-//! A retained snapshot owns a root pin; an offline backup owns its
-//! authenticated immutable point. Log data comes
+//! A retained snapshot captures one immutable publication, protected by the GC
+//! grace period; an offline backup owns its immutable point. Log data comes
 //! from authoritative transaction content, never an index whose noHistory
 //! consolidation may already have discarded earlier assertions.
 use crate::{

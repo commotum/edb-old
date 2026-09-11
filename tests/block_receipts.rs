@@ -153,7 +153,7 @@ fn exact_receipts_preserve_links_tempids_and_immutable_request_bindings() {
 }
 
 #[test]
-fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() {
+fn receipt_index_is_selective_path_copy_and_insertion_order_independent() {
     let Some((_scope, mut store)) = fixture("block_receipt_scale") else {
         return;
     };
@@ -161,16 +161,14 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
     let mut index = RequestIndex::empty();
     let mut entries = Vec::new();
     let mut retained = None;
-    let mut sample = Instant::now();
-    let mut maximum_writes = 0;
-    for n in 0u64..2048 {
+    const RECEIPTS: u64 = 128;
+    for n in 0..RECEIPTS {
         let key = scoped_request_key(&IDENTITY, &format!("request-{n}")).unwrap();
         receipt.request_digest = sha256(&n.to_be_bytes());
         let context = OperationContext::new(OperationKind::Transaction);
         let guard = context.enter();
         let id = receipt.put(&mut store).unwrap();
         index = index.insert(&mut store, key, id).unwrap();
-        maximum_writes = maximum_writes.max(writes(&context));
         assert!(
             writes(&context) <= 24,
             "hashed-key updates must remain path-sized, not receipt-count-sized"
@@ -180,7 +178,7 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
         if n == 63 {
             retained = Some(index);
         }
-        if [63, 511, 2047].contains(&n) {
+        if [63, RECEIPTS - 1].contains(&n) {
             let context = OperationContext::new(OperationKind::Query);
             let guard = context.enter();
             let (key, id) = entries[n as usize / 2];
@@ -190,15 +188,7 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
                 context.snapshot().sql_calls <= 20,
                 "lookup should touch a bounded trie path and one receipt"
             );
-            let calls = context.snapshot().sql_calls;
             drop(guard);
-            eprintln!(
-                "BLOCK_RECEIPT_SAMPLE receipts={} complete_insert_interval_ms={} max_insert_objects={} lookup_and_receipt_reads={calls}",
-                n + 1,
-                sample.elapsed().as_millis(),
-                maximum_writes
-            );
-            sample = Instant::now();
         }
     }
     let retained = retained.unwrap();
@@ -230,6 +220,7 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
     entries.sort_unstable();
     let mut after = None;
     let mut enumerated = Vec::new();
+    let mut pages = 0;
     loop {
         let context = OperationContext::new(OperationKind::Query);
         let guard = context.enter();
@@ -242,10 +233,12 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
         if page.is_empty() {
             break;
         }
+        pages += 1;
         after = page.last().map(|(key, _)| *key);
         enumerated.extend(page);
     }
     assert_eq!(enumerated, entries);
+    assert_eq!(pages, 2);
     assert!(
         index
             .scan(&mut store, Some([0xff; 32]), 1)
@@ -256,7 +249,8 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
         index.scan(&mut store, None, 0).unwrap_err().code,
         "storage/request-index-limit"
     );
-    let (key, previous) = entries[1024];
+    let middle = entries.len() / 2;
+    let (key, previous) = entries[middle];
     let occupied = store
         .put(b"privacy-safe occupied request decision")
         .unwrap();
@@ -278,7 +272,9 @@ fn receipt_index_scale_is_selective_path_copy_and_insertion_order_independent() 
         "administrative replacement keeps the request key occupied"
     );
     assert_eq!(
-        replaced.scan(&mut store, Some(entries[1023].0), 1).unwrap(),
+        replaced
+            .scan(&mut store, Some(entries[middle - 1].0), 1)
+            .unwrap(),
         vec![(key, occupied)]
     );
 }

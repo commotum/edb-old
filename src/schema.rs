@@ -320,6 +320,7 @@ impl Schema {
     /// called. Keeping this operation on the schema cache mirrors recovered
     /// `alter-attribute`, which updates the immutable database value only after
     /// the complete transaction has passed its hooks.
+    #[cfg(test)]
     pub(crate) fn alter(&mut self, proposed: Attribute) -> Result<(), SemanticError> {
         self.alter_with_work(proposed, &mut SchemaValidationWork::default())
     }

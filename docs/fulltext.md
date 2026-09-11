@@ -67,9 +67,9 @@ weighting. Treat them as relative relevance for the available index, not a
 probability, application invariant or cross-version/Lucene-compatible number.
 Datalog relation ordering is unspecified even when the direct search is ranked.
 The corpus is the retained historical assertions in the selected search
-publication, not just entities visible through the final current/time/filter
-view. Repeated assertions at different transactions are distinct documents;
-speculation adds its local assertion documents. Final hit validation enforces
+publication plus committed recent and speculative assertions, not just entities
+visible through the final current/time/filter view. Repeated assertions at
+different transactions are distinct documents. Final hit validation enforces
 the supplied view, but does not recalculate a view-specific corpus. Consequently
 historical facts and filtered-out documents can influence a visible hit's score.
 Filters are not a promise that ranking statistics reveal nothing about the
@@ -82,22 +82,22 @@ Candidates are checked against the supplied value's visible facts. Retained,
 `as_of`, `since`, history, filtered and speculative views must not leak a fact
 hidden by that view. The `tx` column is the visible assertion transaction, not
 the indexing time. An old assertion can still appear in history after its
-current value is retracted. An attachment is fixed for its captured value. A newer value can have a more
-complete search basis even when no new transaction changed its logical snapshot
-key. That key omits physical index placement and is not a fulltext-result cache
-key.
+current value is retracted. An attachment is fixed for its captured value.
+Indexing can change retained corpus statistics (for example, by physically
+removing no-history assertions) without changing the logical snapshot key.
+That key omits physical index placement and is not a fulltext-result cache key.
 
 Persisted search reads the captured source-bound immutable attachment; it does not
 fall back to materializing the whole native database when the projection is
-missing. Missing/unusable search data is an explicit error. Fulltext coverage
-is reported through `FulltextStats::index_basis_t`; a value newer than this
-frontier may have missing matches. Ordinary transaction acknowledgment is not
-a search-index completion receipt. Small deployments can lower background index scheduling thresholds, or an
-attached writer connection can request indexing and synchronize to the desired
-basis. Required search data is built in the same coherent job as canonical
-indexes; successful adoption does not publish a missing attachment. A read-only connection's transaction socket currently does not carry
-maintenance requests. Do not turn an absent hit into a uniqueness or absence
-constraint.
+missing. Missing/unusable required search data is an explicit error. Searches
+also seek the requested attribute's bounded committed recent tail and local
+speculative assertions, so new matches are visible before indexing. An attribute
+installed after the captured index basis needs no attachment until that basis
+includes it. `FulltextStats::index_basis_t` reports persisted indexing progress,
+not a missing-match frontier. Indexing reduces tail analysis work; required
+search data is built in the same coherent job as canonical indexes. Use
+structured equality and uniqueness constraints for exact-value requirements,
+not analyzed or top-k-limited search results.
 
 `FulltextOptions` defaults to at most 10,000 returned hits, 10 million work
 units, 64 MiB cumulative logical allocation/read admission, a 64 KiB query,
@@ -113,7 +113,9 @@ hits and reports truncation when matches exist.
 Queries debit search work and allocated bytes from their enclosing query or
 stored-program budget, including attempted work on failure. A query row limit
 remains an error, not an implicit search top-k. `QueryStats` reports search,
-lagging-search and truncation counts; nested query counters are included.
+lagging-index and truncation counts; nested query counters are included. The
+`fulltext_lagging_searches` counter means the persisted index was behind the
+value, even though the same search included its unindexed assertions.
 `FulltextStats::read_bytes` counts authenticated search objects loaded through
 the backing source (PostgreSQL or repository; zero for eager fixtures and decoded
 page-cache hits). `admitted_bytes` is the separate cumulative logical allowance.
@@ -126,9 +128,9 @@ broader I/O picture.
 The current program codec supports fulltext-bearing native templates, including
 nested queries and rules; author them with the typed query API and current encoder. Fulltext is also allowed in transaction
 programs: the writer re-executes the program and commits its grounded facts.
-Its selection can depend on eventual index availability, so do not describe
-such a program as deterministic from its logical db-before key alone. Use
-structured indexes for correctness constraints needing complete membership.
+Ranking can depend on physical corpus statistics, so do not describe a
+score-dependent program as deterministic from its logical db-before key alone.
+Use structured indexes for exact-value correctness constraints.
 
 Search data is derived, not authoritative history. Backup preserves the
 canonical publication and supplies an exact read graph with a coherent search
@@ -196,8 +198,8 @@ occupancy. Its decoded entries are not persisted; underlying immutable objects
 can use the shared SSD cache on a live snapshot. Active cursors may retain
 additional pages outside cache ownership. A fully warmed search can require no
 SQL. New live captures establish current
-authority and reader-session protection; cold source reads fail if that
-protection is no longer valid. A cache hit is not an authorization token.
+authority; subsequent cold source reads remain subject to storage retention.
+A cache hit is not an authorization token.
 
 The block background service prepares canonical indexes and their search
 attachment as one coherent candidate. `BackgroundIndexingStats.fulltext`
@@ -221,7 +223,7 @@ readers. Reopen/synchronize to observe the replacement; existing held values
 continue using their old immutable graph.
 
 Objects are retained through ordinary Rust graph ownership. Current publications,
-exact receipts, authorized retained indexes, reader pins and protected work all
+exact receipts, authorized retained indexes and protected work all
 participate in the same GC protocol. Dropping an old root does not delete pages
 reachable through a successor or another owner. GC advances bounded persisted
 work and honors retention; no feature-specific SQL page frontier, sidecar import
@@ -229,7 +231,7 @@ or physical discard procedure is involved. Search repair is not secure erasure.
 
 Excision builds search from the rewritten successor before activating its new
 generation. New current/history views exclude excised facts, while already-held
-authorized old values retain their pre-excision graph. New serialized openings
+authorized old values can read their pre-excision graph within storage retention. New serialized openings
 of the old generation are denied. GC waits for remaining owners and retention;
 independent backups, SSD copies and already delivered application data are
 separate retention responsibilities. See [operations](operations.md#excision).

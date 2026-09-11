@@ -208,16 +208,7 @@ impl BlockDatabase {
         changes.extend(super::catalog::creation_changes(
             &mut store, &database, name_id,
         )?);
-        let (observer_guard, observer_change) = super::report_handoff::prepare_observer_anchor(
-            &mut store,
-            database.route,
-            database.identity,
-            0,
-        )?;
-        let mut publication_guards = protection.conditions.clone();
-        publication_guards.push(observer_guard);
-        changes.push(observer_change);
-        match super::ownership::publish_refs(&mut store, &publication_guards, &changes)? {
+        match super::ownership::publish_refs(&mut store, &protection.conditions, &changes)? {
             BatchOutcome::Applied(_) => Ok((database, true)),
             BatchOutcome::Conflict(_) => Err(conflict(
                 "storage/create-conflict",
@@ -361,7 +352,7 @@ impl BlockTransactor {
         let duration = lease_millis(options.lease_duration)?;
         let mut store = PgBlockStore::connect(config)?;
         let reader = BlockReader::connect(config, options.reads.clone())?;
-        let capture = reader.pin_reference(&database.reference_key())?;
+        let capture = reader.capture_reference(&database.reference_key())?;
         let result = (|| {
             let root = DatabaseRoot::decode_for_identity(
                 &capture.root_id(),
@@ -447,7 +438,6 @@ impl BlockTransactor {
             store.set_write_protection(None)?;
             Ok((lease, revision))
         })();
-        let _ = capture.release();
         let (lease, lease_revision) = result?;
         Ok(Self {
             store,
@@ -500,46 +490,32 @@ impl BlockTransactor {
         request_key: &str,
         digest: ObjectId,
     ) -> Result<Option<ServiceTransactionReport>, SemanticError> {
-        let key = scoped_request_key(&self.database.identity, request_key)?;
-        let capture = self
-            .reader
-            .pin_current_reference(&self.database.reference_key())?;
-        let result = (|| {
-            let root = self.load_root(capture.root_id())?;
-            RequestIndex::from_root(root.receipts)
-                .lookup(&mut self.store, key)?
-                .map(|id| self.replay(id, digest, &capture))
-                .transpose()
-        })();
-        let _ = capture.release();
-        result
+        self.reader
+            .resolve_request_outcome(&self.database, request_key, digest)
     }
     pub(crate) fn activate(
         &mut self,
     ) -> Result<(crate::RecoveryStats, crate::WriterResidencyStats), SemanticError> {
-        let capture = self.reader.pin_reference(&self.database.reference_key())?;
-        let result = (|| {
-            let root = self.load_root(capture.root_id())?;
-            self.check_epoch(&root)?;
-            self.refresh_owned_lease()?;
-            let snapshot = self.reader.capture_root(&capture)?;
-            let base_t = snapshot.indexed_basis_t();
-            let target_t = snapshot.basis_t();
-            self.publication_revision = capture.source_revision();
-            self.current = Some(snapshot);
-            Ok((
-                crate::RecoveryStats {
-                    base_t,
-                    target_t,
-                    tail_transactions: target_t - base_t,
-                    tail_range_reads: u64::from(target_t > base_t),
-                    rejected_manifests: 0,
-                },
-                self.writer_residency_stats(),
-            ))
-        })();
-        let _ = capture.release();
-        result
+        let capture = self
+            .reader
+            .capture_reference(&self.database.reference_key())?;
+        let root = self.load_root(capture.root_id())?;
+        self.check_epoch(&root)?;
+        self.refresh_owned_lease()?;
+        let snapshot = self.reader.capture_root(&capture)?;
+        let base_t = snapshot.indexed_basis_t();
+        let target_t = snapshot.basis_t();
+        self.publication_revision = capture.source_revision();
+        self.current = Some(snapshot);
+        Ok((
+            crate::RecoveryStats {
+                base_t,
+                target_t,
+                tail_transactions: target_t - base_t,
+                tail_range_reads: u64::from(target_t > base_t),
+            },
+            self.writer_residency_stats(),
+        ))
     }
     pub(crate) fn hint_database_value(&self) -> Option<DatabaseValue> {
         self.current.as_ref().map(BlockSnapshot::database_value)
@@ -621,7 +597,9 @@ impl BlockTransactor {
         &mut self,
         prepared: super::indexing::PreparedIndex,
     ) -> Result<IndexAdoption, SemanticError> {
-        let capture = self.reader.pin_reference(&self.database.reference_key())?;
+        let capture = self
+            .reader
+            .capture_reference(&self.database.reference_key())?;
         let result = (|| {
             let root = self.load_root(capture.root_id())?;
             self.check_epoch(&root)?;
@@ -668,7 +646,6 @@ impl BlockTransactor {
             })
         })();
         let _ = self.store.set_write_protection(None);
-        let _ = capture.release();
         result
     }
     pub(crate) fn writer_residency_stats(&self) -> crate::WriterResidencyStats {
@@ -735,20 +712,9 @@ impl BlockTransactor {
     /// Root and lease revisions fence every publication even under clock skew.
     pub fn renew(&mut self) -> Result<(), SemanticError> {
         for _ in 0..4 {
-            let capture = match self.reader.pin_reference(&self.database.reference_key()) {
-                Ok(capture) => capture,
-                Err(error)
-                    if matches!(
-                        error.code,
-                        "storage/capture-conflict"
-                            | "storage/capture-gc-conflict"
-                            | "storage/read-pin-changed"
-                    ) =>
-                {
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
+            let capture = self
+                .reader
+                .capture_reference(&self.database.reference_key())?;
             let result = (|| {
                 let root = self.load_root(capture.root_id())?;
                 self.check_epoch(&root)?;
@@ -781,7 +747,6 @@ impl BlockTransactor {
                     }
                 }
             })();
-            let _ = capture.release();
             if result? {
                 return Ok(());
             }
@@ -815,10 +780,11 @@ impl BlockTransactor {
             MAX_LOG_TRANSACTION_BYTES,
         )?;
         let key = scoped_request_key(&self.database.identity, &request.request_key)?;
-        let capture = self.reader.pin_reference(&self.database.reference_key())?;
+        let capture = self
+            .reader
+            .capture_reference(&self.database.reference_key())?;
         let result = self.transact_captured(request, digest, bytes, key, &capture, gate);
         let _ = self.store.set_write_protection(None);
-        let _ = capture.release();
         result
     }
     fn transact_captured(
@@ -973,7 +939,7 @@ impl BlockTransactor {
             transaction,
             assessed.tx_data.clone(),
             &[
-                capture.condition(),
+                capture.source_condition(),
                 protection
                     .conditions
                     .iter()
@@ -1094,51 +1060,35 @@ impl BlockTransactor {
         digest: ObjectId,
         capture: &super::snapshot::RootCapture,
     ) -> Result<ServiceTransactionReport, SemanticError> {
-        let operation = crate::OperationContext::current_or_process();
-        let _report_phase = operation.phase(crate::OperationKind::TransactionReport);
-        let bytes = required(&mut self.store, id)?;
-        super::excision::reject_tombstone_bytes(id, &bytes, &self.database.identity)?;
-        let receipt = ExactReceipt::load_from_bytes(&mut self.store, id, &bytes)?;
-        if receipt.identity != self.database.identity {
-            return Err(fault(
-                "storage/receipt-identity",
-                "Receipt belongs to a different database",
-            ));
-        }
-        if receipt.request_digest != digest {
-            return Err(conflict(
-                "postgres/idempotency-key-reused",
-                "Request key is already bound to different transaction data",
-            ));
-        }
-        self.reader.report_from_receipt(capture, receipt, true)
+        self.reader
+            .replay_receipt(capture, id, digest, self.database.identity)
     }
 
     /// Revalidate an admitted maintenance source on the serialized writer.
     /// Until this succeeds the service must not park ordinary fresh work.
     pub(crate) fn admit_excision(&mut self, source: &DatabaseRoot) -> Result<(), SemanticError> {
-        let capture = self.reader.pin_reference(&self.database.reference_key())?;
-        let result = (|| {
-            let current = self.load_root(capture.root_id())?;
-            self.check_epoch(&current)?;
-            self.refresh_owned_lease()?;
-            if !super::excision::same_source(&current, source) {
-                return Err(conflict(
-                    "excision/source-changed",
-                    "Canonical source changed during excision admission",
-                ));
-            }
-            Ok(())
-        })();
-        let _ = capture.release();
-        result
+        let capture = self
+            .reader
+            .capture_reference(&self.database.reference_key())?;
+        let current = self.load_root(capture.root_id())?;
+        self.check_epoch(&current)?;
+        self.refresh_owned_lease()?;
+        if !super::excision::same_source(&current, source) {
+            return Err(conflict(
+                "excision/source-changed",
+                "Canonical source changed during excision admission",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn adopt_excision(
         &mut self,
         mut prepared: super::excision::PreparedExcision,
     ) -> Result<IndexAdoption, SemanticError> {
-        let capture = self.reader.pin_reference(&self.database.reference_key())?;
+        let capture = self
+            .reader
+            .capture_reference(&self.database.reference_key())?;
         let result = (|| {
             let current = self.load_root(capture.root_id())?;
             self.check_epoch(&current)?;
@@ -1207,7 +1157,7 @@ impl BlockTransactor {
             prepared.candidate.writer_epoch = self.lease.epoch;
             let id = self.store.put(&prepared.candidate.encode()?)?;
             let snapshot = self.reader.capture_immutable(id, &protected.conditions)?;
-            // Keep the final original receipts only for connected observers
+            // Keep the final original receipts for the collection grace period
             // that have not crossed this generation yet. The handoff is an
             // independent reclaimable owner, never a prior-publication link
             // reachable from ordinary database values.
@@ -1267,7 +1217,6 @@ impl BlockTransactor {
             })
         })();
         let _ = self.store.set_write_protection(None);
-        let _ = capture.release();
         result
     }
     fn load_root(&mut self, id: ObjectId) -> Result<DatabaseRoot, SemanticError> {

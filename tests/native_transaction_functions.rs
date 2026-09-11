@@ -204,6 +204,106 @@ fn speculative_fixture() -> (
 }
 
 #[test]
+fn direct_native_predicates_need_no_alias_entities_or_marker_schema() {
+    let mut builder = NativeRegistry::builder();
+    builder
+        .attribute_predicate(Symbol::new("checks", "positive"), |value, control| {
+            control.check(1)?;
+            Ok(RuntimeValue::Scalar(Value::Bool(
+                matches!(value, Value::Long(n) if *n > 0),
+            )))
+        })
+        .unwrap();
+    builder
+        .entity_predicate(
+            Symbol::new("checks", "small"),
+            |database, entity, control| {
+                control.check(1)?;
+                Ok(RuntimeValue::Scalar(Value::Bool(
+                    database.values(entity, SCORE)? == vec![Value::Long(7)],
+                )))
+            },
+        )
+        .unwrap();
+    let options = options(builder.build());
+    let mut schema = Schema::new();
+    let mut score = Attribute::new(
+        SCORE,
+        Keyword::new("item", "score"),
+        ValueType::Long,
+        Cardinality::One,
+    );
+    score.predicates.push("checks/positive".into());
+    schema.install(score).unwrap();
+    let database = Database::new(schema).unwrap().database_value();
+    let seeded = database
+        .with_forms_with_execution_options(
+            &[
+                TxForm::Op(add(EntityRef::Temp("item".into()), SCORE, Value::Long(7))),
+                TxForm::Op(add(
+                    EntityRef::Temp("spec".into()),
+                    DB_IDENT as u32,
+                    Value::Keyword(Keyword::new("item", "spec")),
+                )),
+                TxForm::Op(add(
+                    EntityRef::Temp("spec".into()),
+                    DB_ENTITY_PREDS as u32,
+                    Value::Symbol(Symbol::new("checks", "small")),
+                )),
+            ],
+            1,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap();
+    let database = seeded.db_after;
+    assert!(database.entid(&native_deployment_ident()).is_none());
+    assert!(
+        database
+            .entid(&Keyword::new("checks", "positive"))
+            .is_none()
+    );
+    let entity = seeded.tempids["item"];
+    let ensure = TxForm::Op(TxOp::Ensure {
+        entity: EntityRef::Id(entity),
+        spec: EntityRef::Ident(Keyword::new("item", "spec")),
+    });
+    database
+        .with_forms_with_execution_options(
+            std::slice::from_ref(&ensure),
+            2,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap();
+    let rejected = database
+        .with_forms_with_execution_options(
+            &[
+                TxForm::Op(add(EntityRef::Id(entity), SCORE, Value::Long(8))),
+                ensure,
+            ],
+            2,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap_err();
+    assert_eq!(rejected.code, "transaction/entity-predicate");
+    let rejected = database
+        .with_forms_with_execution_options(
+            &[TxForm::Op(add(
+                EntityRef::Id(entity),
+                SCORE,
+                Value::Long(-1),
+            ))],
+            2,
+            SpeculationLimits::default(),
+            &options,
+        )
+        .unwrap_err();
+    assert_eq!(rejected.code, "transaction/attribute-predicate");
+}
+
+#[test]
 fn exact_speculation_shares_db_before_and_checks_complete_db_after() {
     let (db, entity, options, calls) = speculative_fixture();
     let report = db
@@ -247,9 +347,12 @@ fn exact_speculation_shares_db_before_and_checks_complete_db_after() {
 #[test]
 fn deployment_identity_limits_panics_and_application_errors_are_explicit() {
     let mut builder = NativeRegistry::builder();
+    builder
+        .transaction(Symbol::new("app", "unversioned"), |_, _, _| Ok(vec![]))
+        .unwrap();
     assert_eq!(
         builder
-            .transaction(Symbol::new("app", "unversioned"), |_, _, _| Ok(vec![]))
+            .transaction(Symbol::new("", "invalid"), |_, _, _| Ok(vec![]))
             .err()
             .unwrap()
             .code,
@@ -462,7 +565,7 @@ fn legacy_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_check
 fn service(connection: &str, native: NativeRegistry) -> TransactionService {
     TransactionService::start_with_execution_options(
         TransactionServiceConfig {
-            connection: connection.to_owned(),
+            connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
             database_id: "native-functions".into(),
             holder_id: "native-host".into(),
             lease_duration: Duration::from_secs(5),

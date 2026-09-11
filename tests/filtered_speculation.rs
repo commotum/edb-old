@@ -320,6 +320,5 @@ fn postgres_filtered_speculation_and_controlled_generation_commute_with_filters(
     assert!(hidden.db_after.is_filtered());
     assert_eq!(peer.sync().unwrap().basis_t(), base.basis_t());
     assert_eq!(store.recover(&id).unwrap().basis_t(), base.basis_t());
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     writer.shutdown();
 }

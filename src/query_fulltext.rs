@@ -1,5 +1,5 @@
-//! Fulltext is an eventually consistent candidate source, never a substitute
-//! for the supplied immutable database value or authoritative structured facts.
+//! Fulltext combines persisted candidates with a bounded committed-tail search,
+//! then checks matches against the supplied immutable database value.
 use super::*;
 
 pub(super) fn execute(

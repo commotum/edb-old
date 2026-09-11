@@ -118,7 +118,7 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     assert!(restart_sql.sql_calls < cold_sql.sql_calls);
     assert_eq!(
         restart_sql.sql_calls, 0,
-        "the captured pin authorizes warm reads"
+        "the authenticated captured value permits warm reads"
     );
     let warm_peer =
         Peer::connect_configured_with_cache_limits(&config, "ssd", 128, 16 * 1024 * 1024).unwrap();
@@ -279,7 +279,6 @@ fn postgres_native_ssd_reopen_corruption_disable_and_purge() {
     }
     assert!(evicting.ssd_cache_stats().evictions > 0);
     assert_eq!(evicting.ssd_cache_stats().current_entries, 1);
-    assert_eq!(evicting.load_stats().compatibility_materializations, 0);
     eprintln!(
         "NATIVE_SSD_OK cold_sql={} reopen_sql={} hits={} canonical_bytes={} physical_payload_bytes={} cache_bytes={} damaged_entries={damaged} framing_reopen_fallback=true framing_preserved=true",
         cold_sql.sql_calls,

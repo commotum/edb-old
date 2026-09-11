@@ -226,7 +226,7 @@ fn missing_nonpartition_and_reserved_defaults_fail_explicitly_without_affecting_
 fn service(connection: &str, defaults: TransactionDefaults) -> TransactionService {
     TransactionService::start_with_defaults(
         TransactionServiceConfig {
-            connection: connection.into(),
+            connection: atomic_core::PostgresConnectionConfig::plaintext(connection),
             database_id: "defaults".into(),
             holder_id: format!("defaults-{}", std::process::id()),
             lease_duration: Duration::from_secs(5),

@@ -142,9 +142,13 @@ fn fingerprint(phase: &str, view: &str, value: &DatabaseValue) -> Result<Fingerp
     Ok(Fingerprint { datoms, digest })
 }
 
-fn writer_config(database: &str, holder: &str) -> TransactionServiceConfig {
+fn writer_config(
+    connection: &PostgresConnectionConfig,
+    database: &str,
+    holder: &str,
+) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: String::new(), // configured constructor is the sole source.
+        connection: connection.clone(),
         database_id: database.into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(3),
@@ -165,9 +169,8 @@ fn start_writer(
 ) -> Result<TransactionService> {
     let deadline = Instant::now() + WAIT;
     loop {
-        match TransactionService::start_configured_with_indexing(
-            writer_config(database, holder),
-            connection.clone(),
+        match TransactionService::start_with_indexing(
+            writer_config(connection, database, holder),
             BackgroundIndexingConfig {
                 memory_index_threshold_bytes: 2 * 1024 * 1024,
                 memory_index_max_bytes: 8 * 1024 * 1024,
@@ -360,7 +363,6 @@ fn main() -> Result<()> {
     let residency = replacement.writer_residency_stats();
     assert_eq!(residency.eager_database_values, 0);
     assert_eq!(residency.eager_history_datoms, 0);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(replacement_peer);
     replacement.shutdown();
     let reopened =
@@ -375,12 +377,6 @@ fn main() -> Result<()> {
         final_fingerprints,
         "independent final reopen differs from the complete successor value"
     );
-    for connection in [&peer, &reopened] {
-        let load = connection.load_stats();
-        assert_eq!(load.compatibility_materializations, 0);
-        assert_eq!(load.compatibility_hits, 0);
-        assert_eq!(load.compatibility_failures, 0);
-    }
     memory("after-recovery")?;
     println!(
         "recovery storage_restart_ms={} replacement_start_ms={} base_t={} target_t={} tail_transactions={} tail_range_reads={}",

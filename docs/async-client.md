@@ -63,14 +63,14 @@ executor's own timeout combinator to stop waiting promptly if needed.
 Abandoned results, streams and the facade's retained connection are disposed
 on workers. Their reserved slots stay live until that cleanup finishes.
 Neither future/stream cancellation nor dropping the last facade joins a
-blocked worker or releases PostgreSQL pins on the executor thread.
+blocked worker or performs storage writes on the executor thread.
 
 **Consumed native results keep their native contract.** A returned
 `DatabaseValue`, `LogValue`, `ServiceTransactionReport` or
-`CommittedTransaction` is not an async wrapper. Its synchronous methods, and
-the last drop of its pins, may perform PostgreSQL I/O; an embedded connection
-may also join its service on last drop. Keep those native operations off your
-executor thread. Pure query/Pull rows do not own database pins. This boundary
+`CommittedTransaction` is not an async wrapper. Its synchronous reads may
+perform PostgreSQL I/O; an embedded connection may also join its service on
+last drop. Keep those operations off your executor thread. Dropping immutable
+read values issues no SQL; their driver uses the bounded disposal path. This boundary
 does not change the existing native types or pretend that Rust `Drop` is async.
 
 `operation.on_complete(callback)` consumes the future instead of awaiting it.

@@ -176,9 +176,9 @@ fn start(
     native: NativeRegistry,
     telemetry: Option<TelemetryEmitter>,
 ) -> TransactionService {
-    TransactionService::start_configured_with_options(
+    TransactionService::start_with_options(
         TransactionServiceConfig {
-            connection: String::new(),
+            connection: PostgresConnectionConfig::plaintext(connection),
             database_id: "diagnostics".into(),
             holder_id: "diagnostic-writer".into(),
             lease_duration: Duration::from_secs(5),
@@ -186,7 +186,6 @@ fn start(
             queue_capacity: 8,
             capacity_limits: Default::default(),
         },
-        PostgresConnectionConfig::plaintext(connection),
         ServiceOptions {
             execution: TransactionExecutionOptions {
                 native,

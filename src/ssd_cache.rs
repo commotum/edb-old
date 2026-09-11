@@ -107,8 +107,7 @@ pub struct SsdCache {
     state: Arc<Mutex<State>>,
 }
 
-/// Share the existing policy-safe directory admission between block readers and
-/// the remaining explicitly staged legacy read path.
+/// Open the immutable block cache using the connection's access namespace.
 pub(crate) fn open_connection_cache(
     connection: &crate::PostgresConnectionConfig,
     identity: &str,

@@ -63,7 +63,6 @@ pub struct WriterResidencyStats {
     pub resident_ident_names: usize,
     pub resident_ident_entities: usize,
     pub resident_ident_estimated_bytes: u64,
-    pub native_manifest_candidates: u64,
     pub native_root_reads: u64,
     pub native_directory_reads: u64,
     pub native_leaf_reads: u64,

@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 pub fn atomic() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_atomic"));
     for name in [
+        "ATOMIC_POSTGRES_TRANSPORT",
         "ATOMIC_POSTGRES_TLS_ROOT",
         "ATOMIC_CONNECT_TIMEOUT_MS",
         "ATOMIC_STATEMENT_TIMEOUT_MS",
@@ -38,8 +39,11 @@ pub fn configured(command: &mut Command, connection: &str) {
         command.env_remove(name);
     }
     command
-        .env("ATOMIC_POSTGRES_URL", connection)
-        .env("ATOMIC_POSTGRES_TRANSPORT", "plaintext")
+        .env(
+            "ATOMIC_POSTGRES_URL",
+            super::plaintext_connection(connection),
+        )
+        .env_remove("ATOMIC_POSTGRES_TRANSPORT")
         .env("ATOMIC_CONNECT_TIMEOUT_MS", "5000")
         .env("ATOMIC_STATEMENT_TIMEOUT_MS", "30000")
         .env("ATOMIC_LOCK_TIMEOUT_MS", "10000");

@@ -36,7 +36,6 @@ pub enum CollectionPhase {
     Sweeping,
     PruningRecords,
     ClearingEvents,
-    ReapingSessions,
     Complete,
 }
 #[derive(Clone, Debug, Default)]
@@ -49,8 +48,6 @@ pub struct CollectionStats {
     pub objects_removed: u64,
     pub stored_bytes_removed: u64,
     pub events_removed: u64,
-    pub sessions_revoked: u64,
-    pub pins_reaped: u64,
 }
 #[derive(Clone, Debug)]
 pub struct CollectionProgress {
@@ -73,21 +70,23 @@ pub struct BlockCollector {
     store: PgBlockStore,
 }
 impl BlockCollector {
-    /// Retire one bounded page of report handoffs with no connected peer or
-    /// earlier handoff interest. Its ownership deltas settle next cycle.
+    /// Retire one bounded page of report handoffs older than the read grace
+    /// period. Its ownership deltas settle next cycle.
     pub fn prune_report_handoffs(
         &mut self,
+        minimum_age: Duration,
         maximum: usize,
     ) -> Result<ReportHandoffMaintenance, SemanticError> {
-        self.prune_report_handoffs_with_control(maximum, &mut || Ok(()))
+        self.prune_report_handoffs_with_control(minimum_age, maximum, &mut || Ok(()))
     }
 
     pub fn prune_report_handoffs_with_control(
         &mut self,
+        minimum_age: Duration,
         maximum: usize,
         control: &mut dyn FnMut() -> Result<(), SemanticError>,
     ) -> Result<ReportHandoffMaintenance, SemanticError> {
-        super::report_handoff::prune(&mut self.store, maximum, control)
+        super::report_handoff::prune(&mut self.store, minimum_age, maximum, control)
     }
 
     pub fn connect(config: &crate::PostgresConnectionConfig) -> Result<Self, SemanticError> {
@@ -258,6 +257,7 @@ impl BlockCollector {
             ));
         }
         control()?;
+        self.expire_staging(minimum_age, maximum_steps.min(32))?;
         // Bound repeated trie/stack metadata reads within this advance. A new
         // call starts cold; cross-checkpoint authentication is not hidden by a
         // forever-resident collector cache.
@@ -521,36 +521,6 @@ impl BlockCollector {
                                     as u64;
                         } else {
                             state.event_after = None;
-                            state.phase = CollectionPhase::ReapingSessions;
-                        }
-                    }
-                    CollectionPhase::ReapingSessions => {
-                        let sessions = self.store.list_live_refs(
-                            "sessions/read/",
-                            state.event_after.as_deref(),
-                            1,
-                        )?;
-                        if let Some((key, reference)) = sessions.into_iter().next() {
-                            // Revocation requires an exclusive session lock, never
-                            // age alone. A disconnected reader gets five minutes
-                            // after explicit revocation before its pins are reaped.
-                            let report = super::snapshot::reap_read_session(
-                                &mut self.store,
-                                &key,
-                                &reference,
-                                now_ms()?,
-                                5 * 60 * 1000,
-                                32,
-                            )?;
-                            stats.sessions_revoked += u64::from(report.revoked);
-                            stats.pins_reaped += report.pins_removed as u64;
-                            if report.complete || report.pins_removed < 32 {
-                                state.event_after = Some(key);
-                            }
-                            // Releases belong to the new epoch and are folded in
-                            // the next cycle, preserving a conservative handoff.
-                        } else {
-                            state.event_after = None;
                             state.phase = CollectionPhase::Complete;
                             break;
                         }
@@ -586,6 +556,48 @@ impl BlockCollector {
             (Err(e), _) | (Ok(_), Err(e)) => Err(e),
             (Ok(result), Ok(())) => Ok(result),
         }
+    }
+
+    /// Unbound program uploads are ordinary temporary roots. They expire by
+    /// age, without reader sessions or application-owned release handles.
+    fn expire_staging(&mut self, age: Duration, maximum: usize) -> Result<(), SemanticError> {
+        let cutoff = now_ms()?.saturating_sub(u64::try_from(age.as_millis()).unwrap_or(u64::MAX));
+        for (key, reference) in self.store.list_refs(Some("staging/"), maximum)? {
+            if !key.starts_with("staging/") {
+                break;
+            }
+            let time = key
+                .split('/')
+                .nth(1)
+                .and_then(|s| u64::from_str_radix(s, 16).ok())
+                .ok_or_else(|| fault("Invalid staged root timestamp"))?;
+            if time >= cutoff {
+                break;
+            }
+            let tombstone = if reference.value.is_some() {
+                let guard = condition(&key, Some(&reference));
+                match publish_refs(
+                    &mut self.store,
+                    &[guard],
+                    &[RefChange {
+                        key: key.clone(),
+                        value: None,
+                    }],
+                )? {
+                    BatchOutcome::Applied(mut changed) => changed.remove(0).1,
+                    BatchOutcome::Conflict(_) => continue,
+                }
+            } else {
+                reference
+            };
+            // Staging keys contain a fresh UUID and are never reused. The
+            // durable ownership event precedes removal, including after a crash.
+            self.store.forget_ephemeral_refs(
+                std::slice::from_ref(&key),
+                &[condition(&key, Some(&tombstone))],
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -652,7 +664,7 @@ fn sealed_event(
 }
 
 /// A pruning proof is useful only at a settled boundary and must join the
-/// caller's publication CAS. A concurrent new pin invalidates its clock guard.
+/// caller's publication CAS. A concurrent ownership change invalidates its clock guard.
 pub(crate) fn settled_count(
     store: &mut PgBlockStore,
     id: ObjectId,
@@ -722,7 +734,6 @@ impl State {
             CollectionPhase::ClearingEvents => 4,
             CollectionPhase::Complete => 5,
             CollectionPhase::PruningRecords => 6,
-            CollectionPhase::ReapingSessions => 7,
         };
         let mut payload = vec![phase];
         payload.extend_from_slice(&self.epoch.to_be_bytes());
@@ -772,7 +783,6 @@ impl State {
                 4 => CollectionPhase::ClearingEvents,
                 5 => CollectionPhase::Complete,
                 6 => CollectionPhase::PruningRecords,
-                7 => CollectionPhase::ReapingSessions,
                 _ => return Err(fault("Invalid collection phase")),
             },
             cutoff_ms: u64::from_be_bytes(p[9..17].try_into().unwrap()),
@@ -1081,11 +1091,10 @@ fn is_root_key(key: &str) -> bool {
         "databases/",
         "names/",
         "catalog/",
-        "pins/",
+        "staging/",
         "excision/",
         "restores/",
         "handoffs/",
-        "observers/",
     ]
     .iter()
     .any(|prefix| key.starts_with(prefix))

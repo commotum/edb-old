@@ -1,7 +1,7 @@
 //! Actual stock commands against fresh, isolated opaque-storage namespaces.
 mod common;
 
-use atomic_core::storage::{CasOutcome, PgBlockStore};
+use atomic_core::storage::PgBlockStore;
 use atomic_core::{DatabaseCatalog, Peer, PostgresConnectionConfig};
 use postgres::{Client, NoTls};
 use std::process::{Command, Output};
@@ -22,9 +22,10 @@ fn command(connection: Option<&str>, args: &[&str]) -> Output {
         command.env_remove(variable);
     }
     if let Some(connection) = connection {
-        command
-            .env("ATOMIC_POSTGRES_URL", connection)
-            .env("ATOMIC_POSTGRES_TRANSPORT", "plaintext");
+        command.env(
+            "ATOMIC_POSTGRES_URL",
+            common::plaintext_connection(connection),
+        );
     }
     command.args(args).output().unwrap()
 }
@@ -313,7 +314,11 @@ fn installation_grants_generic_runtime_access_without_peer_object_writes() {
                 )
                 .unwrap()
                 .get(0);
-            assert!(actual, "reference privilege {privilege}");
+            assert_eq!(
+                actual,
+                role == &writer || privilege == "SELECT",
+                "reference privilege {privilege} for {role}"
+            );
         }
     }
     let peer_url = role_connection(&fixture.connection, &peer);
@@ -322,12 +327,11 @@ fn installation_grants_generic_runtime_access_without_peer_object_writes() {
     drop(captured);
     let mut peer_store =
         PgBlockStore::connect(&PostgresConnectionConfig::plaintext(&peer_url)).unwrap();
-    assert!(matches!(
+    assert!(
         peer_store
             .compare_exchange("test/peer-reference", None, Some(b"opaque"))
-            .unwrap(),
-        CasOutcome::Applied(_)
-    ));
+            .is_err()
+    );
     assert!(peer_store.put(b"forbidden peer upload").is_err());
     let mut peer_sql = Client::connect(&peer_url, NoTls).unwrap();
     assert_eq!(
@@ -336,8 +340,11 @@ fn installation_grants_generic_runtime_access_without_peer_object_writes() {
                 "DELETE FROM atomic_refs WHERE key='test/peer-reference'",
                 &[]
             )
-            .unwrap(),
-        1
+            .unwrap_err()
+            .code()
+            .unwrap()
+            .code(),
+        "42501"
     );
     drop(peer_sql);
     drop(peer_store);

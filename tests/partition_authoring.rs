@@ -28,11 +28,14 @@ fn policy_program() -> Program {
 }
 
 #[test]
-fn partition_program_abi_is_selected_only_when_needed_and_emits_bounded_policy() {
+fn current_program_format_emits_bounded_partition_policy() {
     let db = Database::bootstrap().unwrap();
     let program = policy_program();
     let bytes = encode_program(&program).unwrap();
-    assert_eq!(&bytes[16..18], &8u16.to_be_bytes());
+    assert_eq!(
+        &bytes[16..18],
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+    );
     assert_eq!(decode_program(&bytes).unwrap(), program);
     let output = ProgramRuntime
         .execute(&program, &db, &[], ProgramControl::default())
@@ -59,7 +62,7 @@ fn partition_program_abi_is_selected_only_when_needed_and_emits_bounded_policy()
         )
         .unwrap_err();
     assert_eq!(error.code, "program/form-limit");
-    for old_abi in [4u16, 5, 6, 7] {
+    for old_abi in 4u16..atomic_core::PROGRAM_ABI_VERSION {
         let mut downgraded = bytes.clone();
         downgraded[16..18].copy_from_slice(&old_abi.to_be_bytes());
         let checksum_at = downgraded.len() - 32;
@@ -67,14 +70,17 @@ fn partition_program_abi_is_selected_only_when_needed_and_emits_bounded_policy()
         downgraded[checksum_at..].copy_from_slice(&checksum);
         assert!(decode_program(&downgraded).is_err());
     }
-    for old_kind in [ProgramKind::Transaction, ProgramKind::Query] {
-        let old = Program {
-            kind: old_kind,
+    for kind in [ProgramKind::Transaction, ProgramKind::Query] {
+        let minimal = Program {
+            kind,
             arity: 0,
             instructions: vec![Instruction::Return],
         };
-        if old.validate().is_ok() {
-            assert_eq!(&encode_program(&old).unwrap()[16..18], &4u16.to_be_bytes());
+        if minimal.validate().is_ok() {
+            assert_eq!(
+                &encode_program(&minimal).unwrap()[16..18],
+                &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
+            );
         }
     }
     let mut nested = program;
@@ -88,7 +94,7 @@ fn partition_program_abi_is_selected_only_when_needed_and_emits_bounded_policy()
     ];
     assert_eq!(
         &encode_program(&nested).unwrap()[16..18],
-        &8u16.to_be_bytes()
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
     );
     assert_eq!(
         decode_program(&encode_program(&nested).unwrap()).unwrap(),
@@ -125,10 +131,10 @@ fn runtime_partition_install_map_keeps_normal_entity_map_representation() {
             Instruction::Return,
         ],
     };
-    // No new instruction: this remains the old program ABI and form grammar.
+    // Entity maps and partition instructions share one current program format.
     assert_eq!(
         &encode_program(&program).unwrap()[16..18],
-        &4u16.to_be_bytes()
+        &atomic_core::PROGRAM_ABI_VERSION.to_be_bytes()
     );
     let input = RuntimeValue::Map(vec![
         (

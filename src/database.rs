@@ -9,11 +9,11 @@ use crate::vocabulary::{
 };
 use crate::{
     Cardinality, Datom, ErrorCategory, INITIAL_EIDX_FRONTIER, IndexOrder, IndexPrefix, Schema,
-    SemanticError, TX_PARTITION, TupleSpec, Unique, Value, ValueType, eid_to_eidx, eid_to_part,
-    make_eid, t_to_tx, tx_to_t,
+    SemanticError, TX_PARTITION, TupleSpec, Value, ValueType, eid_to_eidx, eid_to_part, t_to_tx,
+    tx_to_t,
 };
 #[cfg(test)]
-use crate::{DB_EXCISE_ATTRS, USER_PARTITION};
+use crate::{DB_EXCISE_ATTRS, USER_PARTITION, Unique, make_eid};
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -332,14 +332,6 @@ struct LogicalDatom {
     added: bool,
 }
 
-#[derive(Clone, Debug)]
-struct EnsureCheck {
-    entity: u64,
-    spec: u64,
-    required: Vec<u32>,
-    predicates: Vec<String>,
-}
-
 /// The time boundary exactly as it existed when `:db/excise` was asserted.
 /// The effective predicate is additionally capped by `request_t`, so facts
 /// added after the request can never be removed by delayed background work.
@@ -364,16 +356,6 @@ pub(crate) struct FrozenExcisionRequest {
     pub(crate) cutoff: Option<ExcisionCutoff>,
 }
 
-/// One pure, fully assessed successor plus the predicate checks that remain
-/// before it may be accepted.  Keeping this boundary explicit mirrors the
-/// recovered `filter-assess-tx-datoms`/delayed predicate-resolution flow:
-/// redundancy, cardinality, tempids, and db-after are decided before any
-/// process-local or persisted predicate code is looked up or run.
-pub(crate) struct AssessedTransaction {
-    report: TxReport,
-    ensures: Vec<EnsureCheck>,
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PredicateRole {
     Attribute,
@@ -395,27 +377,11 @@ impl PredicateRole {
     }
 }
 
-impl AssessedTransaction {
-    pub(crate) fn validate(
-        self,
-        functions: Option<&crate::TxFunctions>,
-    ) -> Result<TxReport, SemanticError> {
-        self.report.db_before.validate_attribute_predicates_with(
-            self.report.db_before.schema(),
-            &self.report.tx_data,
-            functions,
-        )?;
-        validate_ensures(&self.report.db_after, &self.ensures, functions)?;
-        Ok(self.report)
-    }
-}
-
 /// Immutable, single-process database value.
 ///
-/// The transaction assessor deliberately remains straightforward and is the
-/// semantic oracle inherited from Goal 1. Observable reads use immutable
-/// Datomic-shaped index roots; history is chunked by transaction so successor
-/// values structurally share all prior chunks.
+/// Transactions use the same selective assessor as every `DatabaseValue`.
+/// This type owns the eager memory representation; history is chunked by
+/// transaction so successor values structurally share all prior chunks.
 #[derive(Clone, Debug)]
 pub struct Database {
     // Reference identity is deliberately outside durable semantic commitments.
@@ -740,7 +706,7 @@ impl Database {
     }
 
     /// Borrow one already-resident current or history index without copying
-    /// it. `DatabaseValue` uses this narrow eager-oracle seam to give its
+    /// it. `DatabaseValue` uses this memory representation to give its
     /// public fallible cursor the same construction-time laziness as a native
     /// tree cursor.
     pub(crate) fn index_datoms(&self, history: bool, order: IndexOrder) -> &[Datom] {
@@ -1194,7 +1160,7 @@ impl Database {
         if current.unique.is_none() && proposed.unique.is_some() {
             // Recovered Datomic Pro distinguishes logical `:db/index` from
             // physical AVET availability (`Attribute.hasAVET`).  The eager
-            // oracle has no asynchronous physical tier, so an existing
+            // representation has no asynchronous physical tier, so an existing
             // logical AVET member is ready.  An unindexed attribute may gain
             // uniqueness only when it has never had a value: in that case
             // there is no historical range to backfill and AVET can become
@@ -1328,7 +1294,7 @@ impl Database {
     /// Pure transaction application. `tx_instant` is supplied by the caller so
     /// the same inputs always produce the same result.
     pub fn with(&self, ops: &[TxOp], tx_instant: i64) -> Result<TxReport, SemanticError> {
-        self.assess_context(ops, tx_instant)?.validate(None)
+        self.with_defaults(ops, tx_instant, &crate::TransactionDefaults::default())
     }
 
     /// Pure application with explicit allocation defaults. Neither this value
@@ -1339,8 +1305,14 @@ impl Database {
         tx_instant: i64,
         defaults: &crate::TransactionDefaults,
     ) -> Result<TxReport, SemanticError> {
-        self.assess_context_with_defaults(ops, tx_instant, defaults)?
-            .validate(None)
+        let assessed = crate::transaction::assess_operations(
+            &self.database_value(),
+            ops,
+            tx_instant,
+            defaults,
+            None,
+        )?;
+        self.materialize_assessment(assessed)
     }
 
     /// Rebuild one already-assessed committed successor from its material
@@ -1728,237 +1700,50 @@ impl Database {
         Ok(db_after)
     }
 
-    pub(crate) fn with_function_context(
+    /// Store the already-assessed delta in the eager memory representation.
+    /// Transaction resolution and constraints belong only to the shared assessor.
+    pub(crate) fn materialize_assessment(
         &self,
-        ops: &[TxOp],
-        functions: &crate::TxFunctions,
-        tx_instant: i64,
+        assessed: crate::tiered_assessor::TieredAssessment,
     ) -> Result<TxReport, SemanticError> {
-        self.assess_context(ops, tx_instant)?
-            .validate(Some(functions))
-    }
-
-    pub(crate) fn with_function_context_and_defaults(
-        &self,
-        ops: &[TxOp],
-        functions: &crate::TxFunctions,
-        tx_instant: i64,
-        defaults: &crate::TransactionDefaults,
-    ) -> Result<TxReport, SemanticError> {
-        self.assess_context_with_defaults(ops, tx_instant, defaults)?
-            .validate(Some(functions))
-    }
-
-    fn assess_context(
-        &self,
-        ops: &[TxOp],
-        tx_instant: i64,
-    ) -> Result<AssessedTransaction, SemanticError> {
-        self.assess_context_with_defaults(ops, tx_instant, &crate::TransactionDefaults::default())
-    }
-
-    fn assess_context_with_defaults(
-        &self,
-        ops: &[TxOp],
-        tx_instant: i64,
-        defaults: &crate::TransactionDefaults,
-    ) -> Result<AssessedTransaction, SemanticError> {
-        crate::transaction_stats::count(|work| &mut work.assessments, 1);
-        crate::transaction_stats::count(|work| &mut work.input_operations, ops.len());
-        crate::transaction::validate_ops_input(ops)?;
-        let default_partition = defaults.resolve(&self.schema, |name| self.entid(name))?;
-        if let Some(previous) = self.last_tx_instant
-            && tx_instant < previous
-        {
-            return Err(SemanticError::incorrect(
-                "transaction/non-monotonic-instant",
-                format!("transaction instant {tx_instant} precedes {previous}"),
-            ));
-        }
-
-        let t = self.basis_t.checked_add(1).ok_or_else(|| {
-            SemanticError::incorrect(
-                "transaction/basis-overflow",
-                "database basis cannot advance beyond u64",
-            )
-        })?;
-        let tx = t_to_tx(t)?;
-        let allocation_start = self.eidx_frontier.max(t.checked_add(1).ok_or_else(|| {
-            SemanticError::incorrect(
-                "transaction/basis-overflow",
-                "transaction time cannot advance the issued frontier",
-            )
-        })?);
-        validate_frontier(allocation_start)?;
-        let mut ordered_ops = ops.to_vec();
-        ordered_ops.sort_by(crate::transaction::compare_tx_op);
-        self.validate_tx_instant_forms(&ordered_ops, tx_instant)?;
-
-        // Typed schema forms are syntax only. Lower them to ordinary
-        // self-describing datoms before assessment; all non-schema operation
-        // resolution below still uses db-before, matching ProcessInpoint.
-        let (schema_logical, _schema_changes, allocation_start) =
-            self.prepare_schema_information(&ordered_ops, tx, allocation_start)?;
-
-        let mut reserved_allocation = self.reserved_allocation;
-        if let Some(reserved) = &mut reserved_allocation {
-            observe_reserved_transaction_inputs(reserved, &ordered_ops)?;
-        }
-        let (tempids, eidx_frontier) = self.resolve_tempids(
-            &ordered_ops,
-            tx,
-            allocation_start,
-            default_partition,
-            &mut reserved_allocation,
-        )?;
-        let mut logical = schema_logical;
-        let mut ensures = Vec::new();
-        let mut touched_constituents = BTreeSet::new();
-
-        for op in &ordered_ops {
-            self.expand_op(
-                op,
-                tx,
-                &tempids,
-                &mut logical,
-                &mut ensures,
-                &mut touched_constituents,
-            )?;
-        }
-        ensures.sort_by_key(|ensure| (ensure.entity, ensure.spec));
-        ensures.dedup_by_key(|ensure| (ensure.entity, ensure.spec));
-
-        dedupe(&mut logical);
-        validate_same_transaction(&self.schema, &logical)?;
-        add_cardinality_one_retractions(&self.schema, &self.current, &mut logical)?;
-        dedupe(&mut logical);
-        validate_same_transaction(&self.schema, &logical)?;
-
-        // Recovered `filter-assess-tx-datoms` discovers missing schema hooks
-        // only after ordinary schema datoms have passed redundancy and
-        // cardinality assessment. Derive events from material property
-        // changes here so a no-op reassertion cannot manufacture history.
-        self.synthesize_schema_hooks(&mut logical)?;
-        dedupe(&mut logical);
-        validate_same_transaction(&self.schema, &logical)?;
-
-        let provisional = apply_logical(&self.current, &logical, tx);
-        let composites = derive_composites(
-            &self.schema,
-            &self.current,
-            &provisional,
-            &touched_constituents,
-        )?;
-        logical.extend(composites);
-
-        if let Some(attribute) = self.tx_instant_attribute {
-            logical.push(LogicalDatom {
-                entity: tx,
-                attribute,
-                value: Value::Instant(tx_instant),
-                added: true,
-            });
-        }
-
-        dedupe(&mut logical);
-        validate_same_transaction(&self.schema, &logical)?;
-        let mut final_current = apply_logical(&self.current, &logical, tx);
-        validate_excision_requests(&final_current)?;
-        let mut tx_data = material_changes(&self.current, &final_current, &logical, tx);
-        crate::transaction_stats::count(|work| &mut work.produced_datoms, tx_data.len());
-        tx_data.sort_by(|left, right| left.cmp_in(right, IndexOrder::Eavt));
-        let proposed_history: Vec<_> = self
-            .history_datoms()
-            .chain(tx_data.iter())
-            .cloned()
+        let logical: Vec<_> = assessed
+            .tx_data
+            .iter()
+            .map(|datom| LogicalDatom {
+                entity: datom.entity,
+                attribute: datom.attribute,
+                value: datom.value.clone(),
+                added: datom.added,
+            })
             .collect();
-        let successor_idents = IdentIndex::derive(proposed_history.iter(), DB_IDENT as u32)?;
-        let successor_current = facts_as_datoms(&final_current);
-        let successor_schema = Arc::new(Schema::derive_from_information(
-            &successor_current,
-            &successor_idents,
+        let mut current = apply_logical(&self.current, &logical, t_to_tx(assessed.basis_t)?);
+        current.sort_by(compare_current);
+        let mut after = self.clone();
+        after.schema = assessed.successor_schema;
+        after.idents = Arc::new(IdentIndex::derive(
+            self.history_datoms().chain(assessed.tx_data.iter()),
+            DB_IDENT as u32,
         )?);
-        let _actual_schema_changes =
-            self.schema_changes_to(&successor_schema, &final_current, &logical)?;
-
-        // Hooks judge the complete proposed database. A newly installed
-        // attribute was unavailable during expansion, while its validated
-        // descriptor is immediately operative on db-after.
-        validate_cardinality(&successor_schema, &final_current)?;
-        validate_uniqueness_inner(&successor_schema, &final_current, true)?;
-        final_current.sort_by(compare_current);
-
-        let mut db_after = self.clone();
-        db_after.basis_t = t;
-        db_after.last_tx_instant = Some(tx_instant);
-        db_after.schema = successor_schema;
-        db_after.idents = Arc::new(successor_idents);
-        db_after.eidx_frontier = eidx_frontier;
-        db_after.reserved_allocation = reserved_allocation;
-        let current_datoms = facts_as_datoms(&final_current);
-        db_after.current = final_current.into();
-        let mut history_chunks: Vec<_> = self.history.iter().cloned().collect();
-        history_chunks.push(Arc::from(tx_data.clone()));
-        db_after.history = history_chunks.into();
-        db_after.current_indexes = IndexRoots::build(&db_after.schema, current_datoms);
-        db_after.history_indexes =
-            IndexRoots::build(&db_after.schema, db_after.history_datoms().cloned());
-        let (semantic_state, semantic_commitment_work) =
-            self.semantic_state.advance(self, &tx_data)?;
-        db_after.semantic_state = semantic_state;
-        db_after.semantic_commitment_work = semantic_commitment_work;
-
-        // Keep the pure transition and durable replay on one acceptance
-        // boundary. This is intentionally an internal cross-check, not a
-        // second mutation path.
-        db_after.validate_invariants()?;
-
-        Ok(AssessedTransaction {
-            report: TxReport {
-                db_before: self.clone(),
-                db_after,
-                tx_data,
-                tempids,
-            },
-            ensures,
+        after.basis_t = assessed.basis_t;
+        after.eidx_frontier = assessed.eidx_frontier;
+        after.reserved_allocation = assessed.db_after.reserved_allocation()?;
+        after.last_tx_instant = assessed.db_after.last_tx_instant()?;
+        after.current_indexes = IndexRoots::build(&after.schema, facts_as_datoms(&current));
+        after.current = current.into();
+        let mut history: Vec<_> = self.history.iter().cloned().collect();
+        history.push(Arc::from(assessed.tx_data.clone()));
+        after.history = history.into();
+        after.history_indexes = IndexRoots::build(&after.schema, after.history_datoms().cloned());
+        let (state, work) = self.semantic_state.advance(self, &assessed.tx_data)?;
+        after.semantic_state = state;
+        after.semantic_commitment_work = work;
+        Ok(TxReport {
+            db_before: self.clone(),
+            db_after: after,
+            tx_data: assessed.tx_data,
+            tempids: assessed.tempids,
         })
     }
-
-    fn synthesize_schema_hooks(
-        &self,
-        logical: &mut Vec<LogicalDatom>,
-    ) -> Result<(), SemanticError> {
-        self.validate_schema_hook_events(logical)?;
-        let touched = self.material_schema_hook_targets(logical)?;
-
-        // Explicit hooks are accepted as transaction syntax, but the
-        // assessor owns their canonical event set. This prevents a lone
-        // :db.alter/attribute assertion from surviving without the material
-        // controlled-property change that gives it meaning.
-        logical.retain(|datom| {
-            datom.attribute != crate::DB_INSTALL_ATTRIBUTE as u32
-                && datom.attribute != crate::DB_ALTER_ATTRIBUTE as u32
-        });
-
-        for target in touched {
-            let attribute = crate::schema_eid_to_attr_id(target)?;
-            logical.push(LogicalDatom {
-                entity: crate::DB_PART_DB,
-                attribute: if self.schema.attribute(attribute).is_ok() {
-                    crate::DB_ALTER_ATTRIBUTE as u32
-                } else {
-                    crate::DB_INSTALL_ATTRIBUTE as u32
-                },
-                value: Value::Ref(target),
-                added: true,
-            });
-        }
-        Ok(())
-    }
-
-    /// Validate explicit schema hook events. Both pure assessment and durable
-    /// recovery use this routine so hook shape, target, and kind have one
-    /// definition.
     fn validate_schema_hook_events(
         &self,
         logical: &[LogicalDatom],
@@ -2063,886 +1848,6 @@ impl Database {
         }
         Ok(())
     }
-
-    fn validate_attribute_predicates_with(
-        &self,
-        schema: &Schema,
-        assessed: &[Datom],
-        functions: Option<&crate::TxFunctions>,
-    ) -> Result<(), SemanticError> {
-        for datom in assessed.iter().filter(|datom| datom.added) {
-            let attribute = schema.attribute(datom.attribute)?;
-            for predicate in &attribute.predicates {
-                let result = functions
-                    .ok_or_else(|| {
-                        SemanticError::incorrect(
-                            "transaction/missing-predicate-context",
-                            format!(
-                                "attribute {} requires predicate {predicate}",
-                                attribute.ident.qualified_name()
-                            ),
-                        )
-                    })?
-                    .validate_attribute_predicate(predicate, &datom.value)?;
-                if !crate::is_exact_true(&result) {
-                    return Err(SemanticError::incorrect(
-                        "transaction/attribute-predicate",
-                        format!(
-                            "entity {} attribute {} value {:?} failed predicate {predicate} with result {result:?}",
-                            datom.entity,
-                            attribute.ident.qualified_name(),
-                            datom.value,
-                        ),
-                    )
-                    .detail("entity", datom.entity.to_string())
-                    .detail("attribute", attribute.ident.qualified_name())
-                    .detail("value", format!("{:?}", datom.value))
-                    .detail("predicate", predicate.clone())
-                    .detail("pred_return", format!("{result:?}")));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn prepare_schema_information(
-        &self,
-        ops: &[TxOp],
-        tx: u64,
-        mut allocation_frontier: u64,
-    ) -> Result<(Vec<LogicalDatom>, Vec<SchemaChange>, u64), SemanticError> {
-        let mut seen = BTreeSet::new();
-        let mut installed = Vec::new();
-        let mut candidate = self.schema.as_ref().clone();
-        let mut changes = Vec::new();
-
-        // First form the complete descriptor set. This temporary Rust value
-        // is only a lowering aid for composite names; it is discarded and the
-        // operative successor is independently re-derived from datoms below.
-        for op in ops {
-            let (attribute, install) = match op {
-                TxOp::InstallAttribute(attribute) => (attribute, true),
-                TxOp::AlterAttribute(attribute) => (attribute, false),
-                _ => continue,
-            };
-            if !seen.insert(attribute.id) {
-                return Err(SemanticError::conflict(
-                    "schema/multiple-changes",
-                    format!(
-                        "attribute {} has multiple schema changes in one transaction",
-                        attribute.id
-                    ),
-                ));
-            }
-            crate::schema_eid_to_attr_id(u64::from(attribute.id))?;
-            if install {
-                let reserved = supported_system_idents()
-                    .iter()
-                    .any(|(entity, _)| *entity == u64::from(attribute.id));
-                if reserved {
-                    return Err(SemanticError::incorrect(
-                        "schema/reserved-system-entity",
-                        format!(
-                            "entity {} is reserved by the native system vocabulary",
-                            attribute.id
-                        ),
-                    ));
-                }
-                if u64::from(attribute.id) >= allocation_frontier {
-                    if u64::from(attribute.id) != allocation_frontier {
-                        return Err(SemanticError::incorrect(
-                            "schema/noncontiguous-attribute-id",
-                            format!(
-                                "fresh schema entity {} must use issued frontier {}",
-                                attribute.id, allocation_frontier
-                            ),
-                        ));
-                    }
-                    allocation_frontier = allocation_frontier.checked_add(1).ok_or_else(|| {
-                        SemanticError::incorrect(
-                            "schema/attribute-id-overflow",
-                            "schema entity allocation exhausted the entity-index space",
-                        )
-                    })?;
-                }
-                candidate.install(attribute.clone())?;
-                installed.push(attribute.id);
-                changes.push(SchemaChange::Install(attribute.clone()));
-            } else {
-                candidate.alter(attribute.clone())?;
-                changes.push(SchemaChange::Alter(attribute.clone()));
-            }
-        }
-        candidate.validate_tuple_installations(&installed)?;
-
-        let metadata_attributes = [
-            DB_IDENT as u32,
-            crate::DB_VALUE_TYPE as u32,
-            crate::DB_CARDINALITY as u32,
-            crate::DB_UNIQUE as u32,
-            crate::DB_IS_COMPONENT as u32,
-            crate::DB_INDEX as u32,
-            crate::DB_NO_HISTORY as u32,
-            crate::DB_FULLTEXT as u32,
-            crate::DB_TUPLE_TYPE as u32,
-            crate::DB_TUPLE_TYPES as u32,
-            crate::DB_TUPLE_ATTRS as u32,
-            crate::DB_ATTR_PREDS as u32,
-            crate::DB_TUPLE_DISCONTINUED as u32,
-        ];
-        let mut logical = Vec::new();
-        for change in &changes {
-            let (attribute, install) = match change {
-                SchemaChange::Install(attribute) => (attribute, true),
-                SchemaChange::Alter(attribute) => (attribute, false),
-            };
-            let desired = crate::schema::attribute_information_datoms(attribute, &candidate, tx)?;
-            let current = if install {
-                None
-            } else {
-                Some(self.schema.attribute(attribute.id)?)
-            };
-            let property_changed = |metadata_attribute| {
-                install
-                    || current.is_some_and(|current| {
-                        attribute_property_changed(current, attribute, metadata_attribute)
-                    })
-            };
-
-            // Typed forms are only convenience syntax. Lower alterations to
-            // the same set-difference of ordinary metadata facts that a user
-            // could submit directly. Comparing semantic tuple descriptors,
-            // rather than their ident encoding, also avoids rewriting an
-            // immutable composite merely because a constituent was renamed.
-            for fact in self.current.iter().filter(|fact| {
-                fact.entity == u64::from(attribute.id)
-                    && metadata_attributes.contains(&fact.attribute)
-                    && property_changed(fact.attribute)
-            }) {
-                if !desired.iter().any(|datom| {
-                    datom.entity == fact.entity
-                        && datom.attribute == fact.attribute
-                        && datom.value.stored_eq(&fact.value)
-                }) {
-                    logical.push(LogicalDatom {
-                        entity: fact.entity,
-                        attribute: fact.attribute,
-                        value: fact.value.clone(),
-                        added: false,
-                    });
-                }
-            }
-            logical.extend(desired.into_iter().filter_map(|datom| {
-                if property_changed(datom.attribute)
-                    && !contains_fact(&self.current, datom.entity, datom.attribute, &datom.value)
-                {
-                    Some(LogicalDatom {
-                        entity: datom.entity,
-                        attribute: datom.attribute,
-                        value: datom.value,
-                        added: true,
-                    })
-                } else {
-                    None
-                }
-            }));
-        }
-        changes.sort_by_key(|change| match change {
-            SchemaChange::Install(attribute) | SchemaChange::Alter(attribute) => attribute.id,
-        });
-        validate_frontier(allocation_frontier)?;
-        Ok((logical, changes, allocation_frontier))
-    }
-
-    fn resolve_tempids(
-        &self,
-        ops: &[TxOp],
-        tx: u64,
-        allocation_start: u64,
-        default_partition: u32,
-        reserved: &mut Option<ReservedAllocation>,
-    ) -> Result<(BTreeMap<String, u64>, u64), SemanticError> {
-        let names = validated_entity_tempids(ops)?;
-        let policy = crate::partitions::PartitionPolicy::with_default(
-            ops,
-            &names,
-            &self.schema,
-            default_partition,
-            |entity| self.resolve_entity(entity, tx, &BTreeMap::new()),
-        )?;
-        let names: Vec<_> = names.into_iter().collect();
-        let positions: BTreeMap<_, _> = names
-            .iter()
-            .enumerate()
-            .map(|(index, name)| (name.clone(), index))
-            .collect();
-        let mut union = UnionFind::new(names.len());
-        let mut identities: Vec<(usize, u32, UpsertIdentityValue, Unique)> = Vec::new();
-
-        for op in ops {
-            let TxOp::Add {
-                entity: EntityRef::Temp(name),
-                attribute,
-                value,
-            } = op
-            else {
-                continue;
-            };
-            let schema = self.schema.attribute(*attribute)?;
-            let Some(unique) = schema.unique else {
-                continue;
-            };
-            if unique == Unique::Identity {
-                crate::transaction_stats::count(|work| &mut work.identity_claims, 1);
-            }
-            let value = self.resolve_upsert_identity_value(*attribute, value, tx)?;
-            if value.is_nan() {
-                return Err(SemanticError::incorrect(
-                    "transaction/nan-cannot-identify",
-                    "NaN cannot participate in upsert or uniqueness",
-                ));
-            }
-            identities.push((positions[name], *attribute, value, unique));
-        }
-
-        for left in 0..identities.len() {
-            for right in left + 1..identities.len() {
-                let (left_temp, left_attr, left_value, left_unique) = &identities[left];
-                let (right_temp, right_attr, right_value, right_unique) = &identities[right];
-                if *left_unique == Unique::Identity
-                    && *right_unique == Unique::Identity
-                    && left_attr == right_attr
-                    && left_value.same_key(right_value)
-                {
-                    union.join(*left_temp, *right_temp);
-                }
-            }
-        }
-
-        let mut existing_by_root: BTreeMap<usize, u64> = BTreeMap::new();
-        for (temp, attribute, value, unique) in &identities {
-            let Some(value) = value.resolved() else {
-                continue;
-            };
-            crate::transaction_stats::count(|work| &mut work.identity_lookups, 1);
-            if let Some(existing) = self.lookup(*attribute, value)? {
-                if *unique == Unique::Value {
-                    return Err(SemanticError::conflict(
-                        "transaction/unique-value-conflict",
-                        format!("unique value is already held by entity {existing}"),
-                    ));
-                }
-                crate::transaction_stats::count(|work| &mut work.upsert_resolutions, 1);
-                let root = union.root(*temp);
-                if let Some(previous) = existing_by_root.insert(root, existing)
-                    && previous != existing
-                {
-                    return Err(SemanticError::conflict(
-                        "transaction/upsert-conflict",
-                        format!("one tempid resolves to both {previous} and {existing}"),
-                    ));
-                }
-            }
-        }
-
-        let mut partitions = BTreeMap::new();
-        for (index, name) in names.iter().enumerate() {
-            let root = union.root(index);
-            if existing_by_root.contains_key(&root) {
-                continue;
-            }
-            if let Some(partition) = policy.explicit_partition(name)?
-                && partitions
-                    .insert(root, partition)
-                    .is_some_and(|previous| previous != partition)
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/partition-conflict",
-                    "unified tempids request distinct partitions",
-                ));
-            }
-        }
-        let mut next = allocation_start;
-        let mut allocated_by_root = BTreeMap::new();
-        let mut result = BTreeMap::new();
-        for (index, name) in names.iter().enumerate() {
-            let root = union.root(index);
-            let id = if let Some(existing) = existing_by_root.get(&root) {
-                *existing
-            } else if let Some(allocated) = allocated_by_root.get(&root) {
-                *allocated
-            } else {
-                let partition = partitions.get(&root).copied().unwrap_or(default_partition);
-                let allocated = if partition == TX_PARTITION {
-                    tx
-                } else if partition == crate::DB_PARTITION && reserved.is_some() {
-                    reserved
-                        .as_mut()
-                        .expect("reserved mode checked")
-                        .allocate()?
-                } else {
-                    let allocated = make_eid(partition, next)?;
-                    next = next.checked_add(1).ok_or_else(|| {
-                        SemanticError::incorrect(
-                            "transaction/entity-id-overflow",
-                            "tempid allocation exhausted the entity-index space",
-                        )
-                    })?;
-                    allocated
-                };
-                allocated_by_root.insert(root, allocated);
-                allocated
-            };
-            result.insert(name.clone(), id);
-        }
-        if let Some(reserved) = reserved {
-            next = next.max(reserved.frontier());
-        }
-        validate_frontier(next)?;
-        Ok((result, next))
-    }
-
-    fn resolve_upsert_identity_value(
-        &self,
-        attribute: u32,
-        value: &TxValue,
-        tx: u64,
-    ) -> Result<UpsertIdentityValue, SemanticError> {
-        let descriptor = self.schema.attribute(attribute)?;
-        match value {
-            TxValue::Tuple(slots) => {
-                for value in slots.iter().flatten() {
-                    if let TxValue::Scalar(value) = value {
-                        self.validate_explicit_value_refs(value)?;
-                    }
-                }
-                resolve_tuple_input(&self.schema, descriptor, slots, |entity| match entity {
-                    EntityRef::Temp(name) => Ok(UpsertIdentityValue::TempRef(name.clone())),
-                    entity => self
-                        .resolve_entity(entity, tx, &BTreeMap::new())
-                        .map(|entity| UpsertIdentityValue::Resolved(Value::Ref(entity))),
-                })
-            }
-            TxValue::Scalar(value) => {
-                self.validate_explicit_value_refs(value)?;
-                self.schema.validate_value(descriptor, value)?;
-                Ok(UpsertIdentityValue::Resolved(value.clone()))
-            }
-            TxValue::Entity(EntityRef::Temp(name)) if descriptor.value_type == ValueType::Ref => {
-                Ok(UpsertIdentityValue::TempRef(name.clone()))
-            }
-            TxValue::Entity(entity) if descriptor.value_type == ValueType::Ref => {
-                let value = Value::Ref(self.resolve_entity(entity, tx, &BTreeMap::new())?);
-                self.schema.validate_value(descriptor, &value)?;
-                Ok(UpsertIdentityValue::Resolved(value))
-            }
-            TxValue::Entity(_) => Err(SemanticError::incorrect(
-                "transaction/value-type",
-                format!(
-                    "attribute {} requires {:?}",
-                    descriptor.ident.qualified_name(),
-                    descriptor.value_type
-                ),
-            )),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn expand_op(
-        &self,
-        op: &TxOp,
-        tx: u64,
-        tempids: &BTreeMap<String, u64>,
-        logical: &mut Vec<LogicalDatom>,
-        ensures: &mut Vec<EnsureCheck>,
-        touched_constituents: &mut BTreeSet<(u64, u32)>,
-    ) -> Result<(), SemanticError> {
-        match op {
-            TxOp::Add {
-                entity,
-                attribute,
-                value,
-            } => {
-                let entity = self.resolve_entity(entity, tx, tempids)?;
-                let value = self.resolve_value(*attribute, value, tx, tempids)?;
-                validate_entity_predicate_name(*attribute, &value)?;
-                if *attribute == crate::DB_ENSURE as u32 {
-                    let Value::Ref(spec) = value else {
-                        return Err(SemanticError::incorrect(
-                            "transaction/invalid-ensure",
-                            ":db/ensure must name an entity spec",
-                        ));
-                    };
-                    ensures.push(self.resolve_entity_spec(entity, spec)?);
-                    return Ok(());
-                }
-                if self.is_derived_composite(*attribute)? {
-                    // Recovered `ProcessExpander` allows the value to
-                    // participate in tempid/upsert resolution, then removes
-                    // direct composite datoms before deriving composites from
-                    // constituent changes.
-                    return Ok(());
-                }
-                touched_constituents.insert((entity, *attribute));
-                logical.push(LogicalDatom {
-                    entity,
-                    attribute: *attribute,
-                    value,
-                    added: true,
-                });
-            }
-            TxOp::Retract {
-                entity,
-                attribute,
-                value,
-            } => {
-                let entity = self.resolve_entity(entity, tx, tempids)?;
-                self.schema.attribute(*attribute)?;
-                if *attribute == crate::DB_ENSURE as u32 {
-                    return Err(SemanticError::incorrect(
-                        "transaction/virtual-ensure",
-                        ":db/ensure is virtual and cannot be retracted",
-                    ));
-                }
-                if self.is_derived_composite(*attribute)? {
-                    if let Some(value) = value {
-                        self.resolve_value(*attribute, value, tx, tempids)?;
-                    }
-                    return Ok(());
-                }
-                touched_constituents.insert((entity, *attribute));
-                if let Some(value) = value {
-                    let value = self.resolve_value(*attribute, value, tx, tempids)?;
-                    logical.push(LogicalDatom {
-                        entity,
-                        attribute: *attribute,
-                        value,
-                        added: false,
-                    });
-                } else {
-                    for fact in self
-                        .current
-                        .iter()
-                        .filter(|fact| fact.entity == entity && fact.attribute == *attribute)
-                    {
-                        logical.push(LogicalDatom {
-                            entity,
-                            attribute: *attribute,
-                            value: fact.value.clone(),
-                            added: false,
-                        });
-                    }
-                }
-            }
-            TxOp::Cas {
-                entity,
-                attribute,
-                old,
-                new,
-            } => {
-                let entity = self.resolve_entity(entity, tx, tempids)?;
-                let schema = self.schema.attribute(*attribute)?;
-                if *attribute == crate::DB_ENSURE as u32 {
-                    return Err(SemanticError::incorrect(
-                        "transaction/virtual-ensure",
-                        ":db/ensure is virtual and cannot be compared and swapped",
-                    ));
-                }
-                if schema.cardinality != Cardinality::One {
-                    return Err(SemanticError::incorrect(
-                        "transaction/cas-requires-cardinality-one",
-                        "compare-and-swap requires a cardinality-one attribute",
-                    ));
-                }
-                let observed = self.values(entity, *attribute);
-                let expected = old
-                    .as_ref()
-                    .map(|value| self.resolve_value(*attribute, value, tx, tempids))
-                    .transpose()?;
-                let matches = match (expected.as_ref(), observed.as_slice()) {
-                    (None, []) => true,
-                    (Some(expected), [observed]) => observed.stored_eq(expected),
-                    _ => false,
-                };
-                if !matches {
-                    return Err(SemanticError::new(
-                        ErrorCategory::Conflict,
-                        "transaction/cas-failed",
-                        "compare-and-swap did not match db-before",
-                    ));
-                }
-                let value = self.resolve_value(*attribute, new, tx, tempids)?;
-                validate_entity_predicate_name(*attribute, &value)?;
-                if self.is_derived_composite(*attribute)? {
-                    return Ok(());
-                }
-                touched_constituents.insert((entity, *attribute));
-                logical.push(LogicalDatom {
-                    entity,
-                    attribute: *attribute,
-                    value,
-                    added: true,
-                });
-            }
-            TxOp::RetractEntity(entity) => {
-                let entity = self.resolve_entity(entity, tx, tempids)?;
-                if eid_to_part(entity)? == TX_PARTITION {
-                    return Err(SemanticError::incorrect(
-                        "transaction/reset-tx-instant",
-                        "transaction entities cannot be retracted",
-                    ));
-                }
-                let mut visited = BTreeSet::new();
-                self.expand_retract_entity(entity, logical, touched_constituents, &mut visited)?;
-            }
-            TxOp::Ensure { entity, spec } => {
-                let entity = self.resolve_entity(entity, tx, tempids)?;
-                let spec = self.resolve_entity(spec, tx, tempids)?;
-                ensures.push(self.resolve_entity_spec(entity, spec)?);
-            }
-            TxOp::InstallAttribute(_)
-            | TxOp::AlterAttribute(_)
-            | TxOp::ForcePartition { .. }
-            | TxOp::MatchPartition { .. } => {}
-        }
-        Ok(())
-    }
-
-    fn resolve_entity_spec(&self, entity: u64, spec: u64) -> Result<EnsureCheck, SemanticError> {
-        let mut required = Vec::new();
-        for value in self.values(spec, crate::DB_ENTITY_ATTRS as u32) {
-            let Value::Keyword(ident) = value else {
-                return Err(SemanticError::incorrect(
-                    "transaction/invalid-entity-spec",
-                    ":db.entity/attrs values must be attribute keywords",
-                ));
-            };
-            let attribute = self.entid(ident).ok_or_else(|| {
-                SemanticError::incorrect(
-                    "transaction/unknown-spec-attribute",
-                    format!(
-                        "entity spec names unknown attribute {}",
-                        ident.qualified_name()
-                    ),
-                )
-            })?;
-            required.push(crate::schema_eid_to_attr_id(attribute)?);
-        }
-        required.sort_unstable();
-        required.dedup();
-
-        let mut predicates = Vec::new();
-        for value in self.values(spec, crate::DB_ENTITY_PREDS as u32) {
-            let Value::Symbol(symbol) = value else {
-                return Err(SemanticError::incorrect(
-                    "transaction/invalid-entity-spec",
-                    ":db.entity/preds values must be symbols",
-                ));
-            };
-            if symbol
-                .namespace
-                .as_deref()
-                .is_none_or(|namespace| namespace.is_empty() || namespace.contains('/'))
-                || symbol.name.is_empty()
-                || symbol.name.contains('/')
-            {
-                return Err(SemanticError::incorrect(
-                    "transaction/unqualified-entity-predicate",
-                    ":db.entity/preds values must be fully qualified symbols",
-                ));
-            }
-            predicates.push(symbol.qualified_name());
-        }
-        predicates.sort();
-        predicates.dedup();
-        Ok(EnsureCheck {
-            entity,
-            spec,
-            required,
-            predicates,
-        })
-    }
-
-    fn validate_tx_instant_forms(
-        &self,
-        ops: &[TxOp],
-        selected_instant: i64,
-    ) -> Result<(), SemanticError> {
-        let attribute = DB_TX_INSTANT as u32;
-        let mut explicit = None;
-        for op in ops {
-            match op {
-                TxOp::Add {
-                    entity,
-                    attribute: candidate,
-                    value,
-                } if *candidate == attribute => {
-                    if !matches!(entity, EntityRef::Tx) {
-                        return Err(SemanticError::incorrect(
-                            "transaction/reset-tx-instant",
-                            ":db/txInstant may be asserted only on the current transaction",
-                        ));
-                    }
-                    let TxValue::Scalar(Value::Instant(instant)) = value else {
-                        return Err(SemanticError::incorrect(
-                            "transaction/invalid-tx-instant",
-                            ":db/txInstant must be a scalar instant",
-                        ));
-                    };
-                    if explicit.replace(*instant).is_some() {
-                        return Err(SemanticError::incorrect(
-                            "transaction/multiple-tx-instants",
-                            ":db/txInstant may be specified only once",
-                        ));
-                    }
-                }
-                TxOp::Retract {
-                    attribute: candidate,
-                    ..
-                }
-                | TxOp::Cas {
-                    attribute: candidate,
-                    ..
-                } if *candidate == attribute => {
-                    return Err(SemanticError::incorrect(
-                        "transaction/reset-tx-instant",
-                        ":db/txInstant cannot be retracted or changed",
-                    ));
-                }
-                _ => {}
-            }
-        }
-        if explicit.is_some_and(|instant| instant != selected_instant) {
-            return Err(SemanticError::incorrect(
-                "transaction/tx-instant-mismatch",
-                "explicit :db/txInstant differs from the transactor-selected instant",
-            ));
-        }
-        Ok(())
-    }
-
-    fn expand_retract_entity(
-        &self,
-        entity: u64,
-        logical: &mut Vec<LogicalDatom>,
-        touched: &mut BTreeSet<(u64, u32)>,
-        visited: &mut BTreeSet<u64>,
-    ) -> Result<(), SemanticError> {
-        // Like recovered builtins/component-es-set, graph depth belongs in a
-        // worklist, not the call stack. Continuations preserve the previous
-        // depth-first EAVT/child/VAET order without limiting stored graph depth.
-        enum Work {
-            Visit(u64),
-            Fact(Datom),
-            Retract(Datom),
-            Incoming(u64),
-        }
-        let mut pending = vec![Work::Visit(entity)];
-        while let Some(work) = pending.pop() {
-            match work {
-                Work::Visit(entity) => {
-                    if !visited.insert(entity) {
-                        continue;
-                    }
-                    let facts = self.current_indexes.matching(&IndexPrefix::Eavt {
-                        entity,
-                        attribute: None,
-                        value: None,
-                    })?;
-                    pending.push(Work::Incoming(entity));
-                    pending.extend(facts.iter().rev().cloned().map(Work::Fact));
-                }
-                Work::Fact(fact) => {
-                    let component = self.schema.attribute(fact.attribute)?.component;
-                    let child = match &fact.value {
-                        Value::Ref(child) if component => Some(*child),
-                        _ => None,
-                    };
-                    pending.push(Work::Retract(fact));
-                    if let Some(child) = child {
-                        pending.push(Work::Visit(child));
-                    }
-                }
-                Work::Retract(fact) => {
-                    touched.insert((fact.entity, fact.attribute));
-                    logical.push(LogicalDatom {
-                        entity: fact.entity,
-                        attribute: fact.attribute,
-                        value: fact.value,
-                        added: false,
-                    });
-                }
-                Work::Incoming(entity) => {
-                    // Retract E or V facts, including noncomponent incoming
-                    // refs. VAET avoids scanning unrelated current data.
-                    for fact in self.current_indexes.matching(&IndexPrefix::Vaet {
-                        value: Value::Ref(entity),
-                        attribute: None,
-                        entity: None,
-                    })? {
-                        touched.insert((fact.entity, fact.attribute));
-                        logical.push(LogicalDatom {
-                            entity: fact.entity,
-                            attribute: fact.attribute,
-                            value: fact.value.clone(),
-                            added: false,
-                        });
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn resolve_entity(
-        &self,
-        entity: &EntityRef,
-        tx: u64,
-        tempids: &BTreeMap<String, u64>,
-    ) -> Result<u64, SemanticError> {
-        match entity {
-            EntityRef::Id(id) => {
-                self.validate_explicit_entity_id(*id)?;
-                Ok(*id)
-            }
-            EntityRef::Ident(ident) => self.entid(ident).ok_or_else(|| {
-                SemanticError::incorrect(
-                    "transaction/unknown-ident",
-                    format!("unknown ident {}", ident.qualified_name()),
-                )
-            }),
-            EntityRef::Temp(tempid) => tempids.get(tempid).copied().ok_or_else(|| {
-                SemanticError::incorrect(
-                    "transaction/unknown-tempid",
-                    format!("unknown tempid {tempid}"),
-                )
-            }),
-            EntityRef::Lookup { attribute, value } => {
-                crate::transaction_stats::count(|work| &mut work.identity_lookups, 1);
-                self.lookup(*attribute, value)?.ok_or_else(|| {
-                    SemanticError::incorrect(
-                        "transaction/lookup-not-found",
-                        "lookup ref did not resolve in db-before",
-                    )
-                })
-            }
-            EntityRef::LookupInput { attribute, value } => {
-                crate::transaction_stats::count(|work| &mut work.identity_lookups, 1);
-                self.database_value()
-                    .resolve_lookup_input(*attribute, value)?
-                    .ok_or_else(|| {
-                        SemanticError::incorrect(
-                            "transaction/lookup-not-found",
-                            "lookup ref did not resolve in db-before",
-                        )
-                    })
-            }
-            EntityRef::Tx => Ok(tx),
-        }
-    }
-
-    fn validate_explicit_entity_id(&self, entity: u64) -> Result<(), SemanticError> {
-        validate_supported_eid(entity)?;
-        self.schema.validate_partition_bits(eid_to_part(entity)?)?;
-        let eidx = eid_to_eidx(entity)?;
-        if eidx >= self.eidx_frontier {
-            return Err(SemanticError::incorrect(
-                "transaction/invalid-entity-id",
-                format!(
-                    "entity id {entity} has unissued index {eidx}; issued indexes are below {}",
-                    self.eidx_frontier
-                ),
-            ));
-        }
-        Ok(())
-    }
-
-    fn resolve_value(
-        &self,
-        attribute: u32,
-        value: &TxValue,
-        tx: u64,
-        tempids: &BTreeMap<String, u64>,
-    ) -> Result<Value, SemanticError> {
-        let schema = self.schema.attribute(attribute)?;
-        let value = match (schema.value_type, value) {
-            (ValueType::Tuple, TxValue::Tuple(slots)) => {
-                for value in slots.iter().flatten() {
-                    if let TxValue::Scalar(value) = value {
-                        self.validate_explicit_value_refs(value)?;
-                    }
-                }
-                resolve_tuple_input(&self.schema, schema, slots, |entity| {
-                    self.resolve_entity(entity, tx, tempids)
-                        .map(|entity| UpsertIdentityValue::Resolved(Value::Ref(entity)))
-                })?
-                .resolved()
-                .expect("allocated tuple has no symbolic references")
-                .clone()
-            }
-            (ValueType::Ref, TxValue::Entity(entity)) => {
-                Value::Ref(self.resolve_entity(entity, tx, tempids)?)
-            }
-            (_, TxValue::Scalar(value)) => {
-                self.validate_explicit_value_refs(value)?;
-                value.clone()
-            }
-            _ => {
-                return Err(SemanticError::incorrect(
-                    "transaction/value-type",
-                    format!(
-                        "attribute {} requires {:?}",
-                        schema.ident.qualified_name(),
-                        schema.value_type
-                    ),
-                ));
-            }
-        };
-        self.schema.validate_value(schema, &value)?;
-        Ok(value)
-    }
-
-    fn validate_explicit_value_refs(&self, value: &Value) -> Result<(), SemanticError> {
-        match value {
-            Value::Ref(entity) => self.validate_explicit_entity_id(*entity),
-            Value::Tuple(slots) => {
-                for value in slots.iter().flatten() {
-                    self.validate_explicit_value_refs(value)?;
-                }
-                Ok(())
-            }
-            _ => Ok(()),
-        }
-    }
-
-    fn is_derived_composite(&self, attribute: u32) -> Result<bool, SemanticError> {
-        let attribute = self.schema.attribute(attribute)?;
-        Ok(matches!(attribute.tuple, Some(TupleSpec::Composite(_)))
-            && !attribute.tuple_discontinued)
-    }
-}
-
-fn validate_entity_predicate_name(attribute: u32, value: &Value) -> Result<(), SemanticError> {
-    if attribute != crate::DB_ENTITY_PREDS as u32 {
-        return Ok(());
-    }
-    let Value::Symbol(symbol) = value else {
-        // The ordinary schema value-type check owns this diagnostic.
-        return Ok(());
-    };
-    if symbol
-        .namespace
-        .as_deref()
-        .is_none_or(|namespace| namespace.is_empty() || namespace.contains('/'))
-        || symbol.name.is_empty()
-        || symbol.name.contains('/')
-    {
-        return Err(SemanticError::incorrect(
-            "transaction/unqualified-entity-predicate",
-            ":db.entity/preds values must be fully qualified symbols",
-        ));
-    }
-    Ok(())
 }
 
 /// Match recovered `ProcessExpander`: permanent ids are assigned to tempids in
@@ -3019,19 +1924,6 @@ fn collect_tempids_entity(entity: &EntityRef, output: &mut BTreeSet<String>) {
     }
 }
 
-fn dedupe(datoms: &mut Vec<LogicalDatom>) {
-    let before = datoms.len();
-    let mut result: Vec<LogicalDatom> = Vec::new();
-    for datom in datoms.drain(..) {
-        if !result.iter().any(|existing| same_logical(existing, &datom)) {
-            result.push(datom);
-        }
-    }
-    result.sort_by(compare_logical);
-    *datoms = result;
-    crate::transaction_stats::count(|work| &mut work.duplicate_datoms, before - datoms.len());
-}
-
 fn is_attribute_hook_property(attribute: u32) -> bool {
     matches!(
         u64::from(attribute),
@@ -3048,180 +1940,6 @@ fn is_attribute_hook_property(attribute: u32) -> bool {
             | crate::DB_ATTR_PREDS
             | crate::DB_TUPLE_DISCONTINUED
     )
-}
-
-fn attribute_property_changed(
-    current: &crate::Attribute,
-    proposed: &crate::Attribute,
-    attribute: u32,
-) -> bool {
-    match u64::from(attribute) {
-        crate::DB_IDENT => current.ident != proposed.ident,
-        crate::DB_VALUE_TYPE => current.value_type != proposed.value_type,
-        crate::DB_CARDINALITY => current.cardinality != proposed.cardinality,
-        crate::DB_UNIQUE => current.unique != proposed.unique,
-        crate::DB_IS_COMPONENT => current.component != proposed.component,
-        crate::DB_INDEX => current.indexed != proposed.indexed,
-        crate::DB_NO_HISTORY => current.no_history != proposed.no_history,
-        crate::DB_FULLTEXT => current.fulltext != proposed.fulltext,
-        crate::DB_TUPLE_TYPE | crate::DB_TUPLE_TYPES | crate::DB_TUPLE_ATTRS => {
-            current.tuple != proposed.tuple
-        }
-        crate::DB_ATTR_PREDS => current.predicates != proposed.predicates,
-        crate::DB_TUPLE_DISCONTINUED => current.tuple_discontinued != proposed.tuple_discontinued,
-        _ => false,
-    }
-}
-
-fn same_logical(left: &LogicalDatom, right: &LogicalDatom) -> bool {
-    left.entity == right.entity
-        && left.attribute == right.attribute
-        && left.added == right.added
-        && left.value.stored_eq(&right.value)
-}
-
-fn compare_logical(left: &LogicalDatom, right: &LogicalDatom) -> Ordering {
-    left.entity
-        .cmp(&right.entity)
-        .then(left.attribute.cmp(&right.attribute))
-        .then_with(|| left.value.stored_cmp(&right.value))
-        .then_with(|| right.added.cmp(&left.added))
-}
-
-fn validate_same_transaction(
-    schema: &Schema,
-    datoms: &[LogicalDatom],
-) -> Result<(), SemanticError> {
-    for (index, left) in datoms.iter().enumerate() {
-        schema.attribute(left.attribute)?;
-        for right in &datoms[index + 1..] {
-            if left.entity == right.entity
-                && left.attribute == right.attribute
-                && left.value.stored_eq(&right.value)
-                && left.added != right.added
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/datoms-conflict",
-                    "addition and retraction of the same E/A/V conflict",
-                ));
-            }
-            let attribute = schema.attribute(left.attribute)?;
-            if left.entity == right.entity
-                && left.attribute == right.attribute
-                && left.added
-                && right.added
-                && attribute.cardinality == Cardinality::One
-                && left.value.index_cmp(&right.value).is_ne()
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/cardinality-one-conflict",
-                    "two values for one cardinality-one E/A conflict",
-                ));
-            }
-            if left.attribute == right.attribute
-                && left.added
-                && right.added
-                && attribute.unique.is_some()
-                && left.value.index_cmp(&right.value).is_eq()
-                && left.entity != right.entity
-            {
-                return Err(SemanticError::conflict(
-                    "transaction/unique-conflict",
-                    "two entities assert the same unique A/V",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn add_cardinality_one_retractions(
-    schema: &Schema,
-    current: &[CurrentFact],
-    datoms: &mut Vec<LogicalDatom>,
-) -> Result<(), SemanticError> {
-    let additions: Vec<_> = datoms.iter().filter(|datom| datom.added).cloned().collect();
-    for addition in additions {
-        if schema.attribute(addition.attribute)?.cardinality != Cardinality::One {
-            continue;
-        }
-        for existing in current.iter().filter(|fact| {
-            fact.entity == addition.entity
-                && fact.attribute == addition.attribute
-                && !fact.value.stored_eq(&addition.value)
-        }) {
-            datoms.push(LogicalDatom {
-                entity: existing.entity,
-                attribute: existing.attribute,
-                value: existing.value.clone(),
-                added: false,
-            });
-        }
-    }
-    Ok(())
-}
-
-fn derive_composites(
-    schema: &Schema,
-    before: &[CurrentFact],
-    after_user_data: &[CurrentFact],
-    touched: &BTreeSet<(u64, u32)>,
-) -> Result<Vec<LogicalDatom>, SemanticError> {
-    let mut result = Vec::new();
-    for composite in schema.attributes().filter(|attribute| {
-        matches!(attribute.tuple, Some(TupleSpec::Composite(_))) && !attribute.tuple_discontinued
-    }) {
-        let TupleSpec::Composite(constituents) = composite.tuple.as_ref().unwrap() else {
-            unreachable!()
-        };
-        let entities: BTreeSet<_> = touched
-            .iter()
-            .filter(|(_, attribute)| constituents.contains(attribute))
-            .map(|(entity, _)| *entity)
-            .collect();
-        for entity in entities {
-            crate::transaction_stats::count(|work| &mut work.composite_candidates, 1);
-            let before_count = result.len();
-            let old = find_fact(before, entity, composite.id).map(|fact| fact.value.clone());
-            let slots: Vec<_> = constituents
-                .iter()
-                .map(|attribute| {
-                    find_fact(after_user_data, entity, *attribute).map(|fact| fact.value.clone())
-                })
-                .collect();
-            let new = if slots.iter().all(Option::is_none) {
-                None
-            } else {
-                Some(Value::Tuple(slots))
-            };
-            if let Some(old) = &old
-                && new.as_ref().is_none_or(|new| !old.stored_eq(new))
-            {
-                result.push(LogicalDatom {
-                    entity,
-                    attribute: composite.id,
-                    value: old.clone(),
-                    added: false,
-                });
-            }
-            if let Some(new) = new
-                && old.as_ref().is_none_or(|old| !old.stored_eq(&new))
-            {
-                schema.validate_value(composite, &new)?;
-                result.push(LogicalDatom {
-                    entity,
-                    attribute: composite.id,
-                    value: new,
-                    added: true,
-                });
-            }
-            crate::transaction_stats::count(
-                |work| &mut work.composite_datoms,
-                result.len() - before_count,
-            );
-        }
-    }
-    Ok(result)
 }
 
 fn apply_logical(current: &[CurrentFact], datoms: &[LogicalDatom], tx: u64) -> Vec<CurrentFact> {
@@ -3282,14 +2000,6 @@ fn validate_cardinality(schema: &Schema, facts: &[CurrentFact]) -> Result<(), Se
 }
 
 fn validate_uniqueness(schema: &Schema, facts: &[CurrentFact]) -> Result<(), SemanticError> {
-    validate_uniqueness_inner(schema, facts, false)
-}
-
-fn validate_uniqueness_inner(
-    schema: &Schema,
-    facts: &[CurrentFact],
-    account_work: bool,
-) -> Result<(), SemanticError> {
     let unique_attributes: BTreeSet<_> = schema
         .attributes()
         .filter(|attribute| attribute.unique.is_some())
@@ -3309,9 +2019,6 @@ fn validate_uniqueness_inner(
         let attribute = schema.attribute(left.attribute)?;
         if attribute.unique.is_none() {
             continue;
-        }
-        if account_work {
-            crate::transaction_stats::count(|work| &mut work.uniqueness_checks, 1);
         }
         if left.value.is_nan() {
             return Err(SemanticError::incorrect(
@@ -3445,106 +2152,10 @@ fn validate_uniqueness_for_attribute(
     Ok(())
 }
 
-fn validate_ensures(
-    db_after: &Database,
-    ensures: &[EnsureCheck],
-    functions: Option<&crate::TxFunctions>,
-) -> Result<(), SemanticError> {
-    validate_ensure_attributes(db_after, ensures)?;
-    for ensure in ensures {
-        for predicate in &ensure.predicates {
-            let result = functions
-                .ok_or_else(|| {
-                    SemanticError::incorrect(
-                        "transaction/missing-predicate-context",
-                        format!("entity spec {} requires predicate {predicate}", ensure.spec),
-                    )
-                })?
-                .validate_entity_predicate(predicate, db_after, ensure.entity)?;
-            if !crate::is_exact_true(&result) {
-                return Err(SemanticError::incorrect(
-                    "transaction/entity-predicate",
-                    format!(
-                        "entity {} failed predicate {predicate} of spec {}",
-                        ensure.entity, ensure.spec
-                    ),
-                )
-                .detail("pred_return", format!("{result:?}")));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn validate_ensure_attributes(
-    db_after: &Database,
-    ensures: &[EnsureCheck],
-) -> Result<(), SemanticError> {
-    for ensure in ensures {
-        let missing: Vec<_> = ensure
-            .required
-            .iter()
-            .filter(|attribute| db_after.values(ensure.entity, **attribute).is_empty())
-            .copied()
-            .collect();
-        if !missing.is_empty() {
-            return Err(SemanticError::incorrect(
-                "transaction/entity-spec",
-                format!(
-                    "entity {} is missing attributes {missing:?} of spec {}",
-                    ensure.entity, ensure.spec
-                ),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn material_changes(
-    before: &[CurrentFact],
-    after: &[CurrentFact],
-    logical: &[LogicalDatom],
-    tx: u64,
-) -> Vec<Datom> {
-    let before_index = StoredFactIndex::from_current(before);
-    let after_index = StoredFactIndex::from_current(after);
-    logical
-        .iter()
-        .filter(|datom| {
-            crate::transaction_stats::count(|work| &mut work.redundancy_checks, 1);
-            let existed_before = before_index.contains(datom.entity, datom.attribute, &datom.value);
-            let exists_after = after_index.contains(datom.entity, datom.attribute, &datom.value);
-            let material = if datom.added {
-                (datom.attribute == crate::DB_ALTER_ATTRIBUTE as u32 || !existed_before)
-                    && exists_after
-            } else {
-                existed_before && !exists_after
-            };
-            if !material {
-                crate::transaction_stats::count(|work| &mut work.redundant_datoms, 1);
-            }
-            material
-        })
-        .map(|datom| Datom {
-            entity: datom.entity,
-            attribute: datom.attribute,
-            value: datom.value.clone(),
-            tx,
-            added: datom.added,
-        })
-        .collect()
-}
-
 fn contains_fact(facts: &[CurrentFact], entity: u64, attribute: u32, value: &Value) -> bool {
     facts.iter().any(|fact| {
         fact.entity == entity && fact.attribute == attribute && fact.value.stored_eq(value)
     })
-}
-
-fn find_fact(facts: &[CurrentFact], entity: u64, attribute: u32) -> Option<&CurrentFact> {
-    facts
-        .iter()
-        .find(|fact| fact.entity == entity && fact.attribute == attribute)
 }
 
 fn compare_current(left: &CurrentFact, right: &CurrentFact) -> Ordering {
@@ -4071,39 +2682,6 @@ fn validate_new_value_allocations(
             Ok(())
         }
         _ => Ok(()),
-    }
-}
-
-#[derive(Debug)]
-struct UnionFind {
-    parent: Vec<usize>,
-}
-
-impl UnionFind {
-    fn new(size: usize) -> Self {
-        Self {
-            parent: (0..size).collect(),
-        }
-    }
-
-    fn root(&self, mut index: usize) -> usize {
-        while self.parent[index] != index {
-            index = self.parent[index];
-        }
-        index
-    }
-
-    fn join(&mut self, left: usize, right: usize) {
-        let left = self.root(left);
-        let right = self.root(right);
-        if left != right {
-            let (low, high) = if left < right {
-                (left, right)
-            } else {
-                (right, left)
-            };
-            self.parent[high] = low;
-        }
     }
 }
 

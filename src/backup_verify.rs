@@ -10,9 +10,7 @@ use crate::storage::descriptors::{INDEX_DESCRIPTOR_KIND, SNAPSHOT_METADATA_KIND}
 use crate::storage::log::LogRoot;
 use crate::storage::receipts::{ExactReceipt, RECEIPT_KIND, RequestIndex, basis_receipt_key};
 use crate::storage::root::{Block, DATABASE_VALUE_ROOT_KIND, DatabaseRoot, DatabaseValueRoot};
-use crate::storage::{
-    BlockReadConfig, BlockSnapshot, IndexDescriptor, ObjectId, ObjectReader, SnapshotMetadata,
-};
+use crate::storage::{IndexDescriptor, ObjectId, ObjectReader, SnapshotMetadata};
 use crate::{
     Database, Datom, DurableTransaction, ErrorCategory, IndexOrder, MaintenanceControl,
     SemanticError, View,
@@ -167,9 +165,6 @@ pub(crate) fn verify_read_point(
             "Read value differs from its committed publication",
         ));
     }
-    // Exercise the same selective admission used by actual offline clients.
-    let snapshot = BlockSnapshot::open_repository(directory, &point, BlockReadConfig::default())?;
-    drop(snapshot);
     let log = match publication.log {
         Some(id) => LogRoot::open(&mut reader, id)?,
         None => LogRoot::empty(),
@@ -871,8 +866,6 @@ mod tests {
             .encode()
             .unwrap(),
         ));
-        let publication_id = put(directory, &publication.encode().unwrap());
-        let mut value = DatabaseValueRoot::from(&publication);
         if wrong_tree {
             // Corrupt a covering projection that is not used to derive schema
             // during ordinary open; the deep semantic comparator must catch it.
@@ -889,15 +882,15 @@ mod tests {
                 put(directory, bytes);
             }
             index.trees[3] = built.descriptor;
-            value.indexes = Some(put(directory, &index.encode().unwrap()));
+            publication.indexes = Some(put(directory, &index.encode().unwrap()));
         }
-        let value_id = put(directory, &value.encode().unwrap());
+        let publication_id = put(directory, &publication.encode().unwrap());
         let mut payload = identity.to_vec();
         payload.extend_from_slice(&0u64.to_be_bytes());
         payload.extend_from_slice(&0u64.to_be_bytes());
         let manifest = Block {
             kind: crate::backup::POINT_KIND,
-            links: vec![publication_id, value_id],
+            links: vec![publication_id],
             payload,
         }
         .encode()
@@ -1156,7 +1149,7 @@ mod tests {
             payload.extend_from_slice(&2u64.to_be_bytes());
             let manifest = Block {
                 kind: crate::backup::POINT_KIND,
-                links: vec![publication_id, after_id],
+                links: vec![publication_id],
                 payload,
             }
             .encode()

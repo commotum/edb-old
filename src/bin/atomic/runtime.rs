@@ -25,8 +25,7 @@ pub(super) fn run(
     capacity.writer_tree_cache_bytes =
         args.size("--tree-cache-bytes", capacity.writer_tree_cache_bytes)?;
     let config = TransactionServiceConfig {
-        // The configured constructor ignores this compatibility field.
-        connection: String::new(),
+        connection: connection.clone(),
         database_id: args.required("--database")?.to_owned(),
         holder_id: args
             .options
@@ -136,9 +135,8 @@ pub(super) fn run(
             .get("--mode")
             .is_some_and(|mode| mode == "auto")
         {
-            let mut standby = TransactionStandby::start_configured_with_options(
+            let mut standby = TransactionStandby::start_with_options(
                 config,
-                connection.clone(),
                 options,
                 Duration::from_millis(args.number("--standby-poll-ms", 250)?),
             )?;
@@ -171,8 +169,7 @@ pub(super) fn run(
                 std::thread::sleep(Duration::from_millis(25));
             }
         } else {
-            TransactionService::start_configured_with_options(config, connection.clone(), options)
-                .map(Some)
+            TransactionService::start_with_options(config, options).map(Some)
         }
     };
     let service = match activate() {

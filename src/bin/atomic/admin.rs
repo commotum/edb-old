@@ -38,22 +38,22 @@ already have the current storage installed. Exact basis/generation are required;
 zero is valid. GC is
 catalog-wide, not scoped to one logical database; explicit retention is required.
 Each GC batch bounds ownership and sweep steps, not elapsed time. Default
-batches=1; incomplete output reports resumable work. Live pinned values remain
-protected. Short retention can remove unpinned, disconnected readers' objects.
+batches=1; incomplete output reports resumable work. The normal storage retention
+grace is 30 days. Shorter explicit retention can invalidate held readers.
 Offline list/verify need no PostgreSQL environment. Verification is deep unless
 --presence-only; backup success alone is not deep semantic verification.
 SIGINT/SIGTERM may leave committed resumable work: retry the same exact target
 and point. Rebuild replaces only the derived search attachment. The explicit
-discard digest guards the current index descriptor; pinned old search remains
-readable and is reclaimed only by ordinary GC. There is no physical discard
+discard digest guards the current index descriptor; old search remains readable
+within the storage retention grace and is reclaimed by ordinary GC. There is no physical discard
 phase (the accepted --batches limit needs just one rebuild).
 See docs/admin.md and docs/operations.md.
 
 Create is idempotent; list is paginated (default 1000, maximum 4096). Rename/delete
 preview by default. Apply requires the lineage printed by preview to guard name
 reuse. Delete retires and fences a database; it does not reclaim storage. Already
-captured pinned values remain readable. gc-deleted targets one retired storage
-ID/lineage, admits a shared collection cycle and preserves pinned/shared content.
+captured values remain readable within storage retention. gc-deleted targets one retired storage
+ID/lineage, admits a shared collection cycle and preserves still-owned shared content.
 Cycle completion does not promise deletion of still-owned objects. See
 docs/database-lifecycle.md. These mutations require catalog owner authority.
 
@@ -562,8 +562,12 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
             verify_target(&config, &args)?;
             let directory = Path::new(args.required("--repository")?);
             if !args.has("--apply") {
-                progress("restore", "preview-deep-verification")?;
-                PortableBackup::verify_backup_point(directory, p.basis_t, p.log_generation, true)?;
+                progress("restore", "preview-structure")?;
+                PortableBackup::verify_backup_point_presence(
+                    directory,
+                    p.basis_t,
+                    p.log_generation,
+                )?;
                 point("RESTORE_POINT", &p);
                 println!(
                     "RESTORE_PREVIEW target_database={:?} applied=false target_compatibility=checked-on-apply elapsed_ms={}",
@@ -571,7 +575,7 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                     started.elapsed().as_millis()
                 );
             } else {
-                progress("restore", "verify-stage-activate")?;
+                progress("restore", "copy-activate")?;
                 let db = PortableBackup::connect_configured(&config)?
                     .with_maintenance_control(maintenance.clone())
                     .restore_backup_point(
@@ -584,7 +588,7 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
                     "RESTORED target_database={:?} lineage={} basis_t={} selected_generation={} elapsed_ms={}",
                     args.required("--target-database")?,
                     p.lineage_id,
-                    db.basis_t(),
+                    db.point.basis_t,
                     p.log_generation,
                     started.elapsed().as_millis()
                 );
@@ -702,8 +706,8 @@ fn inventory(label: &str, batch: u64, inventory: &GarbageInventory) {
     );
     if let Some(handoffs) = &inventory.report_handoffs {
         println!(
-            "GC_REPORT_HANDOFFS batch={batch} examined={} removed={} unsettled={} page_complete={} next_cycle_may_have_work=true",
-            handoffs.examined, handoffs.removed, handoffs.unsettled, handoffs.complete,
+            "GC_REPORT_HANDOFFS batch={batch} examined={} removed={} page_complete={} next_cycle_may_have_work=true",
+            handoffs.examined, handoffs.removed, handoffs.complete,
         );
     }
     if let Some(authorization) = &inventory.authorization {

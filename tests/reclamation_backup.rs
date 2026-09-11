@@ -1,4 +1,4 @@
-//! Captured backup ownership and same-lineage restoration on a fresh route.
+//! Backup capture within retirement grace and same-lineage restoration on a fresh route.
 mod common;
 use atomic_core::storage::ownership::{BlockCollector, CollectionPhase};
 use atomic_core::storage::{BlockDatabase, PgBlockStore};
@@ -8,7 +8,12 @@ use std::time::Duration;
 fn collect(config: &PostgresConnectionConfig) {
     let mut collector = BlockCollector::connect(config).unwrap();
     for _ in 0..128 {
-        if collector.advance(Duration::ZERO, 4096).unwrap().phase == CollectionPhase::Complete {
+        if collector
+            .advance(RECOMMENDED_GARBAGE_COLLECTION_AGE, 4096)
+            .unwrap()
+            .phase
+            == CollectionPhase::Complete
+        {
             return;
         }
     }
@@ -16,7 +21,7 @@ fn collect(config: &PostgresConnectionConfig) {
 }
 
 #[test]
-fn backup_capture_survives_retirement_and_restoration_never_reactivates_old_routes() {
+fn backup_capture_survives_retirement_within_grace_and_restore_uses_a_fresh_route() {
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
@@ -60,7 +65,7 @@ fn backup_capture_survives_retirement_and_restoration_never_reactivates_old_rout
     let directory = common::private_directory();
     let point = PortableBackup::connect_configured(&config)
         .unwrap()
-        .backup_database_with_pin_probe("source", directory.path(), || {
+        .backup_database_with_capture_probe("source", directory.path(), || {
             catalog.retire_checked("source", &old.lineage_id).unwrap();
             collect(&config);
             assert_eq!(
@@ -82,7 +87,7 @@ fn backup_capture_survives_retirement_and_restoration_never_reactivates_old_rout
         .unwrap()
         .restore_backup(directory.path(), point.basis_t, "source")
         .unwrap();
-    assert_eq!(restored.basis_t(), point.basis_t);
+    assert_eq!(restored.point.basis_t, point.basis_t);
     let fresh = catalog.resolve("source").unwrap();
     assert_ne!(fresh.database_id, old.database_id);
     assert_eq!(fresh.lineage_id, old.lineage_id);

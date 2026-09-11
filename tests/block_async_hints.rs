@@ -40,7 +40,7 @@ fn fixture(label: &str) -> Option<(common::PostgresFixture, PostgresConnectionCo
 }
 fn service_config(connection: &str, holder: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: connection.into(),
+        connection: PostgresConnectionConfig::plaintext(connection),
         database_id: "workflow".into(),
         holder_id: holder.into(),
         lease_duration: Duration::from_secs(30),
@@ -375,11 +375,11 @@ fn independent_hints_skip_ssd_and_never_change_native_callback_receipts() {
         )
         .unwrap();
     let mut config = service_config(&fixture.connection, "hints");
+    config.connection = configured;
     config.capacity_limits.writer_tree_cache_entries = 0;
     config.capacity_limits.writer_tree_cache_bytes = 0;
-    let service = TransactionService::start_configured_with_options(
+    let service = TransactionService::start_with_options(
         config,
-        configured,
         ServiceOptions {
             execution: TransactionExecutionOptions {
                 native: registry.build(),

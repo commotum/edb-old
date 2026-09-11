@@ -27,8 +27,8 @@ Installation and grants are separate committed operations: `INSTALLED` can
 precede a failed grant. Correct the roles and rerun the command. Runtime
 constructors validate the current storage and perform no DDL.
 
-Writers can read, insert and protect immutable objects; peers can read objects.
-Both maintain opaque references, including reader pins. Only administrative
+Writers can read, insert and protect immutable objects and maintain references.
+Peers only read objects and references; ordinary reads perform no SQL writes. Only administrative
 credentials receive object-deletion authority from this helper. These are
 **trusted storage credentials**, not per-database SQL authorization. The helper
 rejects elevated roles and storage owners but does not audit or revoke existing
@@ -76,12 +76,16 @@ erase search pages still held by immutable readers.
 
 ## Transport and failure policy
 
-Use private Unix-domain sockets locally, or
-`PostgresConnectionConfig::require_tls` for remote PostgreSQL. The latter
-requires verified certificates/hostnames and TLS 1.2 or newer, even when a
-parameter string requests plaintext. A private CA can be added explicitly.
-The string convenience constructors deliberately select plaintext development
-behavior; `sslmode` in that string is not a substitute for the configured API.
+`PostgresConnectionConfig::parse` and the string convenience constructors use
+the DSN as the transport authority. TCP defaults to verified TLS 1.2 or newer;
+Unix sockets are local, and `sslmode=disable` explicitly selects plaintext.
+The `require_tls` and `plaintext` builders reject conflicting DSN settings.
+Certificate and hostname verification remain mandatory; private trust roots can
+be added explicitly. `ATOMIC_POSTGRES_TRANSPORT` is no longer accepted.
+
+`TransactionServiceConfig.connection` holds this typed configuration. Services
+and standbys accept that one configuration, shared by their writer, indexer and
+reader connections; there is no separate connection argument or ignored DSN.
 
 Choose `PostgresIoPolicy` per role. Defaults preserve driver/server settings;
 there is no hidden universal production timeout. For example, a runtime policy
@@ -119,22 +123,19 @@ metrics, warning configuration, privacy and slow-sink/shutdown limits.
 
 ## Backup, verify and restore
 
-`PortableBackup::backup_database` pins one immutable publication through the
-ordinary Rust ownership protocol. It does not hold a relational repeatable-read
+`PortableBackup::backup_database` captures one immutable publication. Storage
+retention must cover the copy duration. It does not hold a relational repeatable-read
 snapshot or write source indexes. A private repository is claimed by one lineage;
 content-addressed files are authenticated and atomically published without
 overwriting existing files. The point is published only after its reachable
 objects are durable. Atomic does not encrypt the repository; media encryption
 and retention remain deployment responsibilities.
 
-Each point links its original canonical publication and a separate exact
-same-basis read value. Capture reuses covering roots when possible. Otherwise it
-finishes existing AVET projection steps, applies the captured recent tail once,
-finishes new projection steps, and builds search against the final index source.
-All generated objects go to the repository. Offline query/Pull/log reads use
-the same tree and log algorithms without replaying history or consulting the
-source database. No earlier relational backup format or SQL generation ledger
-is accepted by this path.
+Each point links one canonical publication, preserving its existing indexes and
+log tail. Capture does not run indexing or build search. Offline query/Pull/log
+reads use the same tree readers and admitted recent-tail handling as live peers,
+including pending-index readiness. No source database is needed. Earlier backup
+formats are rejected rather than converted.
 
 Copy success and unchanged-point reuse authenticate reachable immutable objects
 and program dependencies; neither is a semantic proof. `verify_backup_presence`
@@ -145,7 +146,8 @@ compares every retained covering index and search attachment against canonical
 information. Receipt before/after values must match exact canonical prefixes,
 and metadata must match ordinary/reserved allocation checkpoints. Legitimate
 no-history omissions and pending AVET prefixes are checked, not ignored.
-Restore performs the deep pass before staging/activation.
+This semantic audit is explicit; ordinary restore authenticates copied objects
+and checks guarded publication without replaying history.
 
 Deep verification is intentionally broad: it retains one replayed database,
 small per-basis schedules and comparison datoms, not a database copy per receipt.
@@ -158,7 +160,7 @@ authenticated closure, not every repeated physical read during comparison.
 The explicit API order remains
 `restore_backup_point(directory, basis_t, generation, target_name)`.
 Install the target namespace and stop its writer before applying restore.
-Existing readers may keep pinned values; target/lease/catalog guards prevent
+Existing readers remain subject to storage retention; target/lease/catalog guards prevent
 stale activation. A new target is reserved as a headless route while copying,
 so catalog discovery can precede a readable database. An unrelated lineage,
 retreating or divergent log, or loss of acknowledged request identities is
@@ -176,7 +178,9 @@ guarded reference batch. A concurrent target change fails closed.
 
 Retry an interrupted or ambiguous restore with the same point and destination.
 It resumes the durable checkpoint or recognizes the exact completion; a completed
-retry neither rolls back a newer head nor reruns activation hooks. Do not edit
+retry returns its recorded activated root without replay, rolling back a newer
+head or rerunning activation hooks. The result is `RestoreResult` with `point`,
+`target` and `activated_root` fields; open a peer for database reads. Do not edit
 work references manually. After success, open new clients and exercise cold
 current/history/query/Pull and exact transaction retries. Retain independent
 physical PostgreSQL backups/WAL under a separately tested recovery policy.
@@ -186,7 +190,7 @@ physical PostgreSQL backups/WAL under a separately tested recovery policy.
 The current operator uses the Rust block engine. PostgreSQL stores opaque
 immutable objects and guarded references; it does not interpret application
 datoms or run feature-specific GC/excision procedures.
-`PostgresOperator::inspect_database(database_id, deep)` pins one immutable
+`PostgresOperator::inspect_database(database_id, deep)` captures one immutable
 publication, using the stable catalog ID rather than resolving a name again.
 Shallow inspection reports authenticated coordinates and index counts. Deep
 inspection additionally walks reachable objects, replays the canonical log and
@@ -206,7 +210,7 @@ Separate inventory and collection calls can observe concurrent activity.
 then persists a resumable checkpoint. Its counters describe that call's work:
 ownership steps, newly owned objects and authenticated payload bytes, metadata
 protection, objects examined/removed, physical bytes removed, ownership events
-removed and reader-session cleanup. Applied reports omit unmeasured whole-store
+removed. Applied reports omit unmeasured whole-store
 totals. The bound is not a wall-clock, SQL-statement or allocator-RSS ceiling;
 one admitted object can still be up to the provider's 64 MiB canonical limit.
 `MaintenanceControl` checks cancellation and optional pacing between safe
@@ -218,14 +222,14 @@ completed events. Rust authenticates a newly owned object's children once and
 retains that ownership information, including Function values in trees/logs and
 fixed program dependencies. Unchanged shared subgraphs do not require a fresh
 live-data traversal every cycle. Uncertain/missing/corrupt ownership evidence
-fails closed. Root publication and pin changes participate in the same guarded
+fails closed. Root publication and protected work participate in the same guarded
 ownership protocol; a losing writer or collector cannot publish stale progress.
 
 The CLI defaults to one bounded apply call. `GC_APPLIED` reports work, while
 `GC_PROGRESS cycle_complete=false` means invoke the same command again or choose
 an explicit larger `--batches` count. A successful process exit or zero deleted
 objects is not proof of completed cleanup. `cycle_complete=true` means only that
-the sealed cycle finished: later publications, pin releases or authorization
+the sealed cycle finished: later publications, staging expiry or authorization
 pruning can require another cycle. Reopening the operator resumes its checkpoint.
 The cycle fixes its retirement cutoff when it begins; changing the supplied age
 does not retroactively change an already running cycle.
@@ -240,22 +244,15 @@ uploads: an abandoned upload fenced by a newer protection epoch, or obsolete
 collector scratch metadata, can be reclaimed regardless of that age. Active
 protected uploads remain fenced against the current sweep.
 
-Held database values, logs and cursors share real reader pins. A healthy reader
-session does not expire because of its age or inactivity. A collector must
-acquire the session's exclusive liveness lock before explicitly revoking a
-disconnected session. Its pins remain protected for five minutes **after that
-revocation**, not merely after the last read or a guessed disconnect time.
-A revoked reader cannot resurrect its session; reopen through the current
-authorized publication, which may reject a retired identity or old excision
-generation.
+Held database values, logs and cursors retain roots in memory and create no
+reader pins or sessions. Capturing, cloning and dropping them perform no SQL
+writes. Retention must cover active read and copy durations; an explicitly short
+age can invalidate cold reads from a held value. Reopening authenticates the
+current publication and may reject retired identities or old excision generations.
 
-Normal final-value cleanup is queued on the bounded worker lane, with no
-PostgreSQL I/O in final value/cursor Drop. Explicit unique-owner release is also
-available. Session cleanup removes at most 32 pins per work item; its release
-events belong to the new epoch and are folded in a later collection cycle.
-Account for that handoff and the retirement horizon before expecting space back.
-GC cannot erase objects still owned by a current root, exact receipt, held value
-or another database. None of these controls erase backups, replicas, WAL,
+GC preserves objects still owned by current roots, exact receipts, protected work
+or another database. In-memory reader ownership alone does not prevent collection
+after the grace period. None of these controls erase backups, replicas, WAL,
 application exports or already copied process memory.
 
 ## Disposable workload checks
@@ -288,8 +285,8 @@ target and checks the source stayed unchanged.
 the driver creates a private temporary directory and prints its retained path.
 After a completed capture/repeat, `ATOMIC_OPS_RESUME_MANIFEST` can select the exact
 retained manifest to resume the remaining phases. Keep earlier output: resumed
-time excludes the original copy and standalone verification, while restore still
-performs its mandatory deep proof. Leave other `ATOMIC_OPS_PHASE` and
+time excludes the original copy and standalone verification. Restore copies and
+authenticates objects without another semantic replay. Leave other `ATOMIC_OPS_PHASE` and
 `ATOMIC_OPS_EXPECT_*` controls unset for the ordinary driver.
 
 Each phase reports its own elapsed time, process CPU/RSS and observed SQL work.
@@ -328,15 +325,13 @@ database. After successful admission, the service parks fresh transactions for
 the rewrite; lease renewal, receipt resolution and independent reads continue.
 An old held database/log value remains an immutable copy: discard it and sync
 controlled clients before claiming removal. New serialized opens of an older
-generation are rejected. Reclamation still obeys held pins and retention.
+generation are rejected. Reclamation follows durable ownership and retention.
 
-Connected lagging peers also retain reclaimable generation handoffs so their
-transaction report queues do not lose original outcomes across a rewrite.
-This retention belongs to the live observer, not to every old database value.
-After observers catch up or are dropped, bounded pruning releases handoffs;
-their ownership releases and skipped-generation cascades require subsequent
-GC cycles. Ordinary opens and serialized references cannot acquire this
-historical report authority. A same-route restore without the original
+Excision publishes reclaimable generation handoffs so lagging transaction-report
+queues can recover original outcomes across a rewrite. Handoffs survive for the
+configured GC grace period regardless of connected readers. Bounded pruning
+releases expired handoffs; subsequent GC folds those ownership changes. Ordinary
+snapshot reads do not consult handoffs. A same-route restore without the original
 generation handoffs makes a lagging report queue fail explicitly with
 `peer/report-history-unavailable`; disconnect and reopen it on restored state.
 

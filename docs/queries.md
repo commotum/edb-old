@@ -150,7 +150,7 @@ cancellation controls still fail closed rather than silently becoming a smaller
 top-k request. Raw tuple and log sources cannot replace its database argument.
 
 Fulltext can appear in portable native query templates, including nested queries
-and transaction programs; only programs containing it select ABI 9. Such programs
+and transaction programs using the shared current program format. Such programs
 are not deterministic solely from the logical db-before value. The authoritative
 writer re-executes them and commits the resulting ordinary facts. Completeness-
 based business invariants must use structured indexes, not a potentially lagging
@@ -172,14 +172,16 @@ let stats = cache.stats();
 ```
 
 Ordinary engine execution also uses a process-local bounded preparation cache.
-Preparation reuses validated query structure, not results or source-dependent
-access plans. Every execution binds the supplied inputs again and validates its
-actual sources and schema. Dynamic attribute resolution still occurs during
+Preparation reuses validated query structure and successful static rule-negation
+analysis. Analysis is first performed under execution controls and shared by
+cloned handles; interrupted analysis is retried. Every execution binds the
+supplied inputs again and validates its actual sources and schema. Dynamic attribute resolution still occurs during
 execution. Extension registries are supplied per invocation; use
 `PreparedQuery::execute_with_extensions` when appropriate.
 
-Cache keys preserve literal numeric representations, decimal scales and exact
-float bits. Queries containing opaque local Pull callbacks bypass caching, even
+Cache keys reuse the bounded structural AST encoder and preserve literal numeric
+representations, decimal scales and exact float bits. Queries containing opaque
+local Pull callbacks bypass caching, even
 when two callbacks have the same display name. Deep/large structures and keys
 that exceed cache admission limits also bypass automatic caching; they are not
 rejected as invalid queries. Truncated keys are never stored. Explicit prepared
@@ -253,13 +255,7 @@ completed or dropped. Cache hits avoid those SQL reads but still incur cache
 bookkeeping; the decoded-node cache's current LRU hit operation is linear in its
 configured resident entries, not in total database size. Accounted bytes are not RSS.
 
-The opt-in `measured_query_runtime_scaling` test in
-[`query_runtime_sources.rs`](../tests/query_runtime_sources.rs) runs a numeric
-equijoin fixture with `ATOMIC_QUERY_BENCH_ROWS` and
-`ATOMIC_QUERY_BENCH_MODE=hash|reference`. Run each size/mode in a fresh process,
-with `--release --ignored --exact --nocapture --test-threads=1`, to observe wall
-time, process CPU, actual `getrusage` peak RSS, output/work and SQL calls. The
-1k/4k/16k measurements demonstrate this fixture's change from quadratic to
-near-linear candidate work while its hash table fits the allowance, not a
-universal speedup. The PostgreSQL witness separately checks real cold index I/O
-and zero foreground SQL on warmed grouped reads as request counts grow.
+[`query_runtime_sources.rs`](../tests/query_runtime_sources.rs) retains query
+source/join correctness, cold PostgreSQL index reads and zero foreground SQL on
+warmed grouped reads. Use operation statistics with an actual application workload when
+measuring performance; the remaining fixtures do not establish a universal speedup.

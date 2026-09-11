@@ -466,11 +466,12 @@ fn entity_predicate_reads_the_complete_db_after() {
     let mut functions = TxFunctions::new();
     functions.register_entity_predicate("person/name-length-matches?", move |db, entity| {
         predicate_calls.fetch_add(1, AtomicOrdering::SeqCst);
-        let name = match db.values(entity, NAME).as_slice() {
+        let names = db.values(entity, NAME)?;
+        let name = match names.as_slice() {
             [Value::String(name)] => name,
             _ => return Ok(false),
         };
-        let length = match db.values(entity, PART_A).as_slice() {
+        let length = match db.values(entity, PART_A)?.as_slice() {
             [Value::Long(length)] => *length,
             _ => return Ok(false),
         };

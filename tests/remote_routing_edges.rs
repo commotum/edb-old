@@ -86,7 +86,7 @@ fn routed_known_commit_survives_peer_report_read_failure_and_exact_retry() {
     .grant_runtime_privileges(writer_role, peer_role)
     .unwrap();
     let service = TransactionService::start(TransactionServiceConfig {
-        connection: fixture.writer_url.clone(),
+        connection: atomic_core::PostgresConnectionConfig::plaintext(&fixture.writer_url),
         database_id: "items".into(),
         holder_id: "route-edge-writer".into(),
         lease_duration: Duration::from_secs(10),

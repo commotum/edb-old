@@ -91,7 +91,9 @@ mod uuid;
 mod value;
 mod vocabulary;
 
-pub use backup::{BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault};
+pub use backup::{
+    BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault, RestoreResult,
+};
 pub use backup_snapshot::{BackupConnection, BackupReadConfig, BackupReadStats};
 pub use change_consumer::{
     ChangeCheckpoint, ChangeConsumer, ChangeConsumerConfig, ChangeConsumerStats, ChangeEvent,
@@ -143,7 +145,7 @@ pub use native_registry::{
 pub use operations::{
     ExcisionConfig, ExcisionFault, ExcisionProgress, ExcisionReceipt, GarbageInventory,
     IndexMaintenanceReceipt, IntegrityProblem, IntegrityReport, MAX_COLLECTION_STEPS,
-    OperationalMetrics, PostgresOperator, ProgramDeployment, RECOMMENDED_GARBAGE_COLLECTION_AGE,
+    OperationalMetrics, PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE,
     RetiredDatabaseReclamation,
 };
 pub use peer::native_log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
@@ -153,12 +155,11 @@ pub use peer::{
 };
 pub use postgres_connection::{PostgresConnectionConfig, PostgresIoPolicy};
 pub use program::{
-    CallableRef, DATA_FUNCTION_QUERY_TEMPLATE_VERSION, GENERAL_QUERY_TEMPLATE_VERSION, Instruction,
-    MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, NATIVE_QUERY_TEMPLATE_VERSION, PROGRAM_ABI_VERSION,
+    CallableRef, Instruction, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, PROGRAM_ABI_VERSION,
     Program, ProgramBudget, ProgramCall, ProgramControl, ProgramHash, ProgramInvocation,
-    ProgramKind, ProgramLimits, ProgramOutput, ProgramRuntime, QUERY_TEMPLATE_VERSION,
-    QueryPattern, QueryTemplate, QueryTemplateSource, QueryTemplateTime, QueryTerm, RuntimeValue,
-    is_exact_true, require_exact_true,
+    ProgramKind, ProgramLimits, ProgramOutput, ProgramRuntime, QueryPattern, QueryTemplate,
+    QueryTemplateSource, QueryTemplateTime, QueryTerm, RuntimeValue, is_exact_true,
+    require_exact_true,
 };
 pub use pull::{
     AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl,

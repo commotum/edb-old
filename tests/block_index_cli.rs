@@ -8,8 +8,11 @@ use std::time::Duration;
 
 fn command(connection: &str, arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_atomic"))
-        .env("ATOMIC_POSTGRES_URL", connection)
-        .env("ATOMIC_POSTGRES_TRANSPORT", "plaintext")
+        .env(
+            "ATOMIC_POSTGRES_URL",
+            common::plaintext_connection(connection),
+        )
+        .env_remove("ATOMIC_POSTGRES_TRANSPORT")
         .env_remove("ATOMIC_SSD_CACHE_DIR")
         .args(arguments)
         .output()
@@ -71,7 +74,7 @@ fn manual_index_and_guarded_search_rebuild_preserve_active_writer_and_exact_rece
     let database = BlockDatabase::create(&config, "documents", schema).unwrap();
     let service = TransactionService::start_with_indexing(
         TransactionServiceConfig {
-            connection: fixture.connection.clone(),
+            connection: PostgresConnectionConfig::plaintext(&fixture.connection),
             database_id: "documents".into(),
             holder_id: "manual-index-witness".into(),
             lease_duration: Duration::from_secs(120),

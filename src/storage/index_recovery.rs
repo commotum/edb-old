@@ -120,7 +120,7 @@ pub(crate) fn prepare_recovery(
         ));
     }
     database.validate_invariants()?;
-    let protection = super::engine::protection(store, &[capture.condition()])?;
+    let protection = super::engine::protection(store, &[])?;
     store.set_write_protection(Some(protection.clone()))?;
     let result = (|| {
         let mut trees = Vec::with_capacity(8);

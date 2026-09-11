@@ -31,7 +31,7 @@ fn schema() -> Schema {
 }
 fn config(url: &str, name: &str) -> TransactionServiceConfig {
     TransactionServiceConfig {
-        connection: url.into(),
+        connection: PostgresConnectionConfig::plaintext(url),
         database_id: name.into(),
         holder_id: "controlled-worker".into(),
         lease_duration: Duration::from_secs(30),
@@ -62,9 +62,8 @@ fn pacing_has_explicit_cancellation_and_counts_only_completed_batches() {
     assert!(control.stats().paused_nanos > 0);
     assert!(MaintenanceControl::new(Duration::MAX, Arc::new(AtomicBool::new(false))).is_err());
     assert!(
-        TransactionService::start_configured_with_options(
+        TransactionService::start_with_options(
             config("invalid", "none"),
-            PostgresConnectionConfig::plaintext("invalid"),
             ServiceOptions {
                 hint_prefetch: HintPrefetchConcurrency { max_workers: 9 },
                 ..Default::default()
@@ -73,9 +72,8 @@ fn pacing_has_explicit_cancellation_and_counts_only_completed_batches() {
         .is_err()
     );
     assert!(
-        TransactionService::start_configured_with_options(
+        TransactionService::start_with_options(
             config("invalid", "none"),
-            PostgresConnectionConfig::plaintext("invalid"),
             ServiceOptions {
                 index_preparation_parallelism: 0,
                 ..Default::default()
@@ -184,7 +182,13 @@ fn restore_cancellation_keeps_inactive_data_and_retry_and_gc_remain_correct() {
         .unwrap()
         .restore_backup(repository.path(), report.basis_t, "restored")
         .unwrap();
-    common::assert_same_information(&retry, &report.db_after);
+    assert_eq!(retry.point.basis_t, report.basis_t);
+    common::assert_same_information(
+        &Peer::connect(&target.connection, "restored", 8)
+            .unwrap()
+            .database_value(),
+        &report.db_after,
+    );
     let resumed_service = common::start_service(&target.connection, "restored");
     let replay = resumed_service
         .client()
@@ -231,9 +235,8 @@ fn concurrent_hint_lanes_share_budget_and_do_not_join_transaction_authority() {
         let mut config = config(url, "hints");
         config.capacity_limits.writer_tree_cache_entries = 0;
         config.capacity_limits.writer_tree_cache_bytes = 0;
-        TransactionService::start_configured_with_options(
+        TransactionService::start_with_options(
             config,
-            PostgresConnectionConfig::plaintext(url),
             ServiceOptions {
                 hint_prefetch: HintPrefetchConcurrency { max_workers: 3 },
                 ..Default::default()

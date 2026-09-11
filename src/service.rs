@@ -215,7 +215,8 @@ pub struct BackgroundIndexingStats {
 
 #[derive(Clone, Debug)]
 pub struct TransactionServiceConfig {
-    pub connection: String,
+    /// One transport and I/O policy shared by every service-owned role.
+    pub connection: PostgresConnectionConfig,
     /// Public catalog name at startup. A service resolves it once and retains
     /// the resulting immutable storage ID for its lease, reader and workers.
     pub database_id: String,
@@ -1256,8 +1257,8 @@ impl TransactionClient {
             .lock()
             .expect("subscriber mutex poisoned");
         let mut oldest_queued_report_basis_t = None;
-        let mut pinned_roots = BTreeSet::new();
-        let mut pinned_generations = BTreeSet::new();
+        let mut report_roots = BTreeSet::new();
+        let mut report_generations = BTreeSet::new();
         let mut queued_reports = 0_usize;
         let mut queued_report_payload_bytes = 0_u64;
         for subscriber in subscribers.values() {
@@ -1273,8 +1274,8 @@ impl TransactionClient {
                     oldest_queued_report_basis_t
                         .map_or(retained.basis_t, |oldest: u64| oldest.min(retained.basis_t)),
                 );
-                pinned_roots.extend(retained.roots.into_iter().flatten());
-                pinned_generations.extend(retained.generations.into_iter().flatten());
+                report_roots.extend(retained.roots.into_iter().flatten());
+                report_generations.extend(retained.generations.into_iter().flatten());
             }
         }
         ServiceStats {
@@ -1291,8 +1292,8 @@ impl TransactionClient {
                 .max_queued_report_payload_bytes
                 .load(Ordering::Relaxed),
             oldest_queued_report_basis_t,
-            distinct_pinned_roots: pinned_roots.len(),
-            distinct_pinned_generations: pinned_generations.len(),
+            distinct_report_roots: report_roots.len(),
+            distinct_report_generations: report_generations.len(),
         }
     }
 
@@ -1400,7 +1401,7 @@ impl ReportSubscription {
 
     /// Reports currently retained for this lossless subscriber. Every queued
     /// report owns its immutable db-before/db-after snapshots and their
-    /// native root pins until it is received or the subscription is dropped.
+    /// in-memory read resources until received or dropped; GC retention is age-based.
     pub fn pending_reports(&self) -> usize {
         self.pending.load(Ordering::Acquire)
     }
@@ -1442,7 +1443,7 @@ impl Drop for ReportSubscription {
             subscribers.remove(&self.id);
             // Drop the channel's queued report objects before removing their
             // mirrored retention ledger. Concurrent stats may briefly
-            // over-report pins, but can never claim zero while reports still
+            // over-report queued coordinates, but can never claim zero while reports still
             // retain immutable database roots.
             drop(self.receiver.take());
             let abandoned_payload_bytes = {
@@ -1507,11 +1508,12 @@ pub struct ServiceStats {
     pub max_queued_report_payload_bytes: u64,
     /// Oldest committed basis still awaiting delivery to any subscriber.
     pub oldest_queued_report_basis_t: Option<u64>,
-    /// Distinct durable native roots pinned by queued db-before/db-after
-    /// values, rather than the number of report clones referencing them.
-    pub distinct_pinned_roots: usize,
-    /// Distinct authoritative log generations pinned by queued reports.
-    pub distinct_pinned_generations: usize,
+    /// Distinct durable roots referenced by queued db-before/db-after values,
+    /// rather than the number of report clones. This does not register readers
+    /// or control storage retention.
+    pub distinct_report_roots: usize,
+    /// Distinct authoritative log generations referenced by queued reports.
+    pub distinct_report_generations: usize,
 }
 
 pub struct TransactionService {
@@ -1591,18 +1593,8 @@ impl TransactionStandby {
         config: TransactionServiceConfig,
         poll_interval: Duration,
     ) -> Result<Self, SemanticError> {
-        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
-        Self::start_configured(config, connection, poll_interval)
-    }
-
-    pub fn start_configured(
-        config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
-        poll_interval: Duration,
-    ) -> Result<Self, SemanticError> {
-        Self::start_configured_with_indexing_and_execution_options(
+        Self::start_with_indexing_and_execution_options(
             config,
-            connection,
             BackgroundIndexingConfig::default(),
             crate::TransactionExecutionOptions::default(),
             poll_interval,
@@ -1616,16 +1608,14 @@ impl TransactionStandby {
     /// Polling is interruptible. Synchronous PostgreSQL activation and final
     /// service cleanup are not preempted; their configured I/O limits still
     /// apply when `shutdown`, `await_active`, or Drop joins the worker.
-    pub fn start_configured_with_indexing_and_execution_options(
+    pub fn start_with_indexing_and_execution_options(
         config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
         indexing_config: BackgroundIndexingConfig,
         options: crate::TransactionExecutionOptions,
         poll_interval: Duration,
     ) -> Result<Self, SemanticError> {
-        Self::start_configured_with_options(
+        Self::start_with_options(
             config,
-            connection,
             ServiceOptions {
                 indexing: indexing_config,
                 execution: options,
@@ -1635,9 +1625,8 @@ impl TransactionStandby {
         )
     }
 
-    pub fn start_configured_with_options(
+    pub fn start_with_options(
         config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
         options: ServiceOptions,
         poll_interval: Duration,
     ) -> Result<Self, SemanticError> {
@@ -1657,7 +1646,7 @@ impl TransactionStandby {
         }
         // Resolve before spawning, not on each lease attempt. A rename or name
         // reuse while waiting must never redirect this standby to another DB.
-        let database = resolve_service_database_name(&connection, &config.database_id)?;
+        let database = resolve_service_database_name(&config.connection, &config.database_id)?;
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let status = Arc::new(Mutex::new(StandbyStatus::Activating));
@@ -1675,9 +1664,8 @@ impl TransactionStandby {
                         }
                         *status = StandbyStatus::Activating;
                     }
-                    let result = TransactionService::start_identity_configured_with_options(
+                    let result = TransactionService::start_identity_with_options(
                         config.clone(),
-                        connection.clone(),
                         options.clone(),
                         database.clone(),
                     );
@@ -1685,8 +1673,6 @@ impl TransactionStandby {
                         Err(error)
                             if error.code == "storage/writer-active"
                                 || error.code == "storage/writer-claim-conflict"
-                                || error.code == "storage/capture-conflict"
-                                || error.code == "storage/capture-gc-conflict"
                                 || block_service::connection_unavailable(&error) =>
                         {
                             {
@@ -1883,64 +1869,34 @@ impl TransactionService {
         config: TransactionServiceConfig,
         options: crate::TransactionExecutionOptions,
     ) -> Result<Self, SemanticError> {
-        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
-        Self::start_configured_with_indexing_and_execution_options(
+        Self::start_with_indexing_and_execution_options(
             config,
-            connection,
             BackgroundIndexingConfig::default(),
             options,
         )
-    }
-
-    pub fn start(config: TransactionServiceConfig) -> Result<Self, SemanticError> {
-        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
-        Self::start_configured(config, connection)
     }
 
     pub fn start_with_defaults(
         config: TransactionServiceConfig,
         defaults: crate::TransactionDefaults,
     ) -> Result<Self, SemanticError> {
-        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
-        Self::start_configured_with_indexing_and_defaults(
+        Self::start_with_indexing_and_defaults(
             config,
-            connection,
             BackgroundIndexingConfig::default(),
             defaults,
         )
     }
 
-    /// Start every writer, lease, and background-index connection under one
-    /// explicit PostgreSQL transport policy. `config.connection` remains for
-    /// source compatibility with the original constructor; this argument is
-    /// the sole connection source used by this configured path.
-    pub fn start_configured(
-        config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
-    ) -> Result<Self, SemanticError> {
-        Self::start_configured_with_indexing(
-            config,
-            connection,
-            BackgroundIndexingConfig::default(),
-        )
+    /// Start every service-owned connection with the configuration's transport policy.
+    pub fn start(config: TransactionServiceConfig) -> Result<Self, SemanticError> {
+        Self::start_with_indexing(config, BackgroundIndexingConfig::default())
     }
-
     pub fn start_with_indexing(
         config: TransactionServiceConfig,
         indexing_config: BackgroundIndexingConfig,
     ) -> Result<Self, SemanticError> {
-        let connection = PostgresConnectionConfig::plaintext(config.connection.clone());
-        Self::start_configured_with_indexing(config, connection, indexing_config)
-    }
-
-    pub fn start_configured_with_indexing(
-        config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
-        indexing_config: BackgroundIndexingConfig,
-    ) -> Result<Self, SemanticError> {
-        Self::start_configured_with_indexing_and_defaults(
+        Self::start_with_indexing_and_defaults(
             config,
-            connection,
             indexing_config,
             crate::TransactionDefaults::default(),
         )
@@ -1948,15 +1904,13 @@ impl TransactionService {
 
     /// Start a writer with explicit fresh-transaction allocation policy. The
     /// policy is not transaction data and never changes a stored retry result.
-    pub fn start_configured_with_indexing_and_defaults(
+    pub fn start_with_indexing_and_defaults(
         config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
         indexing_config: BackgroundIndexingConfig,
         defaults: crate::TransactionDefaults,
     ) -> Result<Self, SemanticError> {
-        Self::start_configured_with_indexing_and_execution_options(
+        Self::start_with_indexing_and_execution_options(
             config,
-            connection,
             indexing_config,
             crate::TransactionExecutionOptions {
                 defaults,
@@ -1965,15 +1919,13 @@ impl TransactionService {
         )
     }
 
-    pub fn start_configured_with_indexing_and_execution_options(
+    pub fn start_with_indexing_and_execution_options(
         config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
         indexing_config: BackgroundIndexingConfig,
         options: crate::TransactionExecutionOptions,
     ) -> Result<Self, SemanticError> {
-        Self::start_configured_with_options(
+        Self::start_with_options(
             config,
-            connection,
             ServiceOptions {
                 indexing: indexing_config,
                 execution: options,
@@ -1982,9 +1934,8 @@ impl TransactionService {
         )
     }
 
-    pub fn start_configured_with_options(
+    pub fn start_with_options(
         config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
         options: ServiceOptions,
     ) -> Result<Self, SemanticError> {
         Self::validate_config(&config)?;
@@ -1995,8 +1946,8 @@ impl TransactionService {
         crate::tree_read::validate_index_preparation_parallelism(
             options.index_preparation_parallelism,
         )?;
-        let database = resolve_service_database_name(&connection, &config.database_id)?;
-        Self::start_identity_configured_with_options(config, connection, options, database)
+        let database = resolve_service_database_name(&config.connection, &config.database_id)?;
+        Self::start_identity_with_options(config, options, database)
     }
 
     fn validate_config(config: &TransactionServiceConfig) -> Result<(), SemanticError> {
@@ -2016,13 +1967,12 @@ impl TransactionService {
 
     // Only callers that already captured an immutable block identity may enter.
     // BlockTransactor acquires authority through guarded opaque references.
-    fn start_identity_configured_with_options(
+    fn start_identity_with_options(
         config: TransactionServiceConfig,
-        connection: PostgresConnectionConfig,
         options: ServiceOptions,
         database: crate::storage::BlockDatabase,
     ) -> Result<Self, SemanticError> {
-        block_service::start(config, connection, options, database)
+        block_service::start(config, options, database)
     }
 
     pub fn client(&self) -> TransactionClient {
@@ -2270,7 +2220,7 @@ mod tests {
         database_id: String,
     ) -> TransactionServiceConfig {
         TransactionServiceConfig {
-            connection: connection.to_owned(),
+            connection: PostgresConnectionConfig::parse(connection).unwrap(),
             database_id,
             holder_id: unique_database("unknown-observer"),
             lease_duration: Duration::from_secs(10),
@@ -3384,10 +3334,10 @@ mod tests {
         assert!(replay.replayed);
         assert_eq!(replay.tx_hash, first.tx_hash);
         let replay_stats = replay_context.snapshot();
-        assert!(
-            replay_stats
-                .phases
-                .contains_key(&OperationKind::TransactionReport)
+        assert_eq!(
+            replay_stats.phases[&OperationKind::TransactionReport].invocations,
+            1,
+            "one receipt reconstruction must record one shared report phase"
         );
         for kind in [
             OperationKind::TransactionExpansion,
@@ -3464,7 +3414,12 @@ mod tests {
         assert!(reconciled.replayed);
         assert_eq!(reconciled.tx_hash, durable.tx_hash);
         let unknown_stats = unknown_context.snapshot();
-        assert!(unknown_stats.phases[&OperationKind::TransactionReport].invocations >= 1);
+        let report_phase = unknown_stats
+            .phases
+            .get(&OperationKind::TransactionReport)
+            .expect("unknown-outcome reconciliation must measure exact report reconstruction");
+        assert!(report_phase.invocations >= 1);
+        assert!(report_phase.elapsed_nanos > 0);
         assert!(unknown_stats.by_operation[&OperationKind::TransactionReport].calls > 0);
         assert_eq!(callbacks.load(Ordering::Relaxed), 1);
         assert_eq!(service.writer_residency_stats().eager_database_values, 0);
@@ -3623,9 +3578,8 @@ mod tests {
                 Ok(observation_request("unused", 22).forms)
             })
             .unwrap();
-        let service = TransactionService::start_configured_with_options(
+        let service = TransactionService::start_with_options(
             observation_service_config(&fixture.connection, "observed".into()),
-            PostgresConnectionConfig::plaintext(&fixture.connection),
             ServiceOptions {
                 indexing: BackgroundIndexingConfig {
                     memory_index_threshold_bytes: 128,

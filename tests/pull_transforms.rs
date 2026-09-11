@@ -456,5 +456,4 @@ fn native_postgres_transforms_keep_exact_values_and_peer_local_execution() {
             QueryValue::Scalar(Value::String("42".into()))
         )])))
     );
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

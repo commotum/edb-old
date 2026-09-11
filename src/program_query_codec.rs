@@ -1,16 +1,14 @@
-//! ABI 7+ / QueryTemplate 2: a bounded encoding of the portable native AST.
-//! Fulltext uses ABI 9 and is intentionally dependent on search-index availability.
-//! Version-1 encoders/tags are intentionally outside this module and unchanged.
+//! The current bounded encoding of the portable native query AST.
 use super::{
     Cursor, decode_keyword, decode_symbol, decode_value, encode_keyword, encode_symbol,
     encode_value, fault, invalid_tag, put_bool, put_len, put_string, put_u64,
 };
 use crate::program::native_query::NativeQueryTemplate;
 use crate::{
-    Aggregate, AttributeName, Binding, Clause, DataPattern, FindElement, FindSpec, Function,
-    InputSpec, Predicate, PullAttribute, PullDirection, PullLimit, PullNested, PullPattern,
-    PullTransform, Query, QueryTemplate, QueryTemplateSource, QueryTemplateTime, QueryValue,
-    RelationPattern, Rule, SemanticError, Term, TimePoint, Variable,
+    Aggregate, AggregateArg, AttributeName, Binding, Clause, DataPattern, FindElement, FindSpec,
+    Function, InputSpec, Predicate, PullAttribute, PullDirection, PullLimit, PullNested,
+    PullPattern, PullTransform, Query, QueryTemplate, QueryTemplateSource, QueryTemplateTime,
+    QueryValue, RelationPattern, Rule, SemanticError, Term, TimePoint, Value, Variable,
 };
 
 const MAX_NODES: usize = 4096;
@@ -20,11 +18,22 @@ const MAX_NAME_BYTES: usize = 4096;
 #[derive(Default)]
 struct Budget {
     nodes: usize,
-    general: bool,
-    data_functions: bool,
     comparisons: usize,
+    // Cache keys use this same AST traversal but preserve in-memory literal
+    // representations and identify registry callbacks by name. They are never
+    // decoded or admitted as persisted code.
+    cache_key_limit: Option<usize>,
 }
 impl Budget {
+    fn check_bytes(&self, output: &[u8]) -> Result<(), SemanticError> {
+        if output.len() > self.cache_key_limit.unwrap_or(super::MAX_PROGRAM_BYTES) {
+            return Err(fault(
+                "program/payload-limit",
+                "query encoding exceeds its byte limit",
+            ));
+        }
+        Ok(())
+    }
     fn comparison(&mut self, work: usize) -> Result<(), SemanticError> {
         self.comparisons = self.comparisons.saturating_add(work);
         if self.comparisons > MAX_NODES * MAX_DEPTH {
@@ -112,33 +121,68 @@ fn unsupported() -> SemanticError {
 }
 
 pub(crate) fn validate_native_query(query: &Query) -> Result<(), SemanticError> {
-    native_query_version(query).map(|_| ())
+    let mut output = Vec::new();
+    encode_query(&mut output, query, 0, &mut Budget::default())?;
+    payload_size(&output)
 }
 
-pub(crate) fn native_query_version(query: &Query) -> Result<u16, SemanticError> {
-    let mut output = Vec::new();
-    let mut budget = Budget::default();
-    encode_query(&mut output, query, 0, &mut budget)?;
-    if output.len() > super::MAX_PROGRAM_BYTES {
-        return Err(fault(
-            "program/payload-limit",
-            "native query exceeds the durable program byte limit",
-        ));
+pub(crate) fn query_cache_key(query: &Query, max_bytes: usize) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    let mut budget = Budget {
+        cache_key_limit: Some(max_bytes),
+        ..Budget::default()
+    };
+    encode_query(&mut bytes, query, 0, &mut budget).ok()?;
+    budget.check_bytes(&bytes).ok()?;
+    Some(bytes)
+}
+
+fn encode_scalar(
+    output: &mut Vec<u8>,
+    value: &Value,
+    depth: usize,
+    budget: &mut Budget,
+) -> Result<(), SemanticError> {
+    let Some(limit) = budget.cache_key_limit else {
+        return encode_value(output, value);
+    };
+    budget.node(depth)?;
+    match value {
+        Value::Float(value) => {
+            output.push(5);
+            output.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+        Value::Double(value) => {
+            output.push(4);
+            output.extend_from_slice(&value.to_bits().to_be_bytes());
+        }
+        Value::Tuple(values) => {
+            output.push(12);
+            length(output, values.len())?;
+            for value in values {
+                put_bool(output, value.is_some());
+                if let Some(value) = value {
+                    encode_scalar(output, value, depth + 1, budget)?;
+                }
+            }
+        }
+        _ => {
+            if value.retained_heap_bytes() > limit.saturating_sub(output.len()) as u64 {
+                return Err(fault(
+                    "program/payload-limit",
+                    "query literal exceeds cache admission",
+                ));
+            }
+            encode_value(output, value)?;
+        }
     }
-    Ok(if budget.data_functions {
-        4
-    } else if budget.general {
-        3
-    } else {
-        2
-    })
+    budget.check_bytes(output)
 }
 
 pub(super) fn encode_template(
     output: &mut Vec<u8>,
     template: &NativeQueryTemplate,
 ) -> Result<(), SemanticError> {
-    let version = template.version()?;
     length(output, template.input_arguments.len())?;
     output.extend_from_slice(&template.input_arguments);
     length(output, template.sources.len())?;
@@ -148,19 +192,14 @@ pub(super) fn encode_template(
         put_bool(output, source.log);
         encode_time(output, &source.as_of);
         encode_time(output, &source.since);
-        if version >= 3 {
-            put_bool(output, source.relation_argument.is_some());
-            if let Some(argument) = source.relation_argument {
-                output.push(argument);
-            }
+        put_bool(output, source.relation_argument.is_some());
+        if let Some(argument) = source.relation_argument {
+            output.push(argument);
         }
     }
     encode_query(output, &template.query, 0, &mut Budget::default())
 }
-pub(super) fn decode_template(
-    cursor: &mut Cursor<'_>,
-    version: u16,
-) -> Result<QueryTemplate, SemanticError> {
+pub(super) fn decode_template(cursor: &mut Cursor<'_>) -> Result<QueryTemplate, SemanticError> {
     let length = count(cursor)?;
     let arguments = cursor.take(length)?.to_vec();
     let mut sources = Vec::new();
@@ -171,7 +210,7 @@ pub(super) fn decode_template(
             log: cursor.boolean()?,
             as_of: decode_time(cursor)?,
             since: decode_time(cursor)?,
-            relation_argument: if version >= 3 && cursor.boolean()? {
+            relation_argument: if cursor.boolean()? {
                 Some(cursor.u8()?)
             } else {
                 None
@@ -286,10 +325,9 @@ fn encode_term(
         }
         Term::Constant(value) => {
             output.push(1);
-            encode_value(output, value)?;
+            encode_scalar(output, value, depth + 1, budget)?;
         }
         Term::QueryConstant(value) => {
-            budget.general = true;
             output.push(4);
             encode_query_value(output, value, depth + 1, budget)?;
         }
@@ -389,7 +427,6 @@ fn encode_clauses(
                 }
             }
             Clause::RelationPattern(pattern) => {
-                budget.general = true;
                 output.push(6);
                 name(output, &pattern.source)?;
                 encode_terms(output, &pattern.terms, depth + 1, budget)?;
@@ -443,7 +480,6 @@ fn encode_clauses(
                     | Function::StartsWith
                     | Function::EndsWith
                     | Function::Includes => {
-                        budget.data_functions = true;
                         output.push(match function {
                             Function::Count => 13,
                             Function::Quot => 14,
@@ -454,6 +490,10 @@ fn encode_clauses(
                             Function::Includes => 19,
                             _ => unreachable!("portable data function arm"),
                         });
+                    }
+                    Function::Extension(extension) if budget.cache_key_limit.is_some() => {
+                        output.push(20);
+                        name(output, extension)?;
                     }
                     Function::Extension(_) => return Err(unsupported()),
                 }
@@ -724,6 +764,28 @@ fn encode_find(
             output.push(0);
             name(output, variable.name())?;
         }
+        FindElement::CustomAggregate(call) if budget.cache_key_limit.is_some() => {
+            output.push(3);
+            name(output, &call.name)?;
+            length(output, call.args.len())?;
+            for argument in &call.args {
+                budget.node(depth + 1)?;
+                match argument {
+                    AggregateArg::Variable(variable) => {
+                        output.push(0);
+                        name(output, variable.name())?;
+                    }
+                    AggregateArg::Constant(value) => {
+                        output.push(1);
+                        encode_query_value(output, value, depth + 1, budget)?;
+                    }
+                    AggregateArg::Source(source) => {
+                        output.push(2);
+                        name(output, source)?;
+                    }
+                }
+            }
+        }
         FindElement::CustomAggregate(_) => return Err(unsupported()),
         FindElement::Aggregate { function, variable } => {
             output.push(1);
@@ -740,9 +802,15 @@ fn encode_find(
                 Aggregate::StandardDeviation => 9,
                 Aggregate::MinN(_) => 10,
                 Aggregate::MaxN(_) => 11,
+                Aggregate::Rand(_) if budget.cache_key_limit.is_some() => 12,
+                Aggregate::Sample(_) if budget.cache_key_limit.is_some() => 13,
                 Aggregate::Rand(_) | Aggregate::Sample(_) => return Err(unsupported()),
             });
-            if let Aggregate::MinN(n) | Aggregate::MaxN(n) = function {
+            if let Aggregate::MinN(n)
+            | Aggregate::MaxN(n)
+            | Aggregate::Rand(n)
+            | Aggregate::Sample(n) = function
+            {
                 put_u64(output, *n as u64);
             }
             name(output, variable.name())?;
@@ -962,7 +1030,7 @@ fn encode_query_value(
     let size = value.measure_with(&mut check)?;
     if size.nodes > MAX_NODES
         || size.depth.saturating_add(depth) > MAX_DEPTH + 1
-        || size.retained_bytes > super::MAX_PROGRAM_BYTES
+        || size.retained_bytes > budget.cache_key_limit.unwrap_or(super::MAX_PROGRAM_BYTES)
     {
         return Err(fault(
             "program/native-query-shape-limit",
@@ -984,7 +1052,7 @@ fn encode_query_value_node(
         QueryValue::Nil => output.push(0),
         QueryValue::Scalar(value) => {
             output.push(1);
-            encode_value(output, value)?;
+            encode_scalar(output, value, depth + 1, budget)?;
         }
         QueryValue::Collection(values) | QueryValue::Tuple(values) => {
             output.push(if matches!(value, QueryValue::Collection(_)) {
@@ -1005,8 +1073,14 @@ fn encode_query_value_node(
                 encode_query_value_node(output, value, depth + 1, budget)?;
             }
         }
+        QueryValue::Set(values) if budget.cache_key_limit.is_some() => {
+            output.push(5);
+            length(output, values.len())?;
+            for value in values {
+                encode_query_value_node(output, value, depth + 1, budget)?;
+            }
+        }
         QueryValue::Set(values) => {
-            budget.general = true;
             output.push(5);
             // Sets have no presentation order. Logical ties choose the least
             // representation bytes, so mixed numeric duplicates do not let
@@ -1065,12 +1139,10 @@ fn encode_query_value_node(
             }
         }
         QueryValue::Char(value) => {
-            budget.general = true;
             output.push(6);
             output.extend_from_slice(&u32::from(*value).to_be_bytes());
         }
         QueryValue::Tagged(tag, value) => {
-            budget.general = true;
             output.push(7);
             encode_symbol(output, tag)?;
             encode_query_value_node(output, value, depth + 1, budget)?;

@@ -76,9 +76,7 @@ impl BackupConnection {
             BlockReadConfig {
                 cache_entries: config.cache_entries,
                 cache_bytes: config.cache_bytes,
-                max_recent_transactions: 0,
-                max_recent_bytes: 0,
-                max_recent_datoms: 0,
+                ..BlockReadConfig::default()
             },
         )?;
         Ok(Self {

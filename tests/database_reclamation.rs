@@ -4,7 +4,7 @@ use atomic_core::*;
 use std::time::Duration;
 
 #[test]
-fn retired_reclamation_checks_identity_and_keeps_held_shared_values() {
+fn retired_reclamation_checks_identity_grace_and_live_shared_values() {
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         return;
     };
@@ -46,7 +46,11 @@ fn retired_reclamation_checks_identity_and_keeps_held_shared_values() {
     let mut complete = false;
     for _ in 0..64 {
         let progress = operator
-            .reclaim_retired_database(&entry.database_id, &entry.lineage_id, Duration::ZERO)
+            .reclaim_retired_database(
+                &entry.database_id,
+                &entry.lineage_id,
+                RECOMMENDED_GARBAGE_COLLECTION_AGE,
+            )
             .unwrap();
         assert!(progress.applied);
         if progress.cycle_complete {
@@ -57,9 +61,26 @@ fn retired_reclamation_checks_identity_and_keeps_held_shared_values() {
     assert!(complete);
     assert!(
         store.get(root_id).unwrap().is_some(),
-        "cycle completion does not revoke held root owners"
+        "the grace period protects the retired publication"
     );
     assert_eq!(held.datoms(IndexOrder::Eavt).unwrap(), expected);
+    // A held Rust value does not override explicit retention expiry. The
+    // other database remains an independent durable owner of shared objects.
+    for _ in 0..2 {
+        let mut complete = false;
+        for _ in 0..64 {
+            if operator
+                .reclaim_retired_database(&entry.database_id, &entry.lineage_id, Duration::ZERO)
+                .unwrap()
+                .cycle_complete
+            {
+                complete = true;
+                break;
+            }
+        }
+        assert!(complete);
+    }
+    assert!(store.get(root_id).unwrap().is_none());
     assert_eq!(
         Peer::connect(&fixture.connection, "second", 0)
             .unwrap()

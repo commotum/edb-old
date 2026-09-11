@@ -80,8 +80,7 @@ fn tls_configuration_fails_closed_and_redacts_connection_secrets() {
 ///
 /// - a private server certificate valid for the URL host;
 /// - `hostssl` access for the test user and no matching plaintext `host` rule;
-/// - `ATOMIC_POSTGRES_TLS_URL` containing `sslmode=disable` (the secure config
-///   must override it); and
+/// - `ATOMIC_POSTGRES_TLS_URL` containing `sslmode=require`; and
 /// - `ATOMIC_POSTGRES_TLS_ROOT_CERT` naming the private CA/server PEM file.
 ///
 /// With either environment variable absent this is a skip, not TLS evidence.
@@ -124,8 +123,7 @@ fn required_tls_covers_store_writer_indexer_peer_listener_and_consumer() {
     assert_eq!(error.category, ErrorCategory::Unavailable);
     assert_eq!(error.code, "postgres/tls-connect");
 
-    // The same URL explicitly requests sslmode=disable. The hostssl-only
-    // fixture must reject it, while `require_tls` above overrides the string.
+    // A plaintext builder must reject the URL's conflicting TLS requirement.
     assert!(
         PostgresConnectionConfig::plaintext(connection.clone())
             .connect()
@@ -138,20 +136,15 @@ fn required_tls_covers_store_writer_indexer_peer_listener_and_consumer() {
         .unwrap()
         .create_database(&database_id, schema())
         .unwrap();
-    let service = TransactionService::start_configured(
-        TransactionServiceConfig {
-            // The configured entry point must never fall back to this legacy
-            // field for seed, lease, worker, cleanup, or index connections.
-            connection: "invalid-option=must-not-be-used".into(),
-            database_id: database_id.clone(),
-            holder_id: unique("tls-writer"),
-            lease_duration: Duration::from_secs(2),
-            renew_interval: Duration::from_millis(100),
-            queue_capacity: 4,
-            capacity_limits: atomic_core::CapacityLimits::default(),
-        },
-        tls.clone(),
-    )
+    let service = TransactionService::start(TransactionServiceConfig {
+        connection: tls.clone(),
+        database_id: database_id.clone(),
+        holder_id: unique("tls-writer"),
+        lease_duration: Duration::from_secs(2),
+        renew_interval: Duration::from_millis(100),
+        queue_capacity: 4,
+        capacity_limits: atomic_core::CapacityLimits::default(),
+    })
     .unwrap();
     let observer = Connection::connect_configured(tls.clone(), &database_id, 8).unwrap();
     let mut consumer = ChangeConsumer::connect_configured(

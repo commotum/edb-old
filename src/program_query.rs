@@ -1,9 +1,9 @@
-//! Version-2 persisted query authoring over the existing native query engine.
+//! Persisted query authoring over the shared native query engine.
 //! No evaluator or source authority lives in this module.
 use super::{ProgramBudget, ProgramRead, RuntimeValue, incorrect};
 use crate::{
-    DatabaseValue, InputSpec, Query, QueryDataSource, QueryEngine, QueryInput, QueryResult,
-    QueryValue, SemanticError, TimePoint, Value,
+    DatabaseValue, Query, QueryDataSource, QueryEngine, QueryInput, QueryResult, QueryValue,
+    SemanticError, TimePoint, Value,
 };
 
 /// A literal documented time point, or an argument containing Long (T), Ref
@@ -77,20 +77,6 @@ pub(crate) struct NativeQueryTemplate {
 }
 
 impl NativeQueryTemplate {
-    pub(crate) fn version(&self) -> Result<u16, SemanticError> {
-        let version = crate::encoding::native_query_version(&self.query)?;
-        Ok(
-            if self
-                .sources
-                .iter()
-                .any(|source| source.relation_argument.is_some())
-            {
-                version.max(3)
-            } else {
-                version
-            },
-        )
-    }
     pub(crate) fn new(
         query: Query,
         input_arguments: Vec<u8>,
@@ -203,39 +189,56 @@ fn time_point(
     })
 }
 
-fn input(spec: &InputSpec, argument: &RuntimeValue) -> Result<QueryInput, SemanticError> {
-    let _ = spec; // The shared query evaluator validates each declared shape.
-    Ok(QueryInput::General(runtime_query_value(argument)?))
+pub(crate) fn runtime_query_value(value: &RuntimeValue) -> Result<QueryValue, SemanticError> {
+    map_runtime_query_value(value, &mut |entity| match entity {
+        crate::EntityRef::Id(entity) => Ok(*entity),
+        _ => Err(incorrect(
+            "program/query-value",
+            "query data requires resolved entity references",
+        )),
+    })
 }
 
-pub(crate) fn runtime_query_value(value: &RuntimeValue) -> Result<QueryValue, SemanticError> {
+fn input_value(
+    value: &RuntimeValue,
+    database: &DatabaseValue,
+    budget: &mut ProgramBudget<'_>,
+) -> Result<QueryValue, SemanticError> {
+    map_runtime_query_value(value, &mut |entity| {
+        super::database_entity_id(
+            ProgramRead::Exact(database),
+            RuntimeValue::Entity(entity.clone()),
+            budget,
+        )
+    })
+}
+
+fn map_runtime_query_value(
+    value: &RuntimeValue,
+    entity_id: &mut impl FnMut(&crate::EntityRef) -> Result<u64, SemanticError>,
+) -> Result<QueryValue, SemanticError> {
     Ok(match value {
         RuntimeValue::Null => QueryValue::Nil,
         RuntimeValue::Scalar(value) => QueryValue::Scalar(value.clone()),
-        RuntimeValue::Entity(crate::EntityRef::Id(entity)) => {
-            QueryValue::Scalar(Value::Ref(*entity))
-        }
+        RuntimeValue::Entity(entity) => QueryValue::Scalar(Value::Ref(entity_id(entity)?)),
         RuntimeValue::Query(value) => value.clone(),
         RuntimeValue::Vector(values) => QueryValue::Tuple(
             values
                 .iter()
-                .map(runtime_query_value)
+                .map(|value| map_runtime_query_value(value, entity_id))
                 .collect::<Result<_, _>>()?,
         ),
         RuntimeValue::Map(entries) => QueryValue::Map(
             entries
                 .iter()
                 .map(|(key, value)| {
-                    Ok((QueryValue::Scalar(key.clone()), runtime_query_value(value)?))
+                    Ok((
+                        QueryValue::Scalar(key.clone()),
+                        map_runtime_query_value(value, entity_id)?,
+                    ))
                 })
                 .collect::<Result<_, SemanticError>>()?,
         ),
-        RuntimeValue::Entity(_) => {
-            return Err(incorrect(
-                "program/query-value",
-                "query data requires resolved entity references",
-            ));
-        }
     })
 }
 
@@ -296,7 +299,7 @@ pub(super) fn execute(
     for source in &template.sources {
         budget.charge(1)?;
         if let Some(argument) = source.relation_argument {
-            let value = runtime_query_value(&arguments[usize::from(argument)])?;
+            let value = input_value(&arguments[usize::from(argument)], &database, budget)?;
             let rows = match &value {
                 QueryValue::Tuple(rows) | QueryValue::Collection(rows) | QueryValue::Set(rows) => {
                     rows
@@ -343,11 +346,11 @@ pub(super) fn execute(
         sources.push(QueryDataSource::database(source.name.clone(), view));
     }
     let inputs = template
-        .query
-        .inputs
+        .input_arguments
         .iter()
-        .zip(&template.input_arguments)
-        .map(|(spec, index)| input(spec, &arguments[usize::from(*index)]))
+        .map(|index| {
+            input_value(&arguments[usize::from(*index)], &database, budget).map(QueryInput::General)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let outcome = QueryEngine::execute_program(&template.query, &sources, &inputs, budget)?;
     budget.check_cancel()?;

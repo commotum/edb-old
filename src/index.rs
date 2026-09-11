@@ -403,7 +403,7 @@ impl NormalizedIndexBoundary {
     }
 
     /// Forward lower bound and reverse upper bound in an already sorted slice.
-    /// This helper fixtures positioning; production Stage 2 cursors use the
+    /// This helper fixtures positioning; production cursors use the
     /// same comparator during tree descent instead of collecting a slice.
     #[cfg(test)]
     fn positions_in(&self, datoms: &[Datom]) -> (usize, usize) {
@@ -634,7 +634,7 @@ impl TryFrom<&IndexPrefix> for IndexBoundary {
             } => Self::Vaet(IndexComponents::Three(value.clone(), *attribute, *entity)),
             // `validate` rejects these gap shapes before this match. Keeping
             // the arm explicit prevents a future prefix variant from silently
-            // acquiring different compatibility semantics.
+            // acquiring different matching semantics.
             _ => unreachable!("validated IndexPrefix has no component gap"),
         })
     }
@@ -642,11 +642,8 @@ impl TryFrom<&IndexPrefix> for IndexBoundary {
 
 /// Immutable roots for a single database value.
 ///
-/// `Arc` gives snapshots cheap clones and makes the ownership boundary match
-/// the recovered immutable database/index-root design. Current roots are
-/// rebuilt from a transaction's small in-memory working set for now; the
-/// PostgreSQL milestone can replace their construction without changing the
-/// read contract.
+/// `Arc` gives eager values cheap clones. Durable database values use the
+/// block-backed persistent trees and bounded recent tier instead.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct IndexRoots {
     eavt: Arc<[Datom]>,
@@ -1139,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_prefix_converts_without_changing_logical_value_matching() {
+    fn prefix_conversion_preserves_logical_value_matching() {
         let prefix = IndexPrefix::Avet {
             attribute: 20,
             value: Some(decimal("1.00")),

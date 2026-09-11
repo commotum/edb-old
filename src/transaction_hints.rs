@@ -477,9 +477,9 @@ impl PendingHints {
 
 /// Configured workers per writer and at most eight per process. Synchronous driver
 /// calls cannot be interrupted safely: stuck workers retain their permits, so
-/// dropping/restarting services cannot accumulate unbounded threads or pins.
+/// dropping/restarting services cannot accumulate unbounded threads or connections.
 /// Authority completion cancels further work but never waits for it. The worker
-/// creates independent SQL/pin/miss lanes; only authenticated node cache is shared.
+/// creates independent SQL/cache-miss lanes; only authenticated node cache is shared.
 pub(crate) fn overlap<T>(
     database: Option<DatabaseValue>,
     hints: Option<&PendingHints>,
@@ -509,7 +509,7 @@ pub(crate) fn overlap<T>(
         .as_ref()
         .map(DatabaseValue::hint_prefetch_plan)
         .transpose();
-    // No original core/pin owner is moved into the detached worker. Releasing
+    // No original reader connection is moved into the detached worker. Releasing
     // this local source happens while authority still owns its current value.
     drop(database);
     if let Ok(Some(plan)) = plan {

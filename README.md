@@ -44,20 +44,27 @@ unpublished original source tree or a runnable recovered distribution. Its
 
 ```sh
 cargo build --offline --bin atomic --examples
-cargo test --offline
+cargo test --offline --lib
 ```
 
 PostgreSQL-dependent tests report missing configuration and return without
 exercising PostgreSQL. A green unconfigured run is not PostgreSQL acceptance.
 
-For real integration checks, use a dedicated disposable PostgreSQL database and
+For a focused integration pass, use a dedicated disposable PostgreSQL database and
 an administrative test login. Fixtures install the current object/reference
 schema; role tests require permission to create restricted test roles.
 
 ```sh
 ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atomic_test' \
-  cargo test --offline --all-targets -- --test-threads=1
+  cargo test --offline --test edn_transactions --test native_connection \
+    --test block_receipts --test block_backup --test transactor_differential \
+    -- --test-threads=1
 ```
+
+Choose relevant targets while developing; use `cargo test --offline --all-targets`
+for a broader integration pass when needed. Duplicate stress/measurement campaigns
+and historical-format fixtures have been removed. The remaining focused tests
+protect current behavior; benchmark throughput with an actual application workload.
 
 The server-crash test is separately opted in with
 `ATOMIC_ALLOW_DISPOSABLE_PG_CRASH=1`, `ATOMIC_RESTART_POSTGRES_URL`,
@@ -110,11 +117,11 @@ Excision cannot erase bytes or memories already exported to another process.
 
 Read limits, deadlines and cancellation are cooperative resource policies, not
 hard allocator or SQL preemption guarantees. Local Rust callbacks are trusted.
-Fulltext has an explicit coverage frontier and supplied-view validation; an
+Fulltext merges indexed and recent facts with supplied-view validation; an
 absent search hit is not an identity or uniqueness constraint. Advisory hints
 never become transaction meaning or durable request identity.
 
-Current acceptance, including measured whole-operation costs and outstanding
-verification, is recorded in [product acceptance](docs/acceptance.md). Historical
+Current acceptance and measurement limits are recorded in
+[product acceptance](docs/acceptance.md). Historical
 implementation results remain in Git history; they are not evidence for the
 current storage engine.

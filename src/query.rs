@@ -882,7 +882,14 @@ impl QueryEngine {
     ) -> Result<QueryOutcome, SemanticError> {
         let (prepared, hit) = prepare::cached(query)?;
         let query = prepared.as_ref().map_or(query, PreparedQuery::query);
-        let mut outcome = Self::execute_query(query, sources, inputs, control, extensions)?;
+        let mut outcome = Self::execute_query(
+            query,
+            sources,
+            inputs,
+            control,
+            extensions,
+            prepared.as_ref(),
+        )?;
         outcome.stats.prepared_cache_hits = u64::from(hit);
         Ok(outcome)
     }
@@ -894,7 +901,14 @@ impl QueryEngine {
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
     ) -> Result<QueryOutcome, SemanticError> {
-        Self::execute_query(prepared.query(), sources, inputs, control, extensions)
+        Self::execute_query(
+            prepared.query(),
+            sources,
+            inputs,
+            control,
+            extensions,
+            Some(prepared),
+        )
     }
 
     fn execute_query(
@@ -903,6 +917,7 @@ impl QueryEngine {
         inputs: &[QueryInput],
         control: &QueryControl,
         extensions: Option<&QueryExtensions>,
+        prepared: Option<&PreparedQuery>,
     ) -> Result<QueryOutcome, SemanticError> {
         let mut source_map = BTreeMap::new();
         for source in sources {
@@ -938,7 +953,7 @@ impl QueryEngine {
                 .diagnostics
                 .map(|options| diagnostics::Trace::new(options, query, control, deadline)),
         };
-        let result = run_query(query, inputs, &mut state)?;
+        let result = run_query(query, inputs, &mut state, prepared)?;
         Ok(QueryOutcome {
             result,
             stats: state.stats,
@@ -1001,6 +1016,7 @@ impl QueryEngine {
                     prepared.as_ref().map_or(query, PreparedQuery::query),
                     inputs,
                     &mut state,
+                    prepared.as_ref(),
                 )?;
                 Ok(QueryOutcome {
                     result,
@@ -1037,6 +1053,7 @@ fn run_query(
     query: &Query,
     inputs: &[QueryInput],
     state: &mut State<'_>,
+    prepared: Option<&PreparedQuery>,
 ) -> Result<QueryResult, SemanticError> {
     state.check(0)?;
     validate_query_values(query, state)?;
@@ -1048,7 +1065,10 @@ fn run_query(
     }
     // These checks depend on the invocation's sources, never cached preparation.
     validate_consumed_sources(query, &state.sources, state.extensions)?;
-    dependencies::validate_negation(query, state)?;
+    match prepared {
+        Some(prepared) => prepared.validate_negation(state)?,
+        None => dependencies::validate_negation(query, state)?,
+    }
     let initial = bind_inputs(&query.inputs, inputs, state)?;
     let rows = dependencies::evaluate_complete(query, initial, state)?;
     let mut pull_budget = QueryPullBudget::new(

@@ -36,7 +36,7 @@ Usage:
 
 Required environment (all commands except help/version):
   ATOMIC_POSTGRES_URL          PostgreSQL connection string; never printed
-  ATOMIC_POSTGRES_TRANSPORT    tls (verified) or plaintext (explicit development)
+                              TCP uses verified TLS; sslmode=disable opts out
 Optional: ATOMIC_POSTGRES_TLS_ROOT (PEM); ATOMIC_CONNECT_TIMEOUT_MS,
   ATOMIC_STATEMENT_TIMEOUT_MS, ATOMIC_LOCK_TIMEOUT_MS, ATOMIC_TCP_USER_TIMEOUT_MS,
   ATOMIC_KEEPALIVES=true|false, ATOMIC_KEEPALIVES_IDLE_SECONDS,

@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     match arguments.first().map(String::as_str) {
         Some("writer") => {
             let writer = TransactionService::start(TransactionServiceConfig {
-                connection: postgres,
+                connection: PostgresConnectionConfig::parse(&postgres)?,
                 database_id: arguments[1].clone(),
                 holder_id: format!("process-writer-{}", std::process::id()),
                 lease_duration: Duration::from_secs(5),
@@ -81,7 +81,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             assert!(replay.replayed);
             assert_eq!(replay.basis_t, committed.basis_t);
             assert_eq!(replay.report?.tempids, report.tempids);
-            assert_eq!(peer.load_stats().compatibility_materializations, 0);
             println!(
                 "peer pid={} name={name} committed t={}",
                 std::process::id(),
@@ -178,7 +177,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let reopened = Connection::connect(&postgres, &database, 8)?;
     assert_eq!(reopened.db().basis_t(), current.basis_t());
     assert_eq!(reopened.identity(), observer.identity());
-    assert_eq!(observer.load_stats().compatibility_materializations, 0);
     println!(
         "PASS {database}: independent writer/peers, schema, concurrent maps, retries, complete reports, native pull, immutable values, writer-offline reopen"
     );

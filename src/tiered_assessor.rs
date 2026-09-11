@@ -1,9 +1,8 @@
 //! Incremental transaction assessment over one exact immutable database value.
 //!
-//! The eager [`crate::Database`] transition remains the semantic oracle.  This
-//! module is the production-shaped counterpart: it obtains only left-prefix
-//! ranges from the db-before value and keeps the proposed successor as a small
-//! logical delta.  It deliberately contains no `materialize` fallback.
+//! All memory, speculative and durable transactions use this assessor. It
+//! obtains left-prefix ranges from db-before and represents the successor as
+//! an immutable delta, independently of how its caller stores the result.
 
 #[cfg(test)]
 use crate::USER_PARTITION;
@@ -109,9 +108,8 @@ impl TieredAssessment {
                 })
     }
 
-    /// Resolve only predicates this assessed transaction can execute.  As in
-    /// the eager oracle, missing required attributes short-circuit before
-    /// persisted predicate bindings are looked up.
+    /// Resolve only predicates this assessed transaction can execute. Missing
+    /// required attributes short-circuit before predicate bindings are looked up.
     pub(crate) fn predicate_requirements(
         &self,
     ) -> Result<BTreeMap<String, crate::database::PredicateRole>, SemanticError> {
@@ -143,8 +141,7 @@ impl TieredAssessment {
     }
 
     /// Run the delayed add-data and ensure hooks against the exact immutable
-    /// db-before/db-after pair. Persisted entity predicates use the lazy
-    /// `DatabaseValue`; eager Rust callbacks remain an oracle-only adapter.
+    /// db-before/db-after pair. All callbacks receive the same `DatabaseValue`.
     pub(crate) fn validate_exact(
         &self,
         functions: Option<&TxFunctions>,
@@ -194,7 +191,7 @@ impl TieredAssessment {
                             format!("entity spec {} requires predicate {predicate}", ensure.spec),
                         )
                     })?
-                    .validate_entity_predicate_exact(predicate, &self.db_after, ensure.entity)?;
+                    .validate_entity_predicate(predicate, &self.db_after, ensure.entity)?;
                 if !crate::is_exact_true(&result) {
                     return Err(SemanticError::incorrect(
                         "transaction/entity-predicate",
@@ -452,7 +449,7 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
     count_work(|work| &mut work.assessments, 1);
     count_work(|work| &mut work.input_operations, ops.len());
     // PostgreSQL supplies one context before persisted generation begins. The
-    // standalone semantic-oracle entry still needs the same cross-phase
+    // standalone memory entry still needs the same cross-phase
     // behavior, so give it a private unbounded observer while Reader enforces
     // the caller's explicit assessment allowance.
     crate::transaction::validate_ops_input(ops)?;
@@ -827,8 +824,9 @@ fn derive_successor_schema(
     // composite's historical constituent ident after an ident rename. An
     // ident repurpose can also affect an active composite without touching the
     // composite entity, so include only composites that depend on the ident's
-    // previous target. Discontinued composites deliberately keep their frozen
-    // resolved constituents, matching the recovered reverse-link removal.
+    // previous target. Discontinued composites no longer have active derivation
+    // links, but their stored constituent names must still reconstruct the same
+    // schema projection as replay after an ident is repurposed.
     let mut physical_entities = BTreeSet::new();
     for datom in logical.iter().filter(|datom| {
         schema_information_attribute(datom.attribute)
@@ -874,9 +872,9 @@ fn derive_successor_schema(
             (u64::from(previous) != datom.entity).then_some(previous)
         })
         .collect::<BTreeSet<_>>();
-    for attribute in retargeted_attributes {
+    for attribute in &retargeted_attributes {
         reader.work.dependency_lookups = reader.work.dependency_lookups.saturating_add(1);
-        for composite in reader.base.schema().composites_for_constituent(attribute) {
+        for composite in reader.base.schema().composites_for_constituent(*attribute) {
             reader.work.dependency_edges = reader.work.dependency_edges.saturating_add(1);
             physical_entities.insert(composite);
         }
@@ -920,7 +918,10 @@ fn derive_successor_schema(
             tx: 0,
             added: true,
         });
-        if physical_entities.contains(&attribute.id) {
+        let discontinued_dependency = attribute.tuple_discontinued
+            && matches!(&attribute.tuple, Some(TupleSpec::Composite(constituents))
+                if constituents.iter().any(|id| retargeted_attributes.contains(id)));
+        if physical_entities.contains(&attribute.id) || discontinued_dependency {
             current.extend(
                 reader
                     .prefix(&IndexPrefix::Eavt {
@@ -1109,7 +1110,17 @@ fn validate_schema_transition(
                         "an installed attribute's fulltext property cannot change",
                     ));
                 }
-                if current.tuple != proposed.tuple {
+                let tuple_property_touched = logical.iter().any(|datom| {
+                    datom.entity == u64::from(proposed.id)
+                        && matches!(
+                            u64::from(datom.attribute),
+                            DB_TUPLE_TYPE | DB_TUPLE_TYPES | DB_TUPLE_ATTRS
+                        )
+                });
+                let discontinued_ident_retarget = current.tuple_discontinued
+                    && proposed.tuple_discontinued
+                    && !tuple_property_touched;
+                if current.tuple != proposed.tuple && !discontinued_ident_retarget {
                     return Err(SemanticError::incorrect(
                         "schema/tuple-definition-immutable",
                         "an installed tuple definition cannot change",
@@ -1864,7 +1875,7 @@ fn expand_retract_entity(
     touched: &mut BTreeSet<(u64, u32)>,
     visited: &mut BTreeSet<u64>,
 ) -> Result<(), SemanticError> {
-    // Explicit continuations keep the eager oracle's depth-first read order,
+    // Explicit continuations preserve depth-first read order,
     // including ordinary Reader read/byte admission checks at every prefix.
     // A visited set alone stops cycles but cannot make deep paths stack-safe.
     enum Work {
@@ -3255,7 +3266,7 @@ mod tests {
     }
 
     #[test]
-    fn unique_enablement_uses_history_and_matches_the_eager_oracle() {
+    fn unique_enablement_uses_history_in_both_memory_representations() {
         let initial = Database::new(schema()).unwrap();
         let mut unique_empty = initial.schema().attribute(COUNT).unwrap().clone();
         unique_empty.unique = Some(Unique::Identity);
@@ -3300,7 +3311,7 @@ mod tests {
     }
 
     #[test]
-    fn excision_cutoff_domain_and_request_scope_match_the_eager_oracle() {
+    fn excision_cutoff_domain_and_request_scope_match_memory_results() {
         fn request(before_t: i64) -> Vec<TxOp> {
             vec![
                 TxOp::Add {

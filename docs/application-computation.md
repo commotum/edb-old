@@ -59,9 +59,8 @@ when expanded decimal text would be unreasonable.
 The corresponding `clojure.core/` aliases are accepted for count/quot/subs/str;
 `clojure.string/` aliases are accepted for the three string predicates. This is
 explicit name mapping, not JVM lookup. Other qualified names remain explicit
-extensions. Portable function programs select query-template 4 / ABI 11 in the
-current canonical codec. Simpler programs use its smaller feature grammars;
-this is not an old-database upgrade promise.
+extensions. All persisted programs use the same current canonical format,
+including portable helpers, fulltext, and general query data.
 
 ## Compiled Rust transaction deployments
 
@@ -70,11 +69,14 @@ Build a `NativeRegistry` using its builder, then supply it in
 or the configured/indexing equivalent. Register transaction functions, attribute
 predicates and entity predicates separately. The same immutable registry works
 with `DatabaseValue::with_forms_with_execution_options` for exact speculation.
-Existing eager `TxFunctions` APIs and content-addressed stored programs remain
-available; neither is replaced.
+`TxFunctions` remains a local callback convenience using `TxValue` arguments.
+Its callbacks receive `DatabaseValue`; in-memory `with_forms` and
+`DatabaseValue::with_functions` use the same selective transaction assessor.
+Content-addressed stored programs remain available.
 
-Deployment symbols identify explicitly versioned compiled code, for example
-`demo.people.v1/add-person`. Use a new `.vN` namespace when changing its meaning.
+Deployment symbols are ordinary fully qualified names, for example
+`demo.people/add-person`. Application deployment policy controls code versions;
+versioned names such as `demo.people.v1/add-person` are also accepted.
 Deploy the same code to every writer/standby and speculative application that
 needs it. The database does not archive native machine code; retain source/build
 artifacts externally. Do not silently reuse a version for incompatible code.
@@ -87,13 +89,21 @@ predicate; rejection data/errors and panic containment follow the native boundar
 The receipt check happens first: removing or changing a deployment cannot change
 an already accepted request's exact retry. A new request needing missing code fails.
 
-For native schema predicates, explicitly bind the predicate entity using ordinary
-schema data. Install `native_deployment_attribute(id)` (or its EDN schema form),
-then, for example:
+Native schema predicates can name a registered callback directly. After
+registering `demo.people/valid-name?` as an attribute predicate, attach it to
+an existing attribute:
+
+```edn
+[[:db/add :person/name :db.attr/preds demo.people/valid-name?]]
+```
+
+Entity predicate symbols work the same way through `:db.entity/preds`.
+An optional temporal alias can bind a stable database ident to a native name.
+To use aliases, install `native_deployment_attribute(id)`, then transact:
 
 ```edn
 [{:db/ident :checks/valid-person
-  :atomic.native/deployment demo.people.v1/valid-person}]
+  :atomic.native/deployment demo.people/valid-person}]
 ```
 
 Reference `checks/valid-person` from `:db.attr/preds` or `:db.entity/preds` as

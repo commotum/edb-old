@@ -8,7 +8,14 @@ pub(super) fn execute(
     binding: &Binding,
     parent: &mut State<'_>,
 ) -> Result<Vec<Vec<BoundValue>>, SemanticError> {
-    validate_query(query, args.len())?;
+    let (prepared, _) = prepare::cached(query)?;
+    let query = prepared.as_ref().map_or(query, PreparedQuery::query);
+    if query.inputs.len() != args.len() {
+        return Err(SemanticError::incorrect(
+            "query/input-arity",
+            "query input count does not match its bindings",
+        ));
+    }
     let mut sources = parent.sources.clone();
     if let Some(default) = parent.sources.get(source).copied() {
         sources.insert("$", default);
@@ -39,7 +46,10 @@ pub(super) fn execute(
         diagnostics: parent.diagnostics.take(),
     };
     let result = (|| {
-        dependencies::validate_negation(query, &mut child)?;
+        match &prepared {
+            Some(prepared) => prepared.validate_negation(&mut child)?,
+            None => dependencies::validate_negation(query, &mut child)?,
+        }
         let initial = bind_arguments(&query.inputs, args, &mut child)?;
         let rows = dependencies::evaluate_complete(query, initial, &mut child)?;
         let mut budget = QueryPullBudget::new(

@@ -23,12 +23,10 @@ pub struct RecoveryStats {
     /// tail. This is zero for a covered endpoint and one for any non-empty
     /// tail, independent of transaction count.
     pub tail_range_reads: u64,
-    pub rejected_manifests: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PeerLoadStats {
-    pub manifest_candidates: u64,
     pub root_reads: u64,
     pub directory_reads: u64,
     pub leaf_reads: u64,
@@ -46,9 +44,6 @@ pub struct PeerLoadStats {
     pub cursor_sql_read_bytes: u64,
     pub cursor_recent_datoms_examined: u64,
     pub cursor_recent_datoms_yielded: u64,
-    pub compatibility_materializations: u64,
-    pub compatibility_hits: u64,
-    pub compatibility_failures: u64,
 }
 
 /// Lazy ordered traversal retaining one immutable block snapshot.

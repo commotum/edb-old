@@ -450,7 +450,15 @@ fn same_basis_excision_points_select_exact_generations_and_restore_tombstones() 
             "target",
         )
         .unwrap();
-    assert!(restored.values(entity, DB_DOC as u32).is_empty());
+    assert_eq!(restored.point.manifest_hash, after.manifest_hash);
+    assert!(
+        Peer::connect(&target.connection, "target", 8)
+            .unwrap()
+            .database_value()
+            .values(entity, DB_DOC as u32)
+            .unwrap()
+            .is_empty()
+    );
     let service = common::start_service(&target.connection, "target");
     assert_eq!(
         service

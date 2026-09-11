@@ -630,5 +630,4 @@ fn postgres_captured_nested_tuple_join_and_maps_work_after_new_writes_and_writer
         assert!(outcome.stats.index_seeks >= 3);
         assert!(outcome.stats.datoms_examined <= 4);
     }
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
 }

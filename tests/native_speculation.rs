@@ -1,6 +1,6 @@
 use atomic_core::{
     Attribute, Cardinality, Database, DatabaseValue, EntityRef, IndexBoundary, IndexComponents,
-    IndexOrder, Keyword, Schema, TxOp, Value, ValueType,
+    IndexOrder, Keyword, Schema, TxCall, TxForm, TxFunctions, TxOp, Value, ValueType,
 };
 
 mod common;
@@ -193,7 +193,7 @@ fn exercise(mut eager: Database, mut native: DatabaseValue) {
 }
 
 #[test]
-fn chained_speculation_preserves_current_and_history_against_the_eager_oracle() {
+fn chained_speculation_preserves_current_and_history_across_memory_representations() {
     let eager = Database::new(schema()).unwrap();
     exercise(eager.clone(), eager.database_value());
 }
@@ -218,10 +218,38 @@ fn native_speculation_never_advances_postgres_or_materializes_the_database() {
     let peer = atomic_core::Connection::connect(&postgres, &id, 4).unwrap();
     let before = peer.db();
     let eager = Database::new(schema()).unwrap();
+    let before_basis = before.basis_t();
+    let mut functions = TxFunctions::new();
+    functions.register("item/create", move |database, _| {
+        assert_eq!(database.basis_t(), before_basis);
+        assert_eq!(
+            database.schema().attribute(1_000)?.value_type,
+            ValueType::Long
+        );
+        Ok(vec![TxForm::Op(TxOp::Add {
+            entity: EntityRef::Temp("from-callback".into()),
+            attribute: 1_000,
+            value: Value::Long(17).into(),
+        })])
+    });
+    let callback_forms = [TxForm::Call(TxCall {
+        function: "item/create".into(),
+        arguments: vec![],
+    })];
+    let local = before
+        .with_functions(&callback_forms, &functions, 1)
+        .unwrap();
+    let memory = eager.with_forms(&callback_forms, &functions, 1).unwrap();
+    assert_eq!(local.tx_data, memory.tx_data);
+    let local_entity = local.tempids["from-callback"];
+    assert_eq!(
+        local.db_after.values(local_entity, 1_000).unwrap(),
+        vec![Value::Long(17)]
+    );
+    assert!(before.values(local_entity, 1_000).unwrap().is_empty());
     exercise(eager, before.clone());
     assert_eq!(peer.sync().unwrap().basis_t(), before.basis_t());
     assert_eq!(store.recover(&id).unwrap().basis_t(), before.basis_t());
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     // Schema/index changes in a speculative chain must expose pre-existing
     // unindexed facts as well as the new delta without publishing a tree.
     let first = before

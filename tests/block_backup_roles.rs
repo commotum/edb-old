@@ -1,4 +1,4 @@
-//! A backup reads source objects and prepares its covering indexes only in files.
+//! Backup copies a canonical publication using SELECT-only source credentials.
 mod common;
 
 use atomic_core::storage::ownership::{BlockCollector, CollectionPhase, CollectionStats};
@@ -8,7 +8,7 @@ use atomic_core::storage::{
 };
 use atomic_core::*;
 use postgres::{Client, NoTls};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const SCORE: u32 = 1000;
 const TEXT: u32 = 1001;
@@ -28,24 +28,9 @@ impl Drop for ReaderRole {
         let role = quote(&self.name);
         let _ = self.admin.batch_execute(&format!(
             "REVOKE SELECT ON {schema}.atomic_objects FROM {role}; \
-             REVOKE SELECT,INSERT,UPDATE,DELETE ON {schema}.atomic_refs FROM {role}; \
+             REVOKE SELECT ON {schema}.atomic_refs FROM {role}; \
              REVOKE USAGE ON SCHEMA {schema} FROM {role}; DROP ROLE {role}"
         ));
-    }
-}
-
-fn no_reader_pins(store: &mut PgBlockStore) {
-    let start = Instant::now();
-    while !store
-        .list_live_refs("pins/read/", None, 128)
-        .unwrap()
-        .is_empty()
-    {
-        assert!(
-            start.elapsed() < Duration::from_secs(10),
-            "reader cleanup did not finish"
-        );
-        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -53,7 +38,9 @@ fn collect(config: &PostgresConnectionConfig) -> (usize, CollectionStats) {
     let mut collector = BlockCollector::connect(config).unwrap();
     let mut total = CollectionStats::default();
     for batches in 1..=128 {
-        let progress = collector.advance(Duration::ZERO, 512).unwrap();
+        let progress = collector
+            .advance(RECOMMENDED_GARBAGE_COLLECTION_AGE, 512)
+            .unwrap();
         // The API reports work for this advance, not cumulative cycle work.
         let stats = progress.stats;
         total.ownership_steps += stats.ownership_steps;
@@ -64,8 +51,6 @@ fn collect(config: &PostgresConnectionConfig) -> (usize, CollectionStats) {
         total.objects_removed += stats.objects_removed;
         total.stored_bytes_removed += stats.stored_bytes_removed;
         total.events_removed += stats.events_removed;
-        total.sessions_revoked += stats.sessions_revoked;
-        total.pins_reaped += stats.pins_reaped;
         if progress.phase == CollectionPhase::Complete {
             return (batches, total);
         }
@@ -81,7 +66,7 @@ fn objects(admin: &mut Client) -> i64 {
 }
 
 #[test]
-fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_collection() {
+fn readonly_capture_preserves_source_indexes_and_survives_retirement_within_grace() {
     let Ok(base) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIP block backup roles: ATOMIC_POSTGRES_URL unset");
         return;
@@ -126,7 +111,7 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
         .batch_execute(&format!(
             "GRANT USAGE ON SCHEMA {} TO {quoted_role}; \
          GRANT SELECT ON atomic_objects TO {quoted_role}; \
-         GRANT SELECT,INSERT,UPDATE,DELETE ON atomic_refs TO {quoted_role}",
+         GRANT SELECT ON atomic_refs TO {quoted_role}",
             quote(&fixture.schema)
         ))
         .unwrap();
@@ -155,6 +140,9 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
         "INSERT INTO atomic_objects SELECT * FROM atomic_objects WHERE false",
         "UPDATE atomic_objects SET payload=payload WHERE false",
         "DELETE FROM atomic_objects WHERE false",
+        "INSERT INTO atomic_refs SELECT * FROM atomic_refs WHERE false",
+        "UPDATE atomic_refs SET revision=revision WHERE false",
+        "DELETE FROM atomic_refs WHERE false",
     ] {
         assert_eq!(
             probe
@@ -204,15 +192,48 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
             value: Value::String(format!("violet document {index}")).into(),
         });
     }
-    let report = writer
+    let first = writer
         .transact(&TransactionRequest::new("seed", operations).with_tx_instant(1000))
+        .unwrap();
+    let changed = first.tempids["e0"];
+    let report = writer
+        .transact(
+            &TransactionRequest::new(
+                "edit",
+                vec![TxOp::Add {
+                    entity: EntityRef::Id(changed),
+                    attribute: TEXT,
+                    value: Value::String("violet changed document".into()).into(),
+                }],
+            )
+            .with_tx_instant(2000),
+        )
         .unwrap();
     let basis = report.basis_t;
     let expected = report.db_after.datoms(IndexOrder::Eavt).unwrap();
-    drop(report);
+    let expected_search = report
+        .db_after
+        .fulltext(TEXT, "violet", &FulltextOptions::default())
+        .unwrap()
+        .hits;
+    assert_eq!(
+        expected_search.len(),
+        48,
+        "live fulltext includes unindexed assertions"
+    );
+    assert_eq!(
+        report
+            .db_after
+            .fulltext(TEXT, "changed", &FulltextOptions::default())
+            .unwrap()
+            .hits
+            .len(),
+        1,
+        "live fulltext includes the unindexed replacement"
+    );
+    drop((first, report));
     writer.release().unwrap();
     let mut store = PgBlockStore::connect(&config).unwrap();
-    no_reader_pins(&mut store);
     let root_id: Digest = store
         .read_ref(&database.reference_key())
         .unwrap()
@@ -232,11 +253,10 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
     let mut backup = PortableBackup::connect_configured(&readonly).unwrap();
     let first = backup.backup_database("source", &first_path).unwrap();
     let capture_elapsed = capture_started.elapsed();
-    no_reader_pins(&mut store);
     assert_eq!(
         objects(&mut admin),
         before_objects,
-        "file preparation wrote a source immutable object"
+        "backup wrote a source immutable object"
     );
     assert_eq!(
         store
@@ -248,8 +268,20 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
         root_id
     );
 
-    // Ensure collection actually removes an unowned object while the backup's
-    // publication pin alone protects the retired database's required closure.
+    let manifest_bytes = std::fs::read(first_path.join("points").join(format!(
+        "{:016x}-{:016x}.root",
+        first.log_generation, first.basis_t
+    )))
+    .unwrap();
+    let manifest = Block::decode(&first.manifest_hash, &manifest_bytes).unwrap();
+    assert_eq!(
+        manifest.links,
+        vec![root_id],
+        "capture must retain the canonical root unchanged"
+    );
+
+    // Normal collection preserves retired objects throughout the grace while
+    // removing an object that was never published or protected.
     let orphan = store
         .put(
             &Block {
@@ -264,7 +296,7 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
     let mut collection = None;
     let retired_path = directory.path().join("retired");
     let point = backup
-        .backup_database_with_pin_probe("source", &retired_path, || {
+        .backup_database_with_capture_probe("source", &retired_path, || {
             let retired = DatabaseCatalog::connect_configured(&config)
                 .unwrap()
                 .retire("source")
@@ -282,7 +314,7 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
             collection = Some(collect(&config));
             assert!(
                 store.get(orphan).unwrap().is_none(),
-                "probe must exercise physical collection"
+                "unpublished unprotected objects are eligible for collection"
             );
             for id in [
                 Some(root_id),
@@ -296,7 +328,7 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
             {
                 assert!(
                     store.get(id).unwrap().is_some(),
-                    "backup pin lost a required root child"
+                    "retention grace lost a required root child"
                 );
             }
         })
@@ -304,7 +336,6 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
     let (batches, gc) = collection.unwrap();
     assert!(gc.objects_removed > 0);
     assert_eq!(point.basis_t, basis);
-    no_reader_pins(&mut store);
     drop((store, admin, backup));
     drop(role);
     drop(fixture); // No source SQL can satisfy the following reads.
@@ -340,9 +371,17 @@ fn readonly_capture_prepares_file_indexes_and_survives_source_retirement_and_col
         assert_eq!(
             db.fulltext(TEXT, "violet", &FulltextOptions::default())
                 .unwrap()
+                .hits,
+            expected_search
+        );
+        assert_eq!(
+            db.fulltext(TEXT, "changed", &FulltextOptions::default())
+                .unwrap()
                 .hits
-                .len(),
-            48
+                .into_iter()
+                .map(|hit| hit.entity)
+                .collect::<Vec<_>>(),
+            vec![changed]
         );
         assert_eq!(
             offline

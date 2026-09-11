@@ -553,7 +553,6 @@ fn lookup_inputs_cross_native_socket_and_preserve_receipts_recovery_and_rejected
     assert_eq!(error.code, "transaction/input-depth");
     assert_eq!(head(), committed_head);
     common::assert_same_information(&peer.db(), &expected.db_after);
-    assert_eq!(peer.load_stats().compatibility_materializations, 0);
     drop(server);
     writer.shutdown();
     common::assert_same_information(&store.recover(&id).unwrap(), &expected.db_after);

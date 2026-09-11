@@ -10,50 +10,7 @@ const LINK: u32 = 1002;
 const WAIT: Duration = Duration::from_secs(60);
 
 #[test]
-fn completion_observation_retries_are_bounded_cancelable_and_never_assume_success() {
-    let control = crate::MaintenanceControl::default();
-    let capture_conflict = || SemanticError::conflict("storage/capture-conflict", "moved root");
-    let mut attempts = 0;
-    let pending = capture_observation(&control, || {
-        attempts += 1;
-        if attempts < 4 {
-            Err(capture_conflict())
-        } else {
-            Ok(false)
-        }
-    })
-    .unwrap();
-    assert!(!pending);
-    assert_eq!(attempts, 4);
-    attempts = 0;
-    let result: Result<bool, _> = capture_observation(&control, || {
-        attempts += 1;
-        Err(capture_conflict())
-    });
-    assert_eq!(result.unwrap_err().code, "storage/capture-conflict");
-    assert_eq!(attempts, 4);
-    attempts = 0;
-    let result: Result<bool, _> = capture_observation(&control, || {
-        attempts += 1;
-        Err(fault(
-            "test/corrupt-completion",
-            "Corrupt immutable completion",
-        ))
-    });
-    assert_eq!(result.unwrap_err().code, "test/corrupt-completion");
-    assert_eq!(attempts, 1);
-    attempts = 0;
-    let result: Result<bool, _> = capture_observation(&control, || {
-        attempts += 1;
-        control.cancel();
-        Err(capture_conflict())
-    });
-    assert_eq!(result.unwrap_err().category, ErrorCategory::Interrupted);
-    assert_eq!(attempts, 1);
-}
-
-#[test]
-fn completion_observation_recaptures_a_real_changed_root_without_hiding_pending_requests() {
+fn completion_observation_does_not_hide_pending_requests() {
     let Some(f) = fixture() else { return };
     let mut writer =
         super::super::BlockTransactor::claim(&f.config, f.database.clone(), Default::default())
@@ -62,23 +19,10 @@ fn completion_observation_recaptures_a_real_changed_root_without_hiding_pending_
         .transact(&TransactionRequest::new("sync-source", seed()))
         .unwrap();
     let reader = BlockReader::connect(&f.config, Default::default()).unwrap();
-    let stale = reader.pin_reference(&f.database.reference_key()).unwrap();
     let requested = writer
         .transact(&TransactionRequest::new("sync-request", request()))
         .unwrap();
-    let mut attempts = 0;
-    let snapshot = capture_observation(&crate::MaintenanceControl::default(), || {
-        attempts += 1;
-        if attempts == 1 {
-            // Exercise the actual pin CAS with a source revision displaced by
-            // the just-committed request, not a synthetic driver error.
-            reader.capture_immutable(stale.root_id(), &[stale.source_condition()])
-        } else {
-            reader.capture(&f.database.reference_key())
-        }
-    })
-    .unwrap();
-    assert_eq!(attempts, 2);
+    let snapshot = reader.capture(&f.database.reference_key()).unwrap();
     assert_eq!(snapshot.basis_t(), requested.basis_t);
     assert!(!sync_complete(&snapshot, requested.basis_t).unwrap());
     writer.release().unwrap();
@@ -357,7 +301,7 @@ fn fixture() -> Option<Fixture> {
 }
 fn service_config(f: &Fixture) -> crate::TransactionServiceConfig {
     crate::TransactionServiceConfig {
-        connection: f.url.clone(),
+        connection: f.config.clone(),
         database_id: "private".into(),
         holder_id: "excision-test".into(),
         lease_duration: Duration::from_secs(20),
@@ -406,12 +350,8 @@ fn assert_excised(value: &DatabaseValue) {
 #[test]
 fn automatic_excision_sanitizes_history_search_retries_and_reopen_but_not_held_values() {
     let Some(f) = fixture() else { return };
-    let service = crate::TransactionService::start_configured_with_options(
-        service_config(&f),
-        f.config.clone(),
-        options(),
-    )
-    .unwrap();
+    let service =
+        crate::TransactionService::start_with_options(service_config(&f), options()).unwrap();
     let client = service.client();
     let original = TransactionRequest::new("private-key", seed());
     let first = client.transact(original.clone(), WAIT).unwrap();
@@ -453,12 +393,8 @@ fn automatic_excision_sanitizes_history_search_retries_and_reopen_but_not_held_v
         stats.excision.peak_admitted_bytes
     );
     service.shutdown();
-    let restarted = crate::TransactionService::start_configured_with_options(
-        service_config(&f),
-        f.config.clone(),
-        options(),
-    )
-    .unwrap();
+    let restarted =
+        crate::TransactionService::start_with_options(service_config(&f), options()).unwrap();
     assert_eq!(
         restarted
             .client()
@@ -587,12 +523,8 @@ fn failed_automatic_admission_leaves_ordinary_writes_available_and_request_pendi
     let Some(f) = fixture() else { return };
     let mut config = options();
     config.excision.max_admitted_bytes = 1;
-    let service = crate::TransactionService::start_configured_with_options(
-        service_config(&f),
-        f.config.clone(),
-        config,
-    )
-    .unwrap();
+    let service =
+        crate::TransactionService::start_with_options(service_config(&f), config).unwrap();
     let client = service.client();
     client
         .transact(TransactionRequest::new("source", seed()), WAIT)
@@ -627,12 +559,8 @@ fn failed_automatic_admission_leaves_ordinary_writes_available_and_request_pendi
             .is_err()
     );
     service.shutdown();
-    let resumed = crate::TransactionService::start_configured_with_options(
-        service_config(&f),
-        f.config.clone(),
-        options(),
-    )
-    .unwrap();
+    let resumed =
+        crate::TransactionService::start_with_options(service_config(&f), options()).unwrap();
     let peer = crate::Peer::connect(&f.url, "private", 64).unwrap();
     assert_excised(&peer.sync_excise(requested.basis_t, WAIT).unwrap());
     resumed.shutdown();
@@ -725,7 +653,7 @@ fn public_operator_uses_same_checkpoint_resume_and_atomic_completion() {
 }
 
 #[test]
-fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext() {
+fn programs_and_search_survive_grace_then_excision_releases_expired_plaintext() {
     use crate::storage::ownership::{BlockCollector, CollectionPhase};
     use crate::{Instruction, Program, ProgramKind, encode_program};
     let Some(f) = fixture() else { return };
@@ -795,7 +723,7 @@ fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext
                 // Raw collection follows published roots. Like the operator's
                 // Complete hook, retire unused report roots explicitly; their
                 // release events are folded by the next collection cycle.
-                let handoffs = collector.prune_report_handoffs(32).unwrap();
+                let handoffs = collector.prune_report_handoffs(age, 32).unwrap();
                 retired_handoffs.set(retired_handoffs.get() + handoffs.removed);
                 return removed;
             }
@@ -829,7 +757,7 @@ fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext
         .prepare(&mut store, &TreeConfig::default())
         .unwrap();
     writer.adopt_index(index).unwrap();
-    tree_held.release().unwrap();
+    drop(tree_held);
     let held = reader.capture(&f.database.reference_key()).unwrap();
     assert!(
         held.database_value()
@@ -859,10 +787,10 @@ fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext
         .unwrap();
     assert!(erased.removed_datoms > 0);
     assert_eq!(erased.request_count, 1);
-    collect(Duration::ZERO);
+    collect(Duration::from_secs(3600));
     assert!(
         store.get(parent).unwrap().is_some(),
-        "held old generation retains code"
+        "the grace period retains the old generation"
     );
     assert!(store.get(secret).unwrap().is_some());
     assert!(
@@ -885,7 +813,7 @@ fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext
             .is_empty()
     );
     assert!(store.get(safe).unwrap().is_some());
-    held.release().unwrap();
+    drop(held);
     collect(Duration::from_secs(3600));
     for id in [parent, secret, attachment] {
         assert!(
@@ -893,8 +821,7 @@ fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext
             "recently retired published object respects its age horizon"
         );
     }
-    // Other transient report/worker pins release on the bounded cleanup lane.
-    // Retry only until that real cleanup completes, not to hide a GC failure.
+    // Explicitly expire the grace period and finish incremental collection.
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut removed = 0;
     loop {
@@ -907,7 +834,7 @@ fn programs_and_search_survive_live_gc_then_excision_releases_unpinned_plaintext
         }
         assert!(
             Instant::now() < deadline,
-            "unpinned excised program/search plaintext remains owned"
+            "expired excised program/search plaintext remains owned"
         );
         std::thread::sleep(Duration::from_millis(10));
     }

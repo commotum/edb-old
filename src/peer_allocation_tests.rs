@@ -80,7 +80,7 @@ fn allocation_checkpoint_stays_exact_across_successor_indexing_and_reopen() {
     }
     assert_eq!(context.snapshot().sql_calls, 0);
     let service = crate::TransactionService::start(crate::TransactionServiceConfig {
-        connection: fixture.connection.clone(),
+        connection: config.clone(),
         database_id: "memo".into(),
         holder_id: "allocation-memo".into(),
         lease_duration: Duration::from_secs(5),

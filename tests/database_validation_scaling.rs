@@ -10,7 +10,6 @@ use atomic_core::{
 use bigdecimal::BigDecimal;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::time::Instant;
 
 const DEC: u32 = 1000;
 const DOUBLE: u32 = 1001;
@@ -380,62 +379,4 @@ fn optimized_validation_preserves_cardinality_uniqueness_and_nan_rejections() {
             assert_eq!(observation(&before), original);
         }
     }
-}
-
-#[test]
-fn validation_scaling_reports_1000_and_4000_facts_without_a_machine_specific_sla() {
-    const IDENTIFIER: u32 = 1000;
-    let mut measurements = Vec::new();
-    for count in [1000_usize, 4000] {
-        let mut schema = Schema::new();
-        let mut identifier = Attribute::new(
-            IDENTIFIER,
-            Keyword::new("scaling", "id"),
-            ValueType::Long,
-            Cardinality::One,
-        );
-        identifier.unique = Some(Unique::Value);
-        schema.install(identifier).unwrap();
-        let before = Database::new(schema).unwrap();
-        let ops = (0..count)
-            .map(|index| TxOp::Add {
-                entity: EntityRef::Temp(format!("entity-{index:04}")),
-                attribute: IDENTIFIER,
-                value: Value::Long(index as i64).into(),
-            })
-            .collect::<Vec<_>>();
-        let build_start = Instant::now();
-        let report = before.with(&ops, 1000).unwrap();
-        let build_us = build_start.elapsed().as_micros();
-        assert_eq!(
-            report
-                .db_after
-                .datoms(View::Current, IndexOrder::Eavt)
-                .iter()
-                .filter(|datom| datom.attribute == IDENTIFIER)
-                .count(),
-            count
-        );
-        let mut validation_us = Vec::new();
-        for _ in 0..3 {
-            let start = Instant::now();
-            std::hint::black_box(&report.db_after)
-                .validate_invariants()
-                .unwrap();
-            validation_us.push(start.elapsed().as_micros());
-        }
-        validation_us.sort_unstable();
-        eprintln!(
-            "database_validation_scaling facts={count} history_datoms={} build_us={build_us} validation_us={validation_us:?}",
-            report
-                .db_after
-                .datoms(View::History, IndexOrder::Eavt)
-                .len()
-        );
-        measurements.push(validation_us[1]);
-    }
-    eprintln!(
-        "database_validation_scaling median_ratio_4000_over_1000={:.3}; observational_only=true",
-        measurements[1] as f64 / measurements[0].max(1) as f64
-    );
 }

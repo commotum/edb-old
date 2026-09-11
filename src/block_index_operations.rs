@@ -82,15 +82,7 @@ pub(super) fn maintain(
     let mut recovered = false;
     loop {
         control.check()?;
-        let capture = match reader.pin_reference(&key) {
-            Ok(capture) => capture,
-            Err(error) => {
-                if retry_capture(&error, &mut conflicts, control)? {
-                    continue;
-                }
-                return Err(error);
-            }
-        };
+        let capture = reader.capture_reference(&key)?;
         let root = load_root(&mut store, capture.root_id())?;
         if crate::storage::engine::identity_string(root.identity) != entry.lineage_id {
             return Err(fault(
@@ -101,16 +93,7 @@ pub(super) fn maintain(
             return Err(target_changed());
         }
         let target = *target.get_or_insert(root.basis);
-        let captured = match reader.capture_root(&capture) {
-            Err(error) if is_capture_conflict(&error) => {
-                if retry_capture(&error, &mut conflicts, control)? {
-                    drop(capture);
-                    continue;
-                }
-                return Err(error);
-            }
-            result => result,
-        };
+        let captured = reader.capture_root(&capture);
         let prepared = match captured {
             Ok(snapshot) if rebuild_search => Candidate::Ordinary(prepare_search(
                 snapshot,
@@ -150,16 +133,7 @@ pub(super) fn maintain(
         control.check()?;
         // Catch up only the publication coordinate, not the prepared input.
         // Ordinary writes may have appended a newer tail during preparation.
-        let latest = match reader.pin_reference(&key) {
-            Ok(capture) => capture,
-            Err(error) => {
-                if retry_capture(&error, &mut conflicts, control)? {
-                    drop((prepared, capture));
-                    continue;
-                }
-                return Err(error);
-            }
-        };
+        let latest = reader.capture_reference(&key)?;
         let latest_root = load_root(&mut store, latest.root_id())?;
         if expected_index.is_some_and(|expected| latest_root.indexes != Some(expected)) {
             return Err(target_changed());
@@ -203,34 +177,13 @@ pub(super) fn maintain(
     }
 }
 
-fn is_capture_conflict(error: &SemanticError) -> bool {
-    error.category == ErrorCategory::Conflict
-        && matches!(
-            error.code,
-            "storage/capture-conflict" | "storage/capture-gc-conflict" | "storage/read-pin-changed"
-        )
-}
-
-fn retry_capture(
-    error: &SemanticError,
-    conflicts: &mut u64,
-    control: &MaintenanceControl,
-) -> Result<bool, SemanticError> {
-    if !is_capture_conflict(error) || *conflicts >= 3 {
-        return Ok(false);
-    }
-    *conflicts += 1;
-    control.after_batch()?;
-    Ok(true)
-}
-
 fn prepare_search(
     snapshot: BlockSnapshot,
     store: &mut PgBlockStore,
     control: &MaintenanceControl,
     fulltext_limits: &FulltextBuildLimits,
 ) -> Result<PreparedIndex, SemanticError> {
-    let protection = crate::storage::engine::protection(store, &[snapshot.pin_condition()?])?;
+    let protection = crate::storage::engine::protection(store, &[])?;
     store.set_write_protection(Some(protection.clone()))?;
     let result = (|| {
         let mut descriptor = snapshot.index_descriptor().clone();
