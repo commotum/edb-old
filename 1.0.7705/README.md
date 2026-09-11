@@ -86,3 +86,12 @@ Rich Hickey's source formatting or macro choices.
 Only recovered source, source-boundary manifests, and concise provenance belong
 in this directory. The downloaded distribution, JARs, extracted classes,
 reports, and scratch recovery products are deliberately absent.
+
+## Development annotations
+
+The descriptions above record the unannotated recovery baseline. Source study
+now adds marked `ATOMIC-NOTE` comments without changing source bodies or original
+docstrings. Annotated files are not byte-for-byte archive extracts, including
+when their original provenance was exact source. The unannotated baseline and
+per-file hashes, counterpart inventory, reading guidance and preservation check
+are maintained in the [source atlas](../development/source/README.md).

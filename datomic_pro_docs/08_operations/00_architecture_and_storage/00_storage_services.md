@@ -8,6 +8,10 @@ word_count: 2770
 
 This document walks through the process of provisioning a storage service for use with Datomic Pro.
 
+<!-- ATOMIC-NOTE: Development trace, separate from the original reference body. -->
+> Atomic development: [SQL provider and storage-boundary trace](00_storage_services.atomic.md)
+> maps the Storage Services, SQL Database and Validation Query passages to source and Rust.
+
 ### Storage Services
 
 Storage service options are listed here:

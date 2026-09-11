@@ -2,13 +2,14 @@
 //! Sources authenticate/cache nodes; cursor positioning and replacement semantics
 //! are shared by live block snapshots, existing peers, and offline backups.
 
+use crate::collections::LruMap;
 use crate::index::{IndexComponents, NormalizedIndexBoundary};
 use crate::persistent_tree::{
     ChildRef, DirectoryNode, LeafSegment, RootNode, TreeNode, TreeReadStats,
 };
 use crate::recent::{RecentCursor, RecentCursorStats, RecentTier};
 use crate::{Datom, Digest, ErrorCategory, IndexOrder, IndexPrefix, SemanticError};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, MutexGuard};
 #[cfg(test)]
@@ -45,8 +46,7 @@ pub(crate) struct TreeNodeCache {
 
 #[derive(Debug, Default)]
 struct TreeNodeCacheState {
-    entries: BTreeMap<Digest, CachedTreeNode>,
-    recency: VecDeque<Digest>,
+    entries: LruMap<Digest, CachedTreeNode>,
     stats: CacheStats,
 }
 
@@ -99,7 +99,7 @@ impl TreeNodeCache {
     pub(crate) fn peek(&self, hash: &Digest) -> Option<Arc<TreeNode>> {
         lock(&self.state)
             .entries
-            .get(hash)
+            .peek(hash)
             .map(|entry| Arc::clone(&entry.node))
     }
 
@@ -117,8 +117,6 @@ impl TreeNodeCacheState {
         let node = self.entries.get(hash).map(|entry| Arc::clone(&entry.node));
         if node.is_some() {
             self.stats.hits = self.stats.hits.saturating_add(1);
-            self.recency.retain(|candidate| candidate != hash);
-            self.recency.push_back(*hash);
         } else {
             self.stats.misses = self.stats.misses.saturating_add(1);
         }
@@ -137,21 +135,16 @@ impl TreeNodeCacheState {
             self.stats.oversized_bypasses = self.stats.oversized_bypasses.saturating_add(1);
             return;
         }
-        if let Some(old) = self.entries.remove(&hash) {
+        if let Some(old) = self.entries.insert(hash, CachedTreeNode { node, bytes }) {
             self.stats.current_bytes = self.stats.current_bytes.saturating_sub(old.bytes);
         }
-        self.entries.insert(hash, CachedTreeNode { node, bytes });
         self.stats.current_bytes = self.stats.current_bytes.saturating_add(bytes);
-        self.recency.retain(|candidate| candidate != &hash);
-        self.recency.push_back(hash);
         while self.entries.len() > max_entries || self.stats.current_bytes > max_bytes {
-            let Some(oldest) = self.recency.pop_front() else {
+            let Some((_, old)) = self.entries.pop_lru() else {
                 break;
             };
-            if let Some(old) = self.entries.remove(&oldest) {
-                self.stats.current_bytes = self.stats.current_bytes.saturating_sub(old.bytes);
-                self.stats.evictions = self.stats.evictions.saturating_add(1);
-            }
+            self.stats.current_bytes = self.stats.current_bytes.saturating_sub(old.bytes);
+            self.stats.evictions = self.stats.evictions.saturating_add(1);
         }
         self.stats.current_entries = self.entries.len();
         self.stats.peak_entries = self.stats.peak_entries.max(self.entries.len());

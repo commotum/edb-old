@@ -1,3 +1,5 @@
+;; ATOMIC-NOTE [scope] Shared-collection pilot: nodes, insertion and cursors, not benchmarks.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns 'datomic.btset)
   (.resetMeta
@@ -85,6 +87,10 @@
       *ns*))
   (definterface IBTSetLeaf (^long count []) (^java.lang.Object keyAt [^long arg0]))
   (clojure.core/import 'datomic.btset.IBTSetLeaf)
+  ;; ATOMIC-NOTE [observed] Iteration mutates this cursor and its BTSetIterLink
+  ;; offsets, while retaining immutable branches/leaves. next/prev walk the saved
+  ;; path at leaf boundaries. [inferred] Cursor-local mutation avoids rebuilding
+  ;; the set or a persistent cursor path for every returned datom.
   (deftype
     BTSetIter
     [^{:unsynchronized-mutable true} branches
@@ -160,6 +166,11 @@
     (assoc {:const true, :column (int 1)} :name 'BT_BRANCH_SIZE :ns *ns*))
   (def BT_LEAF_SIZE 16)
   (reset-meta! #'BT_LEAF_SIZE (assoc {:const true, :column (int 1)} :name 'BT_LEAF_SIZE :ns *ns*))
+  ;; ATOMIC-NOTE [observed] conjoin descends one child; upsert clones only the
+  ;; changed ancestor array and shares untouched children, or propagates a split.
+  ;; An identical child returns this node unchanged. The width 16 bounds nks slots
+  ;; (children alternate with separators), not sixteen child pointers.
+  ;; [inferred] This preserves old roots with update work bounded by tree height.
   (deftype
     BTSetBranch
     [cmp nks]
@@ -283,6 +294,9 @@
       '->BTSetBranch
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] Comparator-equal insertion returns this leaf; a new
+  ;; value copies its small sorted array and may split it. Appending beyond a full
+  ;; leaf reuses that leaf as the left split. Existing leaf arrays are never edited.
   (deftype
     BTSetLeaf
     [^long cnt cmp ks]
@@ -437,6 +451,10 @@
   ;; IDataSet is the ordered-cursor contract shared by in-memory and durable
   ;; index tiers. A keyed seek positions at the lowest value greater than or
   ;; equal to the key; seekLast positions at the greatest value.
+  ;; ATOMIC-NOTE [observed] db/seekEAVT and its sibling index methods seek each
+  ;; memory/durable tier through IDataSet, then iter/merge-iters combines their
+  ;; ordered cursors. [documented] Index Model / Efficient Accumulation describes
+  ;; this sorted-view composition; consumers need not materialize and sort all tiers.
   (definterface
     IDataSet
     (^long longCount [])
@@ -449,6 +467,10 @@
     (^datomic.iter.Iter rseek [])
     (^datomic.iter.Iter rseek [^java.lang.Object arg0]))
   (clojure.core/import 'datomic.btset.IBTSet)
+  ;; ATOMIC-NOTE [observed] cons publishes a new root/count after path copying;
+  ;; comparator duplicates preserve this set. rseek adjusts a lower-bound cursor
+  ;; to its predecessor when necessary. disjoin is unsupported: this is the recent
+  ;; datom accumulation mechanism, not a complete general-purpose set API.
   (deftype
     BTSet
     [cmp ^long cnt root]

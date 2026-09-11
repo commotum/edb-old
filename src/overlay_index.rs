@@ -1,6 +1,6 @@
 //! Resident speculative indexes. Every index entry shares one immutable datom;
 //! branches copy tree paths, never an accumulated transaction vector.
-use crate::shared_map::{MapCursor, SharedMap};
+use crate::collections::persistent_map::{MapCursor, SharedMap};
 use crate::{Datom, IndexOrder, IndexPrefix, Keyword};
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -174,7 +174,7 @@ impl OverlayIndexes {
     }
 
     #[cfg(test)]
-    pub(crate) fn metrics(&self) -> (usize, u32, crate::shared_map::MapWork) {
+    pub(crate) fn metrics(&self) -> (usize, u32, crate::collections::persistent_map::MapWork) {
         self.history[0].metrics()
     }
 

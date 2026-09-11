@@ -8,6 +8,12 @@ import clojure.lang.RT;
  * <p>Attribute information is kept in memory, so this interface is the
  * efficient way to inspect schema properties that are needed repeatedly.</p>
  */
+// ATOMIC-NOTE BEGIN foundation-schema-counterpart
+// Baseline-identical to transactor/src-java/datomic/Attribute.java at
+// cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; see its foundation-schema note for
+// derived schema ownership, configured-versus-available AVET and the bytes
+// uniqueness source/docs conflict. This is the same contract at the peer boundary.
+// ATOMIC-NOTE END foundation-schema-counterpart
 public interface Attribute {
     /** Cardinality-many schema value. */
     public static final Object CARDINALITY_MANY = RT.keyword((String)"db.cardinality", (String)"many");

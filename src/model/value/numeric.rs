@@ -308,5 +308,4 @@ impl Digits {
 }
 
 #[cfg(test)]
-#[path = "value_numeric_tests.rs"]
 mod tests;

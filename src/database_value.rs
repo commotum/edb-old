@@ -1,7 +1,7 @@
+use crate::collections::persistent_map::SharedMap;
 use crate::identity::validate_frontier;
 use crate::index::compare_prefix;
 use crate::overlay_index::{EavSet, OverlayIndexCursor, OverlayIndexes};
-use crate::shared_map::SharedMap;
 use crate::{
     AttributeName, DB_IDENT, Database, Datom, EntityIdentifier, ErrorCategory, IndexBoundary,
     IndexComponents, IndexOrder, IndexPrefix, IndexTransaction, Keyword, PeerCursorStats,

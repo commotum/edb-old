@@ -152,10 +152,13 @@ fn from_edn(value: &EdnValue, budget: &mut Budget, depth: usize) -> Result<Value
                     }
                     Value::Ref(reference)
                 }
-                (Some("atomic"), "uri") => Value::Uri(
-                    text.ok_or_else(|| invalid("#atomic/uri requires a string"))?
-                        .to_owned(),
-                ),
+                (Some("atomic"), "uri") => {
+                    let uri = text.ok_or_else(|| invalid("#atomic/uri requires a string"))?;
+                    if !crate::model::uri::validate(uri) {
+                        return Err(invalid("#atomic/uri has invalid syntax or escaping"));
+                    }
+                    Value::Uri(uri.to_owned())
+                }
                 (Some("atomic"), "bytes") => {
                     Value::Bytes(decode_hex(text.ok_or_else(|| {
                         invalid("#atomic/bytes requires a hexadecimal string")

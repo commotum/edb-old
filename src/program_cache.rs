@@ -1,9 +1,9 @@
 //! Bounded, discardable canonical-program decoding cache. Scope is captured
 //! database lineage plus excision generation; a cache entry never grants a
 //! snapshot, writer lease, or authorization to open a retired value.
+use crate::collections::LruMap;
 use crate::program::ValidatedProgram;
 use crate::{ProgramCacheStats, ProgramHash};
-use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub(crate) type ProgramCacheKey = ([u8; 16], u64, ProgramHash);
@@ -15,8 +15,7 @@ struct CachedProgram {
 }
 
 pub(crate) struct ProgramCache {
-    entries: BTreeMap<ProgramCacheKey, CachedProgram>,
-    lru: VecDeque<ProgramCacheKey>,
+    entries: LruMap<ProgramCacheKey, CachedProgram>,
     max_entries: usize,
     max_bytes: usize,
     stats: ProgramCacheStats,
@@ -24,8 +23,7 @@ pub(crate) struct ProgramCache {
 impl Default for ProgramCache {
     fn default() -> Self {
         Self {
-            entries: BTreeMap::new(),
-            lru: VecDeque::new(),
+            entries: LruMap::default(),
             max_entries: 64,
             max_bytes: 64 * 1024 * 1024,
             stats: ProgramCacheStats::default(),
@@ -40,7 +38,6 @@ impl ProgramCache {
             .map(|entry| Arc::clone(&entry.program));
         if value.is_some() {
             self.stats.hits = self.stats.hits.saturating_add(1);
-            self.touch(key);
         } else {
             self.stats.misses = self.stats.misses.saturating_add(1);
         }
@@ -60,12 +57,10 @@ impl ProgramCache {
         if self.max_entries == 0 || weight > self.max_bytes {
             return;
         }
-        if let Some(previous) = self.entries.remove(&key) {
+        if let Some(previous) = self.entries.insert(key, CachedProgram { program, weight }) {
             self.stats.current_bytes = self.stats.current_bytes.saturating_sub(previous.weight);
         }
-        self.entries.insert(key, CachedProgram { program, weight });
         self.stats.current_bytes = self.stats.current_bytes.saturating_add(weight);
-        self.touch(key);
         self.enforce_limits();
     }
     pub(crate) fn set_limits(&mut self, entries: usize, bytes: usize) {
@@ -73,19 +68,13 @@ impl ProgramCache {
         self.max_bytes = bytes;
         self.enforce_limits();
     }
-    fn touch(&mut self, key: ProgramCacheKey) {
-        self.lru.retain(|old| old != &key);
-        self.lru.push_back(key);
-    }
     fn enforce_limits(&mut self) {
         while self.entries.len() > self.max_entries || self.stats.current_bytes > self.max_bytes {
-            let Some(key) = self.lru.pop_front() else {
+            let Some((_, entry)) = self.entries.pop_lru() else {
                 break;
             };
-            if let Some(entry) = self.entries.remove(&key) {
-                self.stats.current_bytes = self.stats.current_bytes.saturating_sub(entry.weight);
-                self.stats.evictions = self.stats.evictions.saturating_add(1);
-            }
+            self.stats.current_bytes = self.stats.current_bytes.saturating_sub(entry.weight);
+            self.stats.evictions = self.stats.evictions.saturating_add(1);
         }
         self.stats.current_entries = self.entries.len();
     }
@@ -125,5 +114,49 @@ mod tests {
         cache.insert_validated(([1; 16], 0, hash), value, 64);
         assert_eq!(cache.stats().current_entries, 0);
         assert_eq!(cache.stats().decodes, 2);
+    }
+
+    #[test]
+    fn recency_replacement_and_limit_changes_preserve_accounting() {
+        let mut cache = ProgramCache::default();
+        cache.set_limits(2, usize::MAX);
+        let program = crate::Program {
+            kind: crate::ProgramKind::Transaction,
+            arity: 0,
+            instructions: vec![crate::Instruction::Return],
+        };
+        let hash = crate::program_hash(&program).unwrap();
+        let value = Arc::new(ValidatedProgram::from_canonical(program));
+        let a = ([1; 16], 0, hash);
+        let b = ([2; 16], 0, hash);
+        let c = ([3; 16], 0, hash);
+        let overhead = 1024 + std::mem::size_of::<ProgramCacheKey>();
+        cache.insert_validated(a, Arc::clone(&value), 100);
+        cache.insert_validated(b, Arc::clone(&value), 200);
+        assert!(Arc::ptr_eq(&cache.get(a).unwrap(), &value));
+        cache.insert_validated(c, Arc::clone(&value), 300);
+        assert!(cache.get(b).is_none());
+        assert_eq!(cache.stats().current_bytes, overhead * 2 + 400);
+
+        cache.insert_validated(a, Arc::clone(&value), 400);
+        assert_eq!(cache.stats().current_entries, 2);
+        assert_eq!(cache.stats().current_bytes, overhead * 2 + 700);
+        cache.set_limits(2, overhead + 400);
+        assert!(cache.get(c).is_none());
+        assert!(Arc::ptr_eq(&cache.get(a).unwrap(), &value));
+        assert_eq!(cache.stats().current_bytes, overhead + 400);
+        assert_eq!(cache.stats().evictions, 2);
+
+        cache.insert_validated(a, Arc::clone(&value), 401);
+        assert_eq!(cache.stats().current_bytes, overhead + 400);
+        assert_eq!(cache.stats().current_entries, 1);
+        assert_eq!(cache.stats().decodes, 5);
+        assert_eq!(cache.stats().validations, 5);
+        assert_eq!(cache.stats().hits, 2);
+        assert_eq!(cache.stats().misses, 2);
+        cache.set_limits(0, usize::MAX);
+        assert_eq!(cache.stats().current_entries, 0);
+        assert_eq!(cache.stats().current_bytes, 0);
+        assert_eq!(cache.stats().evictions, 3);
     }
 }

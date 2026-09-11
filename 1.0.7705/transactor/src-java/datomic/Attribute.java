@@ -8,6 +8,19 @@ import clojure.lang.RT;
  * <p>Attribute information is kept in memory, so this interface is the
  * efficient way to inspect schema properties that are needed repeatedly.</p>
  */
+// ATOMIC-NOTE BEGIN foundation-schema (baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d)
+// Observed: db/create-attribute builds the in-memory descriptor from schema
+// information. db/Attribute.hasAVET requires storageHasAVET AND needsAVET;
+// db/AttrInfo exposes the public projection below. Logical indexing intent and
+// physically available index coverage are different state, needed by index reads
+// and schema-transition checks; do not infer readiness just from :db/index.
+// Rust src/schema.rs derives descriptors from ordinary schema datoms, while
+// tiered_assessor.rs checks physical_avet_ready separately. Retain that split.
+// A source/docs conflict remains: db/install-attribute-errors rejects unique
+// bytes (type 27), as Rust does; the Identity and Uniqueness chapter says any
+// value type. This interface does not decide that conflict. See the companion
+// datomic_pro_docs/03_schema/03_identity_and_uniqueness.atomic.md for evidence.
+// ATOMIC-NOTE END foundation-schema
 public interface Attribute {
     /** Cardinality-many schema value. */
     public static final Object CARDINALITY_MANY = RT.keyword((String)"db.cardinality", (String)"many");

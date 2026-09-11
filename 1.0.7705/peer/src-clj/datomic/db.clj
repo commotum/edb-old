@@ -4720,6 +4720,11 @@
   ;; filter derive new values by adding index predicates while preserving the
   ;; underlying indexes. Entity navigation is available for point-in-time views;
   ;; history retains assertions and retractions for across-time queries.
+  ;; ATOMIC-NOTE [observed]: This record is the read/assessment value shared by
+  ;; queries, speculative with and notification acceptance. Index seeks merge its
+  ;; fixed layers; acceptDataCheck conjs into persistent indexes and assocs a new
+  ;; record. [inferred] Retaining unaffected structures avoids rebuilding the
+  ;; entire database merely to preserve an earlier application's read basis.
   (defrecord
     Db
     [id
@@ -4745,6 +4750,9 @@
     datomic.db.IDb
     datomic.db.IDbImpl
     datomic.Database
+    ;; ATOMIC-NOTE [observed]: Applying already formed datoms derives new memory
+    ;; indexes, memlog and time fields. Peer notification acceptance uses this
+    ;; path; transaction input validation/expansion occurs through with-tx instead.
     (acceptDataCheck
       [this indata check]
       (let [basis nextT d (first indata)]
@@ -6156,6 +6164,11 @@
       'process-match-partition
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [documented]: datomic_pro_docs/04_transactions/02_transaction_data.md,
+  ;; "Map Forms", defines maps as shorthand for primitive additions, including
+  ;; anonymous ids and cardinality-many values. [observed] ProcessInpoint feeds
+  ;; these generated forms back through the same input processor; nested reference
+  ;; maps also emit a parent-child assertion through expand-submap.
   (defn expand-map
     "Expands a transaction map into primitive :db/add forms. Assigns an anonymous tempid when :db/id is absent, expands cardinality-many values, supports reverse attributes and nested reference maps, and records partition directives."
     ([db m part_reqs local_tempids]
@@ -6526,6 +6539,11 @@
   ;; for expansion; the resulting datoms are assessed together as one information set.
   ;; Lookup refs resolve against db-before. Anonymous nested entities require either a
   ;; component relationship to their parent or a unique identity of their own.
+  ;; ATOMIC-NOTE [observed]: Maps and primitive forms converge before assessment.
+  ;; The stored db resolves identifiers and attribute types, then nextp receives
+  ;; canonical forms; transaction-function output re-enters this same processor.
+  ;; [inferred] Keeping syntax expansion separate gives equivalent surface forms
+  ;; one validation path while preserving the same db-before for all expansions.
   (deftype
     ProcessInpoint
     [db part_reqs nextp]
@@ -7357,6 +7375,12 @@
   ;; Transaction functions receive the immutable db-before and only their explicit
   ;; arguments. Their returned transaction data is expanded into the same transaction;
   ;; no function observes the return value of another function in that transaction.
+  ;; ATOMIC-NOTE [observed]: inject accumulates datoms in a transaction-local
+  ;; ArrayList and invokes transaction functions against the stored db. getData
+  ;; resolves identities across that collection, derives composites and invokes
+  ;; filter-assess-tx-datoms before with-tx creates db-after.
+  ;; [documented] datomic_pro_docs/04_transactions/01_transaction_model.md,
+  ;; "d/with and d/transact": consistency is assessed over the whole information set.
   (deftype
     ProcessExpander
     [db part_reqs arraylist attr_hook_attrs prefetch_dispatcher tx_stat_registers]
@@ -7889,6 +7913,12 @@
       'add-ensured-data
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: ProcessInpoint and ProcessExpander share db-before;
+  ;; their scratch maps/lists are local to this invocation. getData completes
+  ;; expansion/assessment before add-ensured-data constructs the successor, and
+  ;; the report retains both values plus the actual datoms and resolved tempids.
+  ;; [documented] datomic_pro_docs/04_transactions/01_transaction_model.md,
+  ;; "d/with and d/transact", explains computation independent of durable swap.
   (defn with-tx
     "Applies transaction data as a pure computation over db. Expands maps and transaction functions against db-before, resolves tempids and unique identities, derives composites, enforces schema and entity predicates, and returns :db-before, :db-after, :tx-data, :tempids, and transaction statistics."
     ([db dispatcher txdata]
@@ -7934,6 +7964,9 @@
       'with-tx
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Database.with and LocalConnection use this wrapper
+  ;; around with-tx. Optional hints/statistics wrap the same computation; this
+  ;; function does not enqueue a transaction or publish a durable database head.
   (defn with-tx+opts
     "Applies a speculative transaction with optional I/O accounting and prefetch hints. :return-hints includes immutable storage keys read during processing; transaction semantics are unchanged when hints are requested."
     ([db txdata p__12985]

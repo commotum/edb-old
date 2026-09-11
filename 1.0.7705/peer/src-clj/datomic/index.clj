@@ -1,3 +1,5 @@
+;; ATOMIC-NOTE [scope] Shared-index pilot: seek/cache, sorted merge and directory reuse only.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns (.withMeta 'datomic.index {:author "Rich Hickey"}))
   (.resetMeta
@@ -232,6 +234,11 @@
       *ns*))
   ;; Sparse root keys select immutable directory nodes. The dirs array is a
   ;; weak in-process cache parallel to the durable directory identifiers.
+  ;; ATOMIC-NOTE [observed] RootNode and DirNode keep immutable child identifiers
+  ;; beside process-local weak-reference cache arrays. Their get/seek consumers may
+  ;; fill these arrays without changing keys, child IDs or the represented datoms.
+  ;; [documented] Index Model / Accumulate Only permits caching immutable segments.
+  ;; [inferred] Immutable db values therefore need not retain frozen cache bookkeeping.
   (deftype RootNode [keydata dirids dirs])
   (clojure.core/import 'datomic.index.RootNode)
   (defn ->RootNode ([keydata dirids dirs] (datomic.index.RootNode. keydata dirids dirs)))
@@ -299,6 +306,9 @@
       'dir-node
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] A live weak reference avoids lookup; otherwise the same
+  ;; immutable dir ID is resolved and optionally cached again. [inferred] Weak
+  ;; retention permits reclamation without invalidating the durable index identity.
   (defn get-dir-node
     ([root ridx lookup cache?]
       (let [k (aget (.-dirids ^datomic.index.RootNode root) (unchecked-int ridx))]
@@ -1350,6 +1360,10 @@
   ;; through sparse root and directory keys, loads at most the selected path,
   ;; and returns a bidirectional cursor positioned at the first key greater
   ;; than or equal to the requested key.
+  ;; ATOMIC-NOTE [observed] Index implements btset/IDataSet: ibtree-search selects
+  ;; predecessor separator entries, ibinary-search finds a segment's lower bound,
+  ;; and TreeIter advances across segment/directory boundaries. db's tier mergers
+  ;; can therefore consume stored and recent sorted sets through the same seek API.
   (deftype
     Index
     [lookup cmpi root cached_count order]
@@ -2674,6 +2688,9 @@
       'build-segs
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] merge-one-index feeds sorted streams to this lazy merge.
+  ;; It emits the lesser head and advances both on comparator equality. [inferred]
+  ;; Presorted inputs permit linear merge work without resorting their union.
   (defn merge-data
     ([cmp ds1 ds2]
       (if (and ds1 ds2)
@@ -3206,6 +3223,11 @@
       'es-equal?
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] merge-dedup supplies existing directories in key order.
+  ;; Matching keys plus es-equal? reuse the old directory ID; otherwise this emits
+  ;; a new ID and entries. start-dirs-pipeline writes only results carrying entries.
+  ;; [inferred] Reusing unchanged directories reduces writes while retaining old roots;
+  ;; this local mechanism alone is not proof of sublinear cost for every index job.
   (defn aligned-dedup
     ([dirs cmp]
       (fn fn__14252

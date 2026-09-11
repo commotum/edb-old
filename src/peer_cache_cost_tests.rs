@@ -1,9 +1,9 @@
-//! Scoped cache-cost disposition, not a replacement-cache performance contract.
+//! Cache ownership, eviction and complete bookkeeping-path cost samples.
 //!
-//! Native cache hits scan the bounded resident recency deque. Timings include
-//! the actual mutex, lookup, recency update, returned Arc and drop. The printed
-//! scan bound is inferred from the production `retain` implementation, not a
-//! measured datom, SQL, or allocation counter. No wall-time ratio is asserted.
+//! Timings include the actual mutex, lookup, recency update, returned Arc and
+//! drop. These isolate bookkeeping, not query/I/O or total process memory.
+//! No wall-time ratio is asserted. Collection-level tests independently check
+//! slot reuse and linked order against a simple sequence-based oracle.
 use super::*;
 use crate::Value;
 use std::hint::black_box;
@@ -29,11 +29,8 @@ fn node(ordinal: usize) -> Arc<TreeNode> {
     }))
 }
 
-fn assert_recency_oracle(cache: &TreeNodeCache) {
+fn assert_accounting(cache: &TreeNodeCache) {
     let state = lock(&cache.state);
-    let keys: BTreeSet<_> = state.recency.iter().copied().collect();
-    assert_eq!(keys.len(), state.recency.len(), "no duplicate recency keys");
-    assert_eq!(keys, state.entries.keys().copied().collect());
     assert_eq!(state.stats.current_entries, state.entries.len());
     assert_eq!(
         state.stats.current_bytes,
@@ -48,7 +45,7 @@ fn measure_hot_hit(cache: &TreeNodeCache, hot: Digest) -> (u128, u128) {
     // immutable allocation. Synthetic unique keys and fixed admission weights
     // isolate cache bookkeeping; this is not an authentication/SQL fixture.
     let expected = cache.peek(&hot).unwrap();
-    assert_recency_oracle(cache);
+    assert_accounting(cache);
     let before = cache.stats();
     let started = Instant::now();
     for _ in 0..HITS {
@@ -63,10 +60,9 @@ fn measure_hot_hit(cache: &TreeNodeCache, hot: Digest) -> (u128, u128) {
     assert_eq!(after.evictions, before.evictions);
     assert_eq!(after.current_entries, before.current_entries);
     assert_eq!(after.current_bytes, before.current_bytes);
-    assert_eq!(lock(&cache.state).recency.back(), Some(&hot));
-    assert_recency_oracle(cache);
+    assert_accounting(cache);
 
-    // The existing internal miss recheck takes the same mutex/map/Arc path but
+    // The test-only inspection takes the same mutex/map/Arc path but
     // intentionally omits recency and stats. It is only a diagnostic comparator,
     // not a recommendation to change hit semantics or an acceptance threshold.
     let started = Instant::now();
@@ -81,7 +77,7 @@ fn measure_hot_hit(cache: &TreeNodeCache, hot: Digest) -> (u128, u128) {
 }
 
 #[test]
-fn native_cache_hot_hit_cost_is_bounded_by_resident_capacity_not_constant() {
+fn native_cache_hot_hit_shares_nodes_and_updates_eviction_order() {
     for width in [32, 128, 512, 2_048, 4_096] {
         let setup = Instant::now();
         let cache = TreeNodeCache::new(width, width * NODE_WEIGHT);
@@ -92,7 +88,7 @@ fn native_cache_hot_hit_cost_is_bounded_by_resident_capacity_not_constant() {
         let retained = cache.peek(&key(0)).unwrap();
         let (hit_ns, peek_ns) = measure_hot_hit(&cache, key(0));
         eprintln!(
-            "CACHE_HIT residents={width} measured_hits={HITS} inferred_recency_visits_per_hit={width} complete_lock_get_drop_ns={hit_ns} complete_lock_peek_drop_ns={peek_ns} setup_us={}",
+            "CACHE_HIT residents={width} measured_hits={HITS} complete_lock_get_drop_ns={hit_ns} complete_lock_peek_drop_ns={peek_ns} setup_us={}",
             setup_elapsed.as_micros()
         );
 
@@ -102,7 +98,7 @@ fn native_cache_hot_hit_cost_is_bounded_by_resident_capacity_not_constant() {
         assert!(cache.peek(&key(1)).is_none());
         assert!(Arc::ptr_eq(&retained, &cache.peek(&key(0)).unwrap()));
         assert_eq!(cache.stats().evictions, 1);
-        assert_recency_oracle(&cache);
+        assert_accounting(&cache);
     }
 }
 
@@ -130,10 +126,54 @@ fn native_cache_fixed_entry_or_byte_capacity_caps_recency_after_more_insertions(
             assert!(cache.peek(&key(distinct_nodes)).is_none());
             let (hit_ns, peek_ns) = measure_hot_hit(&cache, key(distinct_nodes - 1));
             eprintln!(
-                "CACHE_FIXED_CAP byte_limited={byte_limited} distinct_inserted={distinct_nodes} residents={RESIDENTS} evictions={} measured_hits={HITS} inferred_recency_visits_per_hit={RESIDENTS} complete_lock_get_drop_ns={hit_ns} complete_lock_peek_drop_ns={peek_ns} setup_us={}",
+                "CACHE_FIXED_CAP byte_limited={byte_limited} distinct_inserted={distinct_nodes} residents={RESIDENTS} evictions={} measured_hits={HITS} complete_lock_get_drop_ns={hit_ns} complete_lock_peek_drop_ns={peek_ns} setup_us={}",
                 stats.evictions,
                 setup_elapsed.as_micros()
             );
         }
+    }
+}
+
+#[test]
+fn contended_non_mru_hits_preserve_values_and_accounting() {
+    const WIDTH: usize = 4096;
+    const PER_WORKER: usize = 2048;
+    for workers in [1, 4] {
+        let cache = TreeNodeCache::new(WIDTH, WIDTH * NODE_WEIGHT);
+        for ordinal in 0..WIDTH {
+            cache.insert(key(ordinal), node(ordinal), NODE_WEIGHT);
+        }
+        let before = cache.stats();
+        let barrier = std::sync::Barrier::new(workers);
+        let start = Instant::now();
+        std::thread::scope(|scope| {
+            for worker in 0..workers {
+                let cache = &cache;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    for n in 0..PER_WORKER {
+                        let ordinal = (n * 17 + worker * 7) % WIDTH;
+                        let value = black_box(cache.get(&key(ordinal)).unwrap());
+                        let TreeNode::Leaf(leaf) = value.as_ref() else {
+                            panic!("fixture is a leaf");
+                        };
+                        assert_eq!(leaf.entities, [ordinal as u64 + 1]);
+                    }
+                });
+            }
+        });
+        let elapsed = start.elapsed();
+        let after = cache.stats();
+        assert_eq!(after.hits - before.hits, (workers * PER_WORKER) as u64);
+        assert_eq!(after.misses, 0);
+        assert_eq!(after.evictions, 0);
+        assert_accounting(&cache);
+        eprintln!(
+            "CACHE_CONTENTION residents={WIDTH} workers={workers} hits={} wall_us={} wall_ns_per_hit={} includes_thread_start_and_join=true",
+            workers * PER_WORKER,
+            elapsed.as_micros(),
+            elapsed.as_nanos() / (workers * PER_WORKER) as u128,
+        );
     }
 }

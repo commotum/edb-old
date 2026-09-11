@@ -1145,6 +1145,11 @@
       'resolve-qualified-fns
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Normalize query syntax, bindings, aggregates and pull
+  ;; forms before validation and clause preparation. load-query consumes this
+  ;; representation; query/support supplies the EDN/list/map entry conversion.
+  ;; [inferred] One normalized representation lets callers share planning work
+  ;; without coupling the compiled query to a particular connection's latest Db.
   (defn parse-query
     ([query]
       (let [query (mapify-query query)
@@ -1280,6 +1285,10 @@
   (reset-meta!
     #'group-rel
     (assoc {:arglists (clojure.core/list ['fv 'rel]), :column (int 1)} :name 'group-rel :ns *ns*))
+  ;; ATOMIC-NOTE [observed]: This computing cache stores load-query's prepared
+  ;; queries, not answers. q* still evaluates each call's explicit sources through
+  ;; datalog/qsqr. [inferred] Plan reuse amortizes preparation without making query
+  ;; results stale when an application supplies a different database value.
   (.setMeta (clojure.lang.RT/var "datomic.query" "query-cache") {:column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.query" "query-cache")
@@ -1447,6 +1456,10 @@
       'sort-for-pull
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: The basic Peer read path binds supplied sources to a
+  ;; cached query and runs datalog/qsqr locally, then constructs the requested
+  ;; result shape. Database relations seek the supplied Db's indexes; this layer
+  ;; neither dereferences a live Connection nor sends the query to a transactor.
   (defn q*
     ([query srcs]
       (let [vec__19330 (qs/parse-as query)

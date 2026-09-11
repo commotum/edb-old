@@ -4,6 +4,11 @@ package datomic;
  * An immutable, point-in-time fact represented as
  * {@code [entity, attribute, value, transaction, added]}.
  */
+// ATOMIC-NOTE BEGIN foundation-datom-counterpart
+// Baseline-identical to transactor/src-java/datomic/Datom.java at
+// cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; see its foundation-datom note.
+// The public tuple and primitive IDatum view are implemented by one db/Datum.
+// ATOMIC-NOTE END foundation-datom-counterpart
 public interface Datom {
     /**
      * Returns this datom's entity id.

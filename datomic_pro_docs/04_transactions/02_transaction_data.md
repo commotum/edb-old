@@ -376,3 +376,7 @@ You can query transaction entities like any other entities in the system.
 If you are importing past data that includes known transaction times, you may want Datomic's *:db/txInstant* to reflect those times. You can include an explicit *:db/txInstant* addition in tx-data, overriding the transactor's clock time. This is useful when you are importing past data and want to assert when that information was known.
 
 Explicit additions of *:db/txInstant* must respect the monotonic ordering of wall-clock time, i.e. you must choose a *:db/txInstant* value that is not older than any existing transaction, and not newer than the transactor's clock time.
+
+---
+
+> ATOMIC-NOTE — development trace: [Map forms, committed values and peer reads](02_transaction_data.atomic.md) links the relevant passages above to recovered source symbols, current Rust owners and existing acceptance cases. This added commentary is separate from the original reference text; chapter coverage is partial.

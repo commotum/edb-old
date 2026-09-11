@@ -25,11 +25,10 @@ pub(crate) use submission_codec::{
 pub type Digest = [u8; 32];
 
 const MAGIC: &[u8; 4] = b"ATMC";
-// Version 3 makes genesis/schema ordinary immutable information and removes
-// typed SchemaChange side channels from durable transactions and manifests.
-// The corrected runtime/tree comparator is versioned independently by ATIX
-// v4; these authoritative ATMC v3 bytes retain their original stored-first
-// ordering and remain replayable during an administrative tree rebuild.
+// Genesis and schema are ordinary immutable information. Log serialization's
+// stored-first ordering is distinct from index traversal's T/op-first ordering;
+// index and database-root versions reject incompatible comparator generations.
+// There is no old-format reader or administrative upgrade converter.
 const FORMAT_VERSION: u16 = 3;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
@@ -445,7 +444,7 @@ fn validate_index_datom_contents(datoms: &[Datom]) -> Result<(), SemanticError> 
     Ok(())
 }
 
-/// Comparator used by current ATMC genesis and transaction values. The native ATIX v4 tree comparator intentionally
+/// Comparator used by current ATMC genesis and transaction values. The native tree comparator intentionally
 /// differs: it places descending T/op before the stored representation tie.
 fn format_v3_datom_cmp(left: &Datom, right: &Datom, order: IndexOrder) -> std::cmp::Ordering {
     let ordering = match order {
@@ -1440,7 +1439,16 @@ fn decode_value(cursor: &mut Cursor<'_>, depth: usize) -> Result<Value, Semantic
             Ok(Value::Tuple(values))
         }
         13 => Ok(Value::Uuid(u128::from_be_bytes(cursor.array()?))),
-        14 => Ok(Value::Uri(cursor.string()?)),
+        14 => {
+            let uri = cursor.string()?;
+            if !crate::model::uri::validate(&uri) {
+                return Err(fault(
+                    "encoding/invalid-uri",
+                    "encoded URI has invalid syntax or escaping",
+                ));
+            }
+            Ok(Value::Uri(uri))
+        }
         15 => Ok(Value::Function(cursor.array()?)),
         tag => Err(invalid_tag("value", tag)),
     }
@@ -2160,6 +2168,38 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_uri_admission_and_decoding_reject_invalid_syntax_without_rewriting() {
+        let original = "HTTP://EXAMPLE.COM/a%2fb";
+        let bytes = encode_canonical_value(&Value::Uri(original.into())).unwrap();
+        let Value::Uri(decoded) = decode_canonical_value(&bytes).unwrap() else {
+            panic!("expected URI")
+        };
+        assert_eq!(decoded, original);
+        for invalid in ["http://a b", "http://a/%zz", "http://[wrong]/", "x:"] {
+            assert_eq!(
+                encode_canonical_value(&Value::Uri(invalid.into()))
+                    .unwrap_err()
+                    .code,
+                "value/invalid-uri"
+            );
+            assert!(
+                encode_canonical_value(&Value::Tuple(
+                    vec![Some(Value::Uri(invalid.into())), None,]
+                ))
+                .is_err()
+            );
+        }
+        // A valid length/tag envelope does not make malformed stored URI text
+        // admissible. Mutate the final ASCII character, leaving framing intact.
+        let mut invalid = bytes;
+        *invalid.last_mut().unwrap() = b' ';
+        assert_eq!(
+            decode_canonical_value(&invalid).unwrap_err().code,
+            "encoding/invalid-uri"
+        );
+    }
 
     #[test]
     fn canonical_observations_include_genesis_without_admitting_genesis_retractions() {

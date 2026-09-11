@@ -10,8 +10,8 @@
 use crate::SemanticError;
 use crate::datom::{Datom, IndexOrder};
 use crate::identity::{DB_PARTITION, eid_to_eidx, eid_to_part, t_to_tx};
+use crate::model::value::{Keyword, Value};
 use crate::schema::{Attribute, Cardinality, TupleSpec, Unique, ValueType};
-use crate::value::{Keyword, Value};
 
 pub const MAX_SCHEMA_ATTRIBUTE_ID: u32 = 1_048_576;
 

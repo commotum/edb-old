@@ -1,3 +1,8 @@
+;; ATOMIC-NOTE [scope] Stage 1 conditional-tail-publication pilot, not full log/tree coverage.
+;; ATOMIC-NOTE [scope] Stage 2 adds selected encoding, tail/checkpoint and root-read groups.
+;; This is not complete log coverage; the namespace doc's compatibility rationale
+;; for pods is documented, not a requirement to reproduce their layout in Rust.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns 'datomic.log)
   (.resetMeta
@@ -424,6 +429,10 @@
            (datomic.log.LogDir.
              (long (.readInt ^org.fressian.Reader rdr))
              (.readObject ^org.fressian.Reader rdr))))}))
+  ;; ATOMIC-NOTE [observed] Each encoded transaction resets its cache context, so
+  ;; create-leaves can concatenate buffers without decoding/re-encoding their data.
+  ;; Required :id/:t/:data preserves transaction identity, not evidence of Atomic's
+  ;; durable caller-key receipt with exact before/after values and tempid mapping.
   (defn fressianed-tx
     ([tx]
       (let [baos (org.fressian.impl.BytesOutputStream.)
@@ -544,6 +553,10 @@
       'pod-update-succeeded?
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] claim-log, Log.append and root adoption converge on
+  ;; cluster/update-pod with the proposed revision, prior etag, payload and root
+  ;; metadata. The dereferenced provider result must contain both revision and etag.
+  ;; [documented] ACID / How It Works requires conditional publication of durable refs.
   (defn write-tail-descriptor
     ([cs desc buf]
       (let [logger (org.slf4j.LoggerFactory/getLogger "datomic.log")]
@@ -574,6 +587,10 @@
       'write-tail-descriptor
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] Master.internal-start-database calls Log.claim before
+  ;; catchup. This increments the descriptor revision with no added transaction buf.
+  ;; The log namespace's original contract explains the fence: an earlier writer
+  ;; then conflicts on its next conditional write, independently of message delivery.
   (defn claim-log
     ([cs desc]
       (let [temp__5825__auto__ (write-tail-descriptor cs (inc-rev desc) nil)]
@@ -682,6 +699,9 @@
   (.setMeta (clojure.lang.RT/var "datomic.log" "empty-tail") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.log" "->Tail") {:declared true, :column (int 1)})
   (.setMeta (clojure.lang.RT/var "datomic.log" "map->Tail") {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE [observed] Tail retains decoded txes for time seeks and matching
+  ;; encoded bufs for append/segmentation. since slices both at the same boundary;
+  ;; inference: retaining bytes trades resident memory for avoiding re-encoding.
   (defrecord
     Tail
     [txes bufs]
@@ -1176,6 +1196,10 @@
     datomic.log.Log
     datomic.log.LogSeek
     datomic.log.TailTxes
+    ;; ATOMIC-NOTE [observed] update/writer-process :adopt-tree calls this on the
+    ;; writer's current LogImpl: since keeps transactions newer than the checkpoint.
+    ;; Resetting the pod installs the new tree plus that remainder together, so a
+    ;; background checkpoint cannot discard appends that arrived while it was built.
     (adopt-root
       [this cs new_root_id basis_t]
       (let [tail (since tail basis_t)
@@ -1185,6 +1209,10 @@
         (if temp__5823__auto__
           (let [new_desc temp__5823__auto__] (assoc this :desc new_desc :tail tail))
           (do (throw (java.lang.Error. "Conflict adopting log root.")) nil))))
+    ;; ATOMIC-NOTE [observed] update/writer supplies encoded transactions in order.
+    ;; extend-tail computes the candidate value; write-tail-descriptor conditionally
+    ;; publishes the bytes at the next revision, and conflict throws before success
+    ;; returns to the writer. The local candidate alone cannot release :logged.
     (append
       [this cs msgs]
       (let [bufs (map :fressianed-tx msgs)
@@ -2049,6 +2077,9 @@
       'last-tree-tx
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] Only pod metadata is needed for the tree pointer; this
+  ;; avoids get-pod's linked-tail reads and byte concatenation. The index root has
+  ;; its own ref (index/find-index-root-id), not this log-domain descriptor.
   (defn root-id ([cs] (:d/r (deref (cluster/get-pod-meta cs (tail-pod-key cs))))))
   (reset-meta!
     #'root-id
@@ -2118,6 +2149,10 @@
       'combine-last-if
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] Partitioning uses encoded bytes, then merges a short
+  ;; final group; target_size is a grouping target, not a hard segment-size bound.
+  ;; io/unchunk copies the grouped bytes. This defers tree writes and amortizes
+  ;; segment overhead, but does not make checkpoint work independent of tail size.
   (defn create-leaves*
     ([target_size ftxes]
       (let [weigh (comp io/remaining second)]
@@ -2260,6 +2295,11 @@
       'coalesce-dirs
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] Stage immutable leaves, a replacement tail directory
+  ;; and a replacement root, and await every create before returning the candidate.
+  ;; Root/directory encoding and optional coalescing also cost work; this is not an
+  ;; in-place tree edit or publication. update/extend-tree queues writer adoption;
+  ;; that later conditional pod reset preserves the writer's newer tail.
   (defn extend-tree
     ([cs olookup root_id target_dir_count leaf_segs]
       (let [leaf_ts (map first leaf_segs)

@@ -81,3 +81,7 @@ Automatic discovery of Memcached nodes requires Datomic 1.0.6316 or later.
 - The transactor benefits from both the object cache and Memcached in the course of ordinary transaction processing. For example, the transactor uses database indexes for both cardinality and uniqueness checks.
 - Because the object cache lives in your application's address space, it competes with your application for available memory. Take this into account when planning your object cache and VM RAM settings.
 - The independent configuration of the object cache and Memcached supports task-specific cache strategies. For example, a production system could have two groups of peers with different Memcached clusters, one for OLTP and one for OLAP loads. Meanwhile, a support engineer's machine could connect to the same system using its own local Memcached install.
+
+---
+
+> ATOMIC-NOTE — development trace: [Immutable cached data and mutable cache policy](01_memory_and_caching.atomic.md) links the ownership, sizing, memory-index and optional-integration passages above to recovered source and current Rust owners. It explains the selected recency adaptation and cache-owned byte versus process-memory limits. This added commentary is separate from the reference text and records no new test execution.

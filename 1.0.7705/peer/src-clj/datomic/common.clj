@@ -60,6 +60,14 @@
   (reset-meta!
     #'DEFAULT_SYSTEM_NAME
     (assoc {:const true, :column (int 1)} :name 'DEFAULT_SYSTEM_NAME :ns *ns*))
+  ;; ATOMIC-NOTE BEGIN foundation-order-counterpart
+  ;; The comparison section through cl is identical to the transactor copy at
+  ;; cd7192e63d883a4a34aa7de4d5bcd17e6edb692d (not the complete namespace).
+  ;; See transactor/src-clj/datomic/common.clj foundation-order/runtime-values/
+  ;; storage-equality notes: peer Datum/index consumers share these value rules,
+  ;; including signed bytes, URI component comparison and top-level decimal
+  ;; scale-sensitive redundancy. Artifact membership does not split ownership.
+  ;; ATOMIC-NOTE END foundation-order-counterpart
   (defn compare-byte-arrays
     (^long [a b]
       (let [a a b b len (alength ^bytes a) lencomp (- len (alength ^bytes b))]

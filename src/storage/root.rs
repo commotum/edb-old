@@ -8,7 +8,10 @@ use super::ObjectId;
 use crate::{SemanticError, sha256};
 
 const MAGIC: &[u8; 4] = b"ATOB";
-const VERSION: u16 = 1;
+// URI key semantics are component-based in this first-release engine. Reject
+// earlier database roots rather than mixing indexes/receipts assessed under
+// raw-string URI equality. The opaque PostgreSQL provider format is unchanged.
+const VERSION: u16 = 2;
 const HEADER_BYTES: usize = 20;
 const OBJECT_ID_BYTES: usize = 32;
 const ROOT_PAYLOAD_BYTES: usize = 33;
@@ -457,7 +460,7 @@ mod tests {
         let bytes = block.encode().unwrap();
         assert_eq!(block.id().unwrap(), sha256(&bytes));
         assert_eq!(Block::decode(&block.id().unwrap(), &bytes).unwrap(), block);
-        assert_eq!(&bytes[..8], b"ATOB\0\x01\0\x2a");
+        assert_eq!(&bytes[..8], b"ATOB\0\x02\0\x2a");
         assert_eq!(&bytes[8..12], &3u32.to_be_bytes());
         assert_eq!(&bytes[12..20], &3u64.to_be_bytes());
     }
@@ -541,7 +544,7 @@ mod tests {
         }
         .encode()
         .unwrap();
-        bytes[5] = 2;
+        bytes[4..6].copy_from_slice(&(VERSION + 1).to_be_bytes());
         assert_eq!(
             Block::decode(&sha256(&bytes), &bytes).unwrap_err().code,
             "storage/block-format"

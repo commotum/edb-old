@@ -95,6 +95,10 @@
       'rename-database
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: The Peer facade passes explicit source values to the
+  ;; local query engine. It does not fetch a newer connection db during evaluation.
+  ;; [documented] datomic_pro_docs/05_query_and_pull/01_executing_queries.md,
+  ;; "Querying a Database": capture a database value, then supply it to q.
   (defn q ([query & inputs] (datomic.query/q query inputs)))
   (reset-meta!
     #'q
@@ -149,6 +153,9 @@
     {:tag datomic.Database,
      :arglists (clojure.core/list [(.withMeta 'connection {:tag 'Connection})]),
      :column (int 1)})
+  ;; ATOMIC-NOTE [observed]: This captures Connection.db's current value; the live
+  ;; Connection implementation dereferences db_ref, while the returned Db retains
+  ;; its own basis and indexes. Reusing that value keeps related reads consistent.
   (.bindRoot
     (clojure.lang.RT/var "datomic.api" "db")
     (fn db ([connection] (.db ^datomic.Connection connection))))
@@ -230,6 +237,11 @@
       'gc-storage
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Entity maps remain transaction data at this boundary.
+  ;; Remote Connection.transact queues a request and awaits its result future;
+  ;; map expansion belongs to db/ProcessInpoint, not this application facade.
+  ;; [documented] datomic_pro_docs/04_transactions/03_processing_transactions.md,
+  ;; "Submitting Transactions", distinguishes Peer futures from the Client API.
   (defn transact
     ([connection tx-data & {:as options}]
       (.transact ^datomic.Connection connection ^java.util.List tx-data options)))
@@ -308,6 +320,10 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.api" "filter")
     (fn filter ([db pred] (.filter ^datomic.Database db pred))))
+  ;; ATOMIC-NOTE [documented]: datomic_pro_docs/04_transactions/01_transaction_model.md,
+  ;; "d/with and d/transact", separates computing a valid successor from durable
+  ;; publication. [observed] This path takes a Db, calls its shared transaction
+  ;; computation, and returns the report without submitting through a Connection.
   (defn with
     ([db tx-data & opts] (.with ^datomic.Database db ^java.util.List tx-data opts))
     ([db tx-data] (.with ^datomic.Database db ^java.util.List tx-data)))

@@ -232,6 +232,10 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.peer" "create-connection-state")
         (assoc protocol_signature__7468 :name protocol_method_name__7469 :ns *ns*))))
+  ;; ATOMIC-NOTE [observed]: transact waits on, then returns, the same future;
+  ;; expiry raises a timeout without cancelling the submitted request here.
+  ;; [documented] datomic_pro_docs/04_transactions/03_processing_transactions.md,
+  ;; "Transaction Timeouts": a timeout leaves success unknown to the peer.
   (defn await-tx-result
     ([prom]
       (let [result (try
@@ -427,6 +431,11 @@
       'create-t-watcher
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Notifications can overlap the captured database;
+  ;; discard the prefix older than nextT before deriving a successor Db. This
+  ;; consumes received datoms through acceptDataCheck, not transaction expansion.
+  ;; [unknown] Passing check=false here does not by itself establish how every
+  ;; possible gap is prevented; loading/reconnection and transport are separate.
   (defn accept-new-data
     ([db data]
       (let [nextT (.nextT ^datomic.Database db)
@@ -526,6 +535,10 @@
   (.setMeta
     (clojure.lang.RT/var "datomic.peer" "stop-connection")
     {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE [observed]: Mutable connection state owns the latest-db reference,
+  ;; outgoing work, futures and watchers. Db values have no pointer back to this
+  ;; reference. [inferred] This boundary lets publication advance independently
+  ;; of application reads already using a captured immutable value.
   (deftype
     Connection
     [db_id
@@ -630,6 +643,11 @@
           (deliver
             prom
             (if (instance? java.lang.Throwable o) o (error/deserialize-exception o))))))
+    ;; ATOMIC-NOTE [observed]: connector/notify dispatches transaction messages here.
+    ;; Integrate the datoms before delivering the submitting peer's future or an
+    ;; installed report queue; the report carries both captured database values.
+    ;; [unknown] This callback does not establish durability on its own: that
+    ;; guarantee must be traced through the transactor's publication path.
     (notify-data
       [this msg]
       (let [map__20419 msg
@@ -739,6 +757,10 @@
           (fn fn__20417
             ([p1__20370#]
               (if p1__20370# p1__20370# (java.util.concurrent.LinkedBlockingQueue.)))))))
+    ;; ATOMIC-NOTE [observed]: create-procargs preserves txdata under :data and
+    ;; assigns :id to correlate pending_txes with notify-data/notify-error. A full
+    ;; outgoing queue completes the future with an error; enqueueing is not a
+    ;; commit acknowledgement. create-connection bounds this queue at 128 items.
     (^datomic.ListenableFuture transactAsync
       [this ^java.util.List txdata options]
       (if (get-cstate state_ref nil)
@@ -790,6 +812,8 @@
           p)
         (do (throw (transactor-unavailable)) nil)))
     (^datomic.Log log [this] (log/create-log-val cluster olookup (deref db_ref)))
+    ;; ATOMIC-NOTE [observed]: Capturing a db checks connection release state and
+    ;; reads the atom once; it neither submits a sync nor mutates earlier Db values.
     (^datomic.Database db [this] (do (get-cstate state_ref nil) (deref db_ref)))
     (^boolean requestIndex
       [this]
@@ -1211,6 +1235,10 @@
       *ns*))
   ;; Builds a long-lived Peer connection, installs bounded work queues, and reconnects indefinitely
   ;; as the active transactor endpoint changes.
+  ;; ATOMIC-NOTE [observed]: A remote connection composes storage lookup with a
+  ;; db_ref atom, bounded work queues and basis/index watchers. Reconnection loads
+  ;; a database basis and restarts notification/submission machinery; queries use
+  ;; the captured Db rather than this mutable coordination state.
   (defn create-connection
     ([cluster-conf]
       (let [unsent_updates_queue (java.util.concurrent.ArrayBlockingQueue. (int 128))

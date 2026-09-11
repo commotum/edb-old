@@ -1,8 +1,9 @@
 //! Immutable byte-key search projection, derived from one captured
 //! canonical index descriptor. Its Merkle pages authenticate range boundaries/absence.
 //! It does not assign meaning to document/posting values or change datom roots.
+use crate::collections::LruMap;
 use crate::{Digest, ErrorCategory, OperationContext, SemanticError, sha256};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -196,6 +197,44 @@ mod tests {
         let cache = FulltextCache::new(10, page.retained_bytes());
         cache.insert([1; 32], hash, page, 1);
         assert!(cache.get([1; 32], hash).is_none());
+    }
+
+    #[test]
+    fn page_recency_and_replacement_preserve_header_fallback_policy() {
+        let page = Arc::new(Page::Leaf(vec![record(b"item")]));
+        let hash = sha256(&page.encode().unwrap());
+        let page_bytes = page.retained_bytes() + 192;
+        let cache = FulltextCache::new(3, usize::MAX);
+        cache.insert_header_at([9; 32], projection(hash, 1));
+        cache.insert([1; 32], hash, Arc::clone(&page), 1);
+        cache.insert([2; 32], hash, Arc::clone(&page), 1);
+        let held = cache.get([1; 32], hash).unwrap();
+        cache.insert([3; 32], hash, Arc::clone(&page), 1);
+        assert!(cache.get([2; 32], hash).is_none());
+        assert!(cache.header([9; 32]).is_some());
+        assert!(Arc::ptr_eq(&cache.get([1; 32], hash).unwrap(), &held));
+
+        cache.insert([1; 32], hash, Arc::clone(&page), 1);
+        assert_eq!(cache.stats().entries, 3);
+        assert_eq!(
+            cache.stats().retained_bytes,
+            page_bytes * 2 + Cache::HEADER_BYTES
+        );
+        cache.insert_header_at([8; 32], projection(hash, 1));
+        assert!(cache.get([3; 32], hash).is_none());
+        cache.insert_header_at([7; 32], projection(hash, 1));
+        assert!(cache.get([1; 32], hash).is_none());
+        assert!(Arc::ptr_eq(&held, &page));
+
+        // After pages are exhausted, headers retain their existing key-order
+        // eviction policy; they do not participate in page recency.
+        cache.insert_header_at([6; 32], projection(hash, 1));
+        assert!(cache.header([6; 32]).is_none());
+        for source in [[7; 32], [8; 32], [9; 32]] {
+            assert!(cache.header(source).is_some());
+        }
+        assert_eq!(cache.stats().entries, 3);
+        assert_eq!(cache.stats().retained_bytes, Cache::HEADER_BYTES * 3);
     }
 }
 
@@ -590,9 +629,8 @@ pub struct FulltextCacheStats {
 }
 #[derive(Debug)]
 struct Cache {
-    pages: BTreeMap<(Digest, Digest), (Arc<Page>, usize)>,
+    pages: LruMap<(Digest, Digest), (Arc<Page>, usize)>,
     headers: BTreeMap<Digest, FulltextProjection>,
-    recency: VecDeque<(Digest, Digest)>,
     bytes: usize,
     max_entries: usize,
     max_bytes: usize,
@@ -604,10 +642,8 @@ impl Cache {
         while self.pages.len() + self.headers.len() > self.max_entries
             || self.bytes > self.max_bytes
         {
-            if let Some(key) = self.recency.pop_front() {
-                if let Some((_, bytes)) = self.pages.remove(&key) {
-                    self.bytes -= bytes;
-                }
+            if let Some((_, (_, bytes))) = self.pages.pop_lru() {
+                self.bytes -= bytes;
             } else if let Some(key) = self.headers.keys().next().copied() {
                 self.headers.remove(&key);
                 self.bytes -= Self::HEADER_BYTES;
@@ -629,9 +665,8 @@ impl FulltextCache {
     }
     pub(crate) fn new(max_entries: usize, max_bytes: usize) -> Self {
         Self(Arc::new(Mutex::new(Cache {
-            pages: BTreeMap::new(),
+            pages: LruMap::default(),
             headers: BTreeMap::new(),
-            recency: VecDeque::new(),
             bytes: 0,
             max_entries,
             max_bytes,
@@ -653,12 +688,7 @@ impl FulltextCache {
     pub(crate) fn get(&self, source: Digest, hash: Digest) -> Option<Arc<Page>> {
         let mut c = self.0.lock().unwrap();
         let key = (source, hash);
-        let p = c.pages.get(&key).map(|(p, _)| Arc::clone(p));
-        if p.is_some() {
-            c.recency.retain(|k| *k != key);
-            c.recency.push_back(key);
-        }
-        p
+        c.pages.get(&key).map(|(p, _)| Arc::clone(p))
     }
     pub(crate) fn insert(
         &self,
@@ -676,13 +706,10 @@ impl FulltextCache {
             return;
         }
         let key = (source, hash);
-        if let Some((_, old)) = c.pages.remove(&key) {
+        if let Some((_, old)) = c.pages.insert(key, (page, bytes)) {
             c.bytes -= old;
         }
-        c.pages.insert(key, (page, bytes));
         c.bytes += bytes;
-        c.recency.retain(|k| *k != key);
-        c.recency.push_back(key);
         c.evict();
     }
 }

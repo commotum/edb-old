@@ -856,6 +856,10 @@ impl Schema {
         }
 
         match value {
+            Value::Uri(uri) if !crate::model::uri::validate(uri) => Err(SemanticError::incorrect(
+                "value/invalid-uri",
+                "URI value has invalid syntax or escaping",
+            )),
             Value::BigInt(value) if value.bits() > 8192 => Err(SemanticError::incorrect(
                 "transaction/bigint-too-large",
                 "BigInteger values are limited to 8192 bits",
@@ -1518,6 +1522,10 @@ fn validate_tuple_slot(value_type: ValueType, value: &Value) -> Result<(), Seman
         ));
     }
     match value {
+        Value::Uri(uri) if !crate::model::uri::validate(uri) => Err(SemanticError::incorrect(
+            "value/invalid-uri",
+            "URI value has invalid syntax or escaping",
+        )),
         Value::String(value) if value.chars().count() > 256 => Err(SemanticError::incorrect(
             "transaction/tuple-string-too-large",
             "tuple strings are limited to 256 characters",

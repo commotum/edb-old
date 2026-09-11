@@ -1,3 +1,5 @@
+;; ATOMIC-NOTE [scope] Stage 1 admission-to-durable-notification pilot, not full runtime coverage.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns 'datomic.update)
   (.resetMeta
@@ -556,6 +558,10 @@
       *ns*))
   ;; Receive transaction submissions from the database address and enqueue them
   ;; for serial processing. The bounded queue is the first transaction back-pressure point.
+  ;; ATOMIC-NOTE [observed] reader consumes tx/submit-address, decodes via
+  ;; tx/read-message and routes ordinary requests to unprocessed-updates-queue.
+  ;; Its broker acknowledgement follows enqueueing, not log/append; it is transport
+  ;; admission. The request's :tx-promise bounds prefetch, unlike the later :logged.
   (defn reader
     ([shutdown_hook & p__30837]
       (let [map__30838 p__30837
@@ -1099,6 +1105,11 @@
       *ns*))
   ;; Evaluate one transaction against the current database, atomically advance
   ;; :db-after, capture I/O statistics, and route the result toward logging and reply.
+  ;; ATOMIC-NOTE [observed] swap-xf! installs with-tx*'s :db-after into db-ref before
+  ;; encoding or log I/O. Success queues one result to both encoders with a shared
+  ;; :logged promise; failure leaves db-ref unchanged and queues only an error reply.
+  ;; [inferred] This separates serialized assessment from publication latency;
+  ;; the internal db-ref advance alone must not be treated as durable completion.
   (defn process-transaction
     ([procargs p__30900]
       (let [map__30901 p__30900
@@ -1213,6 +1224,10 @@
       *ns*))
   ;; Serialize database state transitions, giving maintenance messages priority
   ;; over ordinary submissions and keeping result publication off this worker.
+  ;; ATOMIC-NOTE [observed] Each database's processor is the common consumer for
+  ;; transaction, request-index and completed-index messages. At the process-wide
+  ;; memory limit it services only the priority queue, allowing index adoption to
+  ;; release memory. [unknown] This ordering alone does not establish fairness.
   (defn processor
     ([shutdown_hook & p__30912]
       (let [map__30913 p__30912
@@ -1355,6 +1370,10 @@
       *ns*))
   ;; Encode successful transaction results for the durable log and pass encoded
   ;; work to the writer without making the processor perform serialization.
+  ;; ATOMIC-NOTE [observed] log/fressianed-tx produces the stored form and the writer
+  ;; receives the original :logged promise; maintenance messages pass through this
+  ;; same queue. [inferred] A separate encoder can overlap computation and I/O;
+  ;; the worker split is evidence of that opportunity, not a throughput measurement.
   (defn fressianer
     ([shutdown_hook & p__30933]
       (let [map__30934 p__30933
@@ -1482,6 +1501,9 @@
       *ns*))
   ;; Encode the peer notification form and enqueue it for publication after the
   ;; writer has established the transaction's durable block boundary.
+  ;; ATOMIC-NOTE [observed] This encoder can run before commit and carries :logged
+  ;; alongside the response bytes. block-notifier performs the wait; serializing a
+  ;; response here therefore neither commits the transaction nor makes it visible.
   (defn notify-fressianer
     ([shutdown_hook & p__30951]
       (let [map__30952 p__30951
@@ -1655,6 +1677,10 @@
         (some-> completed (deliver true)))))
   ;; Batch encoded transactions into log appends. Each transaction's :logged
   ;; promise is delivered only after the batch append succeeds.
+  ;; ATOMIC-NOTE [documented] ACID / Durability requires storage acknowledgement
+  ;; before completion; How It Works permits batching. [observed] log_block calls
+  ;; log/append before delivering any :logged promise, and fails the process on an
+  ;; append error. The batch shares a storage write, retaining each transaction's t.
   (defn writer
     ([& p__30988]
       (let [map__30989 p__30988
@@ -1782,6 +1808,10 @@
       :ns
       *ns*))
   ;; Broadcast committed transaction blocks to connected peers in log order.
+  ;; ATOMIC-NOTE [observed] The FIFO notification path waits up to 60 seconds on
+  ;; :logged before sending to tx/push-address, invoking process/fail on timeout.
+  ;; [documented] ACID / Durability explains this boundary: a computed or encoded
+  ;; result cannot be reported as complete merely because it entered the pipeline.
   (defn block-notifier
     ([shutdown_hook & p__31009]
       (let [map__31010 p__31009

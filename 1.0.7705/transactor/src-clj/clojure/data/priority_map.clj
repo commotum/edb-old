@@ -7,6 +7,9 @@
 ;; by Mark Engelberg (mark.engelberg@gmail.com)
 ;; Last update - September 19, 2021
 
+;; ATOMIC-NOTE [scope] Selected dependency mechanics below, not a Datomic feature mandate.
+;; This annotated derivative retains the archive text at baseline
+;; cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; it is no longer a verbatim archive extract.
 (ns 
     ^{:author "Mark Engelberg",
       :doc "A priority map is very similar to a sorted map, but whereas a sorted map produces a
@@ -257,6 +260,11 @@ to Clojure's assortment of built-in maps (hash-map and sorted-map).
 ;; Priority maps can also have a keyfn which is applied to the "priorities" found as values in 
 ;; the item->priority map to get the actual sortable priority keys used in priority->set-of-items.
 
+;; ATOMIC-NOTE [observed] Two persistent indexes support different questions:
+;; item->priority answers membership/lookup, priority->set-of-items supplies ordered
+;; traversal and extrema, grouping ties in hash sets. [documented: library doc above]
+;; Persistence and reprioritization justify this composition at the cost of extra
+;; index maintenance and logarithmic, rather than heap-style constant-time, peek.
 (deftype PersistentPriorityMap [priority->set-of-items item->priority _meta keyfn]
   Object
   (toString [this] (str (.seq this)))
@@ -269,6 +277,10 @@ to Clojure's assortment of built-in maps (hash-map and sorted-map).
   clojure.lang.IPersistentMap
   (count [this] (count item->priority))
 
+  ;; ATOMIC-NOTE [observed] Reassignment removes old priority membership and adds
+  ;; new membership together with the item lookup, returning a new wrapper over
+  ;; persistent maps/sets. [inferred] Untouched structure can remain shared; keeping
+  ;; the two views consistent is part of the collection, not each caller's policy.
   (assoc [this item priority]
     (let [current-priority (get item->priority item nil)]
       (if current-priority
@@ -396,6 +408,9 @@ to Clojure's assortment of built-in maps (hash-map and sorted-map).
                  init priority->set-of-items)))
 
   clojure.lang.IPersistentStack
+  ;; ATOMIC-NOTE [observed] peek chooses the first sorted priority and then one
+  ;; member of its hash set; pop removes that item from both indexes. Equal-priority
+  ;; order is not a FIFO guarantee. core.cache/LRUCache uses these extrema for eviction.
   (peek [this]
     (when-not (.isEmpty this)
       (let [f (first priority->set-of-items)

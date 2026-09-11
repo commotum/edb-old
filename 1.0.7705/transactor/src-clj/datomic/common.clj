@@ -60,6 +60,15 @@
   (reset-meta!
     #'DEFAULT_SYSTEM_NAME
     (assoc {:const true, :column (int 1)} :name 'DEFAULT_SYSTEM_NAME :ns *ns*))
+  ;; ATOMIC-NOTE BEGIN foundation-order (baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d)
+  ;; Observed: db/Datum.equals and the eavt-cmp/avet-cmp consumers use this
+  ;; namespace's value comparison. Byte arrays need content comparison because
+  ;; JVM array equals is identity-based; the actual order is length first, then
+  ;; signed bytes, not unsigned Rust slice order. Rust model/value::index_cmp
+  ;; preserves that rule. These are shared value semantics, not cache policy.
+  ;; The peer copy's comparison section through cl is identical at the baseline;
+  ;; the complete files differ, so this note does not claim whole-file identity.
+  ;; ATOMIC-NOTE END foundation-order
   (defn compare-byte-arrays
     (^long [a b]
       (let [a a b b len (alength ^bytes a) lencomp (- len (alength ^bytes b))]
@@ -89,6 +98,19 @@
   (.setMeta
     (clojure.lang.RT/var "datomic.common" "coll-compare")
     {:private true, :declared true, :column (int 1)})
+  ;; ATOMIC-NOTE BEGIN foundation-runtime-values
+  ;; Observed: same-class values use equals/Comparable, while unrelated classes
+  ;; fall back to class-name order. In particular java.net.URI is not compared as
+  ;; its printed string: its component equality ignores scheme/host case and
+  ;; escaped-hex case. Atomic's original Value::Uri raw-string comparison/hash
+  ;; differed for unique keys; Stage 2 model/uri now separates component meaning
+  ;; from exact retained spelling. Native authority-kind ranking additionally
+  ;; preserves transitive ordering (the Java mixed raw fallback does not). See
+  ;; the chapter-local
+  ;; datomic_pro_docs/03_schema/03_identity_and_uniqueness.atomic.md trace.
+  ;; Inference: a native explicit cross-type rank can replace class packaging,
+  ;; but comparisons within a supported type still require a contract decision.
+  ;; ATOMIC-NOTE END foundation-runtime-values
   (defn compare-ex
     (^long [a b]
       (.longValue
@@ -154,6 +176,14 @@
       'compare
       :ns
       *ns*))
+  ;; ATOMIC-NOTE BEGIN foundation-storage-equality
+  ;; Observed: db/Accrual plus prefetch redundancy checks call this predicate,
+  ;; whereas Datum/index comparison above uses compare. Only two top-level
+  ;; BigDecimals add the scale check; lists recurse through logical comparison.
+  ;; Rust Value::stored_eq versus index_cmp preserves this separation. Do not
+  ;; collapse the predicates merely because both look like equality: doing so
+  ;; would erase an explicitly asserted decimal representation or change keys.
+  ;; ATOMIC-NOTE END foundation-storage-equality
   (defn equals-with-strict-scale
     ([a b]
       (and

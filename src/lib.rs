@@ -15,6 +15,7 @@ mod backup_snapshot;
 mod block_codec;
 mod change_consumer;
 pub(crate) mod change_notices;
+mod collections;
 mod connection;
 mod database;
 pub(crate) mod database_catalog;
@@ -72,9 +73,9 @@ mod runtime_config;
 pub use remote_config::{remote_client_config_from_env, remote_server_credentials_from_env};
 mod io_diagnostics;
 mod maintenance_control;
+mod model;
 mod schema;
 mod service;
-mod shared_map;
 pub mod sql_io;
 mod ssd_cache;
 mod state_commitment;
@@ -88,7 +89,6 @@ mod transaction_stats;
 mod tree_cursor;
 mod tree_read;
 mod uuid;
-mod value;
 mod vocabulary;
 
 pub use backup::{
@@ -138,6 +138,7 @@ pub use local_transport::{
     CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
 };
 pub use maintenance_control::{MaintenanceControl, MaintenanceStats};
+pub use model::value::{Keyword, Symbol, Value};
 pub use native_registry::{
     NativeCallContext, NativeRegistry, NativeRegistryBuilder, TransactionExecutionOptions,
     native_deployment_attribute, native_deployment_ident,
@@ -211,7 +212,6 @@ pub use transaction_hints::{
 pub use transaction_stats::{TransactionDiagnostics, TransactionWorkStats};
 pub use tree_read::NodeBlockReadStats;
 pub use uuid::{squuid, squuid_at, squuid_time_millis, uuid_v7, uuid_v7_at, uuid_v7_time_millis};
-pub use value::{Keyword, Symbol, Value};
 pub use vocabulary::{
     DB_ADD, DB_ALTER_ATTRIBUTE, DB_ATTR_PREDS, DB_CARDINALITY, DB_CARDINALITY_MANY,
     DB_CARDINALITY_ONE, DB_DOC, DB_ENSURE, DB_ENTITY_ATTRS, DB_ENTITY_PREDS, DB_EXCISE,

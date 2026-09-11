@@ -80,3 +80,8 @@ A few writes require the stronger semantics of conditional put:
 - Conditional put of the index root pointer guarantees atomic adoption of a new index.
 
 Another way to understand this is to consider the failure mode introduced by an eventually consistent *storage* node that is not up-to-date yet. Datomic will always see a correct log pointer, which was placed via conditional put. If some of the tree nodes are not yet visible underneath that pointer, Datomic is *consistent* but partially *unavailable*, and will become fully *available* when *eventually* happens.
+
+## Atomic implementation notes
+
+[Selected log, root-publication and exact-outcome trace](05_acid.atomic.md)
+is development commentary, separate from the recovered documentation above.

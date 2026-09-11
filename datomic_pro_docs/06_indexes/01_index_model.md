@@ -116,3 +116,7 @@ The diagram below shows a cloud-based Datomic instance using DynamoDB for its st
 - The overhead of a peer cache miss is 1-2 segment fetches. From memcached, such fetches are on the order of 1 millisecond. Storages vary from 1 up to 10 or more milliseconds.
 - The peer cache insulates Datomic from the performance of the underlying storage system. As a result, it is necessary to weigh storage performance somewhat less heavily than other systems.
 - Background indexing needs to be fast enough to keep up with transaction load. To see more about capacity, check the [Capacity](https://docs.datomic.com/operation/capacity.html) documentation.
+
+---
+
+> ATOMIC-NOTE — development trace: [Index structures, shared values and cache ownership](01_index_model.atomic.md) maps the order/membership, immutable-segment, tier-merging and caching passages above to recovered source symbols and current Rust owners. This added commentary is separate from the reference text; implementation and performance coverage are explicitly bounded in the companion.

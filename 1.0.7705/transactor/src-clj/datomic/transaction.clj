@@ -1,3 +1,5 @@
+;; ATOMIC-NOTE [scope] Stage 1 submission-envelope pilot only; not full codec coverage.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns 'datomic.transaction)
   (.resetMeta
@@ -331,6 +333,9 @@
       'add-to-log-event!
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] update/reader calls this before queueing assessment.
+  ;; Fressian decoding and log-event-map timing correlate a request; neither assigns
+  ;; transaction time nor acknowledges durable storage. Database semantics run later.
   (defn read-message
     "Reads one Fressian transaction message and records when processing of its request began."
     ([is]
@@ -350,6 +355,10 @@
       'read-message
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] The envelope preserves submitted forms/options and adds
+  ;; a random request ID used by replies and diagnostics. [unknown] This constructor
+  ;; establishes no durable deduplication contract; Atomic's exact retry receipts
+  ;; require their own retained contract rather than an inferred equivalence to :id.
   (defn create-procargs
     "Builds a transaction request with a unique request id, transaction data, and optional processing options."
     ([tx options] (cond-> {:id (common/rand-uuid), :data tx} options (assoc :options options))))

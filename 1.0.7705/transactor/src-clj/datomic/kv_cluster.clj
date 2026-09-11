@@ -247,6 +247,13 @@
     datomic.cluster.RefClusterStore
     (get-val2 [this val_key _] (cluster/get-val this val_key))
     (-get-ref-store [this] kvs)
+    ;; ATOMIC-NOTE [observed; selected pod path] A nonnil buf writes one immutable
+    ;; :prev-linked tail chunk before the conditional pod-row put. The latter
+    ;; checks predecessor rev and (for append/touch) etag: payload staging alone
+    ;; cannot advance the published tail. A batch can contain multiple transactions.
+    ;; A failed put is reread for this attempt's same rev/tailid to recognize a
+    ;; completed retry; this is not a durable arbitrary caller-key receipt lookup.
+    ;; Reset success schedules old-chain garbage handling, not immediate deletion.
     (update-pod*
       [this pod_key rev etag buf metamap]
       (let [tailid (if buf (str (common/rand-uuid)) etag)]
@@ -429,6 +436,10 @@
                 (if (contains? result__8600__auto__ :returned)
                   (:returned result__8600__auto__)
                   (do (throw (:threw result__8600__auto__)) nil))))))))
+    ;; ATOMIC-NOTE [observed] Capture one consistent pod row, follow its immutable
+    ;; :prev chain, then copy all buffers into one array. Cost is one read per tail
+    ;; chunk plus O(tail bytes) copying/residency; a later head update cannot alter
+    ;; the captured chain. Missing linked bytes fail the read rather than skip data.
     (get-pod
       [this pod_key]
       (df/-future-with-channel-impl
@@ -566,6 +577,8 @@
               (if (contains? result__8600__auto__ :returned)
                 (:returned result__8600__auto__)
                 (do (throw (:threw result__8600__auto__)) nil)))))))
+    ;; ATOMIC-NOTE [observed] One consistent pod-row lookup (apart from retries),
+    ;; with no tail walk/copy; log/root-id uses this when it needs only :d/r.
     (get-pod-meta
       [this pod_key]
       (df/-future-with-channel-impl
@@ -602,6 +615,11 @@
               (if (contains? result__8600__auto__ :returned)
                 (:returned result__8600__auto__)
                 (do (throw (:threw result__8600__auto__)) nil)))))))
+    ;; ATOMIC-NOTE [observed; selected method only] The caller supplies a successor
+    ;; revision; put checks predecessor rev (or initial absence). On failure,
+    ;; same-ref? distinguishes an already-installed desired value from conflict.
+    ;; [inferred] Lost acknowledgements need not create another transition. This
+    ;; is storage-idempotency evidence, not Atomic's durable request-receipt API.
     (set-ref
       [this ref_key rev vkey]
       (df/-future-with-channel-impl
@@ -852,6 +870,10 @@
                 (if (contains? result__8600__auto__ :returned)
                   (:returned result__8600__auto__)
                   (do (throw (:threw result__8600__auto__)) nil))))))))
+    ;; ATOMIC-NOTE [observed; selected method only] Creation delegates opaque
+    ;; bytes to KVStore with bounded retry and priority-dependent execution.
+    ;; The supplied value ID is not an entity ID. Log/index builders above this
+    ;; layer determine how those bytes become a reachable database structure.
     (create-val [this val_key buf] (cluster/create-val this 3 val_key buf))
     (create-val
       [this priority val_key buf]

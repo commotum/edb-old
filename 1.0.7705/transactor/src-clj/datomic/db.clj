@@ -1,3 +1,5 @@
+;; ATOMIC-NOTE [scope] Stage 1 transaction-map pilot only; other mechanisms remain unreviewed.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns (.withMeta 'datomic.db {:author "Rich Hickey"}))
   (.resetMeta
@@ -6156,6 +6158,10 @@
       'process-match-partition
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [documented] Transaction Data / Map Forms defines maps as shorthand
+  ;; for additions. [observed] ProcessInpoint calls this with db-before; schema
+  ;; controls many-value and nested-map expansion. This emits forms, not db changes.
+  ;; [inferred] Converging on primitive forms avoids a separate map-write evaluator.
   (defn expand-map
     "Expands a transaction map into primitive :db/add forms. Assigns an anonymous tempid when :db/id is absent, expands cardinality-many values, supports reverse attributes and nested reference maps, and records partition directives."
     ([db m part_reqs local_tempids]
@@ -6526,6 +6532,10 @@
   ;; for expansion; the resulting datoms are assessed together as one information set.
   ;; Lookup refs resolve against db-before. Anonymous nested entities require either a
   ;; component relationship to their parent or a unique identity of their own.
+  ;; ATOMIC-NOTE [observed] with-tx feeds this inpoint maps and lists; maps recurse
+  ;; through expand-map, while primitive forms resolve attributes and validate values
+  ;; before forwarding to ProcessExpander. Both retain the same db-before and shared
+  ;; local-tempid map; normalization is not a sequence of visible database mutations.
   (deftype
     ProcessInpoint
     [db part_reqs nextp]
@@ -7357,6 +7367,11 @@
   ;; Transaction functions receive the immutable db-before and only their explicit
   ;; arguments. Their returned transaction data is expanded into the same transaction;
   ;; no function observes the return value of another function in that transaction.
+  ;; ATOMIC-NOTE [documented] Transaction Model / Application Correctness requires
+  ;; transaction functions to generate data from db-before. [observed] inject calls
+  ;; (apply pfn db ...), then re-enters ProcessInpoint; getData later resolves IDs,
+  ;; derives composites and assesses the combined datoms. Its ArrayList and ID maps
+  ;; are mutable work buffers, not intermediate database values exposed to functions.
   (deftype
     ProcessExpander
     [db part_reqs arraylist attr_hook_attrs prefetch_dispatcher tx_stat_registers]
@@ -7889,6 +7904,11 @@
       'add-ensured-data
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [documented] Transaction Model / d/with and d/transact separates
+  ;; value computation from durable publication. [observed] this builds the inpoint/
+  ;; expander, applies add-ensured-data and returns before/after values plus a report;
+  ;; update/process-transaction owns the current-db atom and later log publication.
+  ;; Local accumulators, prefetch and fulltext support do not themselves commit a tx.
   (defn with-tx
     "Applies transaction data as a pure computation over db. Expands maps and transaction functions against db-before, resolves tempids and unique identities, derives composites, enforces schema and entity predicates, and returns :db-before, :db-after, :tx-data, :tempids, and transaction statistics."
     ([db dispatcher txdata]

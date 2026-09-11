@@ -23,7 +23,9 @@ const TREE_MAGIC: &[u8; 4] = b"ATIX";
 /// logical V, descending T, and operation ordering. Version 3 roots are
 /// intentionally rejected: this project does not promise compatibility with
 /// databases produced by its unreleased reconstruction stages.
-pub const TREE_FORMAT_VERSION: u16 = 4;
+// Ordered URI keys use component semantics, not raw spelling. Old trees must
+// not be traversed under a different comparator; this cutover uses fresh data.
+pub const TREE_FORMAT_VERSION: u16 = 5;
 const HEADER_LEN: usize = 16;
 const CHECKSUM_LEN: usize = 32;
 const EMPTY_NODE_LEN: usize = HEADER_LEN + CHECKSUM_LEN;
@@ -4183,7 +4185,7 @@ fn encode_tree_node(node: &TreeNode) -> Result<Vec<u8>, SemanticError> {
     if body.len() > u32::MAX as usize {
         return Err(fault(
             "tree/node-size",
-            "tree node body cannot be represented by the version-1 header",
+            "tree node body cannot be represented by the current header",
         ));
     }
     let total = HEADER_LEN
@@ -5550,11 +5552,11 @@ mod tests {
         let error = decode_tree_node(&build.descriptor.root_hash, &corrupt).unwrap_err();
         assert_eq!(error.code, "tree/content-hash-mismatch");
 
-        // A fully self-consistent predecessor-format value is still not
-        // adoptable: comparator semantics changed, so v3 bytes require an
-        // explicit rebuild from the authoritative log.
+        // Self-consistent bytes with an unsupported comparator/format version
+        // are not adoptable. This first-release product requires fresh data,
+        // not a historical-format reader or rebuild converter.
         let mut unsupported = root_bytes.to_vec();
-        unsupported[4..6].copy_from_slice(&3_u16.to_be_bytes());
+        unsupported[4..6].copy_from_slice(&(TREE_FORMAT_VERSION + 1).to_be_bytes());
         let checksum_at = unsupported.len() - CHECKSUM_LEN;
         let checksum = sha256(&unsupported[..checksum_at]);
         unsupported[checksum_at..].copy_from_slice(&checksum);

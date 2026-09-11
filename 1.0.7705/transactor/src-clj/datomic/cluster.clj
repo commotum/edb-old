@@ -1,3 +1,5 @@
+;; ATOMIC-NOTE [scope] Selected Stage 2 value/ref/pod protocol and update boundary.
+;; Unannotated baseline: cd7192e63d883a4a34aa7de4d5bcd17e6edb692d. Original forms are retained.
 (do
   (clojure.core/in-ns 'datomic.cluster)
   (.resetMeta
@@ -140,6 +142,10 @@
         (assoc protocol_signature__7464 :name protocol_method_name__7465 :ns *ns*))))
   (let [protocol_metadata__7466 {:column (int 1)}]
     (defprotocol
+      ;; ATOMIC-NOTE [documented] Values, revisioned refs and append/reset pods are
+      ;; distinct contracts. Pods combine tail bytes and metadata under rev/etag;
+      ;; get-pod-meta deliberately avoids loading their linked value. This abstract
+      ;; boundary does not require callers to know SQL or provider row layout.
       ClusteredStore
       "An interface to a clustered store. All fns might throw an exception on deref if no quorum is available."
       (get-pod-meta
@@ -434,6 +440,9 @@
         (assoc protocol_signature__7486 :name protocol_method_name__7487 :ns *ns*))))
   ;; Appends or touches a pod only at the next revision. Metadata keys must be namespaced and a
   ;; stale etag is reported as {:failed :conflict} by the storage implementation.
+  ;; ATOMIC-NOTE [observed] This wrapper validates metadata names, then delegates;
+  ;; atomic rev/etag enforcement and acknowledgment belong to update-pod*, not to
+  ;; this local assertion. A proposed descriptor is not yet a published log state.
   (defn update-pod
     ([cs pod_key rev etag buf metamap]
       (do

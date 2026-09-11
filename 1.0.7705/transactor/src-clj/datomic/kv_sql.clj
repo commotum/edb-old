@@ -1,3 +1,9 @@
+;; ATOMIC-NOTE [observed] This is an opaque KV adapter, not SQL-backed Datalog.
+;; KVCluster supplies IDs/revisions and interprets references; SQL supplies row
+;; storage and conditional update. Both immutable values and refs share a table,
+;; but use different signatures. Atomic's two tables encode the distinction in
+;; types/schema; table count alone neither establishes nor violates this boundary.
+;; Baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; original forms retained.
 (do
   (clojure.core/in-ns 'datomic.kv-sql)
   (.resetMeta
@@ -49,6 +55,9 @@
     datomic.kv_store.KVStore
     (close [this] nil)
     (delete [this key consistent?] (do (sql/delete spec key) :ok))
+    ;; ATOMIC-NOTE [observed] Metadata is read back as a data map; :val becomes a
+    ;; ByteBuffer. No datom/log/index parser is called here. consistent? needs no
+    ;; separate branch for this SQL provider's point read.
     (get
       [this key consistent?]
       (let [temp__5825__auto__ (sql/select spec key)]
@@ -61,6 +70,10 @@
                 m (and (:map ret) (read-string (:map ret)))
                 ret (merge (dissoc ret :map :val) m)]
             ret))))
+    ;; ATOMIC-NOTE [observed] :ensure/:rev becomes SQL's revision predicate; new
+    ;; rows use a unique-key insert. Constraint violations return a conditional
+    ;; miss, other SQL exceptions propagate. kv-cluster/set-ref subsequently
+    ;; checks whether a failed put already installed the intended ref (retry).
     (put
       [this v_map]
       (when (let [map__10808 v_map

@@ -1,3 +1,10 @@
+;; ATOMIC-NOTE [observed] This provider protocol is below KVCluster's object/ref
+;; semantics. put/get/delete know keys, byte buffers and revision preconditions,
+;; not datoms, tree roots or transaction receipts. [documented] Storage Services
+;; describes SQL as a provisioned KV table, not a server-side transaction engine.
+;; [inferred] Keeping policy above this seam permits reuse across storage services;
+;; Atomic keeps that seam without making other providers a product objective.
+;; Baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; original forms retained.
 (do
   (clojure.core/in-ns 'datomic.kv-store)
   (.resetMeta
@@ -93,6 +100,10 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.kv-store" "close")
         (assoc protocol_signature__7470 :name protocol_method_name__7471 :ns *ns*))))
+  ;; ATOMIC-NOTE [observed] Retryable classifies failures; kv-cluster/retry-fn owns
+  ;; bounded retry/backoff. Interruption is not retried. Conditional put's nil
+  ;; result is not an exception: higher layers resolve revision conflict or a
+  ;; previously successful write, rather than blindly repeating domain work.
   (let [protocol_metadata__7472 {:column (int 1)}]
     (defprotocol
       Retryable

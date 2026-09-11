@@ -100,7 +100,7 @@ execution checkout; this is a bounded assessment, not a whole-product verdict.
 
 The product has substantial implementation substance but uneven architectural
 coherence. Neither “all missing features are resolved” nor “best-in-class
-replication” has been established. The stages below have not been executed.
+replication” has been established. Current execution status is recorded below.
 
 ## Source learning and traceability
 
@@ -147,7 +147,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
 
 ## Ordered stages
 
-### 1. Calibrate one end-to-end slice and component map — pending
+### 1. Calibrate one end-to-end slice and component map — complete
 
 - **Outcome:** A source-backed route through the working product and a practical
   target ownership map, without a whole-corpus annotation gate.
@@ -161,7 +161,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   and the next component change are justified by callers and contracts. Corpus
   inventory exists; unrelated detailed annotation is not a prerequisite.
 
-### 2. Reconcile shared values, structures and storage — pending
+### 2. Reconcile shared values, structures and storage — active
 
 - **Outcome:** Coherent shared foundations with small opaque-storage boundaries,
   preserving useful existing mechanisms instead of recreating them by default.
@@ -254,16 +254,90 @@ Keep decisions in this plan and existing trace records, not competing reports.
 
 ## Status and continuation
 
-All stages are pending. This rewrite changes the strategy, not implementation
-status. Existing product strengths and prior results remain evidence to reuse
-after checking applicability; the product is not starting from zero.
+Stage 1 completed on the execution baseline cd7192e63d883a4a34aa7de4d5bcd17e6edb692d.
+The development/source atlas inventories 493 source files with origin, baseline
+hash and counterpart comparisons. Eight pilot source files now have inline WHY
+notes; the preservation check confirms comment-only changes. This is not full
+symbol coverage. The chapter-local 02_transaction_data.atomic.md trace connects
+map-form passages to source functions, current Rust owners and expected results.
+The atlas records module-first ownership, retain decisions and two next issues:
+nested-map identity guards (Stage 3), and synchronous versus pipelined write
+processing (Stage 3). These are not silently treated as equivalent.
 
-Next: execute Stage 1's entity-map/write/read pilot, using the existing manifests
-and known source paths. Settle component owners and the first concrete change;
-do not start another exhaustive repository-wide audit before doing that work.
-Keep one active stage/component and one integration owner. Replace this note at
-session boundaries with material decisions, checks actually run, remaining
-uncertainty and the next action. Archived goals are evidence only.
+Fresh Stage 1 checks: built atomic/native_workflow and EDN test executables.
+On isolated PostgreSQL 16.15, the actual_edn_commands_install_transact_preview_query_pull_history_and_retry
+CLI workflow passed, followed by all 9 edn_transactions cases with PostgreSQL
+configured. The CLI confirms real maps/nesting, omitted-attribute preservation,
+preview isolation, history/source joins, restricted roles, writer-independent
+reads and exact retry after writer restart. Debug complete transaction processes
+for 32/128/512 added entities took 208490/312017/693514 microseconds in this run;
+query processes took 63391/93569/163964 and Pull 58907/65404/108007 microseconds.
+These are local samples, not throughput or performance-parity claims.
+
+Stage 2 is active. Shared collection repair is integrated: the private
+collections::LruMap uses HashMap lookup plus reusable doubly-linked slots. Tree,
+program and fulltext consumers keep their policy/counters and Arc ownership;
+no persistent priority-map or Caffeine-policy port is claimed. SharedMap's real
+path-copying AVL implementation moved to collections/persistent_map.rs, with
+current callers changed and no forwarding alias at the deleted old path.
+
+Fresh checks: all 4 collection tests pass (including independent randomized
+ordering/slot-reuse oracle and retained AVL snapshots). The host-permitted
+20-test cache filter passes with PostgreSQL configured. Its first sandbox run
+had 8 SSD directory-ownership failures and 2 PostgreSQL skips; these are not
+accepted as product results. On the actual server, all 12 block_storage tests,
+3 block_fulltext tests, the block_program_cache test and the EDN CLI workflow
+pass. The fulltext policy regression is separate from that name filter and
+must be included in the next focused/full library check.
+
+Measured debug cache lock/get/Arc/drop hot-hit means at 32/128/512/2048/4096
+residents were 1625/5671/9200/35801/70450 ns before the repair, versus
+1086/1083/1062/1049/575 ns after. These noisy local samples support removal of
+the recency scan, not a whole-query speedup claim. New non-MRU contention cases
+at 4096 residents measured 4083 us for 2048 hits/one worker and 24840 us for
+8192 hits/four workers, including thread start/join. Both preserved accounting
+and values. Slots are reused but buffer capacity follows peak occupancy;
+cache-owned decoded-byte counters are not process RSS limits.
+
+The 512-record read_load application campaign completed with zero reported
+errors and cleaned up its schemas/roles. Warm one-peer reads used no foreground
+SQL (3165 operations/500 ms, p50 155 us, about 23 MB peer RSS in debug). It ran
+alongside focused checks, with uncontrolled warm PostgreSQL/OS caches: not a
+controlled before/after comparison. The post-repair EDN 32/128/512-entity full
+transaction processes took 228138/284975/710177 us, query 54482/73165/167103 us,
+and Pull 58826/64593/112081 us. These show the application paths still work,
+not that the bookkeeping change accelerates all queries.
+
+The separate 2048-record read_load run (512-byte payload, 500-ms phases, debug,
+uncontrolled warm PostgreSQL/OS cache) also completed and removed its isolated
+schemas/roles. Warm 1/2/4-peer phases performed 3190/5940/10890 operations with
+p50 153/167/176 us and no foreground query SQL. Approximate aggregate peer RSS
+was 23/46/92 MB; full scans exceeded the 1 MiB local cache and did storage reads.
+This demonstrates working peer-local reuse and limited local read scaling, not
+production throughput. Complete seed took 13.175 s/4648 driver SQL calls; mixed
+writer phases took about 100 ms median with 710 calls/3 writes and 1195/5 writes,
+including maintenance. Publication/encoding amplification remains a real Stage 3
+cost issue to explain and address, not something the cache improvement closes.
+
+Next active component: shared model URI equality/order/hash. Source comparison
+found raw-string URI equality differs from source component semantics, affecting
+identity/lookup; preserve original encoded spelling while fixing logical value
+behavior. Opaque SQL/provider study is in its chapter-local trace; guarded
+publication/collector design and remaining foundation ownership still need
+comparison. Stages 3–7 and complete source/doc coverage remain unfinished.
+
+Disposable live fixture (leave unrelated databases alone):
+host=/tmp/atomic-cutover-pg.GbbJ4R/socket port=56147 dbname=atomic_cutover user=jake.
+It has fsync, synchronous_commit, full_page_writes and data checksums on; TCP is
+disabled. Binaries are under prefix/usr/lib/postgresql/16/bin inside that task
+directory; LD_LIBRARY_PATH points to prefix/usr/lib/x86_64-linux-gnu there.
+This fixture was provisioned from Ubuntu packages without system installation.
+Host-permitted test execution is required for local sockets. Stop this owned
+server when the execution session no longer needs it; do not delete other data.
+
+Keep one active stage/component and one integration owner. Replace the
+continuation note with material decisions, actual checks, uncertainty and next
+action at session boundaries. Archived goals are evidence only.
 
 Completion requires the entire product cutover AND the requested learning and
 traceability deliverables. An annotation campaign, folder reorganization,

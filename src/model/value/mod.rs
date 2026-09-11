@@ -4,7 +4,6 @@ use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 use std::mem::size_of;
 
-#[path = "value_numeric.rs"]
 mod numeric;
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -68,8 +67,10 @@ impl Symbol {
 /// Logical values accepted by the semantic model.
 ///
 /// `Instant` is milliseconds since the Unix epoch, matching the documented
-/// representation. UUIDs are stored as their 128 bits. URI syntax validation
-/// belongs at construction/API boundaries; ordering uses the retained string.
+/// representation. UUIDs are stored as their 128 bits. URIs retain their exact
+/// input spelling while logical equality, ordering and hashing use components.
+/// Admission validates URI syntax; unchecked public construction still has a
+/// deterministic comparison without panicking.
 #[derive(Clone, Debug)]
 pub enum Value {
     BigDec(BigDecimal),
@@ -110,7 +111,8 @@ impl Value {
             Self::Instant(value) => value.hash(state),
             Self::Keyword(value) => value.hash(state),
             Self::Symbol(value) => value.hash(state),
-            Self::String(value) | Self::Uri(value) => value.hash(state),
+            Self::String(value) => value.hash(state),
+            Self::Uri(value) => super::uri::hash(value, state),
             Self::Uuid(value) => value.hash(state),
             Self::Tuple(values) => {
                 values.len().hash(state);
@@ -211,7 +213,7 @@ impl Value {
             (Self::Function(left), Self::Function(right)) => left.cmp(right),
             (Self::Bool(left), Self::Bool(right)) => left.cmp(right),
             (Self::String(left), Self::String(right)) => compare_utf16(left, right),
-            (Self::Uri(left), Self::Uri(right)) => compare_utf16(left, right),
+            (Self::Uri(left), Self::Uri(right)) => super::uri::compare(left, right),
             (Self::Instant(left), Self::Instant(right)) => left.cmp(right),
             (Self::Uuid(left), Self::Uuid(right)) => compare_uuid(*left, *right),
             (Self::Tuple(left), Self::Tuple(right)) => compare_tuple(left, right),

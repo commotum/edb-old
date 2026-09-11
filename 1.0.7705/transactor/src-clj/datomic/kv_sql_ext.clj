@@ -61,6 +61,9 @@
           :default
           #'clojure.core/global-hierarchy))
       #'validation-query*))
+  ;; ATOMIC-NOTE [observed] Default is select 1, Oracle is select 1 from dual.
+  ;; The local Storage Services / Validation Query prose reverses these defaults;
+  ;; record that evidence discrepancy rather than copying an unusable PostgreSQL query.
   (defmethod validation-query* :default fn__10777 ([_] "select 1"))
   (defmethod validation-query* "oracle" fn__10779 ([_] "select 1 from dual"))
   ;; Selects the configured JDBC validation query, with an Oracle-specific fallback.
@@ -110,6 +113,10 @@
       'try-validation-query
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed] A memoized connection specification owns the JDBC pool;
+  ;; borrow validation and credentials live here, not in KVSql's value semantics.
+  ;; [inferred] Pool reuse avoids per-block connection creation without merging
+  ;; connection lifetime with the lifetime of immutable database values.
   (.setMeta (clojure.lang.RT/var "datomic.kv-sql-ext" "create-datasource") {:column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.kv-sql-ext" "create-datasource")

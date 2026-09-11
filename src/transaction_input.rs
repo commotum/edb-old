@@ -14,7 +14,7 @@ type LookupFn<'a> = dyn FnMut(u32, &Value) -> Result<Option<u64>, SemanticError>
 /// Match the existing stored-value decoding policy before a native caller's
 /// owned values can enter recursive cloning, comparison, or encoding.
 pub(crate) fn validate_stored_input(value: &Value) -> Result<(), SemanticError> {
-    if !matches!(value, Value::Tuple(_)) {
+    if !matches!(value, Value::Tuple(_) | Value::Uri(_)) {
         return Ok(());
     }
     let mut pending = vec![(value, 0usize)];
@@ -25,8 +25,17 @@ pub(crate) fn validate_stored_input(value: &Value) -> Result<(), SemanticError> 
                 "stored values exceed the 16-level admission policy",
             ));
         }
-        if let Value::Tuple(slots) = value {
-            pending.extend(slots.iter().flatten().map(|value| (value, depth + 1)));
+        match value {
+            Value::Tuple(slots) => {
+                pending.extend(slots.iter().flatten().map(|value| (value, depth + 1)));
+            }
+            Value::Uri(uri) if !crate::model::uri::validate(uri) => {
+                return Err(SemanticError::incorrect(
+                    "value/invalid-uri",
+                    "URI value has invalid syntax or escaping",
+                ));
+            }
+            _ => {}
         }
     }
     Ok(())

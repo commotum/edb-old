@@ -1,5 +1,8 @@
 ;   Copyright (c) Rich Hickey. 
 
+;; ATOMIC-NOTE [scope] LRU dependency pilot only; other cache policies remain unreviewed.
+;; This annotated derivative retains the archive text at baseline
+;; cd7192e63d883a4a34aa7de4d5bcd17e6edb692d; it is no longer a verbatim archive extract.
 
 (ns ^{:doc "A caching library for Clojure."
       :author "Fogus"}
@@ -203,6 +206,13 @@
   [base start-at]
   (into (clojure.data.priority-map/priority-map) (for [[k _] base] [k start-at])))
 
+;; ATOMIC-NOTE [observed] lookup alone leaves recency unchanged; hit returns a new
+;; LRUCache with an advanced tick and updated priority map. miss/evict change both
+;; value and usage maps, and a full miss selects peek's oldest item. core.memoize/lru
+;; composes this implementation into a separately held cache reference.
+;; [documented] Memory and Caching's immutable-data guarantee concerns cached values.
+;; [observed] Datomic's cache/caffeine wrapper also uses mutable cache operations.
+;; [inferred] Persistent cache versions are a library choice, not an immutable-db requirement.
 (defcache LRUCache [cache lru tick limit]
   CacheProtocol
   (lookup [_ item]
@@ -597,6 +607,10 @@
    :post [(== threshold (count (.q ^FIFOCache %)))]}
   (clojure.core.cache/seed (FIFOCache. {} clojure.lang.PersistentQueue/EMPTY threshold) base))
 
+;; ATOMIC-NOTE [observed] seed gives all initial entries priority zero; subsequent
+;; hits assign increasing ticks. [inferred] Priority ordering avoids scanning all
+;; entries for the least recent one, but pays for persistent index updates per hit.
+;; This mechanism does not by itself justify replacing a native Rust cache policy.
 (defn lru-cache-factory
   "Returns an LRU cache with the cache and usage-table initialized to `base` --
    each entry is initialized with the same usage value.
