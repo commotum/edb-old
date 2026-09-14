@@ -1,0 +1,148 @@
+---
+title: "Excision | Datomic"
+source: "https://docs.datomic.com/operation/excision.html"
+description: "Learn how to remove a set of datoms with Datomic's excision operation."
+word_count: 1439
+---
+
+## Excision
+
+Excision is the complete removal of a set of datoms matching a predicate. Excision should be a very infrequent operation and is designed to support the following two scenarios:
+
+- Removing data for privacy reasons
+- Removing data older than some domain-defined retention period
+
+Excision should never be used to correct erroneous data and is unsuitable for that task as it does not restore any previous view of the facts. Consider using ordinary retraction to correct errors without removing history.
+
+## Motivation
+
+Datomic makes the history of your data first class. Given a database value, you can ask questions about what you know right now, and/or questions about what you knew at points in the past.
+
+Legitimate motivations for removing data are *very rare*. A common desire is to be able to erase mistakes, but this is almost always a questionable idea. If a past version of a database contained incorrect information, decisions may have been made based on that incorrect information. It is usually much more valuable to be able to recover the basis for those decisions, even when that basis is known to be incorrect than to pretend that mistakes never happened. (Imagine a source control system that removed the history of code defects once they were fixed). In any case, excision is unsuitable for the error-correcting task, as it does not restore any prior view of the facts.
+
+There are, however, legitimate reasons to 'forget' data. Systems are sometimes interested only in data that happened within a certain time window, or keeping older data can be a source of liability. Or, you may discover after recording data that you do not have the legal right to store the data. Privacy laws might require you to excise data from ex-customers, etc.
+
+These scenarios motivate excision, literally cutting data out of a database.
+
+## Backup Before Excising
+
+Excision is irrevocable. You are strongly encouraged to [backup](https://docs.datomic.com/operation/backup.html) a database before excising data.
+
+## Implementation
+
+You can request excision of data by transacting a new entity with the following attributes:
+
+- *:db/excise* is required, and refers to a target entity or attribute to be excised. Thus there are two scenarios - excise all or part of an entity, or excise some or all of the values of a particular attribute.
+- *:db.excise/attrs* is an optional, cardinality-many, reference attribute that limits an excision to a set of attributes, useful only when the target of excise is an entity. If *:db.excise/attrs* are not specified, then all matching attributes will be excised.
+- *:db.excise/beforeT* is an optional, long-valued attribute that limits an excision to only datoms whose t is before the specified *beforeT*, which may be a t or tx id. This can be used with entity or attribute targets.
+- *:db.excise/before* is an optional, instant-valued attribute that limits an excision to only datoms whose transaction time is before the specified *before*. This can be used with entity or attribute targets.
+
+Use at most one of *:db.excise/before* or *:db.excise/beforeT*.
+
+> Note that excision is a special operation that happens outside the timeline of Datomic history, removing data across all of history as if the data never happened. While the excise request itself is transactional, the excision operation is not transactional – the effect of excision is a background operation that occurs during the first indexing job after an excision transaction.
+
+More than one excision can occur between indexing jobs, and you should avoid attempting to repeatedly excise/ [request-index](https://docs.datomic.com/clojure/index.html#datomic.api/request-index) in an attempt to make excision feels synchronous. It's not. If you need to coordinate with a database that is guaranteed to have your excision, you can accomplish this with [sync-excise](https://docs.datomic.com/clojure/index.html#datomic.api/sync-excise).
+
+Schema datoms and datoms that are part of Datomic's bootstrap cannot be excised. This includes all of the attributes of attributes, and the excision attributes themselves. In addition, you cannot excise anything in the db.part/db partition. Datoms about past excisions also cannot be excised. Attempts to excise datoms that cannot be excised will be recorded, but have no effect.
+
+When the target of excision is an entity, and a datom to be excised is a reference whose attribute has *:db/isComponent* true, then the component entity (and **all** of its attributes) will be excised recursively.
+
+## Excising Specific Entities
+
+To excise a specific entity, manufacture a new entity with a *:db/excise* attribute pointing to that entity's id. For example, if user 42 requests that his personal data be removed from the system, the transaction data would be:
+
+```
+[{:db/excise 42}]
+```
+
+Since *:db.excise/attrs* is not specified in the transaction above, *all* datoms about entity 42 will be excised.
+
+## Excising Specific Attributes of an Entity
+
+To excise only specific attributes of an entity, create a transaction as in the previous step, but also specify a collection of *:db.excise/attrs*. For example, you might excise attributes that contain personally identifying information, such as usernames and email addresses, while leaving untouched other attributes that might be valuable for aggregate queries.
+
+```
+[{:db/excise 42
+  :db.excise/attrs [:person/name :person/email]}]
+```
+
+## Excising Old Values of an Attribute
+
+To excise old values of a particular attribute, you can create an excision for the attribute you want to eliminate, and then limit the excision using either *before* or *beforeT*. Imagine tracking application events that have users, categories, and details. Each attribute requires its own excise request. There are lots of events, and you don't need them after a certain time window, so you can get rid of all the pre-2012 events:
+
+```
+[{:db/excise :event/user
+  :db.excise/before #inst "2012"}
+ {:db/excise :event/category
+  :db.excise/before #inst "2012"}
+ {:db/excise :event/description
+  :db.excise/before #inst "2012"}]
+```
+
+The use of *beforeT* is similar, but specifies the excision boundary in terms of database t. The example below will excise all event-related datoms before t 1100:
+
+```
+[{:db/excise :event/user
+  :db.excise/beforeT 1100}
+ {:db/excise :event/category
+  :db.excise/beforeT 1100}
+ {:db/excise :event/description
+  :db.excise/beforeT 1100}]
+```
+
+## Excising All Values of an Attribute
+
+**Excising by attribute is very dangerous**. If you leave out the *before* limitations from the previous two sections, then you will remove **all** values of the various *:event* attributes, effectively removing events from the database entirely:
+
+```
+[{:db/excise :event/user}
+ {:db/excise :event/category}
+ {:db/excise :event/description}]
+```
+
+## Excision and Reference Attributes
+
+When excising an entire entity, all component entities are also excised, as are all inbound references to the excised entity. When selecting particular attributes of an excised entity, both in- and outbound values of that attribute involving the excised entity are excised, and, if a component attribute, the component entity is excised in its entirety.
+
+When using the excise values of attribute form, it is currently the responsibility of the application to manage all inbound references and components.
+
+## Tracking Excisions
+
+Excision is lossy. Given a datom, you cannot ask "Was this datom in the database before an excision?" If you could ask that question, then the datom is still present in some sense, which defeats the purpose of excision.
+
+However, you can query the *predicates* used for excision, which makes it possible to answer e.g. the more limited question "Has an excision occurred that might have affected this entity?" For example, to check if entity 42 has had any data removed by excision, you can query with:
+
+```
+(d/q '[:find ?e
+       :in $ ?e
+       :where [_ :db/excise ?e]]
+      db
+      42)
+```
+
+> Note that the excise attributes themselves are protected from excision, so there is no way to 'erase your tracks'. Every excision creates a permanent record. This helps preserve a fundamental value proposition of Datomic - it is a database that greatly facilitates your knowing why it is in the state it is in, and how it got there. Thus excision strikes a delicate balance between forgetting and remembering that you forgot.
+
+## How it Works
+
+At some point after the excision request, an indexing job will run. The resulting index (and all future indexes) will no longer contain the datoms implied by the excision predicate(s). Furthermore, those same datoms will be removed from the transaction log.
+
+Thus, **excision is permanent and unrecoverable**, short of restoring a backup. Backing up before significant excisions is highly recommended.
+
+## Performance
+
+Excision puts a substantial burden on background indexing. Large excisions can trigger [indexing jobs](https://docs.datomic.com/operation/capacity.html#indexing) whose execution time is proportional to the size of the entire database, leading to back pressure and reduced write availability. Try to avoid excising more than a few thousand datoms at a time on a live system.
+
+After excision and indexing are complete, storage for the excised data can be recovered via [gc-storage](https://docs.datomic.com/operation/capacity.html#garbage-collection). The datoms recording excisions take up a small amount of space in storage.
+
+## Limitations
+
+Excision does not affect the memory database, as the memory database has no storage.
+
+Excision of *:db/fulltext* attributes is not supported.
+
+Excision cannot guarantee full removal of all datoms with a *:db/noHistory* attribute from index and log.
+
+## Atomic implementation notes
+
+[Selected excision lifecycle trace](02_excision.atomic.md) is marked development
+commentary, separate from the recovered documentation above.

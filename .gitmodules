@@ -12,3 +12,6 @@
 [submodule "EDB-patched-decompiler"]
 	path = EDB/.reverse-engineering-next/tools.decompiler-patched
 	url = https://github.com/Bronsa/tools.decompiler.git
+[submodule "ATOMIC-talk-transcripts"]
+	path = ATOMIC/talk-transcripts
+	url = git@github.com:matthiasn/talk-transcripts.git

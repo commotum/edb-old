@@ -1,0 +1,3 @@
+[submodule "talk-transcripts"]
+	path = talk-transcripts
+	url = git@github.com:matthiasn/talk-transcripts.git
