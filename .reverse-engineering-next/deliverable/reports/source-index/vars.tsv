@@ -1,0 +1,2907 @@
+namespace	name	kind	visibility	line	arglists	doc
+datomic.adopter	adopt-index	defn	public	9	[db_ref adopt_db]	
+datomic.aggregation	min	defn	public	24	[n coll] [coll]	
+datomic.aggregation	max	defn	public	31	[n coll] [coll]	
+datomic.aggregation	count	defn	public	45	[coll]	
+datomic.aggregation	count-distinct	defn	public	46	[coll]	
+datomic.aggregation	distinct	defn	public	47	[coll]	
+datomic.aggregation	sum	defn	public	48	[coll]	
+datomic.aggregation	avg	defn	public	49	[coll]	
+datomic.aggregation	median	defn	public	51	[coll]	
+datomic.aggregation	variance	defn	public	63	[coll]	
+datomic.aggregation	stddev	defn	public	73	[coll]	
+datomic.aggregation	rand	defn	public	75	[n coll] [coll]	
+datomic.aggregation	sample	defn	public	81	[n coll]	
+datomic.api	connect	defn	public	34	[uri]	
+datomic.api	create-database	defn	public	43	[uri]	
+datomic.api	delete-database	defn	public	44	[uri]	
+datomic.api	get-database-names	defn	public	45	[uri]	
+datomic.api	administer-system	defn	public	46	[options]	
+datomic.api	rename-database	defn	public	47	[uri new_name]	
+datomic.api	q	defn	public	48	[query & inputs]	
+datomic.api	query	defn	public	49	[query_map]	
+datomic.api	qseq	defn	public	50	[query_map]	
+datomic.api	tempid	defn	public	51	[partition n] [partition]	
+datomic.api	t->tx	defn	public	54	[t]	
+datomic.api	tx->t	defn	public	55	[tx]	
+datomic.api	part	defn	public	56	[eid]	
+datomic.api	function	defn	public	57	[m]	
+datomic.api	db	defn	public	58	[connection]	
+datomic.api	log	defn	public	69	[connection]	
+datomic.api	sync	defn	public	80	[connection t] [connection]	
+datomic.api	sync-index	defn	public	83	[connection t]	
+datomic.api	sync-schema	defn	public	85	[connection t]	
+datomic.api	sync-excise	defn	public	87	[connection t]	
+datomic.api	request-index	defn	public	89	[connection]	
+datomic.api	gc-storage	defn	public	90	[connection older_than]	
+datomic.api	transact	defn	public	94	[connection tx_data & p__19587]	
+datomic.api	transact-async	defn	public	102	[connection tx_data & p__19590]	
+datomic.api	tx-report-queue	defn	public	110	[connection]	
+datomic.api	remove-tx-report-queue	defn	public	111	[connection]	
+datomic.api	as-of	defn	public	113	[db t]	
+datomic.api	since	defn	public	124	[db t]	
+datomic.api	history	defn	public	135	[db]	
+datomic.api	filter	defn	public	146	[db pred]	
+datomic.api	with	defn	public	158	[db tx_data & opts] [db tx_data]	
+datomic.api	basis-t	defn	public	161	[db]	
+datomic.api	next-t	defn	public	162	[db]	
+datomic.api	as-of-t	defn	public	163	[db]	
+datomic.api	since-t	defn	public	164	[db]	
+datomic.api	is-history	defn	public	165	[db]	
+datomic.api	is-filtered	defn	public	166	[db]	
+datomic.api	attribute	defn	public	167	[db attrid]	
+datomic.api	entity	defn	public	168	[db eid]	
+datomic.api	pull	defn	public	169	[db pattern eid & p__19608]	
+datomic.api	index-pull	defn	public	177	[db arg_map]	
+datomic.api	pull-many	defn	public	178	[db pattern eids & p__19612]	
+datomic.api	touch	defn	public	186	[entity]	
+datomic.api	entity-db	defn	public	187	[entity]	
+datomic.api	index-range	defn	public	188	[db attrid start end]	
+datomic.api	tx-range	defn	public	189	[log start end]	
+datomic.api	ident	defn	public	190	[db eid]	
+datomic.api	entid	defn	public	191	[db ident]	
+datomic.api	entid-at	defn	public	192	[db part t_or_date]	
+datomic.api	invoke	defn	public	193	[db eid_or_ident & args]	
+datomic.api	datoms	defn	public	194	[db index & components]	
+datomic.api	seek-datoms	defn	public	195	[db index & components]	
+datomic.api	resolve-tempid	defn	public	196	[db tempids tempid]	
+datomic.api	shutdown	defn	public	198	[shutdown_clojure]	
+datomic.api	release	defn	public	210	[conn]	
+datomic.api	cancel	defn	public	221	[p__19629]	
+datomic.api	squuid	defn	public	254	[]	
+datomic.api	squuid-time-millis	defn	public	255	[squuid]	
+datomic.api	add-listener	defn	public	256	[fut f executor]	
+datomic.api	db-stats	defn	public	263	[db]	
+datomic.api	implicit-part	defn	public	274	[id]	
+datomic.api	implicit-part-id	defn	public	275	[part]	
+datomic.artemis-client	netty-connector-factory	def	public	51		org.apache.activemq.artemis.core.remoting.impl.netty.NettyConnectorFactory
+datomic.artemis-client	in-vm-connector-factory	def	public	53		org.apache.activemq.artemis.core.remoting.impl.invm.InVMConnectorFactory
+datomic.artemis-client	create-transport	defn	public	55	[factory & transport_opts]	
+datomic.artemis-client	create-connector	defn	public	81	[connector_class_name & kvs]	
+datomic.artemis-client	HornetImpl	defonce	public	93		
+datomic.artemis-client	HornetImpl	defprotocol	public	94		
+datomic.artemis-client	start-session	defn	public	95	[factory creds & args]	
+datomic.artemis-client	wrap-as-failure-listener	defn	private	96	[f]	
+datomic.artemis-client	SessionFactoryBundle	deftype	public	120		
+datomic.artemis-client	->SessionFactoryBundle	defn	public	183	[locator factory cleanup]	
+datomic.artemis-client	create-server-locator	defn	private	186	[connector p__20814]	
+datomic.artemis-client	create-session-factory	defn	public	211	[connector opts]	
+datomic.artemis-client	create-temporary-queue	defn	public	296	[session address]	
+datomic.artemis-client	delete-queue	defn	public	304	[session queue]	
+datomic.artemis-client	create-producer	defn	public	313	[session address]	
+datomic.artemis-client	create-consumer	defn	public	330	[session queue_name & p__20844]	
+datomic.artemis-client	set-handler	defn	public	372	[consumer handler]	
+datomic.artemis-client	create-message	defn	public	381	[session message_type durable expiration timestamp priority] [session message_type durable] [session durable]	
+datomic.artemis-client	output-stream	defn	public	418	[msg]	
+datomic.artemis-client	input-stream	defn	public	439	[msg]	
+datomic.artemis-client	create-fressian-message	defn	public	444	[session lookup obj & message_args]	
+datomic.artemis-client	create-serializer	defn	public	450	[write_handlers]	
+datomic.artemis-client	create-deserializer	defn	public	458	[read_handlers]	
+datomic.artemis-client	read-batch	defn	public	466	[msg read_handlers]	
+datomic.artemis-client	fressian-producer	defn	public	469	[hornet_session hornet_producer write_handlers]	
+datomic.artemis-client	RpcClient	deftype	public	496		
+datomic.artemis-client	->RpcClient	defn	public	524	[session producer consumer serializer response_map producer_queue consumer_queue cleanup]	
+datomic.artemis-client	create-rpc-client	defn	public	535	[session request_address response_address & p__20877]	
+datomic.artemis-client	RpcServer	deftype	public	672		
+datomic.artemis-client	->RpcServer	defn	public	700	[consumer producer cleanup]	
+datomic.artemis-client	create-rpc-server	defn	public	702	[session_fn request_address response_address handler & p__20918]	
+datomic.artemis-client	rpc-request	defn	public	884	[conn request]	
+datomic.assert	*level*	def	public	13		
+datomic.assert	*result*	def	public	15		
+datomic.assert	*assert-handler*	def	public	17		
+datomic.assert	local-bindings	defn	private	21	[env]	
+datomic.assert	assertion-repl	defn	public	38	[error]	
+datomic.assert	assert	defn	public	50	[&form &env x msg] [&form &env x]	
+datomic.async	name-map	def	public	10		
+datomic.async	binding-conveyor-fn	def	public	11		
+datomic.async	daemon	defn	public	12	[f base]	
+datomic.async	DiscardPolicy	deftype	public	41		
+datomic.async	->DiscardPolicy	defn	public	49	[f]	
+datomic.async	discard-policy	defn	public	50	[f]	
+datomic.aws	aws-access-key-id?	defn	public	24	[s]	
+datomic.aws	aws-secret-key?	defn	public	25	[s]	
+datomic.aws	credentials?	defn	public	26	[m]	
+datomic.aws	set-endpoint	defn	public	27	[client endpoint]	
+datomic.aws	credentials	defn	public	31	[creds]	
+datomic.aws	endpoint-for	defn	public	52	[service region]	
+datomic.aws	data-to-object	defmethod	public	56		
+datomic.aws	newclient	defn	public	353	[&form &env cls creds conf] [&form &env cls creds]	
+datomic.aws	defclient	defn	public	405	[&form &env cls service]	
+datomic.aws	client-config	defn	public	576	[args]	
+datomic.aws-detect	quickstream	defn	public	20	[path timeout]	
+datomic.aws-detect	get-ec2-private-ip	defn	public	28	[]	
+datomic.aws-detect	get-ec2-public-ip	defn	public	33	[]	
+datomic.aws-detect	running-in-ec2-ref	def	public	38		
+datomic.aws-detect	running-in-ec2?	defn	public	39	[]	
+datomic.aws-monitor	Qn	defonce	public	26		
+datomic.aws-monitor	Qn	defprotocol	public	27		
+datomic.aws-monitor	units	def	public	38		
+datomic.aws-monitor	ToMetricData	defonce	public	66		
+datomic.aws-monitor	ToMetricData	defprotocol	public	67		
+datomic.aws-monitor	to-metric-data	defn	public	98	[statistics]	
+datomic.aws-monitor	AWS_METRIC_DATA_COUNT_LIMIT	def	public	108		
+datomic.aws-monitor	create-request-map	defn	public	112	[dimensions metrics]	
+datomic.aws-monitor	MILLION	def	public	119		
+datomic.aws-monitor	partitioned-metrics-requests	defn	public	121	[dimensions metrics]	
+datomic.aws-monitor	report-metrics	defn	public	124	[client dimensions metrics]	
+datomic.aws-monitor	create-cloudwatch-reporter	defn	public	145	[& p__23630]	
+datomic.aws-monitor	cloudwatch-reporter-ref	def	private	163		
+datomic.aws-monitor	cloudwatch-reporter	defn	public	181	[m]	
+datomic.backup	pool-size	def	public	74		
+datomic.backup	backup-branch-size	def	public	78		
+datomic.backup	thread-pool	defonce	public	79		
+datomic.backup	backup-branch-pool	defonce	public	80		
+datomic.backup	Storage	defonce	public	82		
+datomic.backup	Storage	defprotocol	public	83		
+datomic.backup	subkey	defn	private	84	[prefix k]	
+datomic.backup	strip-prefix	defn	private	93	[prefix k]	
+datomic.backup	add-key-prefix	defn	private	102	[s]	
+datomic.backup	backup-k-factory	defn	public	111	[backup_version]	
+datomic.backup	Substorage	deftype	public	114		
+datomic.backup	->Substorage	defn	public	131	[storage prefix]	
+datomic.backup	substorage	defn	public	132	[storage prefix]	
+datomic.backup	claim	defn	public	133	[storage id]	
+datomic.backup	claimed-by	defn	public	134	[storage]	
+datomic.backup	ensure-claim	defn	public	144	[storage id]	
+datomic.backup	create-storage*	defmulti	public	155		
+datomic.backup	create-storage*	defmethod	public	156		file
+datomic.backup	create-storage*	defmethod	public	166		s3
+datomic.backup	create-storage*	defmethod	public	171		
+datomic.backup	create-storage	defn	public	179	[storage_uri sse?] [storage_uri]	
+datomic.backup	retry	defn	public	182	[f]	
+datomic.backup	uncached-storage-lookup	defn	public	200	[storage]	
+datomic.backup	storage-olookup	defn	public	208	[storage backup_version]	
+datomic.backup	IValueBackup	defonce	public	217		
+datomic.backup	IValueBackup	defprotocol	public	218		
+datomic.backup	ValueBackup	deftype	public	219		
+datomic.backup	->ValueBackup	defn	public	357	[from_cluster value_storage progress incremental? ids_>nodes throttle sem]	
+datomic.backup	create-value-backup	defn	public	367	[& p__20131]	
+datomic.backup	IValueRestore	defonce	public	400		
+datomic.backup	IValueRestore	defprotocol	public	401		
+datomic.backup	ValueRestore	deftype	public	402		
+datomic.backup	->ValueRestore	defn	public	536	[value_storage to_cluster progress incremental? k_>backup_k ids_>nodes sem]	
+datomic.backup	create-value-restore	defn	public	546	[& p__20210]	
+datomic.backup	roots-path	defn	public	577	[t]	
+datomic.backup	v1->v2-keymap	def	public	578		
+datomic.backup	BACKUP_VERSION	def	public	580		
+datomic.backup	mem-keys	def	private	582		
+datomic.backup	mem->backup	defn	private	585	[roots]	
+datomic.backup	backup->mem	defn	private	594	[roots]	
+datomic.backup	backup-roots	defn	public	618	[job t to_storage]	
+datomic.backup	read-roots	defn	public	624	[t from_storage]	
+datomic.backup	describe-backups	defn	public	630	[storage]	
+datomic.backup	restore-roots	defn	public	643	[job cluster]	
+datomic.backup	create-backup-job	defn	public	670	[cluster lookup]	
+datomic.backup	create-restore-job	defn	public	703	[storage t]	
+datomic.backup	create-cluster	defn	public	727	[cluster_conf concurrency]	
+datomic.backup	create-restore-target	defn	public	738	[uri desc concurrency]	
+datomic.backup	latest-t	defn	public	773	[uri]	
+datomic.backup	require-latest-t	defn	public	781	[uri]	
+datomic.backup	create-ids->nodes	def	public	786		
+datomic.backup	restore-db	defn	public	787	[p__20250 p__20251 progress concurrency incremental?]	
+datomic.backup	backup-key->seg-id	defn	private	885	[s]	
+datomic.backup	->SegSetStorage	declare	public	897		
+datomic.backup	map->SegSetStorage	declare	public	898		
+datomic.backup	SegSetStorage	defrecord	public	899		
+datomic.backup	->SegSetStorage	defn	public	908	[storage seg_id_set]	
+datomic.backup	map->SegSetStorage	defn	public	909	[m__7585__auto__]	
+datomic.backup	backup-seg-ids	defn	public	915	[backup_storage t]	
+datomic.backup	segset-storage	defn	public	925	[backup_storage seg_id_set]	
+datomic.backup	maybe-segset-storage	defn	public	933	[backup_storage]	
+datomic.backup	backup-db	defn	public	943	[from_uri to_storage progress concurrency incremental?]	
+datomic.backup	backup-concurrency	defn	public	1034	[uri]	
+datomic.backup	backup	defn	public	1043	[from_conn_uri to_storage_uri sse? progress incremental?]	
+datomic.backup	restore	defn	public	1052	[from_storage_uri to_uri progress t incremental?]	
+datomic.backup	gc-deleted-dbs	def	public	1060		
+datomic.backup	prefixes	def	public	1061		
+datomic.backup	missing-seg-ids	defn	public	1069	[backup_storage seg_id_set]	
+datomic.backup	unreadable-seg-ids	defn	public	1178	[lookup seg_ids]	
+datomic.backup	verify-backup	defn	public	1200	[p__20354]	
+datomic.btset	comp	defn	private	21	[cmp x y]	
+datomic.btset	IBTSetBranch	definterface	public	36		
+datomic.btset	IBTSetIterLink	definterface	public	42		
+datomic.btset	BTSetIterLink	deftype	public	44		
+datomic.btset	->BTSetIterLink	defn	public	52	[branch offset parent]	
+datomic.btset	IBTSetNode	definterface	public	55		
+datomic.btset	BTSetSplit	deftype	public	63		
+datomic.btset	->BTSetSplit	defn	public	65	[left k right]	
+datomic.btset	IBTSetLeaf	definterface	public	66		
+datomic.btset	BTSetIter	deftype	public	68		
+datomic.btset	->BTSetIter	defn	public	126	[branches leaf offset]	
+datomic.btset	BT_BRANCH_SIZE	def	public	129		
+datomic.btset	BT_LEAF_SIZE	def	public	131		
+datomic.btset	BTSetBranch	deftype	public	133		
+datomic.btset	->BTSetBranch	defn	public	247	[cmp nks]	
+datomic.btset	BTSetLeaf	deftype	public	248		
+datomic.btset	->BTSetLeaf	defn	public	389	[cnt cmp ks]	
+datomic.btset	IDataSet	definterface	public	391		
+datomic.btset	IBTSet	definterface	public	398		
+datomic.btset	BTSet	deftype	public	403		
+datomic.btset	->BTSet	defn	public	467	[cmp cnt root]	
+datomic.btset	btset	defn	public	469	[cmp] []	
+datomic.btset	seek	defn	public	478	[ds k] [ds]	
+datomic.btset	seek-last	defn	public	494	[ds]	
+datomic.btset	rseek	defn	public	505	[bt k] [bt]	
+datomic.btset	bench	defn	private	517	[x]	
+datomic.builtins	component-attr?	defn	public	24	[db a]	
+datomic.builtins	component-es-set	defn	public	30	[db e via_attrs] [db e]	
+datomic.builtins	build-retract-args	defn	public	74	[db e]	
+datomic.builtins	compare-and-swap	defn	public	115	[db e a v_old v_new]	
+datomic.cache	fast-count	def	public	38		
+datomic.cache	cache-keys	def	public	39		
+datomic.cache	put	def	public	40		
+datomic.cache	remove	def	public	41		
+datomic.cache	clear	def	public	42		
+datomic.cache	read-ahead-pool	defonce	public	43		
+datomic.cache	ICachedLookup	definterface	public	47		
+datomic.cache	get-from-cache	defn	public	52	[m k nf]	
+datomic.cache	read-ahead-pool-prop	def	private	57		
+datomic.cache	read-ahead	defn	public	61	[lookup k]	
+datomic.cache	get-uncached	defn	public	71	[m k nf]	
+datomic.cache	getx-uncached	defn	public	76	[m k]	
+datomic.cache	report-val-fn-fail	defn	public	84	[t raw k]	
+datomic.cache	lookup-transformer	defn	public	89	[m & p__9393]	
+datomic.cache	safe-lookup-transformer	defn	public	118	[m & p__9400]	
+datomic.cache	lookup-cache	defn	public	138	[m cache f] [m cache]	
+datomic.cache	lookup-with-inflight-cache	defn	public	169	[m]	
+datomic.cache	fn->lookup	defn	public	190	[f]	
+datomic.cache	double-lookup	defn	public	196	[m1 m2]	
+datomic.cache	repairing-cache-stack	defn	public	204	[p__9422]	
+datomic.cache	create-write-limited	def	public	235		
+datomic.cache	create-limited	def	public	236		
+datomic.cache	create-soft-limited	def	public	237		
+datomic.cache	create-scaled-weight-limited	def	public	238		
+datomic.cache	create-computing	def	public	240		
+datomic.cache	create-response-map	def	public	241		
+datomic.cache.caffeine	CAFFEINE_ENTRY_OVERHEAD	def	private	51		
+datomic.cache.caffeine	CacheGet	defonce	public	55		
+datomic.cache.caffeine	CacheGet	defprotocol	public	56		
+datomic.cache.caffeine	WrappedCCache	deftype	public	65		
+datomic.cache.caffeine	->WrappedCCache	defn	public	90	[cache]	
+datomic.cache.caffeine	adapt-caffeine-cache	defn	private	91	[cache]	
+datomic.cache.caffeine	create-write-limited	defn	public	100	[num_entries timeout_minutes] [num_entries]	
+datomic.cache.caffeine	create-limited	defn	public	109	[num_entries timeout_minutes] [num_entries]	
+datomic.cache.caffeine	create-soft-limited	defn	public	118	[num_entries timeout_minutes] [num_entries] []	
+datomic.cache.caffeine	create-weight-limited	defn	public	130	[weight f]	
+datomic.cache.caffeine	create-scaled-weight-limited	defn	public	143	[weight f divisor]	
+datomic.cache.caffeine	create-computing	defn	public	151	[f max_size]	
+datomic.cache.caffeine	create-response-map	defn	public	159	[timeout_minutes]	
+datomic.cache.impl	FastCount	defonce	public	13		
+datomic.cache.impl	FastCount	defprotocol	public	14		
+datomic.cache.impl	CacheKeys	defonce	public	15		
+datomic.cache.impl	CacheKeys	defprotocol	public	16		
+datomic.cache.impl	CachePut	defonce	public	17		
+datomic.cache.impl	CachePut	defprotocol	public	18		
+datomic.cache.impl	CacheRemove	defonce	public	19		
+datomic.cache.impl	CacheRemove	defprotocol	public	20		
+datomic.callback	has-callback-signature?	defn	public	20	[cls mname]	
+datomic.callback	compile-static-method-callback	defn	public	36	[sym]	
+datomic.callback	create-callback	defn	public	82	[sym]	
+datomic.cassandra	retry-policy	defn	public	32	[]	
+datomic.cassandra	update-stmt*	defn	public	33	[session table id_key col_names]	
+datomic.cassandra	update-stmt	def	public	51		
+datomic.cassandra	updated?	defn	public	52	[res]	
+datomic.cassandra	cql-update	defn	public	58	[session table ensure_rev p__17734 v_map]	
+datomic.cassandra	insert-stmt*	defn	public	79	[session table col_names consistent?]	
+datomic.cassandra	insert-stmt	def	public	98		
+datomic.cassandra	cql-insert	defn	public	99	[session table ks v_map consistent?]	
+datomic.cassandra	select-string	defn	public	116	[table p__17742]	
+datomic.cassandra	select-stmt*	defn	public	127	[session table ks]	
+datomic.cassandra	select-stmt	def	public	131		
+datomic.cassandra	select-with-consistency	defn	public	132	[session stmt consistency serial id]	
+datomic.cassandra	row->map	defn	public	148	[row ks]	
+datomic.cassandra	cql-select	defn	public	192	[session table id ks consistent?]	
+datomic.cassandra	delete-stmt*	defn	public	211	[session table id_key]	
+datomic.cassandra	delete-stmt	def	public	221		
+datomic.cassandra	cql-delete	defn	public	222	[session table id p__17755]	
+datomic.cassandra	cluster-from-callback	defn	public	237	[p__17760]	
+datomic.cassandra-v4	update-stmt*	defn	public	38	[session table id_key col_names]	
+datomic.cassandra-v4	update-stmt	def	public	60		
+datomic.cassandra-v4	updated?	defn	public	61	[res]	
+datomic.cassandra-v4	cql-update	defn	public	67	[session table ensure_rev p__10110 v_map]	
+datomic.cassandra-v4	insert-stmt*	defn	public	88	[session table col_names consistent?]	
+datomic.cassandra-v4	insert-stmt	def	public	111		
+datomic.cassandra-v4	cql-insert	defn	public	112	[session table ks v_map consistent?]	
+datomic.cassandra-v4	select-string	defn	public	129	[table p__10118]	
+datomic.cassandra-v4	select-stmt*	defn	public	140	[session table ks]	
+datomic.cassandra-v4	select-stmt	def	public	150		
+datomic.cassandra-v4	select-with-consistency	defn	public	151	[session stmt consistency serial id]	
+datomic.cassandra-v4	row->map	defn	public	168	[row ks]	
+datomic.cassandra-v4	cql-select	defn	public	212	[session table id ks consistent?]	
+datomic.cassandra-v4	delete-stmt*	defn	public	231	[session table id_key]	
+datomic.cassandra-v4	delete-stmt	def	public	243		
+datomic.cassandra-v4	cql-delete	defn	public	244	[session table id p__10131]	
+datomic.cassandra-v4	session-from-callback	defn	public	260	[p__10136]	
+datomic.cassandra-values	CHUNK_SIZE	def	public	30		
+datomic.cassandra-values	*retry*	def	public	32		
+datomic.cassandra-values	chunk-key	defn	public	34	[k n]	
+datomic.cassandra-values	chunk-pool	defonce	public	35		
+datomic.cassandra-values	cql-keys	def	public	39		
+datomic.cassandra-values	put-value	defn	public	40	[session table p__20525]	
+datomic.cassandra-values	get-value	defn	public	223	[session table id]	
+datomic.cassandra-values	delete-value	defn	public	362	[session table id]	
+datomic.cassandra-values-v4	CHUNK_SIZE	def	public	28		
+datomic.cassandra-values-v4	*retry*	def	public	30		
+datomic.cassandra-values-v4	chunk-key	defn	public	32	[k n]	
+datomic.cassandra-values-v4	chunk-pool	defonce	public	33		
+datomic.cassandra-values-v4	cql-keys	def	public	37		
+datomic.cassandra-values-v4	put-value	defn	public	38	[session table p__10281]	
+datomic.cassandra-values-v4	get-value	defn	public	224	[session table id]	
+datomic.cassandra-values-v4	delete-value	defn	public	363	[session table id]	
+datomic.cast2slf4j	cast-name->cloudwatch-name	def	public	21		
+datomic.cast2slf4j	work	defonce	private	25		
+datomic.cast2slf4j	redirect	defn	public	80	[]	
+datomic.catalog	catalog-key	def	public	23		pod-catalog
+datomic.catalog	pod->catalog	defn	public	25	[pod]	
+datomic.catalog	valid-db-name?	defn	private	34	[db_name]	
+datomic.catalog	get-catalog	defn	public	43	[cluster]	
+datomic.catalog	put-catalog	defn	public	53	[cluster catalog_map]	
+datomic.catalog	db-names	defn	public	67	[catalog]	
+datomic.catalog	get-database-names	defn	public	68	[cluster]	
+datomic.catalog	db-ids	defn	public	69	[catalog]	
+datomic.catalog	db-id->db-name	defn	public	76	[catalog db_id]	
+datomic.catalog	db-name->db-id	defn	public	93	[catalog db_name]	
+datomic.catalog	with-retry	defn	public	94	[&form &env & body]	
+datomic.catalog	update-catalog	defn	public	129	[cluster condition f]	
+datomic.catalog	update-succeeded?	defn	public	149	[m]	
+datomic.catalog	conflict-check-fn	defn	public	150	[db_name db_id]	
+datomic.catalog	add-database	defn	public	165	[catalog db_name db_id]	
+datomic.catalog	create-database*	defn	public	171	[cluster p__11114]	
+datomic.catalog	create-database	defn	public	190	[system_cluster desc]	
+datomic.catalog	rename	defn	public	191	[catalog db_name new_name]	
+datomic.catalog	rename-database	defn	public	193	[cluster db_name new_name]	
+datomic.catalog	delete	defn	public	206	[catalog db_name]	
+datomic.catalog	delete-database	defn	public	213	[cluster db_name]	
+datomic.catalog	undelete-database	defn	public	230	[cluster db_id db_name]	
+datomic.catalog	remove-deleted	defn	public	244	[catalog db_id]	
+datomic.catalog	remove-deleted-database	defn	public	245	[cluster db_id]	
+datomic.catalog	deleted?	defn	public	256	[catalog db_id]	
+datomic.catalog	deleted-database-id?	defn	public	265	[cluster db_id]	
+datomic.catalog	parse-db-conf	defn	public	272	[db_conf]	
+datomic.cleanup	Manager	deftype	public	21		
+datomic.cleanup	->Manager	defn	public	49	[phantoms queue]	
+datomic.cleanup	register-cleanup	defn	public	50	[manager object cleanup]	
+datomic.cleanup	create-manager	defn	public	57	[]	
+datomic.cleanup	run-queue-loop	defn	public	62	[q error_handler]	
+datomic.cleanup	shared-manager-ref	def	public	71		
+datomic.cli	unique-index	defn	private	27	[xrel k v] [xrel k]	
+datomic.cli	print-help	defn	public	48	[cmd spec positions]	
+datomic.cli	cli->map	defn	public	144	[strings positions vararg]	
+datomic.cli	expand-short-names	defn	private	189	[m spec]	
+datomic.cli	coerce-vals	defn	public	199	[m spec]	
+datomic.cli	apply-defaults	defn	public	211	[m spec]	
+datomic.cli	missing-values	defn	public	213	[m spec]	
+datomic.cli	parse-or-exit!	defn	public	217	[cmd args spec positions vararg] [cmd arg spec positions]	
+datomic.cli	failed	def	public	233		
+datomic.cli	fail	defn	public	234	[msg]	
+datomic.cli	exit-after-command	def	public	235		
+datomic.cli	shell	defn	public	236	[& args]	
+datomic.cli	development-version	defn	public	248	[& _]	
+datomic.cloudwatch	client	defn	public	50	[creds config] [creds] []	
+datomic.cloudwatch	list-metrics	defn	public	110	[client request] [client]	
+datomic.cloudwatch	property-to-object	defmethod	public	145		
+datomic.cloudwatch	property-to-object	defmethod	public	159		
+datomic.cloudwatch	property-to-object	defmethod	public	173		
+datomic.cloudwatch	property-to-object	defmethod	public	187		
+datomic.cloudwatch	property-to-object	defmethod	public	201		
+datomic.cloudwatch	data-to-object	defmethod	public	439		
+datomic.cloudwatch	data-to-object	defmethod	public	463		
+datomic.cloudwatch	data-to-object	defmethod	public	491		
+datomic.cloudwatch	data-to-object	defmethod	public	644		
+datomic.cloudwatch	data-to-object	defmethod	public	780		
+datomic.cloudwatch	data-to-object	defmethod	public	880		
+datomic.cloudwatch	data-to-object	defmethod	public	967		
+datomic.cloudwatch	data-to-object	defmethod	public	1006		
+datomic.cloudwatch	data-to-object	defmethod	public	1161		
+datomic.cloudwatch	data-to-object	defmethod	public	1166		
+datomic.cloudwatch	get-metric-statistics	defn	public	1171	[o x1]	
+datomic.cloudwatch	put-metrics	defn	public	1191	[o x1]	
+datomic.cloudwatch	describe-alarms	defn	public	1209	[o x1]	
+datomic.cluster	uuid->val-key	defn	public	34	[uuid]	
+datomic.cluster	val-key->uuid	defn	public	35	[val_key]	
+datomic.cluster	uuid->pod-key	defn	public	36	[uuid]	
+datomic.cluster	pod-key->uuid	defn	public	37	[pod_key]	
+datomic.cluster	new-val-key	defn	public	38	[]	
+datomic.cluster	new-pod-key	defn	public	39	[]	
+datomic.cluster	new-ref-key	defn	public	40	[name]	
+datomic.cluster	new-pod-key	defn	public	41	[]	
+datomic.cluster	path	defn	public	42	[args]	
+datomic.cluster	PRIORITY_HIGH	def	public	66		
+datomic.cluster	PRIORITY_MID	def	public	68		
+datomic.cluster	PRIORITY_LOW	def	public	70		
+datomic.cluster	Dbid	defonce	public	72		
+datomic.cluster	Dbid	defprotocol	public	73		
+datomic.cluster	ClusteredStore	defonce	public	74		
+datomic.cluster	ClusteredStore	defprotocol	public	80		
+datomic.cluster	Get2	defonce	public	91		
+datomic.cluster	Get2	defprotocol	public	93		
+datomic.cluster	update-pod	defn	public	94	[cs pod_key rev etag buf metamap] [cs pod_key rev etag buf]	
+datomic.cluster	reset-ref	defn	public	106	[cluster k v]	
+datomic.cluster	touch-ref	defn	public	143	[cluster k]	
+datomic.cluster	reset-pod	defn	public	182	[cluster k buf metamap]	
+datomic.cluster	touch-pod	defn	public	190	[cs pod_key pod]	
+datomic.cluster	claim-pod	defn	public	192	[cs pod_key msec]	
+datomic.cluster	clone-pod	defn	public	203	[cs from_key to_key]	
+datomic.cluster	clone-ref	defn	public	216	[cs from_key to_key]	
+datomic.cluster	uncached-val-lookup	defn	public	227	[cs]	
+datomic.cluster	pacer	def	public	233		
+datomic.cluster	segment-writes	def	public	234		
+datomic.cluster	segment-pacing-msec	def	public	235		
+datomic.cluster	BOUNDING_TIMEOUT_MSEC	def	public	236		
+datomic.cluster	write-vals*	defn	public	237	[cs source vmap]	
+datomic.cluster	write-vals	defn	public	274	[cs source vmap]	
+datomic.cluster	AsyncWriter	defonce	public	317		
+datomic.cluster	AsyncWriter	defprotocol	public	318		
+datomic.cluster	QueueingWriter	deftype	public	319		
+datomic.cluster	->QueueingWriter	defn	public	359	[cluster done_reason bounding_timeout_msec queue]	
+datomic.cluster	queueing-writer	defn	public	362	[cluster par bounding_timeout_msec progress]	
+datomic.cluster	RefClusterStore	defonce	public	404		
+datomic.cluster	RefClusterStore	defprotocol	public	406		
+datomic.cluster	get-ref-store	defn	public	407	[cs]	
+datomic.cluster	close	defn	public	408	[x]	
+datomic.cluster-stack	pool-ref	defonce	public	38		
+datomic.cluster-stack	ValStoreOnKvCache	deftype	public	39		
+datomic.cluster-stack	->ValStoreOnKvCache	defn	public	70	[exec kv_cache]	
+datomic.cluster-stack	val-store-on-kv-cache	defn	public	72	[exec kv_cache]	
+datomic.cluster-stack	result->anom	defn	public	73	[result]	
+datomic.cluster-stack	ValStoreOnCluster	deftype	public	79		
+datomic.cluster-stack	->ValStoreOnCluster	defn	public	780	[cluster]	
+datomic.cluster-stack	val-store-on-cluster	defn	public	781	[cluster]	
+datomic.cluster-stack	ValStoreWithClose	deftype	public	782		
+datomic.cluster-stack	->ValStoreWithClose	defn	public	794	[store close]	
+datomic.cluster-stack	val-store-with-close	defn	public	795	[store close]	
+datomic.cluster-stack	kv-cache-ref	def	public	796		
+datomic.cluster-stack	start-kv-cache	defn	public	800	[]	
+datomic.cluster-stack	cluster-with-cache	defn	public	853	[cluster cache opts] [cluster cache]	
+datomic.clusterfs	chunk-path	defn	public	36	[path chunk]	
+datomic.clusterfs	floor	defn	public	37	[num]	
+datomic.clusterfs	ceil	defn	public	38	[num]	
+datomic.clusterfs	->Chunk	declare	public	39		
+datomic.clusterfs	map->Chunk	declare	public	40		
+datomic.clusterfs	Chunk	defrecord	public	41		
+datomic.clusterfs	->Chunk	defn	public	43	[chunk]	
+datomic.clusterfs	map->Chunk	defn	public	44	[m__7585__auto__]	
+datomic.clusterfs	->ClusterFS	declare	public	50		
+datomic.clusterfs	map->ClusterFS	declare	public	51		
+datomic.clusterfs	ClusterFS	defrecord	public	52		
+datomic.clusterfs	->ClusterFS	defn	public	77	[dir chunk_size]	
+datomic.clusterfs	map->ClusterFS	defn	public	79	[m__7585__auto__]	
+datomic.clusterfs	files	defn	public	85	[clusterfs]	
+datomic.clusterfs	file-chunk-keys	defn	public	86	[clusterfs file]	
+datomic.clusterfs	chunk-keys	defn	public	93	[clusterfs files]	
+datomic.clusterfs	all-keys	defn	public	94	[clusterfs]	
+datomic.clusterfs	write-handlers	def	public	95		
+datomic.clusterfs	read-handlers	def	public	123		
+datomic.clusterfs	fressian-chunk-from-channel	defn	public	140	[rc n]	
+datomic.clusterfs	create-file	defn	public	145	[cs local_file & p__14243]	
+datomic.clusterfs	create-files	defn	public	214	[cs files & p__14259]	
+datomic.clusterfs	describe	defn	public	274	[cfs]	
+datomic.clusterfs	create-fs	defn	public	290	[cs files & p__14282]	
+datomic.codec	string->bytes	defn	public	13	[s]	
+datomic.codec	bytes->string	defn	public	14	[b]	
+datomic.codec	encode-64	defn	public	15	[raw]	
+datomic.codec	decode-64	defn	public	16	[coded]	
+datomic.codec	base-64-literal	defn	public	17	[literal]	
+datomic.combined-cluster	CombinedCluster	deftype	public	20		
+datomic.combined-cluster	->CombinedCluster	defn	public	45	[ref_cluster val_cluster]	
+datomic.combined-cluster	combined-cluster	defn	public	48	[ref_cluster val_cluster]	
+datomic.common	DEFAULT_SYSTEM_NAME	def	public	55		_default
+datomic.common	compare-byte-arrays	defn	public	59	[a b]	
+datomic.common	BYTES	def	public	75		
+datomic.common	coll-compare	declare	public	76		
+datomic.common	compare-ex	defn	public	77	[a b]	
+datomic.common	compare	defn	public	95	[a b]	
+datomic.common	equals-with-strict-scale	defn	public	116	[a b]	
+datomic.common	cl	defn	private	123	[a b]	
+datomic.common	cx	defn	private	148	[a b]	
+datomic.common	cc	defn	private	175	[a b]	
+datomic.common	coll-compare	defn	public	193	[a b]	
+datomic.common	<'	defn	public	202	[a b]	
+datomic.common	>'	defn	public	203	[a b]	
+datomic.common	split-filter	defn	public	204	[pred coll]	
+datomic.common	getx	defn	public	205	[m k]	
+datomic.common	getx-in	defn	public	211	[m ks]	
+datomic.common	require-keys	defn	public	212	[m keyseq]	
+datomic.common	env-key->clj-key	defn	public	223	[k]	
+datomic.common	clj-key->env-key	defn	public	224	[s]	
+datomic.common	map->env	defn	public	225	[m]	
+datomic.common	map-from-env	defn	public	236	[env]	
+datomic.common	coerce-args	defn	public	247	[m & predfns]	
+datomic.common	assert-all	defn	public	269	[&form &env & args]	
+datomic.common	log-and-print	defn	public	279	[& xs]	
+datomic.common	AsyncShutdown	defonce	public	288		
+datomic.common	AsyncShutdown	defprotocol	public	289		
+datomic.common	sync-shutdown	defn	public	290	[x]	
+datomic.common	with-shutdown	defn	public	291	[&form &env bindings & body]	
+datomic.common	await-derefs	defn	public	334	[msec coll] [coll]	
+datomic.common	find-free-port	defn	public	374	[]	
+datomic.common	array-cat	defn	public	380	[& p__9108]	
+datomic.common	squuid	defn	public	414	[]	
+datomic.common	squuid-time-ms	defn	public	424	[squuid]	
+datomic.common	rand-uuid	defn	public	432	[]	
+datomic.common	run-uuid	def	public	433		
+datomic.common	root-cause	defn	public	434	[x]	
+datomic.common	qualified-symbol?	defn	public	436	[x]	
+datomic.common	requiring-resolve!	defn	public	437	[x]	
+datomic.common	maybe-class	defn	public	455	[cls]	
+datomic.common	maybe-require	defn	public	460	[ns s]	
+datomic.common	throw-anom	defn	public	472	[anom]	
+datomic.common	key-comparator	defn	public	473	[key_fn comp] [key_fn]	
+datomic.common	fire	defn	public	489	[&form &env & body]	
+datomic.common	schedule	defn	public	522	[taskname f msec & p__9149]	
+datomic.common	mapk	defn	public	555	[f coll]	
+datomic.common	returning-throwable	defn	public	556	[&form &env & forms]	
+datomic.common	log-retry	defn	public	570	[result backoff attempts max_retries]	
+datomic.common	return-or-throw	defn	public	587	[x]	
+datomic.common	with-nano-time	defn	public	589	[&form &env f & body]	
+datomic.common	retry-fn	defn	public	623	[f & p__9166]	
+datomic.common	create-temp-directory	defn	public	650	[dir]	
+datomic.common	delete-file-recursively	defn	public	662	[f & p__9175]	
+datomic.common	bean-setters	defn	public	681	[bean_class]	
+datomic.common	into-bean	defn	public	701	[bean props]	
+datomic.common	endpoint?	defn	public	730	[m]	
+datomic.common	qualified-name	defn	public	731	[k]	
+datomic.common	force-keyword	defn	public	737	[x]	
+datomic.common	force-map-keywords	defn	public	738	[m]	
+datomic.common	load-properties	defn	public	751	[filename]	
+datomic.common	store-properties	defn	public	756	[props filename]	
+datomic.common	map->props	defn	public	763	[m]	
+datomic.common	props->map	defn	public	781	[props]	
+datomic.common	probe-name	def	public	788		probe-fa35e6c5-a886-46e7-b90b-1f0d36b3f2fe
+datomic.common	pop-atom!	defn	public	789	[atm]	
+datomic.common	closing-watch	defn	public	793	[_ _ old _]	
+datomic.common	pfuture	defn	public	794	[exec f]	
+datomic.common	thread-pool	def	public	813		
+datomic.common	handoff-thread-pool	def	public	814		
+datomic.common	cached-thread-pool	def	public	815		
+datomic.common	bounded-deref	defn	public	816	[ref timeout_ms]	
+datomic.common	pooled-mapv	defn	public	826	[exec f coll]	
+datomic.common	distinct-by	defn	public	837	[f coll] [f]	
+datomic.common	ensure-vector	defn	public	872	[x]	
+datomic.common	ensure-vectors-in-array	defn	public	877	[vs]	
+datomic.common	maybe-deref	defn	public	887	[v]	
+datomic.common	result-count	defn	public	888	[offset limit coll]	
+datomic.common	result-xform	defn	public	895	[offset limit f]	
+datomic.config	protocol-supports-ha?	defn	public	24	[protocol]	
+datomic.config	Symbolish	defonce	public	25		
+datomic.config	Symbolish	defprotocol	public	26		
+datomic.config	datomic-edition	def	public	33		
+datomic.config	set-pro	defn	public	34	[]	
+datomic.config	pro?	defn	public	35	[]	
+datomic.config	limited-edition?	defn	public	36	[]	
+datomic.config	parse-memory-string	defn	public	37	[s]	
+datomic.config	read-system-property	defn	public	59	[prop coerce valid? default]	
+datomic.config	DEFAULT_MEMIDX_MAX	def	public	71		
+datomic.config	at-least	defn	public	75	[minval]	
+datomic.config	in-range	defn	public	76	[lo hi]	
+datomic.config	warn-deprecations	defn	public	77	[]	
+datomic.config	version	defn	private	83	[& _]	
+datomic.config	version-unique	defn	private	97	[]	
+datomic.config	read-revision	defn	private	106	[props]	
+datomic.config	bool?	defn	private	121	[x]	
+datomic.config	config-table	def	public	125		
+datomic.config	validate-properties	defn	public	283	[m]	
+datomic.config	properties-ref	def	public	298		
+datomic.config	reset!	defn	public	299	[]	
+datomic.config	initialized	def	private	323		
+datomic.config	property	defn	public	325	[name]	
+datomic.config	local-valcache-enabled?	defn	public	335	[]	
+datomic.config	property-map	defn	public	337	[m]	
+datomic.config	edition-has-feature?	defmulti	public	346		
+datomic.config	edition-has-feature?	defmethod	public	347		
+datomic.config	edition-has-feature?	defmethod	public	348		
+datomic.config	edition-has-feature?	defmethod	public	349		
+datomic.config	edition-has-feature?	defmethod	public	350		
+datomic.config	is-folsom?	def	private	351		
+datomic.config	folsom?	defn	public	361	[]	
+datomic.config	local-memcached-args	defn	public	362	[]	
+datomic.config	memcached-args	defn	public	371	[]	
+datomic.config	max-gb->eviction-threshold-mb	defn	private	380	[max_gb]	
+datomic.config	valcache-args	defn	public	389	[]	
+datomic.config	ddb-client-args	defn	public	400	[args]	
+datomic.config	s3-client-args	defn	public	410	[args] []	
+datomic.config	is-prefetch?	def	private	421		
+datomic.config	prefetch-enabled?	defn	public	423	[]	
+datomic.config-ext	flags	def	public	10		
+datomic.connector	Startable	defonce	public	48		
+datomic.connector	Startable	defprotocol	public	49		
+datomic.connector	NotificationHandler	defonce	public	50		
+datomic.connector	NotificationHandler	defprotocol	public	51		
+datomic.connector	TransactorConnector	defonce	public	58		
+datomic.connector	TransactorConnector	defprotocol	public	59		
+datomic.connector	admin-request	defn	public	65	[connector request arg timeout_msec] [connector request arg]	
+datomic.connector	endpoint-error	defn	public	72	[p__21140 cause]	
+datomic.connector	sfb-cache	def	public	91		
+datomic.connector	stop-all-connectors	defn	public	92	[]	
+datomic.connector	try-hornet-connect	defn	private	116	[conn_factory conn_args session_args]	
+datomic.connector	host-order	defn	private	179	[host alt_host]	
+datomic.connector	create-hornet-factory	defn	private	196	[p__21157 ttl]	
+datomic.connector	HornetNotifier	deftype	public	244		
+datomic.connector	->HornetNotifier	defn	public	274	[push_handler_ref session result_queue hornet_consumer starter cleanup]	
+datomic.connector	notify	defmulti	public	283		
+datomic.connector	notify	defmethod	public	284		
+datomic.connector	notify	defmethod	public	285		
+datomic.connector	notify	defmethod	public	286		
+datomic.connector	notify	defmethod	public	287		
+datomic.connector	create-hornet-notifier	defn	public	288	[push_handler session result_queue hornet_consumer failure_handler]	
+datomic.connector	TransactorHornetConnector	deftype	public	510		
+datomic.connector	->TransactorHornetConnector	defn	public	806	[cluster_conf transactor_endpoint hornet_factory]	
+datomic.connector	create-transactor-hornet-connector	defn	public	812	[cluster_conf endpoint ttl] [cluster_conf endpoint]	
+datomic.coordination	DEFAULT_HORNET_PORT	def	public	39		
+datomic.coordination	devspec	def	public	43		
+datomic.coordination	init-protocol	defmulti	public	44		
+datomic.coordination	init-dev	defn	public	45	[cluster_map data_dir]	
+datomic.coordination	init-protocol	defmethod	public	49		
+datomic.coordination	init-protocol	defmethod	public	54		
+datomic.coordination	create-dev-cluster	defn	public	55	[cluster_conf]	
+datomic.coordination	create-cluster	defmulti	public	63		
+datomic.coordination	create-cluster	defmethod	public	64		
+datomic.coordination	create-cluster	defmethod	public	69		
+datomic.coordination	create-db-cluster	defn	public	77	[cluster_conf]	
+datomic.coordination	create-system-cluster	defn	public	89	[cluster_conf]	
+datomic.coordination	pod-key	def	public	90		pod-coord
+datomic.coordination	standby-key	def	public	91		pod-standby
+datomic.coordination	heartbeat-keys	def	public	92		
+datomic.coordination	keys-by-role	def	public	93		
+datomic.coordination	PEER_VERSION	def	public	94		
+datomic.coordination	create-heartbeat	defn	public	96	[p__11682]	
+datomic.coordination	heartbeat->endpoint	defn	public	111	[p__11685]	
+datomic.coordination	lookup-endpoint	defn	public	132	[cluster k]	
+datomic.coordination	lookup-transactor-endpoint	defn	public	168	[cluster]	
+datomic.coordination	vc-password	defn	public	169	[peer_password]	
+datomic.coordination	endpoint->server-spec	defn	public	176	[endpoint repair?]	
+datomic.coordination	allowed-valcache-client?	defn	public	187	[server_specs client]	
+datomic.coordination	check-peer-version	defn	public	195	[endpoint]	
+datomic.coordination	lookup-compatible-transactor-endpoint	defn	public	210	[cluster]	
+datomic.coordination	cluster-conf->resolved-conf	defn	public	215	[cluster_conf]	
+datomic.coordination	db-cache	def	public	223		
+datomic.coordination	resolve-db-name	defn	public	227	[cluster_conf]	
+datomic.coordination-ext	create-cluster	defmethod	public	23		
+datomic.coordination-ext	create-cluster	defmethod	public	28		
+datomic.coordination-ext	create-cluster	defmethod	public	33		
+datomic.coordination-ext	create-cluster	defmethod	public	38		
+datomic.coordination-ext	create-cluster	defmethod	public	53		
+datomic.coordination-ext	create-cluster	defmethod	public	64		
+datomic.coordination-ext	create-cluster	defmethod	public	75		
+datomic.coordination-ext	create-cluster	defmethod	public	94		
+datomic.coordination-ext	remote-sql-stores	def	public	104		
+datomic.coordination-ext	create-cluster	defmethod	public	105		
+datomic.coordination-ext	init-protocol	defmethod	public	137		
+datomic.coordination-ext	create-cluster	defmethod	public	142		
+datomic.core2.algo.hash	consistent-ring	defn	public	10	[name_weights key_hashes_fn]	
+datomic.core2.algo.hash	murmur3-with-dashnum-keys	defn	public	52	[k]	
+datomic.core2.algo.lazy	fully-take-while-delivering-tail	defn	public	8	[p pred coll]	
+datomic.core2.algo.lazy	fully-partition-by	defn	public	18	[f coll]	
+datomic.core2.algo.lazy	fred	defn	public	37	[f ret coll]	
+datomic.core2.algo.search	fn-comparator	defn	public	15	[f comp] [f]	
+datomic.core2.algo.search	binary-search	defn	public	31	[coll k cmp]	
+datomic.core2.anomalies	forbidden	def	public	14		
+datomic.core2.anomalies	not-found	def	public	15		
+datomic.core2.anomalies	anom	defn	public	16	[x context] [x]	
+datomic.core2.anomalies	ok?	defn	public	19	[x]	
+datomic.core2.anomalies	forbidden?	defn	public	20	[x]	
+datomic.core2.anomalies	incorrect?	defn	public	21	[x]	
+datomic.core2.anomalies	conflict?	defn	public	22	[x]	
+datomic.core2.anomalies	not-found?	defn	public	23	[x]	
+datomic.core2.anomalies	fault?	defn	public	24	[x]	
+datomic.core2.anomalies	busy?	defn	public	25	[x]	
+datomic.core2.anomalies	unavailable?	defn	public	26	[x]	
+datomic.core2.anomalies	ok->	defn	public	27	[&form &env expr & forms]	
+datomic.core2.anomalies	fault	defn	public	61	[t]	
+datomic.core2.anomalies	athrow	defn	public	69	[anom]	
+datomic.core2.anomalies	returning	defn	public	75	[&form &env & body]	
+datomic.core2.anomalies	-slet*	defn	public	93	[bindings body]	
+datomic.core2.anomalies	slet	defn	public	123	[&form &env bindings & body]	
+datomic.core2.async	aderef	defn	public	53	[ch timeout_ms timeout_val] [ch timeout_ms] [ch]	
+datomic.core2.async	aderef-n	defn	public	66	[n ch timeout_ms timeout_val] [n ch timeout_ms] [n ch]	
+datomic.core2.async	retry	defn	public	83	[& p__19478]	
+datomic.core2.async	put-all!	defn	public	654	[ch coll close?] [ch coll]	
+datomic.core2.async	channel-closed-error	defn	public	1061	[x]	
+datomic.core2.async	<!x	defn	public	1067	[&form &env ch]	
+datomic.core2.async	<!!x	defn	public	1094	[ch]	
+datomic.core2.atom	reset!	defn	public	23	[a v]	
+datomic.core2.atom	swap-vals!	defn	public	31	[a f & args]	
+datomic.core2.atom	swap!	defn	public	34	[a f & args]	
+datomic.core2.atom	sync	defn	public	42	[a]	
+datomic.core2.atom.logged	LoggedAtomImpl	defonce	public	23		
+datomic.core2.atom.logged	LoggedAtomImpl	defprotocol	public	24		
+datomic.core2.atom.logged	next-header	defn	private	25	[p__19713]	
+datomic.core2.atom.logged	append-value	defn	private	47	[log serialize header value]	
+datomic.core2.atom.logged	LoggedAtom	deftype	public	410		
+datomic.core2.atom.logged	->LoggedAtom	defn	public	4308	[log close_ch state_ref serialize deserialize validator_ref watches_ref]	
+datomic.core2.atom.logged	create*	defn	private	4318	[p__20182 state]	
+datomic.core2.atom.logged	create	defn	public	4944	[p__20320]	
+datomic.core2.atom.logged	load	defn	public	5288	[args]	
+datomic.core2.atom.spi	DurableAtom	defonce	public	7		
+datomic.core2.atom.spi	DurableAtom	defprotocol	public	8		
+datomic.core2.aws.ddb	attribute-value	defn	public	9	[v]	
+datomic.core2.aws.ddb	item-map	defn	public	20	[m]	
+datomic.core2.aws.ddb	de-attribute-value	defn	public	29	[m]	
+datomic.core2.aws.ddb	de-item-map	defn	public	45	[m]	
+datomic.core2.aws.ddb	conditional-put-request	defn	public	47	[p__20440]	
+datomic.core2.aws.ddb	query-range-request	defn	public	65	[p__20443]	
+datomic.core2.aws.s3.aws-api	delete-object-request	defn	public	26	[p__20450]	
+datomic.core2.aws.s3.aws-api	get-object-request	defn	public	38	[p__20453]	
+datomic.core2.aws.s3.aws-api	put-object-request	defn	public	50	[p__20456]	
+datomic.core2.aws.s3.aws-api	get-bytes	defn	public	69	[p__20460]	
+datomic.core2.aws.s3.sdkv1	client	defn	public	30	[p__20526]	
+datomic.core2.aws.s3.sdkv1	s3-service	defn	public	58	[args]	
+datomic.core2.aws.s3.sdkv1	s3-service-with-default-retry	defn	public	60	[args]	
+datomic.core2.aws.s3.sdkv1	throwable-category	defn	public	61	[t]	
+datomic.core2.aws.s3.sdkv1	throwable->anom	defn	public	80	[t]	
+datomic.core2.aws.s3.sdkv1	wrap-ex-handler	defn	public	86	[f context] [f]	
+datomic.core2.aws.s3.sdkv1	put-object	defn	public	92	[s3 bucket path stream metadata]	
+datomic.core2.aws.s3.sdkv1	get-object	defn	public	100	[s3 bucket path]	
+datomic.core2.aws.s3.sdkv1	get-bytes	defn	public	113	[s3 bucket path]	
+datomic.core2.aws.s3.sdkv1	delete-object	defn	public	124	[s3 bucket path]	
+datomic.core2.datafy	-datafy-declared-fields-fn	defn	public	15	[clsym]	
+datomic.core2.datafy	datafy-declared-fields	defn	public	39	[&form &env & classes]	
+datomic.core2.datafy	val-navs	defn	public	43	[k_>f]	
+datomic.core2.datafy	with-nav	defn	public	49	[x nav_fn]	
+datomic.core2.log	append	defn	public	23	[log p__20560 body] [log header]	
+datomic.core2.log	delete	def	public	40		
+datomic.core2.log	scan	defn	public	41	[log opts]	
+datomic.core2.log	item-header	def	public	54		
+datomic.core2.log	item-body	def	public	55		
+datomic.core2.log	ensure-tombstone	defn	public	56	[log tombstone]	
+datomic.core2.log.ddb	append-request	defn	private	34	[table p header body]	
+datomic.core2.log.ddb	ddb-item->log-item	defn	private	49	[ddb_item]	
+datomic.core2.log.ddb	Log	deftype	public	70		
+datomic.core2.log.ddb	->Log	defn	public	1635	[client table p chunk_size]	
+datomic.core2.log.ddb	create	defn	public	1636	[p__20861]	
+datomic.core2.log.mem	Log	deftype	public	24		
+datomic.core2.log.mem	->Log	defn	public	90	[items_ref]	
+datomic.core2.log.mem	create	defn	public	91	[header body] []	
+datomic.core2.log.spi	Append	defonce	public	13		
+datomic.core2.log.spi	Append	defprotocol	public	14		
+datomic.core2.log.spi	Delete	defonce	public	15		
+datomic.core2.log.spi	Delete	defprotocol	public	16		
+datomic.core2.log.spi	Scan	defonce	public	17		
+datomic.core2.log.spi	Scan	defprotocol	public	18		
+datomic.core2.log.spi	Item	defonce	public	19		
+datomic.core2.log.spi	Item	defprotocol	public	20		
+datomic.core2.log.spi	result	defn	public	21	[v]	
+datomic.core2.log.spi	normalize-scan-opts	defn	public	22	[p__20980]	
+datomic.core2.retry	retry	defn	public	8	[f pred retry? calc_backoff p__20988]	
+datomic.core2.retry	limiting-retry	defn	public	47	[iter p__20992]	
+datomic.core2.retry	linear	defn	public	58	[f pred iter backoff opts] [f pred iter backoff]	
+datomic.core2.retry	calc-exp-backoff	defn	public	62	[backoff base p__20996]	
+datomic.core2.retry	full-jitter	defn	public	74	[i]	
+datomic.core2.retry	exp	defn	public	75	[f pred iter backoff base opts] [f pred iter backoff base]	
+datomic.core2.thread	binding-conveyor-fn	def	public	40		
+datomic.core2.thread	pthread-fn	defn	public	41	[exec fn]	
+datomic.core2.thread	pthread	defn	public	43	[&form &env exec & body]	
+datomic.core2.thread	pfuture	defn	public	67	[f exec]	
+datomic.core2.thread	daemon-factory	defn	public	79	[name_prefix group] [name_prefix]	
+datomic.core2.thread	fixed-thread-pool	defn	public	93	[name_prefix n group] [name_prefix n]	
+datomic.core2.thread	result-chan	defn	public	97	[n xform] [n] []	
+datomic.core2.thread	pfuture-ch	defn	public	101	[f exec ch] [f exec]	
+datomic.core2.thread	pmap-n	defn	public	107	[n f coll & colls] [n f coll]	
+datomic.core2.thread	ObservableThreadPool	deftype	public	141		
+datomic.core2.thread	->ObservableThreadPool	defn	public	218	[pool callback]	
+datomic.core2.thread	clojure-name->metric-name	defn	public	220	[s]	
+datomic.core2.thread	cast-queue-metric	defmulti	public	221		
+datomic.core2.thread	cast-queue-metric	defmethod	public	224		
+datomic.core2.thread	cast-queue-metric	defmethod	public	236		
+datomic.core2.thread	observable-thread-pool	defn	public	237	[pool name]	
+datomic.core2.thread	thread-pool	defn	public	264	[p__21062]	
+datomic.core2.thread	cached-thread-pool	defn	public	283	[p__21065]	
+datomic.core2.thread	handoff-thread-pool	defn	public	297	[p__21068]	
+datomic.core2.val-store	put	defn	public	14	[val_store k v opts] [val_store k v]	
+datomic.core2.val-store	get	defn	public	23	[val_store k opts] [val_store k]	
+datomic.core2.val-store	delete	defn	public	24	[val_store k opts] [val_store k]	
+datomic.core2.val-store.double-store	get-from-near-store?	defn	private	27	[opts]	
+datomic.core2.val-store.double-store	read-repair-near-store?	defn	private	42	[opts]	
+datomic.core2.val-store.double-store	ValStore	deftype	public	52		
+datomic.core2.val-store.double-store	->ValStore	defn	public	1916	[near_store far_store repair_metric get_fallback_msec]	
+datomic.core2.val-store.double-store	create	defn	public	1923	[p__21251]	
+datomic.core2.val-store.fs	success-metrics	def	public	50		
+datomic.core2.val-store.fs	failure-metrics	def	public	54		
+datomic.core2.val-store.fs	wrap-metric-handler	defn	public	56	[f k op]	
+datomic.core2.val-store.fs	wrap-op	defn	public	78	[f k op]	
+datomic.core2.val-store.fs	Impl	defonce	public	88		
+datomic.core2.val-store.fs	Impl	defprotocol	public	89		
+datomic.core2.val-store.fs	SYNC_PUT_OPEN_OPTIONS	def	public	90		
+datomic.core2.val-store.fs	SYNC_GET_READ_OPTION	def	public	94		
+datomic.core2.val-store.fs	CREATE_DIRECTORIES_OPTS	def	public	96		
+datomic.core2.val-store.fs	FS	deftype	public	97		
+datomic.core2.val-store.fs	->FS	defn	public	178	[get_pool put_pool path delete_pool]	
+datomic.core2.val-store.fs	create	defn	public	181	[p__21341]	
+datomic.core2.val-store.s3	storage-key	defn	public	28	[prefix key opts]	
+datomic.core2.val-store.s3	success-metrics	def	public	36		
+datomic.core2.val-store.s3	failure-metrics	def	public	40		
+datomic.core2.val-store.s3	retry-success-metrics	def	public	42		
+datomic.core2.val-store.s3	retry-failure-metrics	def	public	46		
+datomic.core2.val-store.s3	go-with-metrics	defn	public	48	[f k op context]	
+datomic.core2.val-store.s3	wrap-metric-handler	defn	public	362	[f k op context]	
+datomic.core2.val-store.s3	retry-handler	defn	public	382	[f op p__21411]	
+datomic.core2.val-store.s3.aws-api	ValStore	deftype	public	35		
+datomic.core2.val-store.s3.aws-api	->ValStore	defn	public	1480	[client bucket prefix]	
+datomic.core2.val-store.s3.aws-api	create	defn	public	1482	[p__21669]	
+datomic.core2.val-store.s3.sdkv1	Impl	defonce	public	36		
+datomic.core2.val-store.s3.sdkv1	Impl	defprotocol	public	37		
+datomic.core2.val-store.s3.sdkv1	ValStore	deftype	public	43		
+datomic.core2.val-store.s3.sdkv1	->ValStore	defn	public	144	[read_pool write_pool retry_fn client bucket prefix]	
+datomic.core2.val-store.s3.sdkv1	create	defn	public	153	[p__21775]	
+datomic.core2.val-store.spi	Put	defonce	public	16		
+datomic.core2.val-store.spi	Put	defprotocol	public	17		
+datomic.core2.val-store.spi	Get	defonce	public	18		
+datomic.core2.val-store.spi	Get	defprotocol	public	19		
+datomic.core2.val-store.spi	Delete	defonce	public	20		
+datomic.core2.val-store.spi	Delete	defprotocol	public	21		
+datomic.core2.val-store.spi	no-val-error	defn	public	22	[k v]	
+datomic.core2.val-store.spi	partition-key	defn	public	28	[s]	
+datomic.core2.val-store.spi	splice-partition-key	defn	public	31	[k pk]	
+datomic.core2.val-store.spi	val-op-succeeded?	defn	public	34	[store_api_result]	
+datomic.crypto	random-string	defn	public	54	[entropy]	
+datomic.crypto	cipher	defn	public	59	[name]	
+datomic.crypto	genkey	defn	public	68	[cipher_name]	
+datomic.crypto	mac	defn	public	73	[plaintext secret]	
+datomic.crypto	encrypt-pk	defn	public	86	[plaintext key]	
+datomic.crypto	spec->public-key	defn	public	91	[algo b64encoded]	
+datomic.crypto	decrypt-pk	defn	public	98	[ciphertext key]	
+datomic.crypto	encrypt	defn	public	103	[plaintext cipher_name rawkey]	
+datomic.crypto	decrypt	defn	public	111	[ciphertext cipher_name rawkey]	
+datomic.crypto	random	def	public	119		
+datomic.crypto	random-bytes	defn	public	123	[n]	
+datomic.crypto	read-n	defn	public	124	[bb n]	
+datomic.crypto	xor-arrays	defn	public	126	[b1 b2]	
+datomic.crypto	split-array	defn	public	150	[b1]	
+datomic.crypto	split-key	defn	public	154	[k]	
+datomic.crypto	ser-key	defn	public	162	[k]	
+datomic.crypto	deser-key	defn	public	166	[p__23360]	
+datomic.crypto	combine-fragments	defn	public	180	[f1 f2]	
+datomic.crypto	hmac-length	def	public	185		
+datomic.crypto	calc-hmac	defn	public	191	[bbuf alg k]	
+datomic.crypto	append-hmac	defn	public	199	[bbuf alg k]	
+datomic.crypto	validate-hmac	defn	public	208	[bbuf alg k]	
+datomic.crypto	crypt-bbuf	defn	public	229	[input k op extra] [input k op]	
+datomic.crypto	sign	defn	public	260	[algo priv arr]	
+datomic.crypto	verify	defn	public	266	[algo pub arr sig]	
+datomic.crypto	keystore	defn	public	272	[f password type] [f password]	
+datomic.crypto	load-private-key	defn	public	281	[ks alias password]	
+datomic.crypto	load-public-key	defn	public	284	[ks alias]	
+datomic.data	table	def	public	7		
+datomic.datafy	setters	defn	public	28	[cls]	
+datomic.datafy	setter-name->keyword	defn	public	38	[n]	
+datomic.datafy	filter-overlapped-setters	defn	public	40	[coll]	
+datomic.datafy	getter?	defn	public	62	[m]	
+datomic.datafy	getters	defn	public	69	[cls]	
+datomic.datafy	type-descriptor-category	defn	public	73	[c]	
+datomic.datafy	type-descriptor	defmulti	public	83		
+datomic.datafy	property-descriptor	defmulti	public	84		
+datomic.datafy	map-property-types	def	public	87		
+datomic.datafy	list-property-types	def	public	88		
+datomic.datafy	property-descriptor	defmethod	public	89		
+datomic.datafy	property-descriptor	defmethod	public	101		
+datomic.datafy	property-descriptor	defmethod	public	110		
+datomic.datafy	type-descriptor	defmethod	public	111		
+datomic.datafy	type-descriptor	defmethod	public	129		
+datomic.datafy	type-descriptor	defmethod	public	151		
+datomic.datafy	ObjectToData	defonce	public	152		
+datomic.datafy	ObjectToData	defprotocol	public	153		
+datomic.datafy	object-to-data-wrapper	defn	public	154	[x]	
+datomic.datafy	vals-to-data	defn	public	175	[m]	
+datomic.datafy	data-to-object	defmulti	public	187		
+datomic.datafy	data-to-object	defmethod	public	188		
+datomic.datafy	data-to-object	defmethod	public	198		
+datomic.datafy	data-to-object	defmethod	public	208		
+datomic.datafy	data-to-object	defmethod	public	218		
+datomic.datafy	data-to-object	defmethod	public	228		
+datomic.datafy	data-to-object	defmethod	public	244		
+datomic.datafy	data-to-object	defmethod	public	260		
+datomic.datafy	property-to-object	defmulti	public	275		
+datomic.datafy	property-to-object	defmethod	public	276		
+datomic.datafy	invoke-setter	defn	public	292	[o m meth]	
+datomic.datafy	invoke-getter	defn	public	339	[o m meth]	
+datomic.datafy	can-data-to-object?	defn	public	370	[cls]	
+datomic.datafy	method-input-classes	defn	public	377	[m]	
+datomic.datafy	define-data-to-object	defn	public	378	[bean_class]	
+datomic.datafy	define-object-to-data	defn	public	495	[bean_class]	
+datomic.datafy	type-docstring	defn	public	525	[p__17298]	
+datomic.datafy	define-method-to-fn	defn	public	538	[m fname docstring]	
+datomic.datafy	get-java-method	defn	public	607	[cls mname arity types]	
+datomic.datafy	define-object-to-functions-for	defn	public	624	[&form &env clsname & specs]	
+datomic.datafy	define-data-to-object-for	defn	public	670	[&form &env & classes]	
+datomic.datafy	define-object-to-data-for	defn	public	677	[&form &env & classes]	
+datomic.datafy	define-map-valued-property-to-object	defn	public	684	[container property map_key_type map_value_type]	
+datomic.datafy	define-map-valued-property-to-object-for	defn	public	763	[&form &env & descs]	
+datomic.datafy	define-list-valued-property-to-object	defn	public	772	[container property list_value_type]	
+datomic.datafy	define-list-valued-property-to-object-for	defn	public	827	[&form &env & descs]	
+datomic.datafy	val-setters	defn	public	836	[bean_class]	
+datomic.datafy	vals-to-bean	defn	public	859	[bean props]	
+datomic.datalog	query-thread-prefix	def	public	81		query-40e7d292-b60a-40ef-b6d8-db96660e415b-
+datomic.datalog	on-query-thread?	defn	public	85	[]	
+datomic.datalog	query-pool	defonce	public	90		
+datomic.datalog	qmapv	defn	public	98	[f coll]	
+datomic.datalog	cancel-service	defonce	public	100		
+datomic.datalog	QUERY_DEFAULT_TIMEOUT	def	public	109		
+datomic.datalog	*cancel*	def	public	113		
+datomic.datalog	maybe-cancel	defn	public	115	[]	
+datomic.datalog	IJoin	defonce	public	122		
+datomic.datalog	IJoin	defprotocol	public	123		
+datomic.datalog	truep	defn	public	127	[]	
+datomic.datalog	tuple	defn	public	128	[arr]	
+datomic.datalog	iterator	defn	private	132	[xs]	
+datomic.datalog	matchf	defn	public	144	[bindings]	
+datomic.datalog	hashxf	defn	public	157	[bindings]	
+datomic.datalog	hashyf	defn	public	172	[bindings]	
+datomic.datalog	partv	defn	public	187	[n coll]	
+datomic.datalog	join-project-coll	defn	public	200	[xs ys join_map project_map_x project_map_y predctor]	
+datomic.datalog	join-project-coll-with	defn	public	209	[xs ys join_map project_map_x project_map_y predctor]	
+datomic.datalog	DbRel	deftype	public	395		
+datomic.datalog	->DbRel	defn	public	397	[db isref iskey consts starts whiles]	
+datomic.datalog	resolve-id	defn	public	400	[db x]	
+datomic.datalog	dbrel	defn	public	406	[db p__18171 starts whiles]	
+datomic.datalog	ExtRel	defonce	public	429		
+datomic.datalog	ExtRel	defprotocol	public	430		
+datomic.datalog	extrel-coll	defn	public	431	[src consts]	
+datomic.datalog	E	def	public	481		
+datomic.datalog	A	def	public	483		
+datomic.datalog	V	def	public	485		
+datomic.datalog	T	def	public	487		
+datomic.datalog	ADDED	def	public	489		
+datomic.datalog	DCOUNT	def	public	491		
+datomic.datalog	FnRel	deftype	public	1087		
+datomic.datalog	->FnRel	defn	public	1201	[db f arity src? consts]	
+datomic.datalog	fnrel	defn	public	1202	[db emap consts]	
+datomic.datalog	create-join-maps	defn	public	1210	[xbinds ybinds zbinds]	
+datomic.datalog	project	defn	public	1232	[xs xbinds ybinds]	
+datomic.datalog	PredRel	deftype	public	1269		
+datomic.datalog	->PredRel	defn	public	1322	[db f arity src? consts]	
+datomic.datalog	predrel	defn	public	1323	[db emap consts]	
+datomic.datalog	variable?	defn	public	1331	[x]	
+datomic.datalog	source?	defn	public	1332	[x]	
+datomic.datalog	variable-or-blank?	defn	public	1333	[x]	
+datomic.datalog	attr?	defn	public	1334	[db x]	
+datomic.datalog	extensional?	defn	public	1339	[rules pred]	
+datomic.datalog	adorned-pred	defn	public	1340	[query bindset] [query]	
+datomic.datalog	eval-query	declare	public	1346		
+datomic.datalog	not-join-clause?	defn	public	1347	[c]	
+datomic.datalog	free-var?	defn	public	1348	[x]	
+datomic.datalog	free-vars	defn	public	1349	[c]	
+datomic.datalog	unifying-vars	defn	public	1351	[p__18431]	
+datomic.datalog	unifying-var-set	defn	public	1383	[c]	
+datomic.datalog	used-srcs	defn	public	1384	[srcs c]	
+datomic.datalog	sched-in-order	defn	public	1389	[srcs prog p__18454 init_binds]	
+datomic.datalog	push-preds	defn	public	1608	[srcs sched]	
+datomic.datalog	recursive?	defn	public	1705	[prog pred seen] [prog pred]	
+datomic.datalog	rules?	defn	public	1716	[x]	
+datomic.datalog	scalar->rel	defn	public	1717	[x]	
+datomic.datalog	tuple->rel	defn	public	1718	[x]	
+datomic.datalog	compile-expr-clause	defn	public	1719	[sources vars expr bind_type binds]	
+datomic.datalog	binding-type	defn	public	1917	[binds]	
+datomic.datalog	expr-clause	defn	public	1930	[p__18637]	
+datomic.datalog	lift-consts-from-preds	defn	public	2014	[clauses]	
+datomic.datalog	all-pred	defn	public	2078	[p__18684]	
+datomic.datalog	to-pred	defn	public	2090	[p__18690]	
+datomic.datalog	not-or-all-pred	defn	public	2103	[p__18695]	
+datomic.datalog	not-or->not-or-join	defn	public	2128	[p__18701]	
+datomic.datalog	normalize-or-join	defn	public	2141	[p__18707]	
+datomic.datalog	or-join->rule-preds	defn	public	2167	[p__18714]	
+datomic.datalog	add-rule	declare	public	2181		
+datomic.datalog	prep-clauses	defn	public	2182	[rm clauses]	
+datomic.datalog	callees	defn	public	2211	[x]	
+datomic.datalog	add-rule	defn	public	2224	[rm rname preds]	
+datomic.datalog	rule-map	defn	public	2273	[rules]	
+datomic.datalog	rule-cache	def	public	2322		
+datomic.datalog	q	def	public	2323		
+datomic.datalog	eval-not-join	defn	public	2324	[srcs prog inrel inbinds p__18774]	
+datomic.datalog	eval-clause	defn	public	2371	[db srcs prog oprog clause predctor inrel inbinds next_binds sched_fn src ans ins top_bounds]	
+datomic.datalog	remap-bounds	defn	public	2490	[nb args]	
+datomic.datalog	eval-rule	defn	public	2503	[db prog oprog p__18820 p__18821 inrel sched_fn src ans ins top_bounds nested_bounds]	
+datomic.datalog	eval-query	defn	public	2590	[db prog oprog p__18844 input sched_fn src ans ins top_bounds nested_bounds]	
+datomic.datalog	bound-consts	defn	public	2643	[srcs query]	
+datomic.datalog	ranges	defn	public	2659	[in_consts query]	
+datomic.datalog	qsqr	defn	public	2677	[db query sched_fn] [db query]	
+datomic.datalog	rel-fn	defn	public	2737	[f]	
+datomic.datalog	rel-pred	defn	public	2739	[f]	
+datomic.db	BOOT-IDS	def	public	110		
+datomic.db	max-boot-id	def	private	156		
+datomic.db	PART_SYS	def	public	158		
+datomic.db	OP_ASSERT	def	public	160		
+datomic.db	OP_RETRACT	def	public	162		
+datomic.db	OP_EXCISE	def	public	164		
+datomic.db	SYS_RE_ID	def	public	166		
+datomic.db	SYS_PARTIALLY_INDEXED	def	public	168		
+datomic.db	EXCISE_ATTRS	def	public	172		
+datomic.db	EXCISE_BEFORE_T	def	public	174		
+datomic.db	EXCISE_BEFORE	def	public	176		
+datomic.db	PART_TX	def	public	178		
+datomic.db	PART_USER	def	public	180		
+datomic.db	RESERVED_PARTITIONS	def	public	182		
+datomic.db	MAX_PARTITION	def	public	186		
+datomic.db	PART_PENDING	def	public	188		
+datomic.db	IMPLICIT_PARTITION_START	def	public	190		
+datomic.db	IDENT	def	public	194		
+datomic.db	UNIQUE_IDENTITY	def	public	196		
+datomic.db	UNIQUE_VALUE	def	public	198		
+datomic.db	INSTALL_PARTITION	def	public	200		
+datomic.db	INSTALL_VTYPE	def	public	204		
+datomic.db	INSTALL_ATTRIBUTE	def	public	206		
+datomic.db	INSTALL_FUNCTION	def	public	210		
+datomic.db	ALTER_ATTRIBUTE	def	public	214		
+datomic.db	SYSTEM_TX	def	public	216		
+datomic.db	ATTR_LANG	def	public	218		
+datomic.db	ATTR_CODE	def	public	220		
+datomic.db	DB_FN	def	public	222		
+datomic.db	LANG_CLOJURE	def	public	224		
+datomic.db	LANG_JAVA	def	public	226		
+datomic.db	TYPE_REF	def	public	228		
+datomic.db	TYPE_KEYWORD	def	public	230		
+datomic.db	TYPE_BYTES	def	public	232		
+datomic.db	TYPE_LONG	def	public	234		
+datomic.db	CARDINALITY_ONE	def	public	236		
+datomic.db	CARDINALITY_MANY	def	public	238		
+datomic.db	ATTR_INSTANT	def	public	242		
+datomic.db	UNIQUE	def	public	244		
+datomic.db	CARDINALITY	def	public	246		
+datomic.db	VALUE_TYPE	def	public	248		
+datomic.db	IS_COMPONENT	def	public	250		
+datomic.db	INDEX	def	public	252		
+datomic.db	NO_HISTORY	def	public	254		
+datomic.db	FULLTEXT	def	public	256		
+datomic.db	BASE_TX	def	public	258		
+datomic.db	SCHEMA-LIMIT	def	public	260		
+datomic.db	SYSTEM_ATTRS	def	public	262		
+datomic.db	TUPLE_SCHEMA_LEVEL	def	public	263		
+datomic.db	supports-tuples?	defn	public	264	[db]	
+datomic.db	MAX_T	def	public	265		
+datomic.db	IDatumImpl	definterface	public	267		
+datomic.db	IElementImpl	definterface	public	269		
+datomic.db	IDb	definterface	public	271		
+datomic.db	IDbImpl	definterface	public	286		
+datomic.db	make-eid	defn	public	299	[part id]	
+datomic.db	eid->part	defn	public	301	[eid]	
+datomic.db	eid->eidx	defn	public	302	[eid]	
+datomic.db	partition-eid	defn	public	306	[eid]	
+datomic.db	get-part	defn	public	310	[datum]	
+datomic.db	get-eidx	defn	public	311	[datum]	
+datomic.db	implicit-part	defn	public	312	[id]	
+datomic.db	implicit-part-id	defn	public	320	[part]	
+datomic.db	make-tempid	defn	private	325	[part id]	
+datomic.db	tempid?	defn	public	339	[eid]	
+datomic.db	->DbId	declare	public	340		
+datomic.db	map->DbId	declare	public	341		
+datomic.db	DbId	defrecord	public	342		
+datomic.db	->DbId	defn	public	355	[part idx]	
+datomic.db	map->DbId	defn	public	356	[m__7585__auto__]	
+datomic.db	print-method	defmethod	public	362		
+datomic.db	print-dup	defmethod	public	367		
+datomic.db	BASE_TEMPID	def	public	368		
+datomic.db	BASE_TRANSACTOR_TEMPID	def	public	370		
+datomic.db	nextid	def	private	374		
+datomic.db	use-transactor-tempid-range	defn	public	383	[]	
+datomic.db	next-id	defn	private	384	[]	
+datomic.db	id-literal	defn	public	388	[literal]	
+datomic.db	resolve-id	declare	public	393		
+datomic.db	tempid	defn	public	394	[db part] [part]	
+datomic.db	LocalizeTempid	defonce	public	401		
+datomic.db	LocalizeTempid	defprotocol	public	402		
+datomic.db	Symbolish	defonce	public	403		
+datomic.db	Symbolish	defprotocol	public	404		
+datomic.db	system-eid	defn	private	405	[db ident]	
+datomic.db	add-system-eids	defn	private	414	[db]	
+datomic.db	caching-normalize	def	public	443		
+datomic.db	to-kw	defn	public	459	[kw]	
+datomic.db	normalize-kw	defn	public	460	[kw]	
+datomic.db	require-kw	defn	public	470	[kw]	
+datomic.db	Datum	deftype	public	475		
+datomic.db	->Datum	defn	public	586	[e a v tOp]	
+datomic.db	print-method	defmethod	public	593		
+datomic.db	dget	defn	public	610	[iter]	
+datomic.db	assertion-policy-compare	defn	private	621	[a b]	
+datomic.db	eavt-cmp	def	public	637		
+datomic.db	avet-cmp	def	public	658		
+datomic.db	aevt-cmp	def	public	679		
+datomic.db	raet-cmp	def	public	700		
+datomic.db	asserting-datum	defn	public	720	[e a v t]	
+datomic.db	retracting-datum	defn	public	723	[e a v t]	
+datomic.db	datum	declare	public	726		
+datomic.db	attr-index-range	declare	public	727		
+datomic.db	require-attrid	declare	public	728		
+datomic.db	require-attr	declare	public	729		
+datomic.db	datom-error-desc	declare	private	730		
+datomic.db	entity-error-desc	declare	private	731		
+datomic.db	update-schema-level	declare	public	732		
+datomic.db	IAttributeImpl	definterface	public	733		
+datomic.db	->Attribute	declare	public	735		
+datomic.db	map->Attribute	declare	public	736		
+datomic.db	Attribute	defrecord	public	737		
+datomic.db	->Attribute	defn	public	756	[id kw vtypeid cardinality isComponent unique index storageHasAVET needsAVET noHistory fulltext]	
+datomic.db	map->Attribute	defn	public	780	[m__7585__auto__]	
+datomic.db	attribute	defn	public	786	[db attrid]	
+datomic.db	resolve-lookup-ref	defn	public	791	[db x]	
+datomic.db	partbits	defn	public	813	[db kw_or_parteid]	
+datomic.db	resolve-dbid	defn	public	822	[db x]	
+datomic.db	extended-resolve-id	defn	public	840	[db x]	
+datomic.db	resolve-id	defn	public	847	[db x]	
+datomic.db	string-tempid?	defn	public	853	[s]	
+datomic.db	require-id	defn	public	854	[db x procargs] [db x]	
+datomic.db	require-tuple-ids	defn	private	872	[db attr tup]	
+datomic.db	maybe-require-ids	defn	public	914	[db a v reverse?]	
+datomic.db	resolve-kw	defn	public	953	[db x]	
+datomic.db	datum	defn	public	955	[db & p__12635]	
+datomic.db	filter-retractions	defn	public	985	[iter]	
+datomic.db	->Partition	declare	public	1025		
+datomic.db	map->Partition	declare	public	1026		
+datomic.db	Partition	defrecord	public	1027		
+datomic.db	->Partition	defn	public	1029	[id kw]	
+datomic.db	map->Partition	defn	public	1030	[m__7585__auto__]	
+datomic.db	explicit-partition	defn	public	1036	[db eid]	
+datomic.db	valid-partbits?	defn	public	1041	[db partbits]	
+datomic.db	->ValueType	declare	public	1044		
+datomic.db	map->ValueType	declare	public	1045		
+datomic.db	ValueType	defrecord	public	1046		
+datomic.db	->ValueType	defn	public	1048	[id kw fressian_tag]	
+datomic.db	map->ValueType	defn	public	1049	[m__7585__auto__]	
+datomic.db	value-type	defn	public	1055	[db attrid]	
+datomic.db	require-attrid	defn	public	1060	[db x]	
+datomic.db	require-attr	defn	public	1066	[db x]	
+datomic.db	AttrInfo	deftype	public	1067		
+datomic.db	->AttrInfo	defn	public	1166	[attr vtype_kw]	
+datomic.db	print-method	defmethod	public	1167		
+datomic.db	attr-info	defn	public	1195	[db attrid]	
+datomic.db	->Function	declare	public	1204		
+datomic.db	map->Function	declare	public	1205		
+datomic.db	Function	defrecord	public	1206		
+datomic.db	->Function	defn	public	1208	[id kw lang code f]	
+datomic.db	map->Function	defn	public	1209	[m__7585__auto__]	
+datomic.db	->IndexSet	declare	public	1215		
+datomic.db	map->IndexSet	declare	public	1216		
+datomic.db	IndexSet	defrecord	public	1217		
+datomic.db	->IndexSet	defn	public	1219	[eavt avet aevt raet fulltext]	
+datomic.db	map->IndexSet	defn	public	1221	[m__7585__auto__]	
+datomic.db	mem-index-set	def	public	1227		
+datomic.db	windowed	defn	public	1234	[db whilep iter]	
+datomic.db	seek-datoms	defn	public	1255	[db index components]	
+datomic.db	index-sort->cmp	defn	public	1327	[index_sort]	
+datomic.db	reverse-comparator	defn	private	1340	[cmp]	
+datomic.db	rseek-index	defn	public	1357	[p__12849 index_sort d]	
+datomic.db	distinct-last-by	defn	private	1387	[f coll]	
+datomic.db	reverse-datum-spec	defn	public	1415	[db index & p__12873]	
+datomic.db	rseek-datoms	defn	public	1437	[db index components]	
+datomic.db	datoms	defn	public	1499	[db index components]	
+datomic.db	attr-index-range	defn	public	1579	[db a start end]	
+datomic.db	find-avet	defn	public	1597	[db a v] [db a]	
+datomic.db	find-aevt	defn	public	1628	[db a e v] [db a e] [db a]	
+datomic.db	find-eavt	defn	public	1666	[db e a v] [db e a] [db e]	
+datomic.db	find-raet	defn	public	1704	[db r a] [db r]	
+datomic.db	get-entity	defn	public	1734	[db ent & p__13014]	
+datomic.db	entity-error-desc	defn	private	1773	[db eid]	
+datomic.db	v-error-desc	defn	private	1784	[v]	
+datomic.db	datom-error-desc	defn	private	1793	[db p__13028]	
+datomic.db	validate-hook-target	defn	public	1820	[db d]	
+datomic.db	prevent-ident-retarget!	defn	private	1840	[db e v]	
+datomic.db	key-hook	defn	private	1863	[_ db d _]	
+datomic.db	install-partition-hook	defn	private	1893	[_ db d check?]	
+datomic.db	install-vtype-hook	defn	private	1912	[_ db d check?]	
+datomic.db	needs-avet?	defn	private	1944	[ent]	
+datomic.db	attr-hook-attr-ids	defn	private	1953	[db]	
+datomic.db	functional-attr-ids	defn	private	1969	[db]	
+datomic.db	required-schema-attrs	def	private	1978		
+datomic.db	schema-hook-attrs	def	private	1982		
+datomic.db	install-attrs	def	private	1986		
+datomic.db	tuple-value-types	def	private	1988		
+datomic.db	installed-attribute?	defn	private	2004	[db eid]	
+datomic.db	TUP_MIN_ELEMS	def	public	2015		
+datomic.db	TUP_MAX_ELEMS	def	public	2017		
+datomic.db	tuple-attr-value-type	defn	private	2019	[db attr_id]	
+datomic.db	attr-tuple-attrs	defn	private	2039	[db attr]	
+datomic.db	datom-tuple-attrs	defn	private	2048	[db d]	
+datomic.db	tuple-install-errors	defn	private	2061	[db e]	
+datomic.db	install-attribute-errors	defn	public	2147	[before after eid]	
+datomic.db	reserved-keyword?	defn	public	2192	[kw]	
+datomic.db	create-attr-pred	defn	public	2197	[kw fn_names]	
+datomic.db	create-attribute	defn	public	2251	[db p__13114]	
+datomic.db	add-constituents	defn	private	2312	[db comp_id constituents]	
+datomic.db	install-attribute-hook	defn	private	2329	[before after d check?]	
+datomic.db	card-one-violator	defn	private	2411	[db aid]	
+datomic.db	unique-violator	defn	private	2432	[db aid]	
+datomic.db	set-element-fields	defn	private	2453	[db aid & kvs]	
+datomic.db	card-many->card-one	defn	private	2464	[db aid _ _]	
+datomic.db	constituent-of	defn	private	2481	[db aid]	
+datomic.db	card-one->card-many	defn	private	2507	[db aid _ vafter]	
+datomic.db	drop-avet	defn	private	2530	[db aid _ _]	
+datomic.db	drop-unique	defn	private	2544	[db aid _ _]	
+datomic.db	has-values?	defn	public	2558	[db attrid]	
+datomic.db	has-background-indexing?	defn	public	2561	[db]	
+datomic.db	can-immediately-toggle-storage-has-avet?	defn	public	2562	[db aid]	
+datomic.db	add-unique	defn	public	2565	[db aid _ unique]	
+datomic.db	memory-db	defn	public	2591	[db]	
+datomic.db	t-needing-avet	defn	public	2600	[db d]	
+datomic.db	t-needing-excise	defn	public	2614	[db d]	
+datomic.db	t-needing-index-job	defn	public	2619	[db d]	
+datomic.db	data-needs-index?	defn	public	2621	[db datoms]	
+datomic.db	system-schema-namespace?	defn	public	2627	[s]	
+datomic.db	system-schema-datom?	defn	public	2628	[db d]	
+datomic.db	system-datom?	defn	public	2637	[db d]	
+datomic.db	memdb-needs-index?	defn	public	2644	[db]	
+datomic.db	ts-needing-index	defn	public	2656	[db type limit_t]	
+datomic.db	is-indexing?	defn	public	2674	[db]	
+datomic.db	attribute-seq	defn	public	2675	[db]	
+datomic.db	add-avet	defn	private	2676	[db aid _ _]	
+datomic.db	create-simple-alter	defn	private	2705	[elem_key]	
+datomic.db	alter-fns	def	private	2718		
+datomic.db	find-alter-fn	defn	public	2737	[db eid fid from to]	
+datomic.db	alter-attribute	defn	public	2771	[before after d]	
+datomic.db	alter-attribute-hook	defn	public	2803	[before after d check?]	
+datomic.db	system-tx-hook	defn	public	2823	[_ after d check?]	
+datomic.db	safe-compile-function	defn	public	2827	[db lang code]	
+datomic.db	install-function-hook	defn	private	2857	[_ db d check?]	
+datomic.db	growvec	defn	private	2898	[v n]	
+datomic.db	hooks	def	public	2907		
+datomic.db	add-hook	defn	private	2908	[id f]	
+datomic.db	get-hook	defn	private	2921	[id]	
+datomic.db	fulltext?	defn	public	2937	[db attr]	
+datomic.db	fulltext-attrs	defn	public	2945	[db]	
+datomic.db	scan-aevt	defn	public	2950	[aevt attrid]	
+datomic.db	with-tx+opts	declare	public	2969		
+datomic.db	add-fulltext	declare	public	2970		
+datomic.db	as-of-t	defn	public	2971	[db t_or_date]	
+datomic.db	t-at-or-since	defn	public	2988	[db t_or_date]	
+datomic.db	entid-at	defn	public	3003	[db partition t_or_date]	
+datomic.db	invoke	defn	public	3030	[db eid_or_ident & args]	
+datomic.db	datoms-conflict	defn	private	3031	[db d1 d2]	
+datomic.db	create-deduper	defn	private	3045	[]	
+datomic.db	create-schema-validator	defn	private	3055	[db]	
+datomic.db	AVof	deftype	public	3108		
+datomic.db	->AVof	defn	public	3120	[d]	
+datomic.db	EAVof	deftype	public	3121		
+datomic.db	->EAVof	defn	public	3138	[d]	
+datomic.db	EAOpof	deftype	public	3139		
+datomic.db	->EAOpof	defn	public	3156	[d]	
+datomic.db	create-op-validator	defn	private	3157	[db]	
+datomic.db	create-card-one-validator	defn	private	3172	[db]	
+datomic.db	create-unique-value-validator	defn	private	3189	[db]	
+datomic.db	attrs-missing-hooks	defn	private	3208	[db datoms]	
+datomic.db	new-ents-not-installed	defn	private	3251	[db datoms]	
+datomic.db	on-prem-only-aids	def	private	3296		
+datomic.db	on-prem-only-vts	def	private	3300		
+datomic.db	cloud-compat-validator	defn	private	3304	[db d]	
+datomic.db	create-cloud-compat-validator	defn	public	3329	[db]	
+datomic.db	filter-assess-tx-datoms	defn	public	3334	[db check_installs? datoms]	
+datomic.db	->MemLog	declare	public	3388		
+datomic.db	map->MemLog	declare	public	3389		
+datomic.db	MemLog	defrecord	public	3390		
+datomic.db	->MemLog	defn	public	3392	[txes]	
+datomic.db	map->MemLog	defn	public	3393	[m__7585__auto__]	
+datomic.db	memlog	defn	public	3399	[]	
+datomic.db	add-log	defn	public	3400	[memlog t data]	
+datomic.db	trim-log	defn	public	3402	[memlog t]	
+datomic.db	retracts?	defn	private	3416	[d1 d2]	
+datomic.db	updates-v?	defn	private	3435	[d1 d2]	
+datomic.db	user-proc?	defn	public	3454	[procid]	
+datomic.db	tx-stat-keys	def	public	3455		
+datomic.db	empty-tx-stat-registers	defn	public	3471	[]	
+datomic.db	timing-key?	def	public	3478		
+datomic.db	summarize-tx-stats	defn	public	3481	[tx_stat_registers]	
+datomic.db	long-add!	defn	public	3496	[a v]	
+datomic.db	timed-tx-stat	defn	public	3497	[&form &env adder expr]	
+datomic.db	reverse-key?	declare	public	3525		
+datomic.db	->Db	declare	public	3526		
+datomic.db	map->Db	declare	public	3527		
+datomic.db	Db	defrecord	public	3528		
+datomic.db	->Db	defn	public	3948	[id memidx indexing mid_index index history memlog basisT nextT indexBasisT indexingNextT elements keys ids index_root_id index_rev asOfT sinceT raw filt]	
+datomic.db	map->Db	defn	public	3990	[m__7585__auto__]	
+datomic.db	bootstrap-data-upgrades	def	public	3996		
+datomic.db	simple-dispatch	defmethod	public	4040		
+datomic.db	assertion?	defn	private	4050	[d]	
+datomic.db	ident-setting-datoms	defn	private	4059	[db index]	
+datomic.db	run-hooks	defn	public	4085	[db index]	
+datomic.db	find-last-tx	defn	private	4122	[nextT index mid_index]	
+datomic.db	print-method	defmethod	public	4170		
+datomic.db	print-dup	defmethod	public	4171		
+datomic.db	load-builtins	def	private	4172		
+datomic.db	bootstrap-maybe-resolve	defn	private	4174	[db a v]	
+datomic.db	add-upgrade-data	defn	public	4187	[db system_data]	
+datomic.db	finish-init	defn	private	4219	[db]	
+datomic.db	db	defn	public	4231	[id p__13625]	
+datomic.db	has-memory-index?	defn	public	4279	[db]	
+datomic.db	recalc-elements	defn	public	4284	[db basisT]	
+datomic.db	prepare-for-indexing	defn	public	4299	[db]	
+datomic.db	complete-indexing	defn	public	4311	[db p__13634]	
+datomic.db	accept-index	defn	public	4356	[db p__13639]	
+datomic.db	IProcess	definterface	public	4505		
+datomic.db	IProcessExpander	definterface	public	4509		
+datomic.db	ProcessCollector	deftype	public	4511		
+datomic.db	->ProcessCollector	defn	public	4519	[arraylist]	
+datomic.db	write-handler-lookup	def	public	4520		
+datomic.db	reverse-key?	defn	public	4530	[k]	
+datomic.db	reverse-lookup?	defn	public	4536	[db k]	
+datomic.db	reverse-key	defn	public	4537	[k]	
+datomic.db	force-map-keywords	defn	public	4543	[db m]	
+datomic.db	nested-entity-map?	defn	public	4562	[db attrid v]	
+datomic.db	normalize-map	defn	private	4568	[m]	
+datomic.db	string-tempid	defn	public	4577	[]	
+datomic.db	has-unique-id?	defn	private	4578	[db emap]	
+datomic.db	AssignPartitions	definterface	public	4593		
+datomic.db	GetPartition	definterface	public	4598		
+datomic.db	reserved-partition?	defn	public	4600	[part]	
+datomic.db	PartitionRequests	deftype	public	4601		
+datomic.db	->PartitionRequests	defn	public	4642	[id_>part id_>match]	
+datomic.db	part-requests	defn	public	4644	[]	
+datomic.db	make-child-id	defn	private	4646	[db parentid attrid childmap]	
+datomic.db	expand-map	declare	public	4663		
+datomic.db	expand-submap	defn	private	4664	[db parentid attrid v part_reqs local_tempids]	
+datomic.db	forward-attr	defn	public	4694	[x]	
+datomic.db	process-force-partition	defn	public	4702	[forcemap db part_reqs local_tempids]	
+datomic.db	process-match-partition	defn	public	4718	[matchmap db part_reqs local_tempids]	
+datomic.db	expand-map	defn	public	4734	[db m part_reqs local_tempids]	
+datomic.db	wrong-type-for-attribute	defn	public	4790	[db attrid tag v]	
+datomic.db	canonicalize-v	defn	public	4801	[db attrid v tag]	
+datomic.db	TupleElem	defonce	public	4808		
+datomic.db	TupleElem	defprotocol	public	4809		
+datomic.db	CoerceV	defonce	public	4832		
+datomic.db	CoerceV	defprotocol	public	4833		
+datomic.db	coerce-tuple	defn	private	4845	[tuple]	
+datomic.db	valid-tuple-assert?	defn	private	4864	[attr tup]	
+datomic.db	validated-tuple	defn	private	4910	[db op attr v]	
+datomic.db	inject-retracts!	defn	private	4932	[nextp db eid attrid local_tempids]	
+datomic.db	validated-v-for-attr	defn	public	4958	[db attr v procargs procid] [db attr v]	
+datomic.db	ProcessInpoint	deftype	public	5011		
+datomic.db	->ProcessInpoint	defn	public	5096	[db part_reqs nextp]	
+datomic.db	default-partition	defn	private	5097	[db]	
+datomic.db	get-ids	defn	public	5114	[db data part_reqs]	
+datomic.db	has-tx-inst?	defn	public	5291	[db now datoms]	
+datomic.db	next-valid-inst	defn	private	5330	[db now]	
+datomic.db	resolve-procid	defn	private	5347	[db arg]	
+datomic.db	LocalDb	defonce	public	5364		
+datomic.db	LocalDb	defprotocol	public	5365		
+datomic.db	local-tuple	defn	private	5366	[attr v db procargs local_tempids]	
+datomic.db	ea->v	defn	private	5390	[db e a]	
+datomic.db	create-composite	defn	private	5399	[db eaop_map p__13921]	
+datomic.db	ensure-datom?	defn	public	5463	[db d]	
+datomic.db	PrefetchDispatcher	definterface	public	5468		
+datomic.db	prefetch!	defn	public	5473	[dispatcher f]	
+datomic.db	pf-close!	defn	public	5474	[dispatcher]	
+datomic.db	prefetch-constituents	defn	public	5475	[dispatcher adder db e a]	
+datomic.db	for-side-effects	defn	public	5491	[proc]	
+datomic.db	composites-prefetcher	defn	public	5492	[dispatcher tx_stat_registers db]	
+datomic.db	generate-composites	defn	private	5515	[db datoms tx_stat_registers]	
+datomic.db	calc-tempids	defn	private	5572	[gid_>lid lid_>eid]	
+datomic.db	add-tempids-to-errors	defn	private	5593	[f get_tempids]	
+datomic.db	prefetch-redundancy+uniqueness	defn	public	5630	[dispatcher tx_stat_registers db datoms]	
+datomic.db	prefetch-identity	defn	public	5694	[dispatcher tx_stat_registers db e a v]	
+datomic.db	ProcessExpander	deftype	public	5707		
+datomic.db	->ProcessExpander	defn	public	5900	[db part_reqs arraylist attr_hook_attrs prefetch_dispatcher tx_stat_registers]	
+datomic.db	default-prefetch-executor	defonce	public	5909		
+datomic.db	get-prefetch-dispatcher	defn	public	5927	[]	
+datomic.db	process-expander	defn	public	5954	[db part_reqs dispatcher tx_stat_registers]	
+datomic.db	add-fulltext	defn	public	5973	[db data]	
+datomic.db	ensure-pred	defn	private	6022	[s db e spec idmap]	
+datomic.db	missing-attrs	defn	private	6046	[entity required]	
+datomic.db	ensure-entity!	defn	public	6056	[db_before db_after e spec idmap]	
+datomic.db	ensure-tx	defn	private	6089	[db_before db_after data idmap]	
+datomic.db	add-ensured-data	defn	private	6174	[db_before data added idmap tx_stat_registers]	
+datomic.db	with-tx	defn	public	6199	[db dispatcher txdata]	
+datomic.db	with-tx+opts	defn	public	6232	[db txdata p__14107]	
+datomic.db	bootstrap-data	def	public	6260		
+datomic.db	system-data-fns	def	public	6333		
+datomic.db	db-docs	def	public	6345		
+datomic.db	add-fn-src	def	public	6432		
+datomic.db	bootstrap-txes	def	public	6511		
+datomic.db	MIN_SCHEMA_LEVEL	def	public	6566		
+datomic.db	MAX_SCHEMA_LEVEL	def	public	6567		
+datomic.db	tx-data-for-latest-schema-level	defn	public	6568	[db]	
+datomic.db	schema-level-fns	def	public	6573		
+datomic.db	on-schema-level	defn	public	6574	[db level]	
+datomic.db	update-schema-level	defn	public	6578	[db]	
+datomic.db	init-db	defn	private	6590	[id]	
+datomic.db	bootstrap-db*	defn	private	6639	[id] []	
+datomic.db	base-bootstrap-db	def	private	6701		
+datomic.db	bootstrap-db	defn	public	6705	[id] []	
+datomic.db	pretty-datum	defn	public	6708	[db d]	
+datomic.db	t->tx	defn	public	6734	[t]	
+datomic.db	accept-data-no-check	defn	public	6735	[db tx]	
+datomic.db	memlog-txes-since	defn	public	6736	[db t]	
+datomic.db	accept-txes	defn	public	6744	[db txes]	
+datomic.db-io	storage-resources	defn	public	29	[uri]	
+datomic.db-io	index-db	defn	public	39	[p__17059]	
+datomic.db-io	log	defn	public	51	[p__17062]	
+datomic.db-io	db-resources	defn	public	60	[cr]	
+datomic.db-io	index-includes-some-log-tail?	defn	public	62	[p__17066]	
+datomic.db-io	most-current-db	defn	private	71	[& dbs]	
+datomic.db-io	load-db-from-basis	defn	public	88	[cluster_db_conn olookup db_id & p__17074]	
+datomic.ddb	client	defn	public	78	[creds config] [creds] []	
+datomic.ddb	property-to-object	defmethod	public	143		
+datomic.ddb	property-to-object	defmethod	public	165		
+datomic.ddb	property-to-object	defmethod	public	189		
+datomic.ddb	property-to-object	defmethod	public	211		
+datomic.ddb	property-to-object	defmethod	public	233		
+datomic.ddb	property-to-object	defmethod	public	255		
+datomic.ddb	property-to-object	defmethod	public	279		
+datomic.ddb	property-to-object	defmethod	public	301		
+datomic.ddb	property-to-object	defmethod	public	316		
+datomic.ddb	data-to-object	defmethod	public	326		
+datomic.ddb	data-to-object	defmethod	public	503		
+datomic.ddb	data-to-object	defmethod	public	641		
+datomic.ddb	data-to-object	defmethod	public	741		
+datomic.ddb	data-to-object	defmethod	public	928		
+datomic.ddb	data-to-object	defmethod	public	1113		
+datomic.ddb	data-to-object	defmethod	public	1167		
+datomic.ddb	data-to-object	defmethod	public	1237		
+datomic.ddb	data-to-object	defmethod	public	1271		
+datomic.ddb	data-to-object	defmethod	public	1276		
+datomic.ddb	data-to-object	defmethod	public	1306		
+datomic.ddb	data-to-object	defmethod	public	1340		
+datomic.ddb	data-to-object	defmethod	public	1345		
+datomic.ddb	data-to-object	defmethod	public	1531		
+datomic.ddb	data-to-object	defmethod	public	1623		
+datomic.ddb	list-tables	defn	public	2221	[o x1]	
+datomic.ddb	create-table	defn	public	2239	[o x1]	
+datomic.ddb	update-table	defn	public	2257	[o x1]	
+datomic.ddb	delete-table	defn	public	2275	[o x1]	
+datomic.ddb	describe-table	defn	public	2293	[o x1]	
+datomic.ddb	put-item*	defn	public	2311	[o x1]	
+datomic.ddb	get-item*	defn	public	2329	[o x1]	
+datomic.ddb	delete-item	defn	public	2347	[o x1]	
+datomic.ddb	log-errors	defn	public	2365	[f & args]	
+datomic.ddb	put-item	defn	public	2391	[ddb_client request]	
+datomic.ddb	get-item	defn	public	2392	[ddb_client request]	
+datomic.ddb	fullname	defn	public	2393	[s]	
+datomic.ddb	create-item	defn	public	2394	[m]	
+datomic.ddb	deattr	defn	public	2405	[m]	
+datomic.ddb	deitem	defn	public	2417	[m]	
+datomic.ddb	create-key	defn	public	2428	[k]	
+datomic.ddb-cluster	key-path	defn	private	33	[path_map k]	
+datomic.ddb-cluster	create-connection	defn	public	42	[p__20504]	
+datomic.ddb-s3-cluster	storage-config-key	def	public	62		ref-storage-config
+datomic.ddb-s3-cluster	efs-delete-pool	defonce	private	66		
+datomic.ddb-s3-cluster	efs-read-pool	defonce	private	73		
+datomic.ddb-s3-cluster	efs-write-pool	defonce	private	75		
+datomic.ddb-s3-cluster	s3-read-pool	defonce	private	82		
+datomic.ddb-s3-cluster	s3-write-pool	defonce	private	84		
+datomic.ddb-s3-cluster	storage-path	defn	private	86	[p__22769]	
+datomic.ddb-s3-cluster	get-config-refval	defn	private	103	[kv_cluster]	
+datomic.ddb-s3-cluster	get-valid-config!	defn	private	116	[kv_store cluster_conf]	
+datomic.ddb-s3-cluster	ensure-config	defn	private	132	[p__22776]	
+datomic.ddb-s3-cluster	create-s3-store	defn	private	185	[p__22783]	
+datomic.ddb-s3-cluster	create-connection-with-efs	defn	private	235	[p__22794]	
+datomic.ddb-s3-cluster	create-connection-without-efs	defn	private	294	[p__22798]	
+datomic.ddb-s3-cluster	create-connection	defn	public	340	[p__22801]	
+datomic.ddb-s3-cluster	ensure-system	defn	public	351	[p__22804]	
+datomic.ddb-values	*retry*	def	public	26		
+datomic.ddb-values	chunk	defn	public	28	[s chunk_size]	
+datomic.ddb-values	unchunk	defn	public	34	[chunks]	
+datomic.ddb-values	split-map-keys-with	defn	public	35	[m pred]	
+datomic.ddb-values	chunk-key	defn	public	51	[k n]	
+datomic.ddb-values	chunk-pool	defonce	public	52		
+datomic.ddb-values	put-value	defn	public	56	[ddb_client table value]	
+datomic.ddb-values	get-deitem	defn	public	249	[ddb_client table id]	
+datomic.ddb-values	get-value	defn	public	269	[ddb_client table id]	
+datomic.ddb-values	delete-value	defn	public	399	[ddb_client table id]	
+datomic.domain	common-read-handlers	def	public	100		
+datomic.domain	uncached-lookup-factory	defn	public	102	[cluster]	
+datomic.domain	create-object-cache	defn	public	110	[cache_bytes] []	
+datomic.domain	ValcachePoller	deftype	public	125		
+datomic.domain	->ValcachePoller	defn	public	140	[cluster valcache_group_config server_specs_ref timer]	
+datomic.domain	print-method	defmethod	public	143		
+datomic.domain	print-dup	defmethod	public	149		
+datomic.domain	cache-delay	def	public	150		
+datomic.domain	system-cache	defn	public	151	[]	
+datomic.domain	peer-object-lookup	defn	public	152	[val_lookup read_lookup object_cache] [val_lookup read_lookup]	
+datomic.domain	preload-extension-resolver!	defn	public	185	[]	
+datomic.domain	defressian	def	private	194		
+datomic.domain	deserialize	defn	public	196	[m]	
+datomic.domain	DeserializingRepairingLookup	deftype	public	197		
+datomic.domain	->DeserializingRepairingLookup	defn	public	222	[cluster]	
+datomic.domain	deserializing-repairing-lookup	defn	public	224	[cluster]	
+datomic.domain	lookup-with-object-cache	defn	public	225	[lookup object_cache] [lookup]	
+datomic.domain	system-cache-olookup	defn	public	253	[cluster]	
+datomic.error	anomalize	defmulti	public	14		
+datomic.error	anomalize	defmethod	public	15		
+datomic.error	anomalize	defmethod	public	21		
+datomic.error	anomalize	defmethod	public	27		
+datomic.error	create	defn	public	28	[&form &env cls code msg details cause] [&form &env cls code msg details] [&form &env cls code msg] [&form &env cls code]	
+datomic.error	raise	defn	public	113	[code msg details cause] [code msg details] [code msg] [code]	
+datomic.error	arg	defn	public	139	[code msg details cause] [code msg details] [code msg] [code]	
+datomic.error	eval-exception	defn	public	165	[p__671 t]	
+datomic.error	add-details-to-msg	defn	public	182	[msg details]	
+datomic.error	argd	defn	public	195	[code msg details cause] [code msg details] [code msg] [code]	
+datomic.error	state	defn	public	221	[code msg details cause] [code msg details] [code msg] [code]	
+datomic.error	reporter	def	public	247		
+datomic.error	has-string-constructor?	defn	private	248	[cls]	
+datomic.error	exception-deserializer	def	public	265		
+datomic.error	deserialize-exception	defn	public	285	[p__699]	
+datomic.error	report	defn	public	310	[t]	
+datomic.error	runonce	defn	public	311	[f]	
+datomic.error	with-unwind*	defn	public	318	[&form &env unwind_prev unwind_all bindings & body]	
+datomic.error	with-unwind	defn	public	415	[&form &env unwind_all bindings & body]	
+datomic.error	cancelled?	defn	public	425	[anom]	
+datomic.error	should-log-exception?	defn	public	426	[anom]	
+datomic.excise	component-attr?	defn	public	37	[db a]	
+datomic.excise	component-es-set	defn	public	38	[db e via_attrs] [db e]	
+datomic.excise	ExcisePred	defonce	public	80		
+datomic.excise	ExcisePred	defprotocol	public	81		
+datomic.excise	bootids	def	private	82		
+datomic.excise	keeper?	defn	public	84	[d]	
+datomic.excise	get-before-t	defn	public	91	[db spec]	
+datomic.excise	pred-and-extent	defn	private	97	[db spec]	
+datomic.excise	pred	defn	private	200	[db spec]	
+datomic.excise	e-target?	defn	private	209	[id]	
+datomic.excise	a-target?	defn	private	218	[id]	
+datomic.excise	ref-datom?	defn	private	227	[db d]	
+datomic.excise	target	defn	private	243	[db spec]	
+datomic.excise	create-e->xpreds	defn	private	252	[db specs]	
+datomic.excise	create-es-pred	defn	private	274	[db specs]	
+datomic.excise	create-a->xpreds	defn	private	300	[db specs]	
+datomic.excise	create-as-pred	defn	public	319	[db specs]	
+datomic.excise	create-xpreds	defn	public	337	[db specs]	
+datomic.excise	datoms	defn	public	341	[epred]	
+datomic.excise	remove?	defn	public	342	[epred datom]	
+datomic.extension-resolver	wildcard-name?	defn	public	19	[s]	
+datomic.extension-resolver	anom-map	defn	private	20	[category msg]	
+datomic.extension-resolver	anomaly!	defn	private	32	[name msg cause] [name msg]	
+datomic.extension-resolver	explicit-pred	defn	private	43	[allow]	
+datomic.extension-resolver	wildcard-pred	defn	private	55	[allow]	
+datomic.extension-resolver	ensure-allow-list!	defn	private	67	[allow_list]	
+datomic.extension-resolver	ensure-extensions-config!	defn	private	84	[p__14311]	
+datomic.extension-resolver	allow-list->pred	defn	private	100	[allow]	
+datomic.extension-resolver	load-extensions-config	defn	public	117	[rsrc]	
+datomic.extension-resolver	config-resource	def	public	125		datomic/extensions.edn
+datomic.extension-resolver	load-preds	defn	private	126	[rsrc]	
+datomic.extension-resolver	preds-ref	def	private	137		
+datomic.extension-resolver	allow?	defn	private	139	[sym pred]	
+datomic.extension-resolver	user-namespaces	defn	public	148	[path]	
+datomic.extension-resolver	preload!	defn	public	156	[path]	
+datomic.extension-resolver	resolve!	defn	public	176	[x context]	
+datomic.extension-resolver	resolve-built-in-xform	defn	public	189	[sym]	
+datomic.extension-resolver	resolve-xform!	defn	public	193	[sym]	
+datomic.extensions	project	defn	private	36	[xs binds]	
+datomic.extensions	fulltext	defn	private	82	[db attr qmap]	
+datomic.extensions	tx-ids	defn	public	91	[log start end]	
+datomic.extensions	tx-data	defn	public	96	[log t]	
+datomic.extensions	missing?	defn	public	97	[db e attr]	
+datomic.extensions	ensure-sv-attrid	defn	private	98	[db a]	
+datomic.extensions	get-else	defn	public	118	[db e attr v]	
+datomic.extensions	get-some	defn	public	125	[db e & attrs]	
+datomic.extensions	ground	defn	public	139	[x]	
+datomic.extensions	-gather	defn	public	140	[db e & attrs]	
+datomic.extensions	/	defn	public	175	[a b]	
+datomic.extensions	!=	def	public	176		
+datomic.extensions	<	defn	public	177	[a b]	
+datomic.extensions	>	defn	public	178	[a b]	
+datomic.extensions	<=	defn	public	179	[a b]	
+datomic.extensions	>=	defn	public	180	[a b]	
+datomic.extensions	tuple	def	public	181		
+datomic.extensions	untuple	def	public	182		
+datomic.extensions	q	defn	public	183	[query & srcs]	
+datomic.extensions	db-attr-splits	def	public	184		
+datomic.external-sort	IO	defonce	public	26		
+datomic.external-sort	IO	defprotocol	public	27		
+datomic.external-sort	temp-file-io	defn	public	28	[dir]	
+datomic.external-sort	next-chunk	defn	private	37	[max_size sizer iter]	
+datomic.external-sort	chunk-seq	defn	public	62	[max_size sizer iter]	
+datomic.external-sort	ExternalSort	defonce	public	76		
+datomic.external-sort	ExternalSort	defprotocol	public	77		
+datomic.external-sort	MAX_MERGE	def	public	82		
+datomic.external-sort	FileSystemSorter	deftype	public	84		
+datomic.external-sort	->FileSystemSorter	defn	public	172	[pool cmp io file_iter_fn create_file_writer_fn prog_fn files]	
+datomic.external-sort	file-system-sorter	defn	public	182	[p__14491 iter]	
+datomic.external-sort-datoms	create-file-writer	defn	public	42	[os handlers]	
+datomic.external-sort-datoms	datom-write-handlers	def	public	46		
+datomic.external-sort-datoms	datom-read-handlers	def	public	76		
+datomic.external-sort-datoms	consume-sorted-datoms	defn	public	94	[iter p__14511 handler]	
+datomic.fressian	as-lookup	defn	public	76	[o]	
+datomic.fressian	write-handler-lookup	defn	public	78	[custom_lookup]	
+datomic.fressian	create-writer	defn	public	80	[out lookup] [out]	
+datomic.fressian	create-reader	defn	public	91	[in lookup validate_checksum] [in lookup] [in]	
+datomic.fressian	begin-open-list	defn	public	109	[writer]	
+datomic.fressian	begin-closed-list	defn	public	110	[writer]	
+datomic.fressian	end-list	defn	public	111	[writer]	
+datomic.fressian	fressian	defn	public	112	[out obj & p__12173]	
+datomic.fressian	defressian	defn	public	126	[in & p__12176]	
+datomic.fressian	byte-buf	defn	public	138	[obj & options]	
+datomic.fressian	fressian-val	defn	public	151	[val handlers]	
+datomic.fressian	read-batch	defn	public	157	[fin]	
+datomic.fressian	read-seq	defn	public	165	[readable handler_lookup] [readable]	
+datomic.fressian	write-named	defn	public	193	[tag w s]	
+datomic.fressian	clojure-write-handlers	def	public	198		
+datomic.fressian	clojure-read-handlers	def	public	222		
+datomic.fressian	user-write-handlers	def	public	244		
+datomic.fressian	user-read-handlers	def	public	260		
+datomic.fressian	record-latencies	defn	private	270	[nanos _]	
+datomic.fressian	val->obj	defn	public	283	[read_lookup]	
+datomic.fressian	FressianIter	deftype	public	314		
+datomic.fressian	->FressianIter	defn	public	325	[reader item]	
+datomic.fressian	reader-iter	defn	public	326	[is handlers]	
+datomic.fressian	fressianable?	defn	public	328	[val handlers] [val]	
+datomic.fulltext	doc->datum	defn	public	88	[doc a]	
+datomic.fulltext	SearchIterator	deftype	public	94		
+datomic.fulltext	->SearchIterator	defn	public	113	[searcher search score_docs attr high_score]	
+datomic.fulltext	SearchIterable	deftype	public	121		
+datomic.fulltext	->SearchIterable	defn	public	134	[searcher search score_docs attr high_score]	
+datomic.fulltext	search-iterable	defn	public	142	[searcher db attr search_map]	
+datomic.fulltext	default-chunk-size	def	public	201		
+datomic.fulltext	hybrid-dir	defn	public	205	[writer reader delete_handler]	
+datomic.fulltext	index-files	defn	public	211	[index_dir]	
+datomic.fulltext	promote-to-cluster	defn	public	218	[indexing_job]	
+datomic.fulltext	cluster-directory	defn	public	240	[clusterfs olookup]	
+datomic.fulltext	null-dir	def	public	245		
+datomic.fulltext	work-dir	def	public	249		
+datomic.fulltext	create-indexing-job	defn	public	250	[cstore olookup baseid]	
+datomic.fulltext	add-data-to-writer	defn	public	269	[writer data]	
+datomic.fulltext	add-chunked-data-to-writer	defn	public	289	[writer data]	
+datomic.fulltext	find-historic-docid	defn	public	374	[searcher datum]	
+datomic.fulltext	remove-data-from-reader	defn	public	412	[reader data]	
+datomic.fulltext	create-index-on-dir	defn	public	457	[dir add_data remove_data]	
+datomic.fulltext	do-indexing-job	defn	public	471	[cstore olookup add_data remove_data attr_id dirid]	
+datomic.fulltext	->Root	declare	public	564		
+datomic.fulltext	map->Root	declare	public	565		
+datomic.fulltext	Root	defrecord	public	566		
+datomic.fulltext	->Root	defn	public	568	[attrmap]	
+datomic.fulltext	map->Root	defn	public	569	[m__7585__auto__]	
+datomic.fulltext	write-handlers	def	public	575		
+datomic.fulltext	read-handlers	def	public	589		
+datomic.fulltext	write-changed-val	defn	public	598	[cstore oldid oldval newval garbage]	
+datomic.fulltext	find-matching-assertion	defn	public	610	[db d]	
+datomic.fulltext	separate-history	defn	public	640	[db data history]	
+datomic.fulltext	build-index	defn	public	669	[cstore olookup db aevt attrids old_root_id old_hist_id]	
+datomic.fulltext	->ClusteredFulltext	declare	public	833		
+datomic.fulltext	map->ClusteredFulltext	declare	public	834		
+datomic.fulltext	ClusteredFulltext	defrecord	public	835		
+datomic.fulltext	->ClusteredFulltext	defn	public	847	[olookup root]	
+datomic.fulltext	map->ClusteredFulltext	defn	public	848	[m__7585__auto__]	
+datomic.fulltext	clustered-fulltext	defn	public	854	[olookup rootid]	
+datomic.fulltext	fulltext-index-reader	defn	public	857	[db idx attrid]	
+datomic.fulltext	search	defn	public	862	[db a search_map]	
+datomic.fulltext-index	datum->doc	defn	public	32	[datum]	
+datomic.fulltext-index	LuceneProvider	defonce	public	46		
+datomic.fulltext-index	LuceneProvider	defprotocol	public	47		
+datomic.fulltext-index	->PersistentFulltext	declare	public	48		
+datomic.fulltext-index	map->PersistentFulltext	declare	public	49		
+datomic.fulltext-index	PersistentFulltext	defrecord	public	50		
+datomic.fulltext-index	->PersistentFulltext	defn	public	60	[]	
+datomic.fulltext-index	map->PersistentFulltext	defn	public	61	[m__7585__auto__]	
+datomic.fulltext-index	update-fulltext	defn	public	67	[pft data]	
+datomic.function	->Function	declare	public	46		
+datomic.function	map->Function	declare	public	47		
+datomic.function	Function	defrecord	public	48		
+datomic.function	->Function	defn	public	93	[lang imports requires params code fnref]	
+datomic.function	map->Function	defn	public	96	[m__7585__auto__]	
+datomic.function	print-function	defn	private	102	[dbfn w]	
+datomic.function	print-method	defmethod	public	118		
+datomic.function	print-dup	defmethod	public	119		
+datomic.function	compile-clojure	defn	public	120	[imports requires params code]	
+datomic.function	normalize	defn	private	136	[m]	
+datomic.function	construct	defn	public	178	[m]	
+datomic.future	filling-promise	defn	private	34	[f]	
+datomic.future	GetChannel	defonce	public	56		
+datomic.future	GetChannel	defprotocol	public	57		
+datomic.future	JavaFutureWithChannel	deftype	public	58		
+datomic.future	->JavaFutureWithChannel	defn	public	77	[fut ch]	
+datomic.future	ClojureFutureWithChannel	deftype	public	78		
+datomic.future	->ClojureFutureWithChannel	defn	public	90	[fut ch]	
+datomic.future	-future-with-channel-impl	defn	public	91	[exec f] [f]	
+datomic.future	add-bounding-warning	defn	public	106	[promise_ch context seconds]	
+datomic.future	bounding-warn-seconds	def	public	522		
+datomic.future	future	defn	public	523	[&form &env & body]	
+datomic.future	future-call	defn	public	568	[&form &env f]	
+datomic.future	pfuture	defn	public	604	[&form &env exec & body]	
+datomic.future	pfuture-call	defn	public	650	[&form &env exec f]	
+datomic.garbage	root-ref-key	defn	public	50	[cluster]	
+datomic.garbage	leaf-threshold	def	public	54		
+datomic.garbage	create-garbage-node	defn	private	55	[cluster uuid o]	
+datomic.garbage	dir-seq	defn	public	69	[lookup root]	
+datomic.garbage	leaf-seq	defn	public	74	[lookup root]	
+datomic.garbage	ensure-root-ref	defn	public	79	[cluster forget_garbage] [cluster]	
+datomic.garbage	ensure-root	defn	public	99	[cluster lookup]	
+datomic.garbage	append-leaf	defn	public	103	[cluster lookup leaf max_dir_size]	
+datomic.garbage	garbage-agent	def	public	184		
+datomic.garbage	do-mark-garbage	defn	public	185	[m cluster lookup ids max_leaf_size max_dir_size]	
+datomic.garbage	mark-garbage	defn	public	252	[cluster lookup ids max_leaf_size max_dir_size] [cluster lookup ids]	
+datomic.garbage	install-mark-handler	defn	public	292	[]	
+datomic.garbage	flush-garbage	defn	public	309	[cluster olookup]	
+datomic.garbage	pending-garbage-count	defn	public	313	[gmap cluster]	
+datomic.garbage	gc-val->obj	def	public	321		
+datomic.garbage	gc-get-node	defn	public	322	[cluster uuid]	
+datomic.garbage	pace-gc	defn	public	327	[]	
+datomic.garbage	gc-delete-vals	defn	public	334	[cluster vs]	
+datomic.garbage	gc-leaf	defn	public	345	[cluster uuid tstamp]	
+datomic.garbage	gc-dir	defn	public	368	[cluster uuid tstamp]	
+datomic.garbage	gc	defn	public	398	[cluster tstamp progress] [cluster tstamp]	
+datomic.garbage	collection-agent	def	public	444		
+datomic.garbage	queue-gc	defn	public	445	[cluster older_than]	
+datomic.garbage	gc-deleted-db	defn	public	498	[system_cluster db_cluster status_callback]	
+datomic.garbage	get-db-ids	defn	public	564	[uri]	
+datomic.garbage	deleted-db-cluster-conf	defn	public	570	[uri id]	
+datomic.garbage	gc-deleted-dbs	defn	public	571	[p__19895]	
+datomic.garbage.fressian	->GarbageRoot	declare	public	17		
+datomic.garbage.fressian	map->GarbageRoot	declare	public	18		
+datomic.garbage.fressian	GarbageRoot	defrecord	public	19		
+datomic.garbage.fressian	->GarbageRoot	defn	public	21	[children]	
+datomic.garbage.fressian	map->GarbageRoot	defn	public	22	[m__7585__auto__]	
+datomic.garbage.fressian	->GarbageDir	declare	public	28		
+datomic.garbage.fressian	map->GarbageDir	declare	public	29		
+datomic.garbage.fressian	GarbageDir	defrecord	public	30		
+datomic.garbage.fressian	->GarbageDir	defn	public	32	[children]	
+datomic.garbage.fressian	map->GarbageDir	defn	public	33	[m__7585__auto__]	
+datomic.garbage.fressian	->GarbageLeaf	declare	public	39		
+datomic.garbage.fressian	map->GarbageLeaf	declare	public	40		
+datomic.garbage.fressian	GarbageLeaf	defrecord	public	41		
+datomic.garbage.fressian	->GarbageLeaf	defn	public	43	[children]	
+datomic.garbage.fressian	map->GarbageLeaf	defn	public	44	[m__7585__auto__]	
+datomic.garbage.fressian	write-handler	defn	private	50	[tag]	
+datomic.garbage.fressian	read-handler	defn	private	68	[factory]	
+datomic.garbage.fressian	write-handlers	def	public	83		
+datomic.garbage.fressian	read-handlers	def	public	102		
+datomic.garbage.pod	pod-gc-delay-msec	def	private	28		
+datomic.garbage.pod	warn	defn	private	32	[msg ex] [msg]	
+datomic.garbage.pod	schedule-gc	defn	public	53	[cluster garbage_ids_ref]	
+datomic.h2	driver-manager-lock	def	private	24		
+datomic.h2	create-sql-spec*	def	public	28		
+datomic.h2	create-sql-spec	defn	public	56	[cluster_map]	
+datomic.h2	sql-url	defn	public	58	[data_dir]	
+datomic.h2	try-connect	defn	public	59	[p__11601]	
+datomic.h2	uq	defn	public	84	[username]	
+datomic.h2	rename-user-cmd	defn	public	85	[p__11607]	
+datomic.h2	set-password-cmd	defn	public	95	[p__11612]	
+datomic.h2	updating-connect	defn	public	104	[data_dir p__11616]	
+datomic.h2	ensure-admin-conn	defn	public	134	[p__11623]	
+datomic.h2	ensure-datomic-password	defn	public	157	[p__11628]	
+datomic.h2	can-remote?	defn	public	184	[p__11633]	
+datomic.h2	init-embedded	defn	public	203	[spec]	
+datomic.h2	init-tcp	defn	public	225	[p__11641]	
+datomic.h2	shutdown	defn	public	253	[p__11644]	
+datomic.h2	local-jdbc-spec	defn	public	262	[p__11647]	
+datomic.h2	remote-jdbc-spec	defn	public	277	[p__11651]	
+datomic.index	deref-or-throw	defn	private	114	[ref]	
+datomic.index	ITransposeData	definterface	public	128		
+datomic.index	TransposedData	deftype	public	143		
+datomic.index	->TransposedData	defn	public	199	[cnt eas vs ts ops]	
+datomic.index	transposed-data	defn	public	202	[es as vs ts ops]	
+datomic.index	RootNode	deftype	public	209		
+datomic.index	->RootNode	defn	public	211	[keydata dirids dirs]	
+datomic.index	root-node	defn	public	212	[keydata dirids]	
+datomic.index	DirNode	deftype	public	218		
+datomic.index	->DirNode	defn	public	220	[keydata segids offsets counts segs]	
+datomic.index	dir-node	defn	public	223	[keydata segids offsets counts]	
+datomic.index	array-cache-ref	def	public	231		
+datomic.index	use-array-cache?	defn	public	232	[]	
+datomic.index	get-dir-node	defn	public	233	[root ridx lookup cache?]	
+datomic.index	ITreeIter	defonce	public	250		
+datomic.index	ITreeIter	defprotocol	public	251		
+datomic.index	IIndex	defonce	public	252		
+datomic.index	IIndex	defprotocol	public	253		
+datomic.index	TreeIter	deftype	public	254		
+datomic.index	->TreeIter	defn	public	879	[lookup root ridx dir didx seg sidx]	
+datomic.index	IBinarySearch	definterface	public	889		
+datomic.index	IndexedComparator	definterface	public	893		
+datomic.index	eavt-cmpi	def	public	897		
+datomic.index	avet-cmpi	def	public	941		
+datomic.index	aevt-cmpi	def	public	985		
+datomic.index	raet-cmpi	def	public	1029		
+datomic.index	btree-search	defn	private	1071	[coll k cmp]	
+datomic.index	binary-search	defn	private	1086	[coll k cmp]	
+datomic.index	indexed-binary-search	defn	public	1102	[tdata k cmpi]	
+datomic.index	ibtree-search	defn	private	1118	[coll k cmp]	
+datomic.index	ibinary-search	defn	private	1134	[coll k cmp]	
+datomic.index	Index	deftype	public	1151		
+datomic.index	->Index	defn	public	1419	[lookup cmpi root cached_count order]	
+datomic.index	lookup-index	defn	public	1422	[lookup cmpi rootid]	
+datomic.index	common-write-handlers	def	public	1434		
+datomic.index	index-read-handlers	def	public	1478		
+datomic.index	index-ref-key-name	defn	public	1512	[cs]	
+datomic.index	fress	defn	public	1516	[val handlers]	
+datomic.index	transpose	defn	public	1526	[data]	
+datomic.index	write-vals	defn	public	1550	[cs vmap]	
+datomic.index	INDEX_VERSION	def	public	1571		
+datomic.index	init-index*	defn	public	1573	[cstore]	
+datomic.index	init-index	defn	public	1765	[cstore]	
+datomic.index	find-index-root-id	defn	public	1777	[cstore]	
+datomic.index	valid-version	defn	public	1785	[root_map]	
+datomic.index	version-root-key	defn	private	1794	[version k]	
+datomic.index	load-index	defn	public	1823	[olookup index_root_id]	
+datomic.index	SEG_BYTES_TARGET	def	private	1913		
+datomic.index	SEGS_PER_DIR	def	private	1917		
+datomic.index	with-log	defn	public	1921	[&form &env name & body]	
+datomic.index	floop	defn	public	1957	[&form &env bindings & body]	
+datomic.index	create-pace-calculator	defn	public	1977	[target_work window_msec]	
+datomic.index	*pace-index-fn*	def	public	2007		
+datomic.index	build-one-seg	defn	private	2011	[data cnt write_handlers]	
+datomic.index	bounded-count	defn	public	2153	[n coll]	
+datomic.index	build-psegs	defn	private	2155	[cstore olookup data es write_handlers segs_written_ref]	
+datomic.index	filter-nohist-pairs	defn	public	2221	[db data]	
+datomic.index	separating-retractions	defn	public	2247	[db retref data]	
+datomic.index	fully-take-while-delivering-tail	defn	public	2274	[p pred coll]	
+datomic.index	fully-partition-by	defn	public	2284	[f coll]	
+datomic.index	fred	defn	public	2303	[f ret coll]	
+datomic.index	build-segs	defn	private	2310	[db cstore olookup data es retractions partfn write_handlers segs_written_ref]	
+datomic.index	merge-data	defn	private	2341	[cmp ds1 ds2]	
+datomic.index	DIR_PARTITION_SIZE	def	private	2361		
+datomic.index	MEM_TO_STG_RATIO	def	private	2365		
+datomic.index	BYTES_PER_SEG	def	private	2369		
+datomic.index	MID_INDEX_THRESHOLD_FACTOR	def	private	2371		
+datomic.index	MIN_MAIN_INDEX_THRESHOLD	def	private	2375		
+datomic.index	SLICE_STEP	def	private	2379		
+datomic.index	dir-partition-size	defn	private	2381	[idx]	
+datomic.index	make-sparse-lt	defn	public	2393	[cmp]	
+datomic.index	strdiff	defn	public	2405	[mins maxs]	
+datomic.index	mindiff	declare	public	2419		
+datomic.index	vecdiff	defn	public	2420	[minv maxv]	
+datomic.index	mindiff	defn	public	2441	[minv maxv]	
+datomic.index	sparse-datom	defn	public	2447	[idx prior d]	
+datomic.index	seg-last-datom	defn	public	2565	[olookup segid]	
+datomic.index	sparse-e-xf	defn	public	2569	[olookup idx]	
+datomic.index	sparse-es-2	defn	public	2589	[olookup idx es]	
+datomic.index	sparse-es	defn	public	2590	[olookup idx es]	
+datomic.index	index-parallelism	def	public	2742		
+datomic.index	serialize-dir	defn	public	2743	[des]	
+datomic.index	write-dirs	defn	public	2753	[cstore olookup ch]	
+datomic.index	conjable-on-channel	defn	public	2765	[ch]	
+datomic.index	capture-last-ex	defn	public	2775	[]	
+datomic.index	start-dirs-pipeline	defn	public	2779	[& p__15429]	
+datomic.index	merge-one-index	defn	private	2822	[db cstore olookup old_root_id data garbage_ids partfn cmp write_handlers filter_retractions? as_of_t idx xpreds filter_segids xcmp segs_written_ref dirs_written_ref]	
+datomic.index	excise-ents	defn	public	3403	[db]	
+datomic.index	get-avet-sorted-datoms-mem	defn	private	3412	[db index attrids]	
+datomic.index	avet-sort-and-process-datoms	defn	private	3458	[datoms f]	
+datomic.index	attr-datoms	defn	public	3486	[db index attrid]	
+datomic.index	aevt-attrs-datoms	defn	public	3491	[db attrids]	
+datomic.index	idx-key	defn	public	3528	[& ks]	
+datomic.index	add-avet-indexes	defn	public	3532	[cstore olookup db as_of_t root_map attrids]	
+datomic.index	needs-new-avet	defn	public	3627	[db]	
+datomic.index	dropped-avet-aids	defn	public	3639	[db]	
+datomic.index	write-object	defn	public	3657	[store olookup v]	
+datomic.index	drop-dirnode-leaves	defn	public	3665	[dirnode drop?]	
+datomic.index	drop-avet	defn	public	3714	[store olookup old_rootid aid old_garbage]	
+datomic.index	drop-avets	defn	public	3835	[store olookup root_id attrids garbage]	
+datomic.index	drop-avet-indexes	defn	public	3846	[store olookup old_root_ids attrids as_of_t garbage]	
+datomic.index	mem-index-bytes	defn	public	3917	[index]	
+datomic.index	stg-index-segs	defn	public	3923	[olookup index part_size]	
+datomic.index	stg-index-size	defn	public	3935	[olookup index part_size]	
+datomic.index	estimate-seg-offset	defn	public	3940	[olookup index dir_partition_size k]	
+datomic.index	least-pop-slice	defn	public	3956	[olookup ks index dir_partition_size slice_size]	
+datomic.index	retract-assert-pair?	defn	public	3973	[d1 d2]	
+datomic.index	paired-assertion-state	defn	public	3981	[sd1 p__15657]	
+datomic.index	problem-assertion-state?	defn	private	4038	[tier state]	
+datomic.index	disjoined-datoms	defn	public	4055	[db tier sort]	
+datomic.index	repair-disjoined	defn	public	4089	[db olookup root_map]	
+datomic.index	merge-db*	defn	public	4271	[cstore olookup db as_of_t old_root_id extra fulltext_enabled? excise_enabled?]	
+datomic.index	merge-db	defn	public	5293	[cstore olookup db as_of_t]	
+datomic.integrity	enhance-uri	defmulti	public	98		
+datomic.integrity	enhance-uri	defmethod	public	99		
+datomic.integrity	enhance-uri	defmethod	public	100		
+datomic.integrity	progress-reduce	defn	public	105	[f val p__21972 coll]	
+datomic.integrity	progress-dot	defn	public	123	[& _]	
+datomic.integrity	cauterize	defn	public	124	[db & ks]	
+datomic.integrity	nohistory-attrs	defn	public	131	[db]	
+datomic.integrity	attr-datoms	defn	public	141	[db attrs]	
+datomic.integrity	dups	defn	public	142	[db attr]	
+datomic.integrity	restatement?	defn	public	160	[p__21989]	
+datomic.integrity	attr-id-set	defn	public	168	[db pred]	
+datomic.integrity	make-tupler	defn	public	181	[index]	
+datomic.integrity	unfindable-datom-seq	defn	public	194	[db index progress]	
+datomic.integrity	progress-dot-fn	defn	public	223	[n]	
+datomic.integrity	datom-comparator	defn	public	227	[sort]	
+datomic.integrity	unsorted-dirs	defn	public	231	[db tier sort progress]	
+datomic.integrity	validate-dir-sorts	defn	public	240	[db]	
+datomic.integrity	unsorted-datoms	defn	public	368	[db sort order progress]	
+datomic.integrity	validate-index-sorts	defn	public	380	[db order] [db]	
+datomic.integrity	unpaired-history-assertions	defn	public	415	[db sort progress]	
+datomic.integrity	unpaired-history-retractions	defn	public	426	[db sort progress]	
+datomic.integrity	validate-history-pairs	defn	public	437	[db]	
+datomic.integrity	selfcheck-index-cli	defn	public	477	[p__22117]	
+datomic.integrity	mk-attr-pred	defn	private	529	[s]	
+datomic.integrity	mk-index-pred	defn	public	538	[db index]	
+datomic.integrity	crosscheck-log	defn	public	557	[log db index progress] [log db index]	
+datomic.integrity	crosscheck-log-representations	defn	public	678	[uri progress] [uri]	
+datomic.integrity	crosscheck-log-cli	defn	public	710	[p__22173]	
+datomic.integrity	defcrosscheck	defn	public	803	[&form &env i1 i2]	
+datomic.integrity	crosscheck-eavt-eavt	defn	public	1045	[db1 db2 progress]	
+datomic.integrity	crosscheck-aevt-aevt	defn	public	1069	[db1 db2 progress]	
+datomic.integrity	crosscheck-avet-avet	defn	public	1093	[db1 db2 progress]	
+datomic.integrity	crosscheck-raet-raet	defn	public	1117	[db1 db2 progress]	
+datomic.integrity	crosscheck-eavt-aevt	defn	public	1141	[db1 db2 progress]	
+datomic.integrity	crosscheck-aevt-eavt	defn	public	1165	[db1 db2 progress]	
+datomic.integrity	crosscheck-avet-eavt	defn	public	1189	[db1 db2 progress]	
+datomic.integrity	crosscheck-avet-aevt	defn	public	1213	[db1 db2 progress]	
+datomic.integrity	crosscheck-raet-aevt	defn	public	1237	[db1 db2 progress]	
+datomic.integrity	crosscheck-raet-eavt	defn	public	1261	[db1 db2 progress]	
+datomic.integrity	crosscheck-aevt-avet	defn	public	1285	[db1 db2 progress]	
+datomic.integrity	crosscheck-eavt-avet	defn	public	1309	[db1 db2 progress]	
+datomic.integrity	crosscheck-aevt-raet	defn	public	1333	[db1 db2 progress]	
+datomic.integrity	crosscheck-eavt-raet	defn	public	1357	[db1 db2 progress]	
+datomic.integrity	get-db	defn	public	1381	[o]	
+datomic.integrity	crosscheck-indexes	defn	public	1382	[o]	
+datomic.integrity	path-to-t	defn	public	1466	[cs olookup t]	
+datomic.integrity	dir-seg-info-seq	defn	public	1488	[dir olookup]	
+datomic.integrity	validate-t-order*	defn	public	1494	[log progress]	
+datomic.integrity	validate-t-order	defn	public	1649	[uri log_fn progress]	
+datomic.integrity	log-dir-entry-seq	defn	public	1703	[p__22268 t]	
+datomic.integrity	log-seg-t-seq	defn	public	1714	[p__22272 t]	
+datomic.integrity	crosscheck-dir-segs	defn	public	1726	[p__22277 progress]	
+datomic.integrity	merge-seqs	defn	public	1906	[cmp s1 s2 s3 s4] [cmp s1 s2 s3] [cmp s1 s2]	
+datomic.integrity	aevt-dquark-seq	defn	public	1928	[db d]	
+datomic.integrity	eavt-dquark-seq	defn	public	1988	[db d]	
+datomic.integrity	avet-dquark-seq	defn	public	2047	[db d]	
+datomic.integrity	validate-log-cli	defn	public	2106	[uri]	
+datomic.integrity	validate-memory-safe	defn	public	2127	[uri]	
+datomic.integrity	excisions	defn	public	2132	[db]	
+datomic.integrity	e-ts	defn	public	2134	[db e]	
+datomic.integrity	validate-excision	defn	public	2141	[spec]	
+datomic.integrity	validate-indexed-excisions	defn	public	2182	[db]	
+datomic.integrity	clusterfs-path-reachability	defn	public	2191	[cfs olookup progress]	
+datomic.integrity	fulltext-path-reachability	defn	public	2212	[ft db olookup progress]	
+datomic.integrity	validate-fulltext	defn	public	2229	[db olookup]	
+datomic.integrity	tx-range-ts	defn	public	2250	[conn]	
+datomic.integrity	tx-instant-ts	defn	public	2251	[db]	
+datomic.integrity	seq-diffs	defn	public	2256	[colla collb progress n] [colla collb progress]	
+datomic.integrity	validate-garbage	defn	public	2293	[cr progress]	
+datomic.integrity	crosscheck-tx-range-with-tx-instant	defn	public	2320	[conn]	
+datomic.integrity	validate-nohistory	defn	public	2334	[db]	
+datomic.integrity	stat-counts	defn	public	2342	[db a]	
+datomic.integrity	aevt-avet-stats	defn	public	2368	[db]	
+datomic.integrity	aevt-avet-stats-consistent?	defn	public	2379	[p__22488]	
+datomic.integrity	report-aevt-avet-stats	defn	public	2388	[db]	
+datomic.integrity	validate-index-totals	defn	public	2393	[db]	
+datomic.integrity	validate-all	defn	public	2411	[uri]	
+datomic.integrity	diagnostics	def	public	2448		
+datomic.integrity	describe-segment	defn	public	2449	[uri segment_id]	
+datomic.integrity	fulltext-storage-seq	defn	public	2455	[uri k]	
+datomic.integrity	log-storage-seq	defn	public	2518	[uri]	
+datomic.integrity	index-storage-seq	defn	public	2558	[uri k]	
+datomic.integrity	pod-storage-seq	defn	public	2617	[uri]	
+datomic.integrity	esafe	defn	public	2655	[&form &env & body]	
+datomic.integrity	index-sort-root-keys	def	public	2673		
+datomic.integrity	-main*	defn	public	2690	[p__22558]	
+datomic.integrity	-main	defn	public	2810	[& args]	
+datomic.io	ByteSource	defonce	public	68		
+datomic.io	ByteSource	defprotocol	public	69		
+datomic.io	Coercions	defonce	public	81		
+datomic.io	Coercions	defprotocol	public	82		
+datomic.io	byte-source->buffer	defn	public	90	[b]	
+datomic.io	alias-buf-bytes	defn	public	91	[buff]	
+datomic.io	string->bbuf	defn	public	100	[s]	
+datomic.io	bbuf->string	defn	public	101	[bb]	
+datomic.io	expand-byte-array	defn	public	102	[buf valid_bytes new_length]	
+datomic.io	fill-array	defn	public	114	[is ba]	
+datomic.io	fill-buffer	defn	public	134	[is bb]	
+datomic.io	unflipped	defn	public	145	[b]	
+datomic.io	clear-buffer	defn	public	160	[bb]	
+datomic.io	allocate-buffer	defn	public	171	[size]	
+datomic.io	expand-buffer	defn	public	180	[buf extra]	
+datomic.io	append-buffer	defn	public	203	[dest src]	
+datomic.io	directify-buffer	defn	public	220	[buf]	
+datomic.io	sub-buffer	defn	public	237	[bb offset length]	
+datomic.io	bytestream->buf	defn	public	253	[stream]	
+datomic.io	limit	defn	public	269	[buf limit]	
+datomic.io	remaining	defn	public	270	[bb]	
+datomic.io	position	defn	public	271	[bb]	
+datomic.io	seek	defn	public	272	[buf n]	
+datomic.io	chunk	defn	public	276	[buf chunk_size]	
+datomic.io	unchunk	defn	public	296	[bbufs]	
+datomic.io	gzip-buffer	defn	public	327	[buff]	
+datomic.io	gunzip-buffer	defn	public	365	[buff]	
+datomic.io	byte-buffer-seq	defn	public	407	[bb]	
+datomic.io	with-serialization-print-settings	defn	public	415	[&form &env & forms]	
+datomic.io	clj->bbuf	defn	public	431	[s]	
+datomic.io	bbuf->clj	defn	public	432	[bbuf]	
+datomic.io	valid-buf-limit?	defn	public	433	[bbuf limit]	
+datomic.io	encode-base128	defn	public	436	[raw]	
+datomic.io	decode-base128	defn	public	437	[coded]	
+datomic.io	bbuf->base128	defn	public	438	[bbuf]	
+datomic.io	base128->bbuf	defn	public	439	[s]	
+datomic.io	read-all	defn	public	443	[src]	
+datomic.io	context-resource	defn	public	453	[r]	
+datomic.io	read-into-buffer	defn	public	457	[bb n rc]	
+datomic.io	read-n-bytes	defn	public	468	[n rc]	
+datomic.io	read-n-direct-bytes	defn	public	480	[n rc]	
+datomic.io	write-buffer	defn	public	493	[bb wc]	
+datomic.io	write-bytes	defn	public	500	[bytes wc]	
+datomic.io	crc32	defn	public	501	[bbuf]	
+datomic.io	describe-bbuf	defn	public	508	[bbuf]	
+datomic.iter	Iter	definterface	public	22		
+datomic.iter	Iterator	deftype	public	28		
+datomic.iter	->Iterator	defn	public	37	[iter]	
+datomic.iter	iterator	defn	public	38	[iter]	
+datomic.iter	iterable	defn	public	39	[iter_fn]	
+datomic.iter	MapIter	deftype	public	44		
+datomic.iter	->MapIter	defn	public	54	[f iter]	
+datomic.iter	map	defn	public	55	[f iter]	
+datomic.iter	iter-seq	defn	public	56	[iter]	
+datomic.iter	iter-rseq	defn	public	61	[iter]	
+datomic.iter	reduce	defn	public	66	[f init iter]	
+datomic.iter	IterCat	deftype	public	74		
+datomic.iter	->IterCat	defn	public	92	[iter iters]	
+datomic.iter	concat	defn	public	93	[iters]	
+datomic.iter	filter	defn	public	102	[p iter]	
+datomic.iter	take-while	defn	public	124	[p iter]	
+datomic.iter	drop-while	defn	public	145	[p iter]	
+datomic.iter	least-index	defn	private	160	[cmp iters]	
+datomic.iter	MergeIter	deftype	public	179		
+datomic.iter	->MergeIter	defn	public	194	[cmp iters i]	
+datomic.iter	ReversedIter	deftype	public	195		
+datomic.iter	->ReversedIter	defn	public	205	[iter]	
+datomic.iter	reversed-iter	defn	public	206	[iter]	
+datomic.iter	merge-iters	defn	public	207	[cmp iter1 iter2 iter3 iter4 iter5] [cmp iter1 iter2 iter3 iter4] [cmp iter1 iter2 iter3] [cmp iter1 iter2]	
+datomic.iter	iget	defn	public	236	[iter]	
+datomic.iter	inext	defn	public	237	[iter]	
+datomic.iter	iprev	defn	public	248	[iter]	
+datomic.janino	java-data-fn	defn	public	8	[params body]	
+datomic.kv-cache	kv-cache-ref	def	private	25		
+datomic.kv-cache	shutdown	defn	public	30	[]	
+datomic.kv-cache	get-kv-cache-ref	defn	public	31	[]	
+datomic.kv-cache	start-kv-cache	defn	public	32	[]	
+datomic.kv-cassandra	retry-policy	defn	public	32	[]	
+datomic.kv-cassandra	cql-keys	def	public	33		
+datomic.kv-cassandra	KVCassandra	deftype	public	34		
+datomic.kv-cassandra	->KVCassandra	defn	public	73	[cluster session table]	
+datomic.kv-cassandra	cluster-sessions	def	public	75		
+datomic.kv-cassandra	kv-cassandra	defn	public	76	[endpoint]	
+datomic.kv-cassandra2	cluster-sessions	def	public	28		
+datomic.kv-cassandra2	cql-keys	def	public	29		
+datomic.kv-cassandra2	KVCassandra2	deftype	public	30		
+datomic.kv-cassandra2	->KVCassandra2	defn	public	77	[cluster session table]	
+datomic.kv-cassandra2	kv-cassandra	defn	public	79	[endpoint]	
+datomic.kv-cassandra3	sessions	def	public	28		
+datomic.kv-cassandra3	cql-keys	def	public	29		
+datomic.kv-cassandra3	KVCassandra3	deftype	public	30		
+datomic.kv-cassandra3	->KVCassandra3	defn	public	77	[session table]	
+datomic.kv-cassandra3	kv-cassandra	defn	public	78	[endpoint]	
+datomic.kv-cluster	root-cause	defn	public	46	[x]	
+datomic.kv-cluster	retry-cause	defn	public	51	[result]	
+datomic.kv-cluster	notify-retry	defn	public	52	[result metric backoff attempts max_retries]	
+datomic.kv-cluster	exponential-backoff	defn	private	67	[n]	
+datomic.kv-cluster	linear-backoff	defn	private	81	[n]	
+datomic.kv-cluster	retry-fn	defn	public	90	[sem metric nested group_ref backoff f]	
+datomic.kv-cluster	shared-pool-ref	defonce	private	147		
+datomic.kv-cluster	shared-pool	defn	public	154	[]	
+datomic.kv-cluster	delete-pool-ref	defonce	private	155		
+datomic.kv-cluster	val-gets-ref	def	public	162		
+datomic.kv-cluster	ref-identity-keys	def	public	163		
+datomic.kv-cluster	same-ref?	defn	public	164	[r1 r2]	
+datomic.kv-cluster	mark-pod-garbage	defn	private	167	[cs tail_keys_ref]	
+datomic.kv-cluster	KVCluster	deftype	public	178		
+datomic.kv-cluster	->KVCluster	defn	public	1222	[kvs path_map exec retrying_write retrying_read retrying_delete protocol protocol_nsec_k pod_garbage_handler]	
+datomic.kv-cluster	PRIORITY_WRITE_CONCURRENCY	def	public	1242		
+datomic.kv-cluster	kv-cluster	defn	public	1246	[kvs p__11061]	
+datomic.kv-dynamo	key-path	defn	private	21	[prefix k]	
+datomic.kv-dynamo	remove-prefix	defn	private	31	[prefix k]	
+datomic.kv-dynamo	expected-map	defn	public	41	[expect_map]	
+datomic.kv-dynamo	KVDynamo	deftype	public	54		
+datomic.kv-dynamo	->KVDynamo	defn	public	96	[client table prefix]	
+datomic.kv-dynamo	kv-dynamo	defn	public	97	[client table prefix] [client table]	
+datomic.kv-dynamo-skv	expected-map	defn	public	26	[expect_map]	
+datomic.kv-dynamo-skv	KVDynamoSKV	deftype	public	39		
+datomic.kv-dynamo-skv	->KVDynamoSKV	defn	public	86	[client table skv prefix]	
+datomic.kv-dynamo-skv	kv-ddb-skv-	defn	public	88	[creds prefix skv]	
+datomic.kv-dynamo-skv	kv-ddb-skv	def	public	132		
+datomic.kv-hotrod	FORCE	def	public	16		
+datomic.kv-hotrod	PROPS	def	public	17		
+datomic.kv-hotrod	managers	def	public	24		
+datomic.kv-hotrod	KVHotRod	deftype	public	25		
+datomic.kv-hotrod	->KVHotRod	defn	public	83	[cache]	
+datomic.kv-hotrod	kv-infinispan	defn	public	84	[endpoint]	
+datomic.kv-mem	KVMem	deftype	public	20		
+datomic.kv-mem	->KVMem	defn	public	48	[m]	
+datomic.kv-mem	kv-mem	defn	public	49	[m]	
+datomic.kv-sql	constraint-violation?	defn	public	31	[e]	
+datomic.kv-sql	KVSql	deftype	public	32		
+datomic.kv-sql	->KVSql	defn	public	89	[spec]	
+datomic.kv-sql	from-spec	defn	public	90	[spec]	
+datomic.kv-sql	LOGIN_FAILED	def	public	91		
+datomic.kv-sql-ext	driver-manager-lock	def	private	38		
+datomic.kv-sql-ext	provider	defn	public	42	[url]	
+datomic.kv-sql-ext	validation-query*	defmulti	public	43		
+datomic.kv-sql-ext	validation-query*	defmethod	public	44		
+datomic.kv-sql-ext	validation-query*	defmethod	public	45		oracle
+datomic.kv-sql-ext	validation-query	defn	public	46	[provider]	
+datomic.kv-sql-ext	try-validation-query	defn	public	48	[sql_url spec]	
+datomic.kv-sql-ext	create-datasource	def	public	80		
+datomic.kv-sql-ext	cluster-conf->spec	defn	public	133	[p__11567]	
+datomic.kv-sql-ext	kv-sql	defn	public	151	[cluster_conf]	
+datomic.kv-store	*retry*	def	public	7		
+datomic.kv-store	KVStore	defonce	public	9		
+datomic.kv-store	KVStore	defprotocol	public	10		
+datomic.kv-store	Retryable	defonce	public	16		
+datomic.kv-store	Retryable	defprotocol	public	17		
+datomic.log	btree-search	def	public	90		
+datomic.log	binary-search	def	public	91		
+datomic.log	segment-threshold	def	public	92		
+datomic.log	dir-threshold	def	public	93		
+datomic.log	last-by-nth	defn	private	94	[coll]	
+datomic.log	LogSeek	defonce	public	103		
+datomic.log	LogSeek	defprotocol	public	104		
+datomic.log	seek-seg-id	defn	public	105	[log t]	
+datomic.log	Log	defonce	public	111		
+datomic.log	Log	defprotocol	public	112		
+datomic.log	TailTxes	defonce	public	120		
+datomic.log	TailTxes	defprotocol	public	121		
+datomic.log	LogKey	defonce	public	122		
+datomic.log	LogKey	defprotocol	public	123		
+datomic.log	LogSegSeq	defonce	public	124		
+datomic.log	LogSegSeq	defprotocol	public	125		
+datomic.log	LogDirSeq	defonce	public	126		
+datomic.log	LogDirSeq	defprotocol	public	127		
+datomic.log	fressianed-txes-length	defn	public	128	[fressianed_txes]	
+datomic.log	->LogDir	declare	public	137		
+datomic.log	map->LogDir	declare	public	138		
+datomic.log	LogDir	defrecord	public	139		
+datomic.log	->LogDir	defn	public	141	[t uuid]	
+datomic.log	map->LogDir	defn	public	142	[m__7585__auto__]	
+datomic.log	write-handlers	def	public	148		
+datomic.log	read-handlers	def	public	163		
+datomic.log	fressianed-tx	defn	public	174	[tx]	
+datomic.log	create-entry	defn	public	181	[t uuid] [t]	
+datomic.log	tail-pod-key	defn	public	184	[cs]	
+datomic.log	tail-descriptor?	defn	private	188	[desc]	
+datomic.log	inc-rev	defn	public	203	[m]	
+datomic.log	legacy-root-ref-key	defn	public	204	[cs]	
+datomic.log	LOG_VERSION	def	public	209		
+datomic.log	normalize-desc	defn	public	211	[desc cs]	
+datomic.log	read-tail-descriptor	defn	public	224	[cs]	
+datomic.log	pod-update-succeeded?	defn	public	245	[response]	
+datomic.log	write-tail-descriptor	defn	public	246	[cs desc buf]	
+datomic.log	claim-log	defn	public	269	[cs desc]	
+datomic.log	convert-log-version	defn	public	276	[cs to_version]	
+datomic.log	zip-and-create	defn	public	281	[cs uuid buf]	
+datomic.log	write-excise-val	defn	public	283	[cs uuid fressianed_buf]	
+datomic.log	TailTxIter	deftype	public	295		
+datomic.log	->TailTxIter	defn	public	306	[txes idx]	
+datomic.log	BEGIN_OPEN_LIST	def	public	307		
+datomic.log	BEGIN_CLOSED_LIST	def	public	310		
+datomic.log	END_COLLECTION	def	public	313		
+datomic.log	create-tail	declare	public	315		
+datomic.log	empty-tail	declare	public	316		
+datomic.log	->Tail	declare	public	317		
+datomic.log	map->Tail	declare	public	318		
+datomic.log	Tail	defrecord	public	319		
+datomic.log	->Tail	defn	public	330	[txes bufs]	
+datomic.log	map->Tail	defn	public	331	[m__7585__auto__]	
+datomic.log	tail-byte-count	defn	public	337	[p__16223]	
+datomic.log	tail-ts	defn	public	345	[p__16226]	
+datomic.log	tail-empty?	defn	public	353	[p__16229]	
+datomic.log	extend-tail	defn	public	361	[p__16232 new_txes new_bufs]	
+datomic.log	since	defn	public	370	[p__16235 since_t]	
+datomic.log	resets-caches?	defn	public	392	[bbuf]	
+datomic.log	create-tail	defn	public	399	[txes bufs]	
+datomic.log	empty-tail	defn	public	416	[]	
+datomic.log	load-tail	defn	public	417	[bbuf]	
+datomic.log	fressianed-dir	defn	public	448	[val]	
+datomic.log	fressianed-leaf	defn	public	459	[val]	
+datomic.log	LogTxIter	deftype	public	487		
+datomic.log	->LogTxIter	defn	public	681	[lookup root_val tail ridx dir didx seg sidx]	
+datomic.log	->LogImpl	declare	public	692		
+datomic.log	map->LogImpl	declare	public	693		
+datomic.log	LogImpl	defrecord	public	694		
+datomic.log	->LogImpl	defn	public	814	[olookup desc tail]	
+datomic.log	map->LogImpl	defn	public	815	[m__7585__auto__]	
+datomic.log	create-log-impl	defn	public	821	[olookup desc tail]	
+datomic.log	write-new-log	defn	public	832	[cs]	
+datomic.log	create-new-log	defn	public	848	[cs olookup]	
+datomic.log	seek-tx	defn	public	856	[provider t]	
+datomic.log	find-log	defn	public	857	[cs olookup]	
+datomic.log	log-tree	defn	public	866	[olookup root_id]	
+datomic.log	catchup-tx	defn	private	868	[p__16361 tx]	
+datomic.log	catchup	defn	public	904	[db log catchup_ft] [db log]	
+datomic.log	ensure-index-and-log	defn	public	982	[cluster olookup db_id]	
+datomic.log	excise-ts	defn	public	1033	[log xpreds]	
+datomic.log	excise-dir-map	defn	public	1045	[log ts]	
+datomic.log	write-excised-log	defn	public	1058	[cs lookup xpreds ts dir_map]	
+datomic.log	excise	defn	public	1121	[cs lookup log xpreds]	
+datomic.log	excise-root	defn	public	1137	[cs lookup current_root_id p__16438]	
+datomic.log	->LogTailValue	declare	public	1219		
+datomic.log	map->LogTailValue	declare	public	1220		
+datomic.log	LogTailValue	defrecord	public	1221		
+datomic.log	->LogTailValue	defn	public	1230	[txes]	
+datomic.log	map->LogTailValue	defn	public	1231	[m__7585__auto__]	
+datomic.log	tx-range	defn	public	1245	[log db start end]	
+datomic.log	->LogValue	declare	public	1259		
+datomic.log	map->LogValue	declare	public	1260		
+datomic.log	LogValue	defrecord	public	1261		
+datomic.log	->LogValue	defn	public	1304	[db olookup root_id tail]	
+datomic.log	map->LogValue	defn	public	1305	[m__7585__auto__]	
+datomic.log	segmented-basis-t	defn	public	1311	[log_value]	
+datomic.log	create-log-val	defn	public	1323	[cs olookup db]	
+datomic.log	max-t	defn	public	1335	[datoms]	
+datomic.log	max-eidx	defn	public	1338	[datoms]	
+datomic.log	last-tree-tx	defn	public	1346	[olookup root_id] [p__16524]	
+datomic.log	root-id	defn	public	1361	[cs]	
+datomic.log	partition-by-weight	defn	public	1362	[weigh target]	
+datomic.log	combine-last-if	defn	public	1387	[pred combine]	
+datomic.log	create-leaves*	defn	public	1411	[target_size ftxes]	
+datomic.log	create-leaves	defn	public	1427	[target_size tail]	
+datomic.log	extend-tree	defn	public	1437	[cs olookup root_id target_dir_count leaf_segs]	
+datomic.log	segment	defn	public	1473	[cluster olookup]	
+datomic.lucene	create-config	defn	private	79	[& p__12232]	
+datomic.lucene	fs-directory	defn	public	101	[f]	
+datomic.lucene	ram-directory	defn	public	110	[]	
+datomic.lucene	index-writer	defn	public	119	[directory & p__12238]	
+datomic.lucene	string-field	defn	public	152	[name value & p__12245]	
+datomic.lucene	long-field	defn	public	183	[name value]	
+datomic.lucene	binary-field	defn	public	202	[name value offset length]	
+datomic.lucene	string-value	defn	public	224	[f]	
+datomic.lucene	long-value	defn	public	235	[f]	
+datomic.lucene	long-query	defn	public	236	[f l]	
+datomic.lucene	boolean-query	defn	public	252	[& queryoccurs]	
+datomic.lucene	field-stream	defn	public	305	[field]	
+datomic.lucene	read-only-clone	defn	public	321	[rdr]	
+datomic.lucene	get-field	defn	public	323	[doc s]	
+datomic.lucene	Readerable	defonce	public	325		
+datomic.lucene	Readerable	defprotocol	public	326		
+datomic.lucene	multi-reader	defn	public	336	[rdrs & p__12290]	
+datomic.lucene	index-searcher	defn	public	346	[rdr]	
+datomic.lucene	persistent-directory	defn	public	358	[pdmap]	
+datomic.lucene	search-seq	defn	public	360	[searcher query & p__12296]	
+datomic.lucene	document	defn	public	377	[& fields]	
+datomic.lucene	add-document	defn	public	413	[writer doc]	
+datomic.lucene	add-documents	defn	public	420	[writer docs]	
+datomic.lucene	term-query	defn	public	425	[field term]	
+datomic.lucene	term-enum-seq	defn	public	439	[te]	
+datomic.lucene	term-from-tokenizer	defn	public	443	[t]	
+datomic.lucene	tokenize-terms	defn	public	449	[s]	
+datomic.lucene	escape-query	defn	public	459	[s]	
+datomic.lucene	parse-query	defn	public	460	[f s & p__12319]	
+datomic.math	K	def	public	7		
+datomic.math	M	def	public	9		
+datomic.math	G	def	public	11		
+datomic.math	SECOND	def	public	13		
+datomic.math	MINUTE	def	public	15		
+datomic.math	HOUR	def	public	17		
+datomic.math	DAY	def	public	19		
+datomic.math	mean	defn	public	21	[coll]	
+datomic.math	mean-and-stddev	defn	public	25	[coll]	
+datomic.math	sla	defn	public	33	[sorted_coll]	
+datomic.math	median	defn	public	45	[sorted_coll]	
+datomic.math	round	defn	public	47	[num significant_digits] [num]	
+datomic.math	rounded-mb	defn	public	58	[bytes]	
+datomic.math	create-exponential	defn	public	59	[p__489]	
+datomic.math	*rnd*	def	public	75		
+datomic.math	uniform	defn	public	79	[lo hi] []	
+datomic.math	reservoir-sample	defn	public	88	[ct coll]	
+datomic.memcached	wrap-metrics	defn	private	80	[f record_kv succ fail]	
+datomic.memcached	safe-deref	defn	private	98	[fut]	
+datomic.memcached	put-result-handler	defn	private	107	[fut]	
+datomic.memcached	op-listener	defn	public	134	[f]	
+datomic.memcached	memcached-client-supports-autodiscovery?	defn	private	141	[]	
+datomic.memcached	set-client-mode*	defn	private	154	[builder auto_discovery config_timeout_msec]	
+datomic.memcached	configure-auto-discovery	defn	private	193	[builder auto_discovery config_timeout_msec]	
+datomic.memcached	SPY_BYTEARRAY_FLAGS	def	public	217		
+datomic.memcached	SPY_MAX_SIZE	def	public	218		
+datomic.memcached	legacy-transcoder	def	public	219		
+datomic.memcached	factory*	defn	private	230	[p__9952]	
+datomic.memcached	factory	def	public	283		
+datomic.memcached	create-client	defn	public	284	[p__9956]	
+datomic.memcached	fits-in-memcached?	defn	public	302	[v]	
+datomic.memcached	local-memcached-metric-names	def	private	303		
+datomic.memcached	memcached-metric-names	def	private	317		
+datomic.memcached	RecoveringClientImpl	defonce	public	331		
+datomic.memcached	RecoveringClientImpl	defprotocol	public	332		
+datomic.memcached	RecoveringClient	deftype	public	338		
+datomic.memcached	->RecoveringClient	defn	public	388	[client_ref create_client sem]	
+datomic.memcached	create-recovering-client	defn	public	391	[create_client]	
+datomic.memcached	create-cache	defn	public	397	[p__10035]	
+datomic.memcached	start-local-memcached-from-config	defn	public	500	[]	
+datomic.memcached	start-memcached-from-config	defn	public	514	[]	
+datomic.memory	MINIMUM_VM_SIZE	def	public	21		
+datomic.memory	SEGMENT_SIZE	def	public	23		
+datomic.memory	DATOMS_PER_SEGMENT	def	public	25		
+datomic.memory	DATOM_OBJECT_SIZE	def	public	29		
+datomic.memory	SEGMENT_OBJECT_SIZE	def	public	33		
+datomic.memory	TRANSACTOR_SPARE_MEM	def	public	37		
+datomic.memory	ram->bytes	defn	public	41	[ram]	
+datomic.memory	aws-instance-mem	def	public	48		
+datomic.memory	segment-cache-max	defn	public	109	[segment_memory_size]	
+datomic.memory	object-cache-max	defn	public	110	[virtual_memory_size]	
+datomic.memory	transactor-settings	defn	public	111	[ram_bytes memidx_bytes] [ram_bytes]	
+datomic.memory	aws-transactor-settings	defn	public	127	[instance_type]	
+datomic.memory	peer-settings	def	public	130		
+datomic.memory	aws-peer-settings	def	public	131		
+datomic.memory	transactor-cache-bytes	defn	public	132	[memidx_max]	
+datomic.memory-size	MemorySize	defonce	public	8		
+datomic.memory-size	MemorySize	defprotocol	public	9		
+datomic.memory-size	REFERENCE	def	public	10		
+datomic.memory-size	LONG	def	public	12		
+datomic.memory-size	INT	def	public	14		
+datomic.memory-size	CHAR	def	public	16		
+datomic.memory-size	ARRAY	def	public	18		
+datomic.memory-size	STRING	def	public	20		
+datomic.memory-size	array-type	defn	public	22	[t]	
+datomic.memory-size	handle-primitive-arrays	defn	public	24	[&form &env & typesizes]	
+datomic.monitor	Metrics	defonce	public	27		
+datomic.monitor	Metrics	defprotocol	public	28		
+datomic.monitor	StatsUpdate	definterface	public	40		
+datomic.monitor	min*	def	public	44		
+datomic.monitor	max*	def	public	48		
+datomic.monitor	Statistics	deftype	public	52		
+datomic.monitor	->Statistics	defn	public	108	[lo hi sum count]	
+datomic.monitor	init-stats	defn	private	109	[]	
+datomic.monitor	statistics	def	public	124		
+datomic.monitor	snapshot-statistics	defn	public	125	[]	
+datomic.monitor	load-callback	defn	public	171	[prop_name]	
+datomic.monitor	metric-event-callback	def	public	184		
+datomic.monitor	add-stat	defn	public	185	[k val]	
+datomic.monitor	ns->ms	defn	public	191	[nanos]	
+datomic.monitor	alarm	defn	public	192	[k]	
+datomic.peer	->ConnectionState	declare	public	96		
+datomic.peer	map->ConnectionState	declare	public	97		
+datomic.peer	ConnectionState	defrecord	public	98		
+datomic.peer	->ConnectionState	defn	public	126	[connector notifier updater cleanup]	
+datomic.peer	map->ConnectionState	defn	public	129	[m__7585__auto__]	
+datomic.peer	get-cstate	defn	public	135	[state_ref or_else]	
+datomic.peer	RemoteConnection	defonce	public	141		
+datomic.peer	RemoteConnection	defprotocol	public	142		
+datomic.peer	await-tx-result	defn	public	147	[prom]	
+datomic.peer	connection-lock	def	public	155		
+datomic.peer	connection-cache	def	public	156		
+datomic.peer	TWatcher	defonce	public	157		
+datomic.peer	TWatcher	defprotocol	public	158		
+datomic.peer	TWatcherImpl	deftype	public	164		
+datomic.peer	->TWatcherImpl	defn	public	227	[q db_ref f lck]	
+datomic.peer	create-t-watcher	defn	public	228	[f db_ref]	
+datomic.peer	accept-new-data	defn	private	239	[db data]	
+datomic.peer	transactor-unavailable	defn	public	262	[]	
+datomic.peer	peer-queue-exceeded	defn	public	268	[]	
+datomic.peer	fail-pending-txes	defn	public	277	[unsent_updates_queue pending_txes]	
+datomic.peer	start-kv-cache-delay	def	private	305		
+datomic.peer	stop-connection	declare	public	309		
+datomic.peer	Connection	deftype	public	310		
+datomic.peer	->Connection	defn	public	840	[db_id cluster olookup state_ref db_ref pending_txes unsent_updates_queue lucene_queue tx_report_queue tx_watcher idx_watcher bg_watcher]	
+datomic.peer	MAX_UNSENT_QUEUE	def	public	866		
+datomic.peer	MAX_LUCENE_QUEUE	def	public	870		
+datomic.peer	integrate-lucene	defn	public	874	[db_ref q]	
+datomic.peer	create-connection	defn	public	899	[cluster_conf]	
+datomic.peer	local-dbs	def	private	993		
+datomic.peer	delete-local-database	declare	public	995		
+datomic.peer	LocalConnection	deftype	public	996		
+datomic.peer	->LocalConnection	defn	public	1060	[dbname db_ref tx_report_queue released tx_watcher]	
+datomic.peer	local-connection	defn	public	1063	[dbname]	
+datomic.peer	connect-local-database	defn	public	1072	[dbname]	
+datomic.peer	create-local-database	defn	public	1078	[dbname uri]	
+datomic.peer	delete-local-database	defn	public	1089	[dbname]	
+datomic.peer	rename-local-database	defn	public	1104	[dbname newname]	
+datomic.peer	shutdown	defn	public	1120	[shutdown_clojure]	
+datomic.peer	stop-connection	defn	public	1151	[p__21638]	
+datomic.peer	get-connection	defn	public	1165	[cluster_conf]	
+datomic.peer	revert-to-log-version-1	defn	public	1239	[p__21658]	
+datomic.peer	db	defn	public	1248	[conn]	
+datomic.peer	transact	defn	public	1249	[conn txdata]	
+datomic.peer	transact-all	defn	public	1250	[conn txdata]	
+datomic.peer	seq-iterator	defn	public	1271	[aseq]	
+datomic.peer	seq-iterable	defn	public	1282	[aseq]	
+datomic.peer	submit-data-script	defn	public	1284	[conn f]	
+datomic.peer	simple-dispatch	defmethod	public	1285		
+datomic.peer	initialize	def	public	1286		
+datomic.peer	ensure-schema-level	defn	public	1297	[conn]	
+datomic.peer	connect-uri	defn	public	1334	[uri]	
+datomic.peer	administer-system	defn	public	1341	[p__21691]	
+datomic.peer	send-admin-request	defn	public	1365	[cluster_conf request arg]	
+datomic.peer	create-database	defn	public	1411	[uri desc] [uri]	
+datomic.peer	delete-database	defn	public	1432	[uri]	
+datomic.peer	rename-database	defn	public	1453	[uri new_name]	
+datomic.peer	get-catalog	defn	public	1470	[uri]	
+datomic.peer	undelete-database	defn	public	1480	[db_id uri]	
+datomic.peer	get-database-names	defn	public	1486	[uri]	
+datomic.peer	tx-group-endpoint	defn	public	1499	[uri k]	
+datomic.peer	transactor-endpoint	defn	public	1501	[uri]	
+datomic.peer	t->tx	defn	public	1502	[t]	
+datomic.peer	resolve-tempid	defn	public	1503	[db tempids tempid]	
+datomic.process	CriticalFailure	defonce	public	20		
+datomic.process	CriticalFailure	defprotocol	public	21		
+datomic.process	->SharedCriticalFailure	declare	public	22		
+datomic.process	map->SharedCriticalFailure	declare	public	23		
+datomic.process	SharedCriticalFailure	defrecord	public	24		
+datomic.process	->SharedCriticalFailure	defn	public	62	[handlers prom shutdown]	
+datomic.process	map->SharedCriticalFailure	defn	public	64	[m__7585__auto__]	
+datomic.process	create-instance	defn	public	70	[shutdown_time exit?]	
+datomic.process	instance	defonce	public	140		
+datomic.process	claim-pid-file	defn	public	141	[]	
+datomic.process	throw-if-failing!	defn	public	146	[]	
+datomic.process	fail-on-exception	defn	public	151	[f]	
+datomic.process.events	subscribers-ref	defonce	public	7		
+datomic.process.events	publish	defn	public	8	[e]	
+datomic.process.events	subscribe	defn	public	29	[reference key fn]	
+datomic.process.events	unsubscribe	defn	public	30	[reference key]	
+datomic.process-monitor	monitored-instances-ref	def	public	29		
+datomic.process-monitor	convert-nanos-to-millis	defn	public	31	[snapshot]	
+datomic.process-monitor	snapshot-metrics	defn	public	46	[]	
+datomic.process-monitor	metrics-callback	defn	public	53	[]	
+datomic.process-monitor	report-metrics	defn	public	86	[callback]	
+datomic.process-monitor	start-metrics-delay	def	private	143		
+datomic.process-monitor	start-metrics	defn	public	166	[]	
+datomic.promise	throw-executionexception-if-throwable	defn	public	24	[o]	
+datomic.promise	call-user-code	defn	public	29	[exec listener]	
+datomic.promise	settable-future	defn	public	45	[]	
+datomic.promise	delivered	defn	public	140	[o]	
+datomic.pull	limit-iterable	defn	public	46	[limit iterable]	
+datomic.pull	nilify-empty	defn	public	68	[x]	
+datomic.pull	ra->e	defn	public	69	[db r attr xf limit valfn]	
+datomic.pull	ea->v	defn	public	103	[db e attr xf limit valfn use_aevt?] [db e attr xf limit valfn]	
+datomic.pull	default-limit	def	public	139		
+datomic.pull	attr-spec->fn	defn	public	140	[attr_spec]	
+datomic.pull	attr-spec->attr	defn	public	166	[attr_spec]	
+datomic.pull	attr-with-opts?	defn	public	185	[expr]	
+datomic.pull	limit-default-from-map	defn	private	191	[p__18944]	
+datomic.pull	try-xform	defn	private	208	[xform]	
+datomic.pull	attr-with-opts->valfn	defn	private	232	[p__18950]	
+datomic.pull	attr-with-opts->attr-tuple	defn	public	258	[p__18959]	
+datomic.pull	normalize-attr	defn	public	276	[attr_spec]	
+datomic.pull	normalize-recur-limit	defn	public	281	[x]	
+datomic.pull	normalize-pattern	defn	public	290	[pull_spec]	
+datomic.pull	normalized-pattern-cache	def	public	354		
+datomic.pull	next-a	defn	private	355	[db e a]	
+datomic.pull	AIter	deftype	public	371		
+datomic.pull	->AIter	defn	public	381	[db e a]	
+datomic.pull	a-iter	defn	public	383	[db e]	
+datomic.pull	resolve-attr	defn	public	389	[db kw]	
+datomic.pull	default-spec	defn	public	395	[attr kw db]	
+datomic.pull	denormalize-kw	defn	public	403	[kw type]	
+datomic.pull	fix-specs-for-underscore-prefix-attrs	defn	public	416	[p__19003 db]	
+datomic.pull	pull*	defn	public	431	[db p__19007 recursed prefer_aevt? e]	
+datomic.pull	parse-index-pull-arg-map	defn	private	591	[arg_map]	
+datomic.pull	index-pull	defn	public	601	[db arg_map]	
+datomic.pull	dereffed-index-pull	defn	public	660	[db arg_map]	
+datomic.pull	pull-1	defn	public	661	[db selector e p__19052] [db selector e]	
+datomic.pull	pull	defn	public	674	[db selector es p__19057] [db selector es]	
+datomic.qtune	mapq->listq	defn	public	25	[p__23419]	
+datomic.qtune	cvars	defn	public	44	[c]	
+datomic.qtune	cbinds	defn	public	46	[c]	
+datomic.qtune	partial-query	defn	public	60	[qmap preds clauses clause rclauses allow_cross]	
+datomic.qtune	partial-queries	defn	public	74	[query preds clauses rclauses allow_cross]	
+datomic.qtune	min-ret	defn	public	89	[qs args timeout]	
+datomic.qtune	aug	defn	public	128	[query preds clauses rclauses args]	
+datomic.qtune	qtune	defn	public	138	[query & args]	
+datomic.query	emap	declare	public	80		
+datomic.query	rae	defn	public	81	[db r a]	
+datomic.query	ref-val	defn	private	104	[db ref? v]	
+datomic.query	eav	defn	public	113	[db e a]	
+datomic.query	get-lazy-entity	defn	public	142	[db ent]	
+datomic.query	EMapImpl	definterface	public	174		
+datomic.query	touch	defn	public	176	[e]	
+datomic.query	EntityMap	deftype	public	177		
+datomic.query	->EntityMap	defn	public	318	[db eid cache edits]	
+datomic.query	emap	defn	public	319	[db eid]	
+datomic.query	print-method	defmethod	public	320		
+datomic.query	Immutify	defonce	public	328		
+datomic.query	Immutify	defprotocol	public	329		
+datomic.query	listq->mapq	defn	public	358	[lq]	
+datomic.query	move-sources-to-meta	defn	public	370	[p__19256]	
+datomic.query	flatten-listy	defn	private	401	[x]	
+datomic.query	variables-in-clause	defn	private	415	[clause]	
+datomic.query	validate-query	defn	public	425	[qmap]	
+datomic.query	process-in-bindings	defn	public	554	[qmap prefix]	
+datomic.query	process-ranges	defn	public	600	[qmap]	
+datomic.query	process-aggregates	defn	public	653	[qmap]	
+datomic.query	process-find-bindings	defn	public	678	[p__19363]	
+datomic.query	pattern?	defn	public	712	[s]	
+datomic.query	normalize-pull	defn	public	713	[expr]	
+datomic.query	process-pulls	defn	public	721	[p__19382]	
+datomic.query	mapify-query	defn	public	762	[query]	
+datomic.query	rename-self-unifications	defn	private	772	[qmap padding]	
+datomic.query	gensym-padding	defn	private	833	[qmap]	
+datomic.query	has-self-unifications?	defn	private	851	[qmap]	
+datomic.query	process-self-unifications	defn	private	870	[qmap]	
+datomic.query	compile-construct-1	defn	public	883	[smap clause]	
+datomic.query	compile-construct-n	defn	public	899	[find_clause construct_clause]	
+datomic.query	compile-construct	defn	public	910	[query]	
+datomic.query	resolve-qualified-fn	defn	public	917	[x]	
+datomic.query	resolve-qualified-fns	defn	public	923	[p__19429]	
+datomic.query	parse-query	defn	public	967	[query]	
+datomic.query	load-query	defn	public	979	[query]	
+datomic.query	group-rel	defn	public	989	[fv rel]	
+datomic.query	query-cache	def	public	1077		
+datomic.query	group-fv	defn	public	1078	[find_clause group_clause]	
+datomic.query	xf-tuple	defn	public	1100	[fv tuple]	
+datomic.query	pull-fv	defn	public	1134	[p__19498 srcs]	
+datomic.query	sort-collection-by-indexed	defn	private	1170	[coll idx]	
+datomic.query	sort-for-pull	defn	private	1197	[query result]	
+datomic.query	q*	defn	public	1215	[query srcs]	
+datomic.query	query*	defn	public	1262	[query_map]	
+datomic.query	apply-pf	defn	private	1267	[p__19535]	
+datomic.query	q	defn	public	1281	[query srcs]	
+datomic.query	query	defn	public	1282	[p__19541]	
+datomic.query	qseq	defn	public	1302	[query_map args] [p__19550]	
+datomic.query	cache	defn	public	1331	[q]	
+datomic.query	construct-fn	defn	public	1332	[qform]	
+datomic.query.support	incorrect!	defn	private	9	[msg]	
+datomic.query.support	listq->mapq	defn	public	24	[lq]	
+datomic.query.support	disallow-find-variants!	defn	public	36	[query]	
+datomic.query.support	query-map	defn	public	42	[q]	
+datomic.query.support	parse-as	defn	public	44	[q]	
+datomic.query.support	counted-seq	defn	public	64	[base_seq ct meta] [base_seq ct]	
+datomic.queue	Producer	defonce	public	20		
+datomic.queue	Producer	defprotocol	public	21		
+datomic.queue	Consumer	defonce	public	22		
+datomic.queue	Consumer	defprotocol	public	23		
+datomic.queue	BlockingProducer	defonce	public	24		
+datomic.queue	BlockingProducer	defprotocol	public	25		
+datomic.queue	BlockingConsumer	defonce	public	26		
+datomic.queue	BlockingConsumer	defprotocol	public	27		
+datomic.queue	Clear	defonce	public	28		
+datomic.queue	Clear	defprotocol	public	29		
+datomic.queue	offer	defn	public	30	[sink item msec] [sink item]	
+datomic.queue	poll	defn	public	31	[source or_else msec] [source or_else] [source]	
+datomic.queue	DelayingQueue	deftype	public	74		
+datomic.queue	->DelayingQueue	defn	public	86	[delay delay_queue thread]	
+datomic.queue	delaying-queue	defn	public	88	[msec dest_queue]	
+datomic.queue	queue-seq	defn	public	112	[size]	
+datomic.reconnector2	Reconnectable	defonce	public	13		
+datomic.reconnector2	Reconnectable	defprotocol	public	14		
+datomic.reconnector2	shutdown?	declare	public	15		
+datomic.reconnector2	Reconnector	deftype	public	16		
+datomic.reconnector2	->Reconnector	defn	public	122	[current_promise_ref worker_ref shutdown_state reconnect_fn cleanup_fn]	
+datomic.reconnector2	print-method	defmethod	public	130		
+datomic.reconnector2	reconnector-ref	defn	public	135	[& p__17146]	
+datomic.require	maybe-require	defn	public	7	[& syms]	
+datomic.require	require-and-run	defn	public	28	[sym & args]	
+datomic.require	-main	defn	public	33	[sname & args]	
+datomic.s3	s3-service	defn	public	56	[& args]	
+datomic.s3	Name	defonce	public	57		
+datomic.s3	Name	defprotocol	public	58		
+datomic.s3	years-from-now	defn	public	61	[n]	
+datomic.s3	create-bucket	defn	public	66	[s3 bucket region] [s3 bucket]	
+datomic.s3	get-bucket	declare	public	69		
+datomic.s3	ensure-bucket	defn	public	70	[s3 bucket region] [s3 bucket]	
+datomic.s3	new-bucket	defn	public	73	[s3 basename]	
+datomic.s3	debug	defn	public	74	[x]	
+datomic.s3	signed-url	defn	public	75	[s3 method bucket key expiry headers virtual_host?] [s3 method bucket key expiry]	
+datomic.s3	-list-objects-seq	defn	public	92	[s3 results]	
+datomic.s3	list-objects	defn	public	102	[s3 bucket prefix delimiter] [s3 bucket]	
+datomic.s3	get-bucket	defn	public	114	[s3 bucket_name]	
+datomic.s3	list-buckets	defn	public	117	[s3]	
+datomic.s3	delete-object	defn	public	118	[s3 bucket key]	
+datomic.s3	delete-objects	defn	public	119	[s3 bucket keys]	
+datomic.s3	delete-all-objects	defn	public	141	[s3 bucket]	
+datomic.s3	object-exists?	defn	public	143	[s3 bucket k]	
+datomic.s3	BUCKET_OWNER_FULL_ACCESS_CANNED_ACL	def	public	153		
+datomic.s3	put-file-as	defn	public	154	[s3 bucket f path metadata canned_acl] [s3 bucket f path metadata] [s3 bucket f path]	
+datomic.s3	put-object	defn	public	169	[s3 bucket path stream metadata]	
+datomic.s3	get-object	defn	public	171	[s3 bucket path]	
+datomic.s3	get-direct-buffer	defn	public	181	[s3 bucket path]	
+datomic.s3	get-bytes	defn	public	196	[s3 bucket path]	
+datomic.s3	get-non-direct-buffer	defn	public	211	[s3 bucket path]	
+datomic.s3	delete-bucket	defn	public	215	[s3 bucket]	
+datomic.s3	destroy-bucket	defn	public	216	[s3 bucket]	
+datomic.s3	signed-get-clj	defn	public	217	[url]	
+datomic.s3	signed-get-file	defn	public	223	[url f]	
+datomic.s3	get-file	defn	public	227	[s3 bucket path dest]	
+datomic.s3	signed-put-file	defn	public	237	[url f]	
+datomic.s3	signed-put-clj	defn	public	247	[url obj]	
+datomic.s3	put-clj	defn	public	262	[s3 bucket key obj]	
+datomic.s3	set-bucket-policy	defn	public	275	[s3 bucket policy]	
+datomic.s3	get-bucket-policy	defn	public	276	[s3 bucket]	
+datomic.s3-api	client	defn	public	43	[creds config] [creds] []	
+datomic.s3-api	data-to-object	defmethod	public	770		
+datomic.s3-api	data-to-object	defmethod	public	914		
+datomic.s3-api	data-to-object	defmethod	public	989		
+datomic.s3-api	property-to-object	defmethod	public	1156		
+datomic.s3-api	property-to-object	defmethod	public	1173		
+datomic.s3-api	property-to-object	defmethod	public	1187		
+datomic.s3-api	list-buckets	defn	public	1195	[o]	
+datomic.s3-api	list-objects	defn	public	1208	[o x1]	
+datomic.s3-api	list-next-batch-of-objects	defn	public	1225	[o x1]	
+datomic.s3-api	list-objects-from-request	defn	public	1242	[o x1]	
+datomic.s3-api	create-bucket	defn	public	1259	[o x1]	
+datomic.s3-api	create-bucket-in-region	defn	public	1276	[o x1 x2]	
+datomic.s3-api	delete-bucket	defn	public	1295	[o x1]	
+datomic.s3-api	put-file	defn	public	1312	[o x1 x2 x3]	
+datomic.s3-api	put-object-with-canned-acl	defn	public	1332	[o x1]	
+datomic.s3-api	put-object	defn	public	1349	[o x1 x2 x3 x4]	
+datomic.s3-api	get-object	defn	public	1370	[o x1 x2]	
+datomic.s3-api	get-object-metadata	defn	public	1389	[o x1 x2]	
+datomic.s3-api	set-bucket-policy	defn	public	1408	[o x1 x2]	
+datomic.s3-api	get-bucket-policy	defn	public	1427	[o x1]	
+datomic.s3-api	delete-object	defn	public	1444	[o x1 x2]	
+datomic.s3-api	delete-objects	defn	public	1463	[o x1]	
+datomic.s3-api	generate-presigned-url	defn	public	1480	[o x1 x2 x3 x4]	
+datomic.s3-kv	s3-storage-path	defn	public	20	[base k]	
+datomic.s3-kv	S3Storage	deftype	public	22		
+datomic.s3-kv	->S3Storage	defn	public	41	[s3 bucket base]	
+datomic.s3-kv	s3-storage	defn	public	42	[& p__23332]	
+datomic.s3-kv	storage-from-conf-	defn	public	56	[conf]	
+datomic.s3-kv	storage-from-conf	def	public	59		
+datomic.simple-kv	KV	defonce	public	15		
+datomic.simple-kv	KV	defprotocol	public	16		
+datomic.simple-kv	map-magic	def	public	17		
+datomic.simple-kv	pack	defn	public	19	[m v]	
+datomic.simple-kv	unpack	defn	public	33	[k v]	
+datomic.simple-kv	get-with-retry	defn	public	49	[skv k]	
+datomic.slf4j	pid	def	public	26		
+datomic.slf4j	print-safely	defn	public	34	[o]	
+datomic.slf4j	event->timing	def	public	35		
+datomic.slf4j	process	defn	public	58	[msg]	
+datomic.slf4j	caused-by	defn	public	63	[logger t]	
+datomic.slf4j	enabled-method	defn	private	69	[level]	
+datomic.slf4j	log-expr	defn	private	78	[level msg ex] [level msg]	
+datomic.slf4j	trace	defn	public	168	[&form &env msg ex] [&form &env msg]	
+datomic.slf4j	debug	defn	public	172	[&form &env msg ex] [&form &env msg]	
+datomic.slf4j	info	defn	public	176	[&form &env msg ex] [&form &env msg]	
+datomic.slf4j	warn	defn	public	178	[&form &env msg ex] [&form &env msg]	
+datomic.slf4j	error	defn	public	180	[&form &env msg ex] [&form &env msg]	
+datomic.slf4j	exception-string	defn	public	184	[t]	
+datomic.slf4j	log-agent-error	defn	public	189	[agent error]	
+datomic.slf4j	format-as-msec	defn	public	191	[nsec]	
+datomic.slf4j	format-as-musec	defn	public	192	[nsec]	
+datomic.slf4j	metric-expr	defn	public	193	[event msec]	
+datomic.slf4j	log-end-phase-only-events	def	public	203		
+datomic.slf4j	log-time	defn	public	204	[&form &env m & body]	
+datomic.slf4j	dont-log-time	defn	public	367	[&form &env m & body]	
+datomic.slf4j	sanitize-uri	defn	public	369	[uri]	
+datomic.slf4j	print-and-warn	defn	public	375	[msg]	
+datomic.slf4j	log-uncaught-exceptions	defn	public	392	[]	
+datomic.slf4j	redact	defmulti	public	410		
+datomic.slf4j	redact	defmethod	public	411		
+datomic.slf4j	redact	defmethod	public	420		
+datomic.slf4j	redact	defmethod	public	425		
+datomic.sql	connect	defn	public	24	[p__11481]	
+datomic.sql	update-with-nulls	defn	public	40	[spec id ensure_rev p__11484]	
+datomic.sql	insert-with-nulls	defn	public	68	[spec p__11487]	
+datomic.sql	update	defn	public	92	[spec id ensure_rev v_map]	
+datomic.sql	insert	defn	public	132	[spec v_map]	
+datomic.sql	select	defn	public	180	[spec id]	
+datomic.sql	delete	defn	public	200	[spec id]	
+datomic.sql	execute-commands	defn	public	214	[conn & cmds]	
+datomic.stats	sparse-v-count	defn	private	34	[des]	
+datomic.stats	key-summary	defn	public	48	[des a_freqs?] [des]	
+datomic.stats	index-summary	defn	public	60	[db index idx partfn]	
+datomic.stats	avet	defn	public	85	[db index]	
+datomic.stats	aevt	defn	public	98	[db index]	
+datomic.stats	eavt	defn	public	111	[db index]	
+datomic.stats	raet	defn	public	121	[db index]	
+datomic.stats	total	defn	public	131	[m]	
+datomic.stats	datom-counts	defn	public	132	[summary_fn db]	
+datomic.stats	fulltext	defn	public	141	[db index]	
+datomic.stats	storage-tiers	def	public	163		
+datomic.stats	memory-tiers	def	public	164		
+datomic.stats	tiers	def	public	165		
+datomic.stats	index-attr-stats	defn	public	166	[db tier]	
+datomic.stats	db-attr-stats	defn	public	210	[db]	
+datomic.stats	db-stats	defn	public	216	[db]	
+datomic.stats	index-attr-splits	defn	public	220	[db tier attr]	
+datomic.stats	merge-data	defn	public	279	[cmp ds1 ds2]	
+datomic.stats	merge-splits	defn	private	290	[splits]	
+datomic.stats	db-attr-splits	defn	public	310	[db attr]	
+datomic.stats	attr-stats-from-splits	defn	public	329	[db]	
+datomic.stats	sizes	defn	public	344	[db & p__17950]	
+datomic.stats	datom-count	defn	public	503	[sizes]	
+datomic.stats	index-datom-count	defn	public	512	[sizes]	
+datomic.stats	segment-count	defn	public	513	[sizes]	
+datomic.stats	sizes->metrics	defn	public	514	[s]	
+datomic.stats	index-metrics	defn	public	522	[db]	
+datomic.summary	Summary	defonce	public	10		
+datomic.summary	Summary	defprotocol	public	11		
+datomic.summary	write	defn	public	14	[w o]	
+datomic.summary	print-method	defn	public	15	[&form &env clazz]	
+datomic.tools	TOOLS_VERSION	def	public	65		
+datomic.tools	datom-read-handler	defn	public	67	[p__21725]	
+datomic.tools	serializer	def	public	82		
+datomic.tools	serialized	defn	public	83	[f agt] [f]	
+datomic.tools	prn-err	defn	public	97	[x]	
+datomic.tools	println-err	defn	public	98	[x]	
+datomic.tools	progress	def	public	99		
+datomic.tools	flush-progress	defn	public	100	[]	
+datomic.tools	connection-resources	def	public	101		
+datomic.tools	index-db	def	public	102		
+datomic.tools	log	def	public	103		
+datomic.tools	db-resources	def	public	104		
+datomic.tools	log-entry->next-t	defn	public	105	[log_entry]	
+datomic.tools	index-has-t?	defn	public	106	[db t]	
+datomic.tools	set-index-basis	defn	public	110	[uri basisT]	
+datomic.tools	get-val	defn	public	137	[conn k]	
+datomic.tools	get-index-ref	defn	public	138	[cluster]	
+datomic.tools	reset-index-ref	defn	private	140	[cluster root_id]	
+datomic.tools	replace-index	defn	public	155	[cluster index_id]	
+datomic.tools	touch-index-ref	defn	public	199	[cluster]	
+datomic.tools	log-size*	defn	public	200	[conn t]	
+datomic.tools	log-size	defn	public	207	[uri t]	
+datomic.tools	get-index	defn	public	208	[p__21769]	
+datomic.tools	cr?	defn	public	219	[o]	
+datomic.tools	tx-range-from-log	defn	public	220	[cr start end]	
+datomic.tools	unique-identities	defn	public	228	[db]	
+datomic.tools	read-capacity-units	defn	public	237	[uri]	
+datomic.tools	pace-msec-per-seg	defn	public	261	[provisioned_kbs]	
+datomic.tools	pace-fn	defn	public	269	[pace_msec]	
+datomic.tools	peer-diagnostics	defn	public	280	[]	
+datomic.tools	count-log-segs	defn	public	285	[p__21791]	
+datomic.tools	storage-diagnostics	defn	public	299	[uri]	
+datomic.tools	db-diagnostics	defn	public	324	[uri]	
+datomic.tools	system-cluster	defn	public	330	[uri]	
+datomic.tools	cause-chain	defn	public	334	[t]	
+datomic.tools	class-sym	defn	public	339	[obj]	
+datomic.tools	tools-fault	defn	public	340	[t]	
+datomic.tools	catalog	defn	public	356	[uri]	
+datomic.tools	diagnostics	defn	public	357	[uri]	
+datomic.tools	unique-values	defn	public	364	[db]	
+datomic.tools	card-ones	defn	public	373	[db]	
+datomic.tools	fulltexts	defn	public	382	[db]	
+datomic.tools	pretty-datom	defn	public	391	[db datom]	
+datomic.tools	touch-heartbeat	defn	public	400	[uri]	
+datomic.tools	segment-log	defn	public	410	[uri]	
+datomic.tools	retract	defn	public	433	[d]	
+datomic.tools	retract-entity	defn	public	434	[d]	
+datomic.tools	rehome	defn	public	435	[p__21849 to]	
+datomic.tools	retarget	defn	public	445	[p__21852 to]	
+datomic.tools	avof-map	defn	public	455	[datoms]	
+datomic.tools	uniques-in-ts	defn	private	458	[log ts ids]	
+datomic.tools	identities-in-ts	defn	public	484	[db log ts]	
+datomic.tools	values-in-ts	defn	public	486	[db log ts]	
+datomic.tools	unsorted-seq	defn	public	488	[pred s]	
+datomic.tools	ever-nohistory-attrs	defn	public	501	[db]	
+datomic.tools	nohistory-checker	defn	public	503	[db]	
+datomic.tools	uuid->val-key	def	public	507		
+datomic.tools	val-key->uuid	def	public	508		
+datomic.tools.index-checks	card-one-collisions	defn	public	24	[db sort progress & components]	
+datomic.tools.index-checks	boot-tail-collision?	defn	public	42	[p__21890]	
+datomic.tools.index-checks	non-unique?	defn	public	46	[p__21895]	
+datomic.tools.index-checks	reporter	defn	public	53	[f]	
+datomic.tools.index-checks	unique-collisions	defn	public	54	[db progress]	
+datomic.tools.index-checks	rename-to	defn	public	67	[db e]	
+datomic.tools.index-checks	rename-from	defn	public	68	[db e]	
+datomic.tools.index-checks	maybe-renamed?	defn	public	69	[db p__21910]	
+datomic.tools.index-checks	log-only	defn	public	83	[cr db progress]	
+datomic.tools.index-checks	progress-dot-fn	defn	public	103	[n]	
+datomic.tools.index-checks	-main*	defn	public	110	[uri]	
+datomic.tools.index-checks	-main	defn	public	214	[uri]	
+datomic.transaction	peer-message-type	defn	public	56	[msg]	
+datomic.transaction	submit-address	defn	public	58	[db_name]	
+datomic.transaction	push-address	defn	public	59	[db_name]	
+datomic.transaction	write-handlers	defn	public	60	[cache] []	
+datomic.transaction	read-handlers	def	public	111		
+datomic.transaction	writer	defn	public	138	[out cache] [out]	
+datomic.transaction	reader	defn	public	149	[in]	
+datomic.transaction	log-event-map	def	public	160		
+datomic.transaction	loggable-keys	def	public	161		
+datomic.transaction	log-completion!	defn	public	163	[ids]	
+datomic.transaction	add-to-log-event!	defn	public	260	[id m]	
+datomic.transaction	read-message	defn	public	264	[is]	
+datomic.transaction	create-procargs	defn	public	271	[tx options]	
+datomic.treewalk	NodeId	defonce	public	21		
+datomic.treewalk	NodeId	defprotocol	public	22		
+datomic.treewalk	TreeWalker	defonce	public	23		
+datomic.treewalk	TreeWalker	defprotocol	public	24		
+datomic.treewalk	index-root-keys	def	public	25		
+datomic.treewalk	Node	deftype	public	66		
+datomic.treewalk	->Node	defn	public	75	[id walker]	
+datomic.treewalk	lookup-val	defn	public	76	[lookup id allow_missing?]	
+datomic.treewalk	create-node	defn	public	78	[id lookup allow_missing?]	
+datomic.treewalk	create-ids->nodes	defn	public	85	[lookup allow_missing?] [lookup]	
+datomic.treewalk	create-parent-node	defn	public	98	[id walker lookup allow_missing?] [id walker lookup]	
+datomic.treewalk	tree-node-ids	defn	public	106	[node ids_>nodes]	
+datomic.treewalk	index-top-walker	defn	public	113	[top]	
+datomic.treewalk	index-tree-seq	defn	public	119	[id lookup allow_missing?] [id lookup]	
+datomic.treewalk	log-root-walker	defn	public	131	[root lookup allow_missing?]	
+datomic.treewalk	log-tree-seq	defn	public	156	[id lookup allow_missing?] [id lookup]	
+datomic.treewalk	db-seq	defn	public	170	[log_root_node index_top_node lookup]	
+datomic.uri	parse-query-string	defn	public	23	[q]	
+datomic.uri	read-port	defn	public	32	[portstr]	
+datomic.uri	storage-protocol	defn	public	33	[uri]	
+datomic.uri	parse*	defmulti	public	41		
+datomic.uri	fixup-uri-map	defn	public	42	[m]	
+datomic.uri	param-map	defn	public	46	[query]	
+datomic.uri	parse*	defmethod	public	61		
+datomic.uri	parse*	defmethod	public	76		
+datomic.uri	mapify-ddb+s3-uri	defn	private	92	[uri]	
+datomic.uri	parse*	defmethod	public	114		
+datomic.uri	parse*	defmethod	public	130		
+datomic.uri	parse*	defmethod	public	145		
+datomic.uri	parse*	defmethod	public	158		
+datomic.uri	parse*	defmethod	public	178		
+datomic.uri	parse*	defmethod	public	209		
+datomic.uri	parse*	defmethod	public	240		
+datomic.uri	parse*	defmethod	public	271		
+datomic.uri	parse-h2	defn	public	288	[uri]	
+datomic.uri	parse*	defmethod	public	312		
+datomic.uri	parse*	defmethod	public	313		
+datomic.uri	parse*	defmethod	public	314		
+datomic.uri	parse*	defmethod	public	334		
+datomic.uri	parse*	defmethod	public	341		
+datomic.uri	parse*	defmethod	public	361		
+datomic.uri	parse	defn	public	362	[uri]	
+datomic.uri	parse-db	defn	public	363	[uri]	
+datomic.uri	remove-query-string	defn	private	369	[s]	
+datomic.uri	loggable-cluster-conf	defn	public	378	[cluster_conf]	
+datomic.uri	create	defmulti	public	384		
+datomic.uri	query-key	defn	public	385	[s]	
+datomic.uri	query-args	defn	public	386	[m]	
+datomic.uri	create	defmethod	public	398		
+datomic.uri	create	defmethod	public	414		
+datomic.uri	create	defmethod	public	448		
+datomic.uri	create	defmethod	public	478		
+datomic.uri	create	defmethod	public	508		
+datomic.uri	create	defmethod	public	538		
+datomic.uri	create	defmethod	public	559		
+datomic.uri	create	defmethod	public	575		
+datomic.uri	create	defmethod	public	595		
+datomic.uri	create	defmethod	public	608		
+datomic.uri	create	defmethod	public	620		
+datomic.uri	map->query-string	defn	public	630	[m]	
+datomic.uri	create-h2	defn	public	642	[cluster_conf]	
+datomic.uri	create	defmethod	public	655		
+datomic.uri	create	defmethod	public	656		
+datomic.uri	create	defmethod	public	657		
+datomic.uri	create	defmethod	public	669		
+datomic.uri	db-uri	defn	public	678	[uri db_name]	
+datomic.val-cluster	Impl	defonce	public	30		
+datomic.val-cluster	Impl	defprotocol	public	31		
+datomic.val-cluster	ValCluster	deftype	public	32		
+datomic.val-cluster	->ValCluster	defn	public	269	[val_store]	
+datomic.val-cluster	val-cluster	defn	public	270	[val_store]	
+datomic.valcache	HEADER_LENGTH	def	public	70		
+datomic.valcache	REQUEST_MAGIC	def	public	72		
+datomic.valcache	RESPONSE_MAGIC	def	public	74		
+datomic.valcache	FILE_MAGIC_LENGTH	def	public	76		
+datomic.valcache	FILE_MAGIC	def	public	80		
+datomic.valcache	DIRS	def	public	82		
+datomic.valcache	MEG	def	public	84		
+datomic.valcache	BLOCK_SIZE_WASTE	def	public	86		
+datomic.valcache	GET	def	public	90		
+datomic.valcache	SET	def	public	92		
+datomic.valcache	DELETE	def	public	94		
+datomic.valcache	QUIT	def	public	96		
+datomic.valcache	NOOP	def	public	98		
+datomic.valcache	SASL_AUTH	def	public	100		
+datomic.valcache	SASL_STEP	def	public	102		
+datomic.valcache	NOT_FOUND	def	public	104		
+datomic.valcache	INVALID	def	public	106		
+datomic.valcache	UNAUTHORIZED	def	public	108		
+datomic.valcache	NOT_SUPPORTED	def	public	110		
+datomic.valcache	read-header	defn	private	112	[sc bb]	
+datomic.valcache	handle	defmulti	public	146		
+datomic.valcache	sasl	defmulti	public	157		
+datomic.valcache	reply-with-error	defn	private	168	[opcode status msg sc]	
+datomic.valcache	supported-or-drain	defn	private	203	[p__9647 sc mmeth]	
+datomic.valcache	reply-empty-ok	defn	private	238	[opcode sc]	
+datomic.valcache	noop-quit	defn	private	267	[p__9654 sc]	
+datomic.valcache	handle	defmethod	public	291		
+datomic.valcache	handle	defmethod	public	292		
+datomic.valcache	uuid-prefix	defn	private	293	[s]	
+datomic.valcache	full-path	defn	private	317	[root k]	
+datomic.valcache	handle	defmethod	public	338		
+datomic.valcache	read-key	defn	private	401	[key_length sc]	
+datomic.valcache	handle	defmethod	public	416		
+datomic.valcache	handle	defmethod	public	473		
+datomic.valcache	scan-strings	defn	private	496	[bb]	
+datomic.valcache	sasl	defmethod	public	517		
+datomic.valcache	dirname	defn	private	546	[n]	
+datomic.valcache	mkdirs	defn	private	550	[root]	
+datomic.valcache	IServer	defonce	public	568		
+datomic.valcache	IServer	defprotocol	public	569		
+datomic.valcache	Server	deftype	public	575		
+datomic.valcache	->Server	defn	public	590	[sem concurrency socket_registry handled host port path shutdown_fn]	
+datomic.valcache	eviction-loop	defn	private	601	[path threshold interval_secs file_window shutdown_requested]	
+datomic.valcache	valcache-ref	def	private	776		
+datomic.valcache	shutdown	defn	public	778	[]	
+datomic.valcache	sasl-loop	defn	public	783	[creds sc sem]	
+datomic.valcache	remote-ip	defn	private	797	[sc]	
+datomic.valcache	start-server	defn	public	811	[p__9788]	
+datomic.valcache	direct-init	defn	public	998	[p__9811]	
+datomic.valcache	direct-get	defn	public	1036	[root k]	
+datomic.valcache	direct-put	defn	public	1052	[root k v]	
+datomic.valcache.puts-pool	PutsPool	defonce	public	7		
+datomic.valcache.puts-pool	PutsPool	defprotocol	public	8		
+datomic.valcache.puts-pool	get-from-put	defmulti	public	9		
+datomic.valcache.puts-pool	get-from-put	defmethod	public	10		
+datomic.valcache.puts-pool	get-from-queued-put	defn	public	11	[puts_pool k]	
+datomic.valcache.puts-pool-impl	get-from-put	defmethod	public	36		
+datomic.valcache.puts-pool-impl	ValcachePutsPoolImpl	deftype	public	48		
+datomic.valcache.puts-pool-impl	->ValcachePutsPoolImpl	defn	public	99	[limit puts pool]	
+datomic.valcache.puts-pool-impl	create-valcache-puts-pool	defn	public	101	[p__9892] []	
+datomic.valcache.puts-pool-impl	valcache-puts-pool	defonce	public	130		
+datomic.valcache-direct	max-bytes	def	private	54		
+datomic.valcache-direct	fits-in-cache?	defn	private	58	[v]	
+datomic.valcache-direct	ValcacheDirect	deftype	public	67		
+datomic.valcache-direct	->ValcacheDirect	defn	public	155	[root shutdown_fn puts_pool]	
+datomic.valcache-direct	create	defn	public	158	[p__9927]	
+datomic.validators	allow-keys	defn	public	12	[m & ks]	
+datomic.validators	require-keys	defn	public	21	[m & ks]	
