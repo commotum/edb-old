@@ -130,10 +130,10 @@ fn exact_numeric_queries_scale_sensitive_history_and_receipts_survive_cli_restar
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     const DATABASE: &str = "numeric_repairs";
     cli(&fixture.admin_url, &["create", "--database", DATABASE]);

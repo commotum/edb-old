@@ -216,6 +216,11 @@
     java.lang.Throwable
     ThrowableAnomCat
     {:-throwable-anom-category (fn fn__3560 ([t] (throwable-class-category (class t))))})
+  ;; ATOMIC-NOTE [observed/disposition]: Wrapper delegation precedes category dispatch,
+  ;; so an ExecutionException does not erase its cause's actionable category.
+  ;; Unclassified types fall back to fault; this is not evidence every external
+  ;; exception is normalized. Native error::SemanticError uses typed categories
+  ;; and transport error data, not a Java superclass/protocol registry.
   (defn throwable-category
     ([throwable] (-throwable-anom-category (category-delegate throwable))))
   (reset-meta!

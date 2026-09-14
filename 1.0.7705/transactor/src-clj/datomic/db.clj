@@ -5145,6 +5145,10 @@
     (^java.util.stream.Stream indexPull [this options] (Circular/indexPull this options))
     (pull [this selector eid options] (Circular/pull this selector eid options))
     (^java.util.Map pull [this selector eid] (Circular/pull this selector eid nil))
+    ;; ATOMIC-NOTE [observed; entity factory]: Capture this exact Db and resolve
+    ;; the identifier without an existence scan. Numeric ids can yield empty
+    ;; lazy entities; unresolved idents/lookups yield nil. Reject history, but
+    ;; retain filter/time/speculative layers through EntityMap navigation.
     (^datomic.Entity entity
       [this eid]
       (do
@@ -5899,6 +5903,9 @@
   (reset-meta!
     #'reverse-key?
     (assoc {:arglists (clojure.core/list ['k]), :column (int 1)} :name 'reverse-key? :ns *ns*))
+  ;; ATOMIC-NOTE [observed; shared naming]: Exact underscore-prefixed schema
+  ;; idents are forward data. query/eav tests this directly; Pull repairs its
+  ;; initially normalized direction in fix-specs-for-underscore-prefix-attrs.
   (defn reverse-lookup? ([db k] (and (datomic.db/reverse-key? k) (not (contains? (:_keys db) k)))))
   (reset-meta!
     #'reverse-lookup?

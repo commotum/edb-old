@@ -255,7 +255,7 @@ fn sequence_shares_work_deadline_cancellation_and_fuses_after_projection_errors(
 }
 
 #[test]
-fn source_errors_are_not_hidden_by_empty_relations_and_legacy_wrappers_still_work() {
+fn source_errors_are_not_hidden_by_empty_relations_and_typed_convenience_wrappers_work() {
     let (database, _) = fixture(0);
     let mut input = sources(database.clone(), 0);
     let q = query(None);
@@ -281,12 +281,12 @@ fn source_errors_are_not_hidden_by_empty_relations_and_legacy_wrappers_still_wor
             .code,
         "query/unknown-source"
     );
-    let mut legacy = q.clone();
-    legacy.clauses.pop();
-    legacy.find = FindSpec::Collection(projection(None));
+    let mut current_query = q.clone();
+    current_query.clauses.pop();
+    current_query.find = FindSpec::Collection(projection(None));
     assert_eq!(
         QueryEngine::sequence(
-            &legacy,
+            &current_query,
             &[QuerySource {
                 name: "$db".into(),
                 database

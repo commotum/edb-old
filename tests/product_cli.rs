@@ -88,10 +88,10 @@ fn actual_product_commands_serve_a_separate_application_across_restart() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
         eprintln!("restricted-role witness unavailable: fixture account cannot create roles");
     }
     const DATABASE: &str = "application";

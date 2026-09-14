@@ -777,9 +777,11 @@
             ([p1__20370#]
               (if p1__20370# p1__20370# (java.util.concurrent.LinkedBlockingQueue.)))))))
     ;; ATOMIC-NOTE [observed]: create-procargs preserves txdata under :data and
-    ;; assigns :id to correlate pending_txes with notify-data/notify-error. A full
-    ;; outgoing queue completes the future with an error; enqueueing is not a
-    ;; commit acknowledgement. create-connection bounds this queue at 128 items.
+    ;; assigns :id to correlate pending_txes with notify-data/notify-error.
+    ;; create-connection supplies a 128-item ArrayBlockingQueue; queue/put calls
+    ;; blocking .put and returns true, so the false-result branch is not a full-
+    ;; queue rejection for that concrete implementation. Enqueueing is not a
+    ;; commit acknowledgement. Native Busy admission is an explicit adaptation.
     (^datomic.ListenableFuture transactAsync
       [this ^java.util.List txdata options]
       (if (get-cstate state_ref nil)

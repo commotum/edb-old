@@ -348,6 +348,13 @@
       'lookup-with-object-cache
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/why]: Live and storage-only peer construction both
+  ;; compose object hits, shared in-flight misses and deserializing repair here.
+  ;; Repair retries a failed decode with reset-cache=true, then surfaces another
+  ;; failure; cache contents are not an authority that can hide corrupt storage.
+  ;; Native typed tree/fulltext/log caches retain immutable payload identities;
+  ;; their admission, validation and optional SSD policies are explicit native
+  ;; adaptations, not Caffeine or Valcache algorithm/wire compatibility.
   (defn system-cache-olookup
     ([cluster]
       (lookup-with-object-cache

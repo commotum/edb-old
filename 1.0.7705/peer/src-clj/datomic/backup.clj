@@ -282,6 +282,9 @@
     #'claimed-by
     (assoc {:arglists (clojure.core/list ['storage]), :column (int 1)} :name 'claimed-by :ns *ns*))
   ;; Claims an empty backup location for one database identity and rejects cross-database reuse.
+  ;; ATOMIC-NOTE [observed/adaptation] Repository ownership prevents cross-lineage reuse; this read/write/read
+  ;; check is not an exclusive backup writer lock. Native repository::claim
+  ;; uses no-clobber publication and authenticates the retained owner.
   (defn ensure-claim
     ([storage id]
       (let [temp__5802__auto__ (claimed-by storage)]
@@ -553,6 +556,10 @@
       (reset-meta!
         (clojure.lang.RT/var "datomic.backup" "backup-node")
         (assoc protocol_signature__7475 :name protocol_method_name__7476 :ns *ns*))))
+  ;; ATOMIC-NOTE [observed/adaptation] Child work is awaited before copying this parent. Incremental subtree
+  ;; skips rely on prior child-closed copies. The semaphore bounds active
+  ;; value transfers, not total traversal memory; native capture authenticates
+  ;; reused objects and publishes the manifest only after the graph is copied.
   (deftype
     ValueBackup
     [from_cluster value_storage progress incremental? ids_>nodes throttle sem]
@@ -1136,6 +1143,10 @@
       :ns
       *ns*))
   ;; Installs the restored index and log roots only after their immutable values are available.
+  ;; ATOMIC-NOTE [observed/adaptation] Index reset and tail reset are separate publications here. Pro restore
+  ;; requires stopped live users; this is not Atomic's guarded activation of
+  ;; root, lease, completion and checkpoint in one batch. Retain that native
+  ;; protocol rather than copying these separate publication steps.
   (defn restore-roots
     ([job cluster]
       (let [map__21556 job
@@ -1175,6 +1186,10 @@
       :ns
       *ns*))
   ;; Captures one consistent index root, log root, and log tail from a live database.
+  ;; ATOMIC-NOTE [observed/adaptation] Tail descriptor/data are captured first; the index reference is read
+  ;; separately. Immutable selected values do not establish an atomic
+  ;; multi-reference capture. Native backup/capture reads one guarded
+  ;; DatabaseRoot containing both coordinates.
   (defn create-backup-job
     ([cluster lookup]
       (let [vec__21559 (log/read-tail-descriptor cluster)
@@ -1571,6 +1586,10 @@
       *ns*))
   ;; Copies values reachable from a live basis and writes the root descriptor last. Existing values
   ;; in a repeatedly used backup location are skipped, making later snapshots differential.
+  ;; ATOMIC-NOTE [observed/adaptation] Both immutable trees finish before the roots record advertises this
+  ;; point. Interrupted copies may leave reusable values, not completed points.
+  ;; See 08_operations/01_capacity_and_reliability/02_backup_and_restore.atomic.md
+  ;; for native backup/{capture,repository,restore,verify} owners and bounds.
   (defn backup-db
     ([from_uri to_storage progress concurrency incremental?]
       (let [cluster_conf (uri/parse-db from_uri)
@@ -1888,6 +1907,10 @@
       :ns
       *ns*))
   ;; Verifies that every referenced log and index segment exists; read-all also reads each value.
+  ;; ATOMIC-NOTE [observed/adaptation] Presence/read-all checks establish segment availability/readability,
+  ;; not replay-equivalent schema and index content. Atomic's explicit verifier
+  ;; also authenticates program edges, receipts/frontiers and projections
+  ;; against one canonical replay. Ordinary backup reads do not run that audit.
   (defn verify-backup
     ([p__21683]
       (let [map__21684 p__21683

@@ -1,14 +1,13 @@
 //! Live observation over the same immutable block snapshots used by writers.
 //! The updater serializes observations, never queries or lazy snapshot reads.
-use super::{PeerIndexCursor, PeerLoadStats, PeerSnapshot, lock, transaction_hash};
+use super::{PeerLoadStats, PeerSnapshot, lock, transaction_hash};
 use crate::index::cursor::MergeSource;
 use crate::index::recent::{RecentLimits, RecentStats};
 use crate::storage::{BlockDatabase, BlockReadConfig, BlockReader, BlockSnapshot};
 use crate::{
-    CacheStats, DatabaseIdentity, DatabaseValue, Datom, Digest, Entity, EntityIdentifier,
-    ErrorCategory, IndexOrder, IndexPrefix, Keyword, PostgresConnectionConfig, PullPattern, Query,
-    QueryControl, QueryExtensions, QueryInput, QueryOutcome, QueryValue, SemanticError,
-    ServiceTransactionReport,
+    CacheStats, DatabaseIdentity, DatabaseValue, Digest, Entity, EntityIdentifier, ErrorCategory,
+    PostgresConnectionConfig, PullPattern, Query, QueryControl, QueryExtensions, QueryInput,
+    QueryOutcome, QueryValue, SemanticError, ServiceTransactionReport,
 };
 use std::collections::VecDeque;
 #[cfg(test)]
@@ -449,8 +448,21 @@ impl Peer {
         through_basis: u64,
         reports: &mut Vec<ServiceTransactionReport>,
     ) -> Result<(), SemanticError> {
-        for basis in after_basis.saturating_add(1)..=through_basis {
-            let report = self.core.reader.exact_report_from_capture(source, basis)?;
+        // sync_once holds the update lock until the entire observation is
+        // validated. Carry the exact previous endpoint across batches, including
+        // generation handoffs; the reader authenticates any changed root before
+        // reusing its recent prefix or falling back to a current-format open.
+        let previous = match reports.last() {
+            Some(report) => direct_report_value(&report.db_after)?.clone(),
+            None => self.state().snapshot,
+        };
+        let batch = self.core.reader.exact_reports_from_capture(
+            source,
+            after_basis,
+            through_basis,
+            Some(&previous),
+        )?;
+        for report in batch {
             let before = direct_report_value(&report.db_before)?;
             let after = direct_report_value(&report.db_after)?;
             if before.generation() != generation
@@ -524,7 +536,7 @@ impl Peer {
         target: u64,
         timeout: Duration,
     ) -> Result<PeerSnapshot, SemanticError> {
-        self.wait_for(target, timeout, "peer/sync-timeout", |_| true)
+        self.wait_for(target, timeout, "peer/sync-timeout", |_| Ok(true))
     }
     pub fn sync_to_database_value(
         &self,
@@ -540,8 +552,10 @@ impl Peer {
     ) -> Result<DatabaseValue, SemanticError> {
         Ok(self
             .wait_for(target, timeout, "peer/sync-index-timeout", |snapshot| {
-                snapshot.indexed_basis_t() >= target
-                    && snapshot.index_descriptor().avet_work.is_empty()
+                if snapshot.indexed_basis_t() < target {
+                    return Ok(false);
+                }
+                avet_ready_through(snapshot, target, true)
             })?
             .database_value())
     }
@@ -552,7 +566,7 @@ impl Peer {
     ) -> Result<DatabaseValue, SemanticError> {
         Ok(self
             .wait_for(target, timeout, "peer/sync-schema-timeout", |snapshot| {
-                snapshot.avet_unready().is_empty()
+                avet_ready_through(snapshot, target, false)
             })?
             .database_value())
     }
@@ -585,15 +599,16 @@ impl Peer {
         target: u64,
         timeout: Duration,
         code: &'static str,
-        ready: impl Fn(&BlockSnapshot) -> bool,
+        ready: impl Fn(&BlockSnapshot) -> Result<bool, SemanticError>,
     ) -> Result<PeerSnapshot, SemanticError> {
         let started = Instant::now();
         loop {
             match self.sync_snapshot() {
-                Ok(snapshot) if snapshot.basis_t() >= target && ready(&snapshot.native) => {
-                    return Ok(snapshot);
+                Ok(snapshot) => {
+                    if snapshot.basis_t() >= target && ready(&snapshot.native)? {
+                        return Ok(snapshot);
+                    }
                 }
-                Ok(_) => {}
                 Err(error)
                     if error.category == ErrorCategory::Unavailable
                         || error.category == ErrorCategory::Conflict => {}
@@ -789,6 +804,116 @@ impl Peer {
         lock(&self.core.update)
     }
 }
+
+// TWatcherImpl.sync-background-t / db.ts-needing-index inspect requests only
+// through the requested T, not every job visible at a newer observed head.
+// Native descriptors can publish a new basis with partial AVET checkpoints,
+// so index basis alone is not completion. Inspect their existing schema
+// history at the frozen descriptor basis before considering the newer tail:
+// a later disable/re-enable must not conceal unfinished earlier work.
+fn avet_ready_through(
+    snapshot: &BlockSnapshot,
+    target: u64,
+    require_removals: bool,
+) -> Result<bool, SemanticError> {
+    let descriptor = snapshot.index_descriptor();
+    let value = snapshot.database_value();
+    for &attribute in &descriptor.pending_avet {
+        if !avet_transition_after(&value, attribute, descriptor.basis, true, target)? {
+            return Ok(false);
+        }
+    }
+    if require_removals {
+        for work in descriptor.avet_work.iter().filter(|work| !work.adding) {
+            if !avet_transition_after(&value, work.attribute, descriptor.basis, false, target)? {
+                return Ok(false);
+            }
+        }
+    } else {
+        for &attribute in snapshot.avet_unready() {
+            if !avet_transition_after(&value, attribute, snapshot.basis_t(), true, target)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+/// Whether the effective membership transition belongs strictly after target.
+/// Both index and unique flags confer AVET. Fold each transaction atomically:
+/// replacing one unique mode or moving between flags is not a disable/enable.
+/// Only pending attributes are read, using selective schema-entity prefixes.
+fn avet_transition_after(
+    value: &DatabaseValue,
+    attribute: u32,
+    through: u64,
+    adding: bool,
+    target: u64,
+) -> Result<bool, SemanticError> {
+    #[derive(Default)]
+    struct Change {
+        retract_index: bool,
+        add_index: Option<bool>,
+        retract_unique: bool,
+        add_unique: bool,
+    }
+    let mut changes = std::collections::BTreeMap::<u64, Change>::new();
+    let history = value.clone().history();
+    for schema_attribute in [crate::DB_INDEX, crate::DB_UNIQUE] {
+        for datom in history.prefix_cursor(&crate::IndexPrefix::Eavt {
+            entity: u64::from(attribute),
+            attribute: Some(schema_attribute as u32),
+            value: None,
+        })? {
+            let datom = datom?;
+            let t = crate::tx_to_t(datom.tx)?;
+            if t > through {
+                continue;
+            }
+            let change = changes.entry(t).or_default();
+            if schema_attribute == crate::DB_INDEX {
+                let crate::Value::Bool(indexed) = datom.value else {
+                    return Err(fault(
+                        "peer/schema-index-value",
+                        "Index schema fact is not boolean",
+                    ));
+                };
+                if datom.added {
+                    change.add_index = Some(indexed);
+                } else {
+                    change.retract_index = true;
+                }
+            } else if datom.added {
+                change.add_unique = true;
+            } else {
+                change.retract_unique = true;
+            }
+        }
+    }
+    let (mut indexed, mut unique, mut latest_transition) = (false, false, None);
+    for (t, change) in changes {
+        let before = indexed || unique;
+        if change.retract_index {
+            indexed = false;
+        }
+        if let Some(next) = change.add_index {
+            indexed = next;
+        }
+        if change.retract_unique {
+            unique = false;
+        }
+        unique |= change.add_unique;
+        if before != (indexed || unique) {
+            latest_transition = Some(t);
+        }
+    }
+    // Absent/inconsistent provenance cannot establish that pending work is
+    // later than the requested coordinate; conservatively keep waiting.
+    Ok((indexed || unique) == adding && latest_transition.is_some_and(|t| t > target))
+}
+
+#[cfg(test)]
+mod readiness_tests;
 
 fn direct_report_value(value: &DatabaseValue) -> Result<BlockSnapshot, SemanticError> {
     let (snapshot, as_of, since, history) = value.committed_block_parts()?;

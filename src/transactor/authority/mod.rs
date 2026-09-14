@@ -88,7 +88,7 @@ pub struct BlockTransactor {
     lease_revision: u64,
     current: Option<BlockSnapshot>,
     publication_revision: u64,
-    last_read_work: crate::database_value::TransactionReadWork,
+    last_read_work: crate::database_value::read_context::TransactionReadWork,
     last_assessment_work: crate::transaction::assess::AssessmentReadWork,
 }
 
@@ -624,7 +624,7 @@ impl BlockTransactor {
             limits,
             &self.options.execution,
         )?;
-        let instant = assessed.db_after.last_tx_instant()?.ok_or_else(|| {
+        let instant = assessed.db_after.last_tx_instant().ok_or_else(|| {
             fault(
                 "storage/transaction-instant",
                 "Assessed transaction has no instant",

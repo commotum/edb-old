@@ -72,6 +72,11 @@
       *ns*))
   ;; Serve reads from local SSD and queue writes outside the caller's path.
   ;; A read first observes a queued value for the same key, preserving read-after-write.
+  ;; ATOMIC-NOTE [observed/disposition]: Queued puts are visible to reads before
+  ;; disk completion; oversize values bypass this optional tier. Errors from
+  ;; direct-get are rethrown here, so fallback policy belongs to the caller.
+  ;; Native ssd_cache uses authenticated, generation-scoped entries and bounded
+  ;; admission; source filesystem layout/atime eviction is not its file format.
   (deftype
     ValcacheDirect
     [root shutdown_fn puts_pool]

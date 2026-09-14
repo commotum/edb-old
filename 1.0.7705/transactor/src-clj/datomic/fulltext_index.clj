@@ -31,6 +31,10 @@
         (clojure.core/import 'datomic.impl.db.IDatum)
         (clojure.core/import 'java.util.Comparator)
         (clojure.core/import 'java.util.ArrayList))))
+  ;; ATOMIC-NOTE [observed; analyzer boundary]: Store original V but index its
+  ;; analyzed terms. E/T remain numeric identity fields; A is the directory key.
+  ;; No assertion flag is stored here, so search's exact-Db validation is needed
+  ;; even when the memory tier receives retractions or superseded assertions.
   (defn datum->doc
     ([datum]
       (lucene/document
@@ -123,6 +127,11 @@
       'map->PersistentFulltext
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; captured tier]: Writers mutate newly constructed
+  ;; DirectoryRefs, then close before publishing persistent directory maps.
+  ;; Existing Db snapshots keep their earlier maps. Native immutable search
+  ;; attachments/recent datoms preserve captured-value isolation without a
+  ;; mutable search-answer cache or a second Lucene integration thread.
   (defn update-fulltext
     ([pft data]
       (let [pft (or pft (datomic.fulltext_index.PersistentFulltext.))

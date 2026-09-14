@@ -21,8 +21,9 @@ The record holds fixed index layers and view coordinates. Seeks merge ordered
 layers; ordinary current reads do not unconditionally add the archived history
 index. `acceptDataCheck` derives new persistent indexes and a new record.
 
-**Native ownership:** `database_value/value.rs` holds the exact shared handle;
-`cursor.rs` chooses current/history sources; `overlay.rs` flattens speculative
+**Native ownership:** [value.rs](../../src/database_value/value.rs) holds the exact shared handle;
+[cursor.rs](../../src/database_value/cursor.rs) chooses current/history sources;
+[overlay.rs](../../src/database_value/overlay.rs) flattens speculative
 chains over one committed base and path-copied `index::overlay` structures.
 The peer captures/adopts handles but does not own their read semantics.
 Query selection in `query.rs::select_datoms`, Pull navigation and transaction
@@ -38,12 +39,15 @@ current value to resolve identity and the since value to inspect recent facts.
 
 **Source:** `Db.asOf/Db.since` update record coordinates;
 `as-of-t` seeks `:db/txInstant` using AVET, preserving its first exact
-millisecond match (around 3995); `windowed` applies `<= asof` and `> since`.
+millisecond match (around 3995). Between matches it returns the next candidate's
+T minus one; after all candidates it returns `nextT`, a boundary that need not
+name an assigned transaction. `windowed` applies `<= asof` and `> since`.
 `resolve-id` delegates ordinary lookup refs through `resolve-lookup-ref`;
 idents use the derived dictionary rather than a temporal schema reconstruction.
 
-**Native:** `views.rs::{resolve_time_point,as_of_time_point,since_time_point}`
-and the single window state machine preserve these rules; `resolve.rs::lookup`
+**Native:** [views.rs](../../src/database_value/views.rs)::`resolve_time_point`,
+`as_of_time_point`, `since_time_point` and the single window state machine
+preserve these rules; [resolve.rs](../../src/database_value/resolve.rs)::`lookup`
 uses windowed AVET except for the ident dictionary. View changes preserve the
 captured basis, schema and ident projection. `entid_at` has the source's
 separate first-at-or-after instant rule, not the as-of predecessor rule.
@@ -101,7 +105,8 @@ overlay tests preserve branch independence, selective ranges and reclamation.
 
 ## Discardable acceleration is not database information
 
-`read_context.rs` retains one bounded exact-prefix memo per attempt. A key
+[read_context.rs](../../src/database_value/read_context.rs) retains one bounded
+exact-prefix memo per attempt. A key
 retains immutable-value identity; complete successful ranges alone are admitted.
 Partial/error/cancelled reads cannot become complete results, and memo replay
 still counts as logical work. Current temporal/custom windows do not memoize raw
@@ -116,5 +121,9 @@ field). Direct `Option<i64>` access preserves the value while removing the
 allocation/lock/error path. Basis/clone/window/successor assertions replace only
 the obsolete internal memo test. This is not a database scan optimization claim.
 
-No application or performance results are claimed by this trace update;
-the main integration run verifies the moved component and direct accessor.
+Fresh Stage 4 verification passed the moved library value/view/overlay and
+read-context cases, including direct resident-time assertions. PostgreSQL
+integration runs passed database_value (8), native_time_points (5),
+native_speculation (3), snapshot_references (3) and the actual connection/log
+workflows. These establish the exercised contracts, not exhaustive semantic
+equivalence or a measured benefit from removing the scalar memo.

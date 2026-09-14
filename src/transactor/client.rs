@@ -6,7 +6,7 @@ use super::observations::{
 use super::request::{
     IndexRequest, ServiceTransactionReport, TransactionRequest, TransactionTicket,
 };
-use crate::connection::DatabaseIdentity;
+use crate::model::identity::DatabaseIdentity;
 use crate::{Digest, ErrorCategory, OperationContext, OperationKind, SemanticError};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};

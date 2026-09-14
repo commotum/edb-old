@@ -1,4 +1,4 @@
-//! A separate application for the local or TLS transactor. See docs/application.md.
+//! A separate application for the local or TLS transactor. See docs/01_tutorials/01_application_workflow.md.
 use atomic_core::{
     Attribute, AttributeRef, Binding, Cardinality, Clause, Connection, DataPattern, Database,
     DatabaseValue, Entity, EntityMap, EntityRef, EntityValue, FindElement, FindSpec,
@@ -523,7 +523,7 @@ fn planning_workflow(
     let reference = base.snapshot_reference()?;
     let original = calculation(base)?;
     let time = base
-        .last_tx_instant()?
+        .last_tx_instant()
         .ok_or("planning base has no transaction instant")?
         + 1;
     let intent = |hours| {
@@ -621,7 +621,7 @@ fn planning_workflow(
         &selected_intent,
         intervened
             .db_after
-            .last_tx_instant()?
+            .last_tx_instant()
             .ok_or("replan base has no time")?
             + 1,
     )?;
@@ -852,25 +852,14 @@ fn partition_workflow(connection: &Connection, endpoint: &AppEndpoint) -> Result
     Ok(())
 }
 
-/// Search is eventual even for an exact DB value. Only the unavailable index
-/// error is retryable here; a corrupt page or rejected expression is not empty.
-fn await_fulltext(database: &DatabaseValue) -> Result<FulltextReport> {
-    let deadline = Instant::now() + WAIT;
-    loop {
-        let options = FulltextOptions {
-            timeout: Some(deadline.saturating_duration_since(Instant::now())),
-            ..FulltextOptions::default()
-        };
-        match database.fulltext(ARTICLE_TEXT, "immutable", &options) {
-            Ok(report) => return Ok(report),
-            Err(error)
-                if error.code == "fulltext/index-unavailable" && Instant::now() < deadline =>
-            {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(error) => return Err(error.into()),
-        }
-    }
+/// Search the captured value once. Recent/speculative text completes physical
+/// index lag; an absent attachment cannot appear on this immutable value.
+fn search_fulltext(database: &DatabaseValue) -> Result<FulltextReport> {
+    let options = FulltextOptions {
+        timeout: Some(WAIT),
+        ..FulltextOptions::default()
+    };
+    Ok(database.fulltext(ARTICLE_TEXT, "immutable", &options)?)
 }
 
 fn fulltext_workflow(connection: &Connection, endpoint: &AppEndpoint) -> Result<()> {
@@ -938,7 +927,7 @@ fn fulltext_workflow(connection: &Connection, endpoint: &AppEndpoint) -> Result<
     // threshold schedules the coherent index/search job; query the captured
     // value returned after its canonical basis has caught up.
     let database = connection.sync_index(committed.basis_t, WAIT)?;
-    let report = await_fulltext(&database)?;
+    let report = search_fulltext(&database)?;
     require(
         report.stats.index_basis_t >= committed.basis_t && report.hits.len() == 2,
         "fulltext projection did not cover the article transaction",

@@ -17,6 +17,11 @@ import java.util.stream.StreamSupport;
  * Utilities for constructing immutable Java data structures, reading EDN,
  * and adapting immutable iterables to streams.
  */
+// ATOMIC-NOTE [observed/disposition]: Java collection/EDN/stream conveniences
+// adapt the host to the Clojure API; they are not database structures. The
+// null list/map cases are mutable and other wrappers are shallow. Native
+// model/query values and EDN adapters specify their own ownership and shapes;
+// neither Java wrapper mutability nor Spliterator flags define DB semantics.
 public final class Util {
     private static final Var REQUIRE = RT.var((String)"clojure.core", (String)"require");
     private static final Var NAME;

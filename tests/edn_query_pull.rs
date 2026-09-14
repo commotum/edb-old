@@ -394,6 +394,8 @@ fn pull_edn_covers_options_reverse_nesting_recursion_wildcard_and_native_transfo
     name.alias = Some(QueryValue::Scalar(Value::String("name".into())));
     let mut friends =
         PullAttribute::reverse(AttributeName::Ident(Keyword::new("person", "friend")));
+    friends.direction =
+        atomic_core::PullDirection::SchemaResolved(Keyword::new("person", "_friend"));
     friends.limit = PullLimit::Unlimited;
     friends.nested = Some(PullNested::Pattern(Box::new(PullPattern {
         wildcard: false,

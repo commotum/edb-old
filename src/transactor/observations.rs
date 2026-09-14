@@ -25,9 +25,6 @@ pub struct BackgroundFulltextStats {
     pub attempts: u64,
     /// Failed whole-job attempts, including preparation and adoption failures.
     pub failures: u64,
-    /// Always zero: there is no separate idle fulltext retry worker. Whole-job
-    /// retries increment `attempts` and use the ordinary index retry policy.
-    pub idle_retries: u64,
     /// Until the next real whole-job retry; None also covers a running attempt.
     pub retry_in: Option<Duration>,
     /// The whole-job retry budget was exhausted or ownership was lost, so this
@@ -84,7 +81,6 @@ impl ProjectionObservations {
                 attempted_basis_t: self.stats.attempted_basis_t,
                 attempts: self.stats.attempts,
                 failures: self.stats.failures,
-                idle_retries: self.stats.idle_retries,
                 retry_in: self.stats.retry_in,
                 retry_exhausted: self.stats.retry_exhausted,
                 last_failure: self.stats.last_failure.as_ref().map(|error| {

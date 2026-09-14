@@ -159,7 +159,10 @@ impl ExcisionLane {
                                         false,
                                     );
                                     refresh_progress(writer, shared);
-                                    crate::change_notices::publish(connection, &shared.database_id);
+                                    crate::observation::notices::publish(
+                                        connection,
+                                        &shared.database_id,
+                                    );
                                     self.attempted_basis = None;
                                 }
                                 Err(error) => self.failed(error, shared),

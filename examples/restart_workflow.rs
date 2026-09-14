@@ -124,7 +124,7 @@ fn fingerprint(phase: &str, view: &str, value: &DatabaseValue) -> Result<Fingerp
     let mut datoms = 0_u64;
     // Consume every EAVT fact through bounded native cursor pages. As in the
     // operations/GC workflows, frame one canonical datom at a time: no whole
-    // database collection, tree-packing dependency or legacy sort conversion.
+    // database collection, tree-packing dependency or cross-format sort conversion.
     for datom in value.scan_cursor(IndexOrder::Eavt)? {
         let encoded = canonical_datom_bytes(&datom?)?;
         hash.update((encoded.len() as u64).to_be_bytes());

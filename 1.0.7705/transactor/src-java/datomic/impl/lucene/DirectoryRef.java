@@ -21,6 +21,10 @@ import java.util.Map;
  * file names to RAM files. File creation and deletion replace map entries
  * atomically, and dereferencing returns the current directory snapshot.
  */
+// ATOMIC-NOTE [observed]: createOutput replaces one map entry with a new RAMFile;
+// update-fulltext closes writers before publishing deref's persistent map.
+// This is transient construction followed by immutable snapshot publication,
+// not permission to mutate an older captured database's search answers.
 public class DirectoryRef
 extends Directory
 implements IDeref {

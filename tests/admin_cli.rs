@@ -57,6 +57,21 @@ fn fixture(label: &str) -> Option<common::PostgresFixture> {
 }
 
 #[test]
+fn only_the_current_install_command_is_exposed() {
+    let output = command(None, &["--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("atomic install"));
+    assert!(!help.contains("migrate"));
+    rejected(None, &["migrate"], "cli/usage");
+    rejected(
+        None,
+        &["migrate", "--writer-role", "writer", "--peer-role", "peer"],
+        "cli/usage",
+    );
+}
+
+#[test]
 fn install_lifecycle_inspection_and_collection_use_only_the_selected_opaque_namespace() {
     let Some(fixture) = fixture("admin_current") else {
         return;
@@ -64,7 +79,6 @@ fn install_lifecycle_inspection_and_collection_use_only_the_selected_opaque_name
     let connection = &fixture.connection;
     let installed = success(connection, &["install"]);
     assert!(installed.contains("INSTALLED storage_format=atomic/opaque-storage/1 tables=2"));
-    assert_eq!(success(connection, &["migrate"]), installed);
     let mut sql = Client::connect(connection, NoTls).unwrap();
     let tables: Vec<String> = sql.query(
         "SELECT c.relname::text FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=$1 AND c.relkind='r' ORDER BY c.relname", &[&fixture.schema]
@@ -380,7 +394,7 @@ fn installation_grants_generic_runtime_access_without_peer_object_writes() {
 fn installation_refuses_a_nonempty_namespace_and_arguments_fail_before_connecting() {
     for args in [
         vec!["install", "--writer-role", "writer"],
-        vec!["migrate", "--writer-role", "same", "--peer-role", "same"],
+        vec!["install", "--writer-role", "same", "--peer-role", "same"],
         vec!["delete", "--database", "missing", "--apply"],
     ] {
         rejected(None, &args, "cli/usage");

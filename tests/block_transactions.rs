@@ -109,8 +109,8 @@ fn create_preserves_initial_schema_transaction_and_empty_genesis_contract() {
         let value = snapshot.database_value();
         common::assert_same_information(&value, &oracle);
         assert_eq!(
-            value.last_tx_instant().unwrap(),
-            oracle.database_value().last_tx_instant().unwrap()
+            value.last_tx_instant(),
+            oracle.database_value().last_tx_instant()
         );
         let publication = store.read_ref(&database.reference_key()).unwrap().unwrap();
         let id = publication

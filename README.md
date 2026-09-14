@@ -16,29 +16,19 @@ upgrade inputs. Installation never resets existing data.
 
 ## Start here
 
-- [EDN transactions, queries, pull patterns and readable results](docs/edn.md),
-  using native Rust adapters or the file/stdin CLI.
-- [Local or verified-TLS remote applications](docs/application.md), including
-  explicit PostgreSQL installation and restricted runtime roles.
-- [Immutable read composition](docs/read-values.md), including snapshot references,
-  time views, entity identity, speculative branches and index access.
-- [Datalog](docs/queries.md), [general application data](docs/query-data.md) and
-  [native application computation](docs/application-computation.md).
-- [Persisted native programs](docs/programs.md), [fulltext](docs/fulltext.md),
-  [partitions](docs/partitions.md) and [schema/identity](docs/schema-identity.md).
-- [Durable change consumers](docs/change-consumers.md) and
-  [logical database lifecycle](docs/database-lifecycle.md).
-- [Backup, restore and administration](docs/admin.md),
-  [selective offline backup reads](docs/backup-reads.md) and
-  [operational guidance](docs/operations.md).
-- [Current acceptance and measured limits](docs/acceptance.md), plus
-  [reader measurements](docs/read-load.md).
+Start with the [chapter guide](docs/00_start_here/00_introduction.md), the
+[EDN file/stdin tutorial](docs/01_tutorials/00_edn_workflow.md), or the
+[separate Rust application](docs/01_tutorials/01_application_workflow.md).
+The guide covers schema, transactions, immutable values, query/Pull/fulltext,
+indexes/logs, native APIs, operations and genuinely optional caching/prefetch.
 
-The retained [Datomic Pro documentation](datomic_pro_docs/) governs semantics.
-The recovered [1.0.7705 source](1.0.7705/) is architectural evidence, not the
-unpublished original source tree or a runnable recovered distribution. Its
-`peer/` and `transactor/` directories are sibling artifact-provenance boundaries.
-[Tools](tools/) retains narrowly useful decompiler and JVM inspection utilities.
+For deployment and recovery use [operations](docs/08_operations/00_deployment.md)
+and [administration](docs/08_operations/01_administration.md).
+Development checks and workload reproduction live under
+[development/validation](development/validation/README.md); source rationale and
+reference tracing live separately in [development/source](development/source/README.md).
+The retained Pro documentation and recovered sources are reference evidence,
+not an executable distribution or a promise of JVM compatibility.
 
 ## Build and exercise
 
@@ -62,9 +52,8 @@ ATOMIC_POSTGRES_URL='host=/path/to/socket port=5432 user=atomic_test dbname=atom
 ```
 
 Choose relevant targets while developing; use `cargo test --offline --all-targets`
-for a broader integration pass when needed. Duplicate stress/measurement campaigns
-and historical-format fixtures have been removed. The remaining focused tests
-protect current behavior; benchmark throughput with an actual application workload.
+for a broader integration pass when needed. Focused tests protect current behavior; benchmark throughput with an actual
+application workload.
 
 The server-crash test is separately opted in with
 `ATOMIC_ALLOW_DISPOSABLE_PG_CRASH=1`, `ATOMIC_RESTART_POSTGRES_URL`,
@@ -74,7 +63,7 @@ The options must specify the disposable server's exact `-k`, `-p` and `-h`
 settings. Run `--test postgres_restart_resilience` alone: never point it at a
 shared server or run other tests against that server while it is being crashed.
 PostgreSQL TLS checks have separate trust/server prerequisites documented in
-[operations](docs/operations.md); do not count skipped fixtures as evidence.
+[operations](docs/08_operations/00_deployment.md); do not count skipped fixtures as evidence.
 
 Run the public Rust application against the disposable database:
 
@@ -87,7 +76,7 @@ It creates a unique logical database and exercises schema, program deployment,
 transactions, queries, Pull, history, held values and reopen. The
 `process_workflow` example exercises an independent writer and submitting peers.
 The stock `application_workflow` example uses the CLI-managed local or remote
-transactor; follow the [application guide](docs/application.md).
+transactor; follow the [application guide](docs/01_tutorials/01_application_workflow.md).
 
 ## Application model
 
@@ -111,8 +100,10 @@ report failure to open its read values without changing the durable outcome.
 
 Connections observe newer roots in the background using coalesced notifications
 and durable catch-up. Change consumers expose explicit checkpoints and bounded
-replay. Retained handles and backup captures participate in Rust-owned retention;
-a serialized snapshot reference is neither a credential nor a retention pin.
+replay. Read handles and backup captures create no reader pins. Configure GC grace
+(normally 30 days) to cover reads, consumer lag and copy durations; holding a
+Rust value does not override it. A serialized snapshot reference is neither a
+credential nor a retention pin.
 Excision cannot erase bytes or memories already exported to another process.
 
 Read limits, deadlines and cancellation are cooperative resource policies, not
@@ -121,7 +112,6 @@ Fulltext merges indexed and recent facts with supplied-view validation; an
 absent search hit is not an identity or uniqueness constraint. Advisory hints
 never become transaction meaning or durable request identity.
 
-Current acceptance and measurement limits are recorded in
-[product acceptance](docs/acceptance.md). Historical
-implementation results remain in Git history; they are not evidence for the
-current storage engine.
+Validation commands and measurement boundaries are described in
+[development validation](development/validation/README.md). Treat only fresh,
+prerequisite-complete runs as release evidence, not historical benchmark claims.

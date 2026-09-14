@@ -1,10 +1,11 @@
 //! Native application composition: one advancing reader and an optional submission/service owner.
 use crate::peer::Peer;
 use crate::{
-    DatabaseIdentity, DatabaseValue, Datom, Entity, EntityIdentifier, IndexBoundary, IndexOrder, IndexPrefix,
-    PostgresConnectionConfig, PullPattern, Query, QueryControl, QueryExtensions, QueryInput,
-    QueryOutcome, QueryValue, SemanticError, ServiceTransactionReport, TransactionClient,
-    TransactionRequest, TransactionService, TransactionServiceConfig, TransactionTicket,
+    DatabaseIdentity, DatabaseValue, Datom, Entity, EntityIdentifier, IndexBoundary, IndexOrder,
+    IndexPrefix, PostgresConnectionConfig, PullPattern, Query, QueryControl, QueryExtensions,
+    QueryInput, QueryOutcome, QueryValue, SemanticError, ServiceTransactionReport,
+    TransactionClient, TransactionRequest, TransactionService, TransactionServiceConfig,
+    TransactionTicket,
 };
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
@@ -239,7 +240,7 @@ impl Connection {
                         Err(mpsc::TryRecvError::Disconnected) => break,
                     }
                     if listener.is_none() && Instant::now() >= reconnect_at {
-                        match crate::change_notices::NoticeListener::connect(
+                        match crate::observation::notices::NoticeListener::connect(
                             &connection,
                             &database_id,
                         ) {

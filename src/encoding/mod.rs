@@ -2472,10 +2472,12 @@ mod tests {
             decode_genesis(&unsupported).unwrap_err().code,
             "encoding/unsupported-version"
         );
-        let mut legacy_identity = encoded.clone();
-        legacy_identity[5..7].copy_from_slice(&1_u16.to_be_bytes());
+        let mut unsupported_identity_version = encoded.clone();
+        unsupported_identity_version[5..7].copy_from_slice(&1_u16.to_be_bytes());
         assert_eq!(
-            decode_genesis(&legacy_identity).unwrap_err().code,
+            decode_genesis(&unsupported_identity_version)
+                .unwrap_err()
+                .code,
             "encoding/unsupported-version"
         );
         assert_eq!(

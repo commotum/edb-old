@@ -429,6 +429,9 @@
   (reset-meta!
     #'listq->mapq
     (assoc {:arglists (clojure.core/list ['lq]), :column (int 1)} :name 'listq->mapq :ns *ns*))
+  ;; ATOMIC-NOTE [observed]: Explicit source prefixes must occur in :in and
+  ;; move into clause metadata. The cached clause keeps a source name, not a Db
+  ;; or connection; q* supplies each invocation's actual immutable sources.
   (defn move-sources-to-meta
     ([p__19068]
       (let [map__19069 p__19068
@@ -629,6 +632,11 @@
       'validate-query
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Scalar/tuple/collection/relation bindings become
+  ;; synthetic ground clauses over generated input names. Scalar and tuple
+  ;; positions also populate :in-consts for range planning; values remain runtime
+  ;; arguments. [inferred] One relation path handles destructuring and joins
+  ;; without embedding a caller's data in the reusable prepared query.
   (defn process-in-bindings
     ([qmap prefix]
       (let [temp__5802__auto__ (:in qmap)]
@@ -683,6 +691,11 @@
       'process-in-bindings
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Recognized binary comparisons with one constant or
+  ;; scalar/tuple input record seek starts and stopping predicates. Equality can
+  ;; replace an earlier bound; this is not a full strongest-bound solver. The
+  ;; original predicate remains in :where, preserving correctness when a seek
+  ;; bound is inclusive, incomplete, or unavailable for a selected index.
   (defn process-ranges
     ([qmap]
       (let [consts (:in-consts qmap)
@@ -744,6 +757,11 @@
       'process-ranges
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; basis before grouping]: Keep each aggregate's input
+  ;; variable once in the relational head, then append :with variables. qsqr
+  ;; forms a set over that whole head; group-rel removes the extra coordinates
+  ;; afterward. Thus distinct identities with equal values remain separate
+  ;; observations, but repeating an identical input tuple cannot inflate count.
   (defn process-aggregates
     ([qmap]
       (let [finds (:find qmap)
@@ -842,6 +860,10 @@
       'normalize-pull
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Pull expressions become projection metadata while
+  ;; their entity variables remain in :find. q* evaluates the basis relation and
+  ;; grouping before constructing pull-fv. Thus qseq defers navigation, not the
+  ;; joins that discover which entities need navigation.
   (defn process-pulls
     ([p__19194]
       (let [map__19195 p__19194
@@ -1005,6 +1027,10 @@
       'has-self-unifications?
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Repeated variables in one data clause are renamed
+  ;; and linked by explicit equality clauses before planning. This preserves
+  ;; same-tuple unification while letting relation planning address positions
+  ;; separately; a blank never becomes a tracked equality variable.
   (defn process-self-unifications
     ([qmap]
       (if (has-self-unifications? qmap)
@@ -1194,6 +1220,11 @@
       'load-query
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; grouping cost]: Integer entries in fv are grouping
+  ;; columns; [index function] entries consume a view over one sorted group.
+  ;; The view avoids copying each aggregate column, but sorting retains the
+  ;; completed relation. With no aggregate functions, subvec removes :with
+  ;; coordinates without another set conversion, preserving the resulting bag.
   (defn group-rel
     ([fv rel]
       (let [grp_idxs (filterv integer? fv)]
@@ -1438,6 +1469,9 @@
       'sort-collection-by-indexed
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Sort the completed relation by its first Pull entity
+  ;; column before per-row navigation. [inferred] Nearby entity reads can share
+  ;; index/cache locality; this is not a user-visible general ordering promise.
   (defn sort-for-pull
     ([query result]
       (let [temp__5802__auto__ (first
@@ -1518,6 +1552,11 @@
   (reset-meta!
     #'query*
     (assoc {:arglists (clojure.core/list ['query-map]), :column (int 1)} :name 'query* :ns *ns*))
+  ;; ATOMIC-NOTE [observed; output identity]: mapv deliberately preserves one
+  ;; output per basis tuple even when different entities Pull to equal maps.
+  ;; Return-map construction follows Pull in q*, so keys cannot affect joins
+  ;; or merge equal projected rows. Native query::results and return_maps retain
+  ;; that distinction; query::value_debug only formats already-produced values.
   (defn apply-pf
     ([p__19347]
       (let [vec__19348 p__19347
@@ -1572,6 +1611,17 @@
       'query
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [documented/observed]: query* has already evaluated joins,
+  ;; grouping and sort-for-pull here. Offset/limit and post-fn apply to that
+  ;; materialized basis; counted-seq knows its count without realizing Pull.
+  ;; The io-context wrapper below measures run-query before lazy consumption,
+  ;; not all later projection reads. Native complete-consumption counters must
+  ;; not be compared to this preparation-only wrapper as identical scopes.
+  ;; ATOMIC-NOTE [native adaptation; shared controls]: qsqr's dynamic cancel
+  ;; binding ends before this deferred projection is consumed. Native sequence
+  ;; retains the caller's absolute deadline, cancellation, work and accounted
+  ;; value-byte allowance across preparation and Pull. Keeping the used byte
+  ;; count while replacing its maximum with usize::MAX would lose the contract.
   (defn qseq
     ([query-map args] (qseq {:query query-map, :args args}))
     ([{:keys [offset limit io-context],

@@ -396,7 +396,7 @@ fn offline_backup_query_pull_history_speculation_and_log_are_selective_and_sourc
             db.clone().as_of(first_t).values(target, LABEL).unwrap(),
             vec![Value::String(format!("row-{target_index}"))]
         );
-        assert_eq!(db.last_tx_instant().unwrap(), Some(2000));
+        assert_eq!(db.last_tx_instant(), Some(2000));
         let reverse = db
             .reverse_seek_cursor(&IndexBoundary::Avet(IndexComponents::Two(
                 SCORE,

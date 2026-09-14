@@ -83,6 +83,10 @@
       'project
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; Datalog adapter]: Project search metadata away and
+  ;; deduplicate complete [E V T score] tuples, not entities alone. Native query
+  ;; fulltext retains all four fields and shares its caller's work/value budget;
+  ;; cardinality-many strings and distinct assertion transactions remain rows.
   (defn fulltext
     "Searches a fulltext attribute and returns distinct [entity value transaction score] tuples."
     ([db attr qmap] (project (ft/search db attr qmap) [2 3 4 5])))
@@ -260,6 +264,10 @@
       '-gather
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [documented/observed]: Integer division chooses quot to avoid
+  ;; exposing ratios to callers. Native query::numeric preserves truncation
+  ;; toward zero and checks overflow/capacity; it does not coerce exact operands
+  ;; through f64 merely to reuse the floating arithmetic path.
   (defn / ([a b] (if (and (integer? a) (integer? b)) (quot a b) (clojure.core// a b))))
   (reset-meta!
     #'/
@@ -335,6 +343,10 @@
      "Returns tuple unchanged so a Datalog tuple binding can name its elements.",
      :column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.extensions" "untuple") identity)
+  ;; ATOMIC-NOTE [observed; nested boundary]: Circular dispatch re-enters the
+  ;; ordinary query API with explicit sources. Native query::nested shares the
+  ;; enclosing resource account and preserves scalar/container result shapes;
+  ;; registered native functions/programs replace JVM namespace evaluation.
   (defn q ([query & srcs] (Circular/q query srcs)))
   (reset-meta!
     #'q

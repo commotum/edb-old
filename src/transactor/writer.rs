@@ -4,7 +4,7 @@ use super::excision_lane::ExcisionLane;
 use super::index_lane::IndexLane;
 use super::indexing::Novelty;
 use super::request::ServiceTransactionReport;
-use crate::connection::DatabaseIdentity;
+use crate::model::identity::DatabaseIdentity;
 use crate::postgres_connection::is_postgres_connection_error;
 use crate::{
     Digest, DurableTransaction, ErrorCategory, OperationContext, OperationKind,
@@ -90,7 +90,7 @@ pub(super) fn run(
                             shared.accepting.store(false, Ordering::Release);
                         }
                         shared.publish(&report);
-                        crate::change_notices::publish(&connection, &shared.database_id);
+                        crate::observation::notices::publish(&connection, &shared.database_id);
                     }
                     if writer.activate().and_then(|_| writer.renew()).is_err() {
                         shared.accepting.store(false, Ordering::Release);
@@ -233,7 +233,7 @@ pub(super) fn run(
         let _ = work.response.send(result);
         if let Some(report) = publish {
             shared.publish(&report);
-            crate::change_notices::publish(&connection, &shared.database_id);
+            crate::observation::notices::publish(&connection, &shared.database_id);
         }
     }
     shared.accepting.store(false, Ordering::Release);

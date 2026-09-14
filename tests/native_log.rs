@@ -499,3 +499,95 @@ fn lazy_log_authenticates_each_payload_and_fuses_on_corruption() {
         Some(second.tx_data)
     );
 }
+
+#[test]
+fn public_log_range_reuses_forward_navigation_across_pages() {
+    let complete = std::time::Instant::now();
+    let Some((_scope, postgres, id)) = setup(false) else {
+        return;
+    };
+    let writer = common::start_service(&postgres, &id);
+    let mut expected = Vec::new();
+    let mut entity = EntityRef::Temp("item".into());
+    for i in 0..130 {
+        let report = write(&writer, &format!("range-{i}"), entity, i, 1000 + i);
+        entity = EntityRef::Id(report.tempids.get("item").copied().unwrap_or_else(|| {
+            report
+                .tx_data
+                .iter()
+                .find(|d| d.attribute == COUNT && d.added)
+                .unwrap()
+                .entity
+        }));
+        expected.push(LogTransaction {
+            t: report.basis_t,
+            data: report.tx_data,
+        });
+    }
+    writer.shutdown();
+    let peer = Peer::connect_with_cache_limits(&postgres, &id, 0, 0).unwrap();
+    let log = peer.log();
+    drop(peer);
+    let start = expected[0].t;
+    assert_eq!(start, 2);
+    assert_eq!(log.basis_t(), 131);
+    let setup_us = complete.elapsed().as_micros();
+
+    // Existing point lookup is the prior public cursor's complete payload path,
+    // not an alternate engine. Its only difference is repeated navigation.
+    let before = atomic_core::OperationContext::diagnostic(atomic_core::OperationKind::Query);
+    let started = std::time::Instant::now();
+    {
+        let _scope = before.enter();
+        for transaction in &expected {
+            assert_eq!(
+                log.tx_data(IndexTransaction::T(transaction.t)).unwrap(),
+                Some(transaction.data.clone())
+            );
+        }
+    }
+    let point_us = started.elapsed().as_micros();
+    let after = atomic_core::OperationContext::diagnostic(atomic_core::OperationKind::Query);
+    let started = std::time::Instant::now();
+    let cursor_stats;
+    {
+        let _scope = after.enter();
+        let mut cursor = log.tx_range(Some(TimePoint::T(start)), None).unwrap();
+        assert_eq!(
+            after.snapshot().sql_calls,
+            0,
+            "integer range construction is lazy"
+        );
+        for transaction in &expected {
+            assert_eq!(cursor.next().unwrap().unwrap(), *transaction);
+        }
+        assert!(cursor.next().is_none());
+        assert!(cursor.next().is_none());
+        cursor_stats = cursor.stats();
+    }
+    let range_us = started.elapsed().as_micros();
+    let before = before.snapshot();
+    let after = after.snapshot();
+    assert_eq!(
+        before.sql_calls, 257,
+        "130 inline entries + 127 repeated page reads"
+    );
+    assert_eq!(
+        after.sql_calls, 132,
+        "130 inline entries + each sealed page once"
+    );
+    assert_eq!(cursor_stats.transactions_read, 130);
+    assert_eq!(cursor_stats.cache_hits, 0);
+    assert_eq!(cursor_stats.peak_buffered_transactions, 1);
+    drop(log);
+    drop(expected);
+    drop(_scope);
+    eprintln!(
+        "public log range: 130 transactions/3 pages, RAM/SSD object caching disabled; setup={setup_us}us point={point_us}us/{} calls/{} cellsB forward={range_us}us/{} calls/{} cellsB complete={}us; same immutable endpoint, uncontrolled PG/OS warmth",
+        before.sql_calls,
+        before.result_cell_bytes,
+        after.sql_calls,
+        after.result_cell_bytes,
+        complete.elapsed().as_micros()
+    );
+}

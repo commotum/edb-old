@@ -1,9 +1,10 @@
 # ATOMIC-NOTE: transaction map → committed value → peer read
 
 This is development commentary for [Transaction Data](02_transaction_data.md),
-not part of the recovered Datomic documentation. It traces the Stage 1 map-form
-pilot; the rest of this chapter is not yet covered. The original text and source
-URLs remain in the reference chapters.
+not part of the recovered Datomic documentation. This focused map-form trace
+connects to the surrounding transaction/schema/function families through the
+[passage ledger](../../development/source/passages.tsv); it is not an annotation
+of every source symbol. The original text and source URLs remain unchanged.
 
 Baseline for all line coordinates below:
 `cd7192e63d883a4a34aa7de4d5bcd17e6edb692d`. Locate source by the named symbol;
@@ -31,7 +32,7 @@ orchestration, [transaction/input.rs](../../src/transaction/input.rs)
 for input validation, and [transaction/assess/mod.rs](../../src/transaction/assess/mod.rs) for
 identity resolution, the logical delta and successor validation. Durable
 publication belongs to [transactor/authority/mod.rs](../../src/transactor/authority/mod.rs);
-[connection.rs](../../src/connection.rs), [database_value.rs](../../src/database_value.rs)
+[application/connection.rs](../../src/application/connection.rs), [database_value/value.rs](../../src/database_value/value.rs)
 and [edn_query.rs](../../src/edn_query.rs) provide the captured read value and query
 boundary. These are present owners, not a claim that final module organization
 is complete.

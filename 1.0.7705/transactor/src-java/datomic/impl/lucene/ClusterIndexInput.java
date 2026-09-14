@@ -12,6 +12,9 @@ import java.nio.ByteBuffer;
  * loaded on demand through {@code IClusterFS}; cloned inputs duplicate the
  * current byte buffer so readers can advance independently.
  */
+// ATOMIC-NOTE [observed]: Clones share immutable chunk contents but duplicate
+// buffer positions. Native readers similarly share decoded Arc pages while
+// each cursor owns traversal state; cache eviction does not invalidate a cursor.
 public class ClusterIndexInput
 extends IndexInput {
     private final int chunkSize;

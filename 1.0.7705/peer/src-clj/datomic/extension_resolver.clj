@@ -270,6 +270,11 @@
       'resolve-built-in-xform
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/why]: pull pattern normalization resolves built-ins
+  ;; before consulting the classpath allowlist; allowed names can require host
+  ;; namespaces on demand. This is admission policy, not a sandbox for arbitrary
+  ;; code. Native edn_pull and pull/transform use explicitly supplied transform
+  ;; registrations; no classpath policy or JVM evaluation is implied.
   (defn resolve-xform! ([sym] (or (resolve-built-in-xform sym) (resolve! sym :xforms))))
   (reset-meta!
     #'resolve-xform!

@@ -1,10 +1,11 @@
 # Development trace — values, datoms, schema and identity foundations
 
-This companion is separate from the preserved Pro text. It covers the passages
-below, not the complete schema chapter or all value semantics. Source coordinates
+This companion is separate from the preserved Pro text. It details the passages
+below; the [passage ledger](../../development/source/passages.tsv) accounts for
+the surrounding schema/value families without claiming every symbol is annotated. Source coordinates
 refer to unannotated revision `cd7192e63d883a4a34aa7de4d5bcd17e6edb692d`; use the
 named symbols after inline comments shift line numbers. Rust paths describe the
-current Stage 2 checkout. Existing tests were inspected; this subtask ran only
+current component owners. Existing tests were inspected; the original study ran only
 the new URI mechanism's three standalone unit tests. Integrated acceptance is
 owned by the parent task; no older or PostgreSQL test is claimed fresh here.
 
@@ -68,7 +69,7 @@ Rust owners: [model/value/mod.rs](../../src/model/value/mod.rs), `Value::index_c
 `stored_eq`, `stored_cmp`; [model/datom.rs](../../src/model/datom.rs), `Datom::cmp_in`;
 [transaction/assess/mod.rs](../../src/transaction/assess/mod.rs), `Reader::lookup`,
 `validate_unique_successor`, `group_unique_deltas`;
-[database_value.rs](../../src/database_value.rs), `DatabaseValue::lookup_with_control`.
+[database_value/resolve.rs](../../src/database_value/resolve.rs), `DatabaseValue::lookup_with_control`.
 Retain length-first signed-byte ordering, UTF-16 string ordering, and separate
 logical versus top-level BigDecimal-scale equality. Do not generalize scale
 sensitivity into tuple elements: the source recurses through logical comparison.
@@ -201,7 +202,7 @@ Rust owners: [model/schema.rs](../../src/model/schema.rs), `Attribute.indexed` a
 unique membership; [transaction/assess/mod.rs](../../src/transaction/assess/mod.rs),
 `validate_unique_successor` consults `physical_avet_ready` before choosing AVET.
 Retain the distinction rather than collapsing these facts into one boolean.
-The public [database_value.rs](../../src/database_value.rs), `has_avet`, reports
+The public [database_value/resolve.rs](../../src/database_value/resolve.rs), `has_avet`, reports
 captured readiness without waiting or refreshing; `resolve_ready_avet_attribute`
 rejects an unready raw AVET range. Eager values have complete in-memory coverage;
 block values consult snapshot coverage; transaction overlays track newly enabled
@@ -263,10 +264,38 @@ consistency, not proof that an unseen scalar implementation was read.
 `validated-tuple` also applies slot/shape checks only to assertions; the complete
 Rust non-asserting tuple validation policy has not been reconciled in this pass.
 
-## Remaining scope
+## Related families and evidence limits
 
-Not covered by this pass: all numeric edge cases; every supported type's cross-type
-ordering; complete tuple lifecycle and predicates; squuid generation; complete
-partition-affinity resolution; schema alteration/retention lifecycle; API-specific
-lookup-ref positions; query/Pull execution; codecs beyond the URI representation
-boundary. No missing feature or parity conclusion is inferred from those omissions.
+The [Partitions](../04_transactions/07_partitions.md) paragraphs on implicit and
+named partitions, forced/matched placement, defaults and new-entity scans map to
+`db/{implicit-part,implicit-part-id,partition-eid,partbits,process-force-partition,process-match-partition}`,
+`AssignPartitions` and `Db.entidAt`. Current pure coordinates live in
+[model/identity.rs](../../src/model/identity.rs); transaction-local placement and
+explicit defaults live in [partitions.rs](../../src/partitions.rs), consumed by
+shared expansion/assessment. Existing checks are
+[partitions.rs](../../tests/partitions.rs),
+[partition_authoring.rs](../../tests/partition_authoring.rs) and
+[default_partition.rs](../../tests/default_partition.rs), including upsert,
+affinity, restart and exact retry. Locality/sharding advice is an application
+optimization, not a new ownership boundary or a measured native speedup.
+
+API `squuid`/`squuid-time-millis` map to `common/squuid` and `squuid-time-ms`,
+which put seconds in the high 32 bits of a random UUID and recover that field.
+Native [uuid.rs](../../src/uuid.rs) retains this explicit layout with checked
+time range and native UUID ordering; `squuid_layout_precision_boundaries_and_native_order_are_explicit`
+is the focused check. UUIDv7 is a separate native capability, not attributed to
+the recovered source or equated with semi-sequential UUIDs.
+
+The original foundation pass did not audit every numeric edge, tuple/partition
+lifecycle, lookup-ref position or execution engine. Current family dispositions
+are in the [source](../../development/source/coverage.tsv) and
+[passage](../../development/source/passages.tsv) ledgers. Exact arithmetic and
+query binding behavior are traced in the
+[query companion](../05_query_and_pull/02_query_reference.atomic.md), navigation
+in the [Pull companion](../05_query_and_pull/03_pull.atomic.md), assessment and
+predicates in the [processing companion](../04_transactions/03_processing_transactions.atomic.md),
+and retention/alteration in the [storage](../08_operations/00_architecture_and_storage/00_storage_services.atomic.md)
+and [indexing](../08_operations/01_capacity_and_reliability/00_capacity_planning.atomic.md)
+companions. This closes family accounting, not exhaustive input-space or
+whole-namespace equivalence; source-only host allocation/hash quirks remain
+distinct from the documented native identity and exact-value contracts.

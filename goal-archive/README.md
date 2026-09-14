@@ -3,7 +3,7 @@
 Archive restored from commit `d1670ae` and extended on 2026-09-10.
 G6 is the completed EDN and native capability pass;
 there are currently no active root-level goal scaffolds. See the
-[product guide](../README.md) and [acceptance record](../docs/acceptance.md)
+[product guide](../README.md) and [acceptance record](../development/validation/README.md)
 for current usage and verified operating limits.
 
 | Pass | Folders | Purpose |

@@ -47,6 +47,9 @@
         (clojure.core/import 'java.util.Iterator)
         (clojure.core/import 'java.util.NoSuchElementException))))
   (set! *warn-on-reflection* true)
+  ;; ATOMIC-NOTE [observed; bounded work]: Limit wraps the source iterator before nested
+  ;; projection in ea->v/ra->e, not after all children are pulled. Native bounded
+  ;; cursors retain that ordering and poll even during filter-rejected candidates.
   (defn limit-iterable
     ([limit iterable]
       (if (not limit)
@@ -78,10 +81,16 @@
       'limit-iterable
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [source/prose boundary]: Recovered empty roots and nested collections
+  ;; become nil here. Pro Pull / Empty Results specifies {} and retained empty
+  ;; nested vectors. Native projection deliberately follows those documented shapes.
   (defn nilify-empty ([x] (when (seq x) x)))
   (reset-meta!
     #'nilify-empty
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'nilify-empty :ns *ns*))
+  ;; ATOMIC-NOTE [observed; shape]: Reverse components select one parent; other reverse
+  ;; refs collect a vector. This cardinality rule is separate from default-spec's
+  ;; forward-only component expansion: implicit reverse components are id-only maps.
   (defn ra->e
     ([db r attr xf limit valfn]
       (^clojure.lang.IFn valfn
@@ -300,6 +309,9 @@
       'try-xform
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; unresolved entities]: ea->v/ra->e call valfn even without a
+  ;; resolved value. An early native unresolved-id return must not skip explicit
+  ;; xform(nil) followed by default only when the transform result is nil.
   (defn attr-with-opts->valfn
     ([p__16268]
       (let [vec__16269 p__16268
@@ -392,6 +404,10 @@
       'normalize-recur-limit
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; preparation]: Validate grammar/duplicates before entity reads.
+  ;; Wildcard overrides remain explicit forward specs. The normalized-pattern cache
+  ;; stores selectors, not answers. Native typed patterns and bounded EDN admission
+  ;; replace host reader/key-class conveniences without a second traversal engine.
   (defn normalize-pattern
     ([pull-spec]
       (cond
@@ -471,6 +487,9 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.pull" "normalized-pattern-cache")
     (cache/create-computing normalize-pattern 1000))
+  ;; ATOMIC-NOTE [observed; wildcard cost]: Seeking (e,a+1) skips the unselected many-value
+  ;; tail of a. Native wildcard discovery retains this property after explicit
+  ;; limit/alias overrides while still discovering later attributes.
   (defn next-a
     ([db e a]
       (let [iter (db/windowed
@@ -525,6 +544,9 @@
       'resolve-attr
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; defaults]: Only forward component refs get wildcard subpatterns.
+  ;; All other refs get :db/id. Explicit nesting overrides either default; keep
+  ;; this decision separate from whether the direction returns one value or many.
   (defn default-spec
     ([attr kw db]
       (when (and attr (= 20 (.-vtypeid ^datomic.db.Attribute attr)))
@@ -563,6 +585,9 @@
       'denormalize-kw
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; schema wins]: An exact installed :ns/_a wins over reverse :ns/a.
+  ;; Normalization needs this database's schema to decide. SchemaResolved directions
+  ;; defer that choice; explicitly typed Forward/Reverse remain unambiguous.
   (defn fix-specs-for-underscore-prefix-attrs
     ([p__16321 db]
       (let [map__16322 p__16321
@@ -589,6 +614,10 @@
       'fix-specs-for-underscore-prefix-attrs
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; value boundary]: Every nested call retains db and rejects history.
+  ;; mk_xf carries path recursion state, not a global database depth. Native task
+  ;; stacks add stack-safe ownership/component-cycle termination; query projection
+  ;; also shares its original work, deadline and value-byte accounting.
   (defn pull*
     ([db {:keys [wildcard dbid], :as spec} recursed prefer-aevt? e]
       (when (.isHistory ^datomic.Database db)
@@ -770,6 +799,10 @@
       'parse-index-pull-arg-map
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; lazy range]: The same db supplies the seek and each delayed map.
+  ;; The attribute fence is not a second-component equality filter; AEVT can repeat
+  ;; entities. Native cursor errors fuse iteration, and cancellation reaches inside
+  ;; filter consumption rather than only the outer next-result boundary.
   (defn index-pull
     ([db arg-map]
       (let [map__16355 (parse-index-pull-arg-map arg-map)
@@ -855,6 +888,9 @@
       'dereffed-index-pull
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [adaptation; controls]: io-context wraps accounting here, not a global
+  ;; traversal budget. Native PullControl adds depth/entity/cancel limits; query
+  ;; Pull additionally shares work/deadline/value limits through lazy consumption.
   (defn pull-1
     ([db selector e {:keys [io-context], :as options}]
       (let [run-pull (fn [] (pull* db (get normalized-pattern-cache selector) #{} false e))]

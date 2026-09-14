@@ -185,7 +185,7 @@ impl IndexLane {
                             receipt.pending_avet != 0,
                         );
                         refresh_progress(writer, shared);
-                        crate::change_notices::publish(connection, &shared.database_id);
+                        crate::observation::notices::publish(connection, &shared.database_id);
                         self.failures = 0;
                         self.retry_at = None;
                     }

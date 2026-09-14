@@ -67,6 +67,12 @@
       'call-user-code
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/disposition]: A sentinel CAS selects one completion; the
+  ;; listener lock closes the registration-versus-countdown race. Executors
+  ;; are invoked outside that lock so caller code cannot hold completion open.
+  ;; Peer transactAsync/notify-data use this as outcome delivery, not authority:
+  ;; cancel merely delivers CancellationException and never interrupts a commit.
+  ;; Native runtime/executor separates dropped interest from durable keyed retry.
   (defn settable-future
     ([]
       (let [d (java.util.concurrent.CountDownLatch. (int 1)) listeners (atom []) v (atom d)]

@@ -74,7 +74,7 @@ Rust owner: [encoding/mod.rs](../../src/encoding/mod.rs), `encode_value`, `decod
 
 The last row is a necessary exactness qualification: `canonical_f32_bits` and
 `canonical_f64_bits` normalize zero signs and NaN payloads in durable and request
-bytes. [Native schema/identity documentation](../../docs/schema-identity.md#nan-replace-ordinary-values-never-use-as-a-unique-identity)
+bytes. [Native schema/identity documentation](../../docs/03_schema/01_identity_and_values.md#nan-replace-ordinary-values-never-use-as-a-unique-identity)
 explicitly declines arbitrary NaN-payload preservation. EDN bit tags and
 `stored_types_roundtrip_without_rewriting_representations` preserve those bits
 only on the EDN conversion path. Do not advertise that test as durable

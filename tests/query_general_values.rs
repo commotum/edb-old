@@ -431,7 +431,7 @@ fn general_aggregate_groups_and_sorted_results_preserve_values_and_bags() {
         (Aggregate::CountDistinct, n(4)),
         (
             Aggregate::Distinct,
-            QueryValue::Collection((0..4).map(set).collect()),
+            QueryValue::Set((0..4).map(set).collect()),
         ),
         (Aggregate::Min, set(0)),
         (Aggregate::Max, set(3)),

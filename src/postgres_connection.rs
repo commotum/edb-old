@@ -1,3 +1,5 @@
+pub(crate) mod environment;
+
 use crate::{ErrorCategory, SemanticError};
 use native_tls::{Certificate, Protocol, TlsConnector};
 use postgres::config::{Host, SslMode};

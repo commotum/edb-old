@@ -171,6 +171,12 @@
       '-future-with-channel-impl
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/disposition]: This is an observation alarm, not an
+  ;; operation deadline. The recovered machine's threshold branch (state 4)
+  ;; logs FutureBoundExceeded then joins states 6/3 and returns; it does not
+  ;; continue waiting as the original metadata below says. No call to cancel
+  ;; the underlying work occurs here. No in-corpus caller of this helper was
+  ;; found; native query/Pull/fulltext controls are separate explicit contracts.
   (defn add-bounding-warning
     ([promise-ch context seconds]
       (let [c__5899__auto__ (a/chan 1)

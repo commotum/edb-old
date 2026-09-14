@@ -7,7 +7,7 @@
 #[cfg(test)]
 use crate::USER_PARTITION;
 use crate::database::normalize_excision_before_t;
-use crate::database_value::TransactionReadContext;
+use crate::database_value::read_context::TransactionReadContext;
 use crate::model::identity::{validate_frontier, validate_supported_eid};
 use crate::model::idents::IdentIndex;
 use crate::model::vocabulary::{supported_system_attributes, supported_system_idents};
@@ -470,7 +470,7 @@ pub(crate) fn assess_tiered_with_remaining_limits_and_defaults(
     };
     let base = &base;
     if base
-        .last_tx_instant()?
+        .last_tx_instant()
         .is_some_and(|prior| tx_instant < prior)
     {
         return Err(SemanticError::incorrect(
@@ -3050,7 +3050,7 @@ mod tests {
         );
         assert_eq!(assessed.db_after.basis_t(), expected.db_after.basis_t());
         assert_eq!(
-            assessed.db_after.last_tx_instant().unwrap(),
+            assessed.db_after.last_tx_instant(),
             expected.db_after.last_tx_instant()
         );
         assessed.validate_exact(None).unwrap();

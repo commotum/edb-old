@@ -4,7 +4,6 @@ use atomic_core::{
     PullLimit, PullNested, PullPattern, Query, QueryControl, QueryResult, QueryValue, Schema, Term,
     TxOp, TxValue, Unique, Value, ValueType, Variable,
 };
-use std::sync::Arc;
 
 const NAME: u32 = 1_000;
 const AGE: u32 = 1_001;
@@ -153,6 +152,150 @@ fn pull_defaults_aliases_nested_refs_reverse_and_limits() {
 }
 
 #[test]
+fn reverse_components_default_to_one_id_map_and_expand_only_when_requested() {
+    let (db, ids) = database();
+    let reverse_key = keyword_key(Keyword::new("person", "_children"));
+    let parent_id = QueryValue::Map(vec![(
+        keyword_key(Keyword::new("db", "id")),
+        QueryValue::Scalar(Value::Ref(ids[0])),
+    )]);
+    let expected = QueryValue::Map(vec![(reverse_key.clone(), parent_id)]);
+    let reverse = PullAttribute::reverse(AttributeName::Id(CHILDREN));
+    let typed = PullPattern::attributes(vec![reverse.clone()]);
+    let edn = atomic_core::edn_pull::parse_pull_edn("[:person/_children]").unwrap();
+    for pattern in [&typed, &edn] {
+        // Reverse component cardinality is one, but it must not implicitly
+        // expand the parent's other attributes or its children back to us.
+        assert_eq!(db.pull(pattern, ids[2]).unwrap(), expected);
+        assert_eq!(db.pull(pattern, ids[3]).unwrap(), QueryValue::Map(vec![]));
+    }
+
+    let mut nested_reverse = reverse;
+    nested_reverse.nested = Some(PullNested::Pattern(Box::new(PullPattern::attributes(
+        vec![PullAttribute::forward(AttributeName::Id(NAME))],
+    ))));
+    let typed = PullPattern::attributes(vec![nested_reverse]);
+    let edn =
+        atomic_core::edn_pull::parse_pull_edn("[{:person/_children [:person/name]}]").unwrap();
+    let expected = QueryValue::Map(vec![(
+        reverse_key,
+        QueryValue::Map(vec![(
+            keyword_key(Keyword::new("person", "name")),
+            QueryValue::Scalar(Value::String("Alice".into())),
+        )]),
+    )]);
+    for pattern in [&typed, &edn] {
+        assert_eq!(db.pull(pattern, ids[2]).unwrap(), expected);
+    }
+}
+
+#[test]
+fn leading_underscore_schema_idents_take_precedence_in_edn_pull_and_wildcard_overrides() {
+    const LITERAL: u32 = 1_004;
+    let mut schema = schema();
+    schema
+        .install(Attribute::new(
+            LITERAL,
+            Keyword::new("person", "_friend"),
+            ValueType::String,
+            Cardinality::One,
+        ))
+        .unwrap();
+    let report = Database::new(schema)
+        .unwrap()
+        .with(
+            &[
+                add(
+                    "subject",
+                    LITERAL,
+                    TxValue::Scalar(Value::String("literal".into())),
+                ),
+                add(
+                    "other",
+                    FRIEND,
+                    TxValue::Entity(EntityRef::Temp("subject".into())),
+                ),
+            ],
+            1_000,
+        )
+        .unwrap();
+    let id = report.tempids["subject"];
+    let database = report.db_after;
+    let literal = QueryValue::Scalar(Value::String("literal".into()));
+    let expected = QueryValue::Map(vec![(
+        keyword_key(Keyword::new("person", "_friend")),
+        literal.clone(),
+    )]);
+    let typed = PullPattern::attributes(vec![PullAttribute::forward(AttributeName::Id(LITERAL))]);
+    let edn = atomic_core::edn_pull::parse_pull_edn("[:person/_friend]").unwrap();
+    let query = Query::new(
+        FindSpec::Relation(vec![FindElement::Pull {
+            source: "$".into(),
+            variable: "e".into(),
+            pattern: Box::new(edn.clone()),
+        }]),
+        vec![Clause::Pattern(Box::new(DataPattern::new(
+            Term::Variable("e".into()),
+            Term::Constant(Value::Ref(u64::from(LITERAL))),
+            Term::Blank,
+        )))],
+    );
+    let program = atomic_core::Program {
+        kind: atomic_core::ProgramKind::Query,
+        arity: 0,
+        instructions: vec![
+            atomic_core::Instruction::Query(
+                atomic_core::QueryTemplate::native(query, vec![], vec![]).unwrap(),
+            ),
+            atomic_core::Instruction::Return,
+        ],
+    };
+    assert_eq!(
+        atomic_core::decode_program(&atomic_core::encode_program(&program).unwrap()).unwrap(),
+        program
+    );
+    for pattern in [&typed, &edn] {
+        assert_eq!(database.pull(pattern, id).unwrap(), expected);
+    }
+
+    let aliased =
+        atomic_core::edn_pull::parse_pull_edn("[* [:person/_friend :as :display/literal]]")
+            .unwrap();
+    let actual = database.pull(&aliased, id).unwrap();
+    let QueryValue::Map(entries) = &actual else {
+        panic!("expected map")
+    };
+    assert_eq!(
+        entries.len(),
+        2,
+        "wildcard override must not emit the original key"
+    );
+    assert_eq!(
+        field(&actual, &Keyword::new("display", "literal")),
+        Some(&literal)
+    );
+    assert_eq!(
+        field(&actual, &Keyword::new("db", "id")),
+        Some(&QueryValue::Scalar(Value::Ref(id)))
+    );
+    assert_eq!(field(&actual, &Keyword::new("person", "_friend")), None);
+
+    // Explicit typed reverse direction remains unambiguous even when its
+    // rendered underscore name also belongs to an installed forward attribute.
+    let reverse = PullPattern::attributes(vec![PullAttribute::reverse(AttributeName::Id(FRIEND))]);
+    assert_eq!(
+        database.pull(&reverse, id).unwrap(),
+        QueryValue::Map(vec![(
+            keyword_key(Keyword::new("person", "_friend")),
+            QueryValue::Collection(vec![QueryValue::Map(vec![(
+                keyword_key(Keyword::new("db", "id")),
+                QueryValue::Scalar(Value::Ref(report.tempids["other"])),
+            )])]),
+        )])
+    );
+}
+
+#[test]
 fn pull_aliases_accept_string_numeric_and_collection_keys() {
     let (db, ids) = database();
     let string_key = QueryValue::Scalar(Value::String("display name".into()));
@@ -234,7 +377,7 @@ fn wildcard_expands_components_and_recursion_is_cycle_safe() {
 #[test]
 fn entity_values_retain_their_immutable_database_snapshot() {
     let (db1, ids) = database();
-    let entity = Entity::new(Arc::new(db1.clone()), ids[0]);
+    let entity = Entity::from_database_value(db1.database_value(), ids[0]).unwrap();
     let db2 = db1
         .with(
             &[TxOp::Add {
@@ -324,12 +467,15 @@ fn unresolved_idents_and_lookup_refs_retain_only_requested_nil_db_id() {
                 identifier.clone(),
             )
             .unwrap();
-        assert_eq!(field(&explicit, &db_id), Some(&QueryValue::Nil));
+        assert_eq!(
+            explicit,
+            QueryValue::Map(vec![(keyword_key(db_id.clone()), QueryValue::Nil)])
+        );
 
         let wildcard = db
             .pull(&PullPattern::wildcard(), identifier.clone())
             .unwrap();
-        assert_eq!(field(&wildcard, &db_id), Some(&QueryValue::Nil));
+        assert_eq!(wildcard, explicit);
 
         let name_only = db
             .pull(
@@ -338,6 +484,58 @@ fn unresolved_idents_and_lookup_refs_retain_only_requested_nil_db_id() {
             )
             .unwrap();
         assert_eq!(name_only, QueryValue::Map(Vec::new()));
+    }
+}
+
+#[test]
+fn unresolved_entities_still_apply_explicit_defaults_and_transforms() {
+    let (db, _) = database();
+    let replacement = atomic_core::PullTransform::new("native/from-nil", |value| {
+        assert_eq!(value, &QueryValue::Nil);
+        Ok(QueryValue::Scalar(Value::String("transformed".into())))
+    });
+    let omit = atomic_core::PullTransform::new("native/to-nil", |value| {
+        assert_eq!(value, &QueryValue::Nil);
+        Ok(QueryValue::Nil)
+    });
+    let mut registry = atomic_core::edn_pull::EdnPullTransforms::new();
+    registry.register("native/from-nil", replacement.clone());
+    registry.register("native/to-nil", omit.clone());
+    for (transform, text, expected) in [
+        (None, "[[:person/name :default \"default\"]]", "default"),
+        (
+            Some(replacement),
+            "[[:person/name :xform native/from-nil :default \"default\"]]",
+            "transformed",
+        ),
+        (
+            Some(omit),
+            "[[:person/name :xform native/to-nil :default \"default\"]]",
+            "default",
+        ),
+    ] {
+        let mut name = PullAttribute::forward(AttributeName::Id(NAME));
+        name.default = Some(QueryValue::Scalar(Value::String("default".into())));
+        name.transform = transform;
+        let typed = PullPattern::attributes(vec![name]);
+        let edn = atomic_core::edn_pull::parse_pull_edn_with_transforms(text, &registry).unwrap();
+        for identifier in [
+            atomic_core::EntityIdentifier::Ident(Keyword::new("person", "nobody")),
+            atomic_core::EntityIdentifier::Lookup {
+                attribute: AttributeName::Id(NAME),
+                value: Value::String("Nobody".into()),
+            },
+        ] {
+            for pattern in [&typed, &edn] {
+                assert_eq!(
+                    db.pull(pattern, identifier.clone()).unwrap(),
+                    QueryValue::Map(vec![(
+                        keyword_key(Keyword::new("person", "name")),
+                        QueryValue::Scalar(Value::String(expected.into())),
+                    )])
+                );
+            }
+        }
     }
 }
 
@@ -511,6 +709,53 @@ fn eager_entity_navigation_returns_entities_and_keeps_one_snapshot() {
     assert!(matches!(&incoming[0], EntityValue::Entity(alice) if alice.id() == ids[0]));
     assert!(entity.keys().unwrap().contains(&Keyword::new("db", "id")));
     entity.touch().unwrap();
+}
+
+#[test]
+fn reverse_entity_navigation_keeps_identified_parents_as_entities() {
+    let (db, ids) = database();
+    let ident = Keyword::new("person", "alice");
+    let db = db
+        .with(
+            &[TxOp::Add {
+                entity: EntityRef::Id(ids[0]),
+                attribute: 10, // :db/ident
+                value: TxValue::Scalar(Value::Keyword(ident.clone())),
+            }],
+            2_000,
+        )
+        .unwrap()
+        .db_after;
+    let bob = db.entity(ids[1]).unwrap().unwrap();
+    let cara = db.entity(ids[2]).unwrap().unwrap();
+    let Some(EntityValue::Collection(parents)) = bob
+        .get_direction(&PullDirection::Reverse(AttributeName::Id(FRIEND)))
+        .unwrap()
+    else {
+        panic!("reverse non-component must be a collection")
+    };
+    assert_eq!(parents.len(), 1);
+    let EntityValue::Entity(parent) = &parents[0] else {
+        panic!("reverse value must remain an entity")
+    };
+    assert_eq!(parent.id(), ids[0]);
+    assert!(
+        matches!(parent.get(NAME).unwrap(), Some(EntityValue::Scalar(Value::String(name))) if name == "Alice")
+    );
+    let Some(EntityValue::Entity(component_parent)) = cara
+        .get_direction(&PullDirection::Reverse(AttributeName::Id(CHILDREN)))
+        .unwrap()
+    else {
+        panic!("reverse component must be one entity")
+    };
+    assert_eq!(component_parent.id(), ids[0]);
+    assert_eq!(bob.reverse(FRIEND).unwrap(), vec![parent.clone()]);
+    assert_eq!(cara.reverse(CHILDREN).unwrap(), vec![component_parent]);
+    // Forward references still expose an ident keyword when one is available.
+    let Some(EntityValue::Collection(friends)) = bob.get(FRIEND).unwrap() else {
+        panic!("expected collection")
+    };
+    assert!(matches!(&friends[0], EntityValue::Scalar(Value::Keyword(value)) if value == &ident));
 }
 
 #[test]

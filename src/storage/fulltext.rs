@@ -2,8 +2,8 @@
 //! shared analyzer, record delta, spill sorter and path-copy page editor own
 //! search semantics; this module supplies object I/O and exact source binding.
 use super::{BlockSnapshot, IndexDescriptor, ObjectId, ObjectWriter, root::Block};
-use crate::fulltext_store::incremental::{self, Pages};
-use crate::fulltext_store::{self, Child, FulltextMutation, Page, PageSummary};
+use crate::fulltext::store::incremental::{self, Pages};
+use crate::fulltext::store::{self, Child, FulltextMutation, Page, PageSummary};
 use crate::index::cursor::{DurableTreeCursor, DurableTreeSource, LoadedDirectory, LoadedLeaf};
 use crate::index::tree::{ChildRef, RootNode, TreeNode, TreeReadStats};
 use crate::{
@@ -164,7 +164,7 @@ pub fn build_for_descriptor_with_control(
             let mut zero = empty.expect("bulk path proved empty corpus");
             let merged =
                 incremental::EmptyCorpusMerge::new(&mut zero, sorted, prior.record_count, limits);
-            fulltext_store::build_pages(merged, limits, &mut |page| pages.save(page, &mut stats))?
+            store::build_pages(merged, limits, &mut |page| pages.save(page, &mut stats))?
         } else {
             incremental::edit_pages(
                 ObjectPages {
@@ -196,7 +196,7 @@ pub fn build_for_descriptor_with_control(
                 cursor.next_datom().transpose()
             })))
         });
-        let sorted = fulltext_store::sorted_records(
+        let sorted = store::sorted_records(
             records.by_ref().map(|record| {
                 let record = record?;
                 pages.poll()?;
@@ -209,7 +209,7 @@ pub fn build_for_descriptor_with_control(
         stats.tokenized_bytes = records.stats.tokenized_bytes;
         stats.source_datoms_examined = records.datoms_examined;
         drop(records);
-        fulltext_store::build_pages(sorted, limits, &mut |page| pages.save(page, &mut stats))?
+        store::build_pages(sorted, limits, &mut |page| pages.save(page, &mut stats))?
     };
     stats.records = summary.records;
     let reads = *pages.reads.borrow();
@@ -239,7 +239,7 @@ fn projection(
         source_manifest: source,
         source_basis_t: descriptor.basis,
         source_generation: descriptor.generation,
-        analyzer_version: crate::fulltext_analysis::ANALYZER_VERSION,
+        analyzer_version: crate::fulltext::analysis::ANALYZER_VERSION,
         root_hash: pages.root,
         record_count: pages.records,
         encoded_bytes: pages.bytes,
@@ -328,7 +328,7 @@ fn validate_projection(
             "Search attachment does not describe its exact index source",
         ));
     }
-    if p.analyzer_version != crate::fulltext_analysis::ANALYZER_VERSION {
+    if p.analyzer_version != crate::fulltext::analysis::ANALYZER_VERSION {
         return Err(SemanticError::new(
             ErrorCategory::Unavailable,
             "fulltext/analyzer-version",
@@ -431,7 +431,7 @@ pub(crate) fn read_page(
                 usize::try_from(u64::from_be_bytes(block.payload[..8].try_into().unwrap()))
                     .map_err(|_| fault("fulltext/page-size", "Page length is not addressable"))?;
             let children = u32::from_be_bytes(block.payload[8..].try_into().unwrap()) as usize;
-            if length > fulltext_store::MAX_PAGE
+            if length > store::MAX_PAGE
                 || children > 128
                 || block.links.len() != children + length.div_ceil(CHUNK_BYTES)
                 || length + 20 + children * 32 <= super::root::MAX_BLOCK_BYTES
@@ -527,8 +527,8 @@ impl<'a> HistoryPages<'a> {
         &self,
         projection: &FulltextProjection,
         key: &[u8],
-    ) -> Result<(Option<fulltext_store::FulltextRecord>, FulltextReadStats), SemanticError> {
-        fulltext_store::lookup_record(projection, key, |id, stats| {
+    ) -> Result<(Option<store::FulltextRecord>, FulltextReadStats), SemanticError> {
+        store::lookup_record(projection, key, |id, stats| {
             let (page, blocks, bytes) = read_page(id, &mut |id| self.read(id))?;
             stats.blocks_read += blocks;
             stats.block_bytes += bytes;
@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn malformed_chunk_headers_fail_before_allocation_or_child_reads() {
-        for length in [0, 1024, fulltext_store::MAX_PAGE as u64 + 1, u64::MAX] {
+        for length in [0, 1024, store::MAX_PAGE as u64 + 1, u64::MAX] {
             let mut payload = length.to_be_bytes().to_vec();
             payload.extend_from_slice(&0u32.to_be_bytes());
             let bytes = Block {

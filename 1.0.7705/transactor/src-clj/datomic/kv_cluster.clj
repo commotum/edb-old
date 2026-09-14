@@ -107,6 +107,10 @@
       *ns*))
   ;; Bounds the outer storage call, retries retryable failures, and coordinates exponential delay
   ;; across concurrent writers so throttled storage is not flooded by independent retries.
+  ;; ATOMIC-NOTE [observed/adaptation] The elapsed guard sums provider-call time; semaphore waits and backoff
+  ;; sleeps are outside that account. Thus 10000 is not a caller wall-clock
+  ;; deadline. Group backoff limits retry pressure; set-ref separately resolves
+  ;; lost responses by exact revision/value, not transaction reassessment.
   (defn retry-fn
     ([sem metric nested group_ref backoff f]
       (binding [kv/*retry* (partial retry-fn sem metric true group_ref backoff)]

@@ -17,6 +17,10 @@ import org.slf4j.LoggerFactory;
  * written locally, and deletion of a base file is delegated to the supplied
  * handler for later cluster cleanup.
  */
+// ATOMIC-NOTE [observed]: Deleted base files are reported to a later publication
+// rather than removed from the shared reader. Native path-copy search edits
+// and root reachability retain that lifetime separation; local Lucene files
+// and package-level constructor bridges are host mechanics, not port targets.
 public class HybridDirectory
 extends Directory {
     private Directory readDirectory;

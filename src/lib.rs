@@ -6,21 +6,17 @@
 //! immutable snapshots. Memory and durable writes share transaction assessment;
 //! the memory representation is not an independent semantic oracle.
 
-pub mod async_client;
-pub use async_client::{
-    AsyncClient, AsyncConfig, AsyncExecutor, AsyncOperation, AsyncStats, AsyncStream,
-    AsyncStreamOptions, AsyncTransaction,
+pub use application::asynchronous::{
+    AsyncClient, AsyncStream, AsyncStreamOptions, AsyncTransaction,
 };
-mod backup;
-mod backup_snapshot;
-mod change_consumer;
-pub(crate) mod change_notices;
-mod collections;
+pub use runtime::executor::{AsyncConfig, AsyncExecutor, AsyncOperation, AsyncStats};
 mod application;
+mod backup;
+mod collections;
 mod database;
-pub(crate) mod database_catalog;
-pub use database_catalog::{CreateDatabaseResult, DatabaseCatalog, DatabaseCatalogEntry};
-pub mod database_invoke;
+mod observation;
+mod runtime;
+pub use storage::catalog::{CreateDatabaseResult, DatabaseCatalog, DatabaseCatalogEntry};
 mod database_stats;
 mod database_value;
 pub mod edn;
@@ -33,12 +29,7 @@ mod entity_identity;
 mod error;
 mod excision;
 mod fulltext;
-mod fulltext_analysis;
-mod fulltext_store;
 pub mod index;
-mod index_pull;
-#[cfg(unix)]
-mod local_transport;
 mod operations;
 mod partitions;
 mod reserved_allocation;
@@ -50,17 +41,10 @@ mod program_bindings;
 mod program_cache;
 mod pull;
 mod query;
-mod query_return_maps;
-mod query_value_debug;
 #[cfg(unix)]
-mod remote_config;
-#[cfg(unix)]
-mod remote_routing;
-#[cfg(unix)]
-mod remote_transport;
-mod runtime_config;
-#[cfg(unix)]
-pub use remote_config::{remote_client_config_from_env, remote_server_credentials_from_env};
+pub use application::transport::remote::config::{
+    remote_client_config_from_env, remote_server_credentials_from_env,
+};
 mod io_diagnostics;
 mod maintenance_control;
 mod model;
@@ -76,22 +60,27 @@ mod transaction_stats;
 mod transactor;
 mod uuid;
 
+pub use application::connection::{Connection, ConnectionTransactionTicket};
+#[cfg(unix)]
+pub use application::transport::local::{
+    CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
+};
+#[cfg(unix)]
+pub use application::transport::remote::routing::RemoteWriter;
+#[cfg(unix)]
+pub use application::transport::remote::{
+    RemoteAuthToken, RemoteClientConfig, RemoteTransactionEndpoint, RemoteTransactionServer,
+    RemoteTransportConfig, RemoteTransportStats, RemoteWriterEndpoint,
+};
+pub use backup::snapshot::{BackupConnection, BackupReadConfig, BackupReadStats};
 pub use backup::{
     BackupFault, BackupPoint, BackupVerification, PortableBackup, RestoreFault, RestoreResult,
 };
-pub use backup_snapshot::{BackupConnection, BackupReadConfig, BackupReadStats};
-pub use change_consumer::{
-    ChangeCheckpoint, ChangeConsumer, ChangeConsumerConfig, ChangeConsumerStats, ChangeEvent,
-};
-pub use change_notices::{
-    NoticeListenerStats, NoticePublisherStats, ObservationConfig, notice_listener_stats,
-    notice_publisher_stats,
-};
-pub use application::connection::{Connection, ConnectionTransactionTicket};
-pub use model::identity::DatabaseIdentity;
 pub use database::{Database, TxReport, View};
-pub use database_invoke::{InvokeControl, InvokeRole};
 pub use database_stats::{AttributeStats, DatabaseStats};
+pub use database_value::invoke::{InvokeControl, InvokeRole};
+pub use database_value::log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
+pub use database_value::reference::{SnapshotKey, SnapshotReference};
 pub use database_value::{
     DatabaseValue, DatabaseValuePrefixCursor, DatabaseValueScanCursor, RawIndexValue,
     SpeculativeTransactionReport,
@@ -104,22 +93,17 @@ pub use encoding::{
 };
 pub use entity_identity::EntityIdentity;
 pub use error::{ErrorCategory, SemanticError};
-pub use fulltext::NativeFulltextReader;
-pub use fulltext::{FulltextHit, FulltextOptions, FulltextReport, FulltextStats};
-pub use fulltext_store::{
-    FulltextBuildLimits, FulltextBuildStats, FulltextCacheStats, FulltextCursor,
-    FulltextProjection, FulltextReadLimits, FulltextReadStats, FulltextRecord,
+pub use fulltext::{
+    FulltextBuildLimits, FulltextBuildStats, FulltextCacheStats, FulltextCursor, FulltextHit,
+    FulltextOptions, FulltextProjection, FulltextReadLimits, FulltextReadStats, FulltextRecord,
+    FulltextReport, FulltextStats, NativeFulltextReader,
 };
 pub use index::NodeBlockReadStats;
 pub use index::{IndexBoundary, IndexComponents, IndexPrefix, IndexTransaction};
-pub use index_pull::{IndexPullCursor, IndexPullOptions};
 pub use io_diagnostics::{CacheIoStats, CacheTier, IndexIoStats, ReadIoStats};
-#[cfg(unix)]
-pub use local_transport::{
-    CommittedTransaction, LocalTransactionEndpoint, LocalTransactionServer, LocalTransportConfig,
-};
 pub use maintenance_control::{MaintenanceControl, MaintenanceStats};
 pub use model::datom::{Datom, IndexOrder};
+pub use model::identity::DatabaseIdentity;
 pub use model::identity::{
     DB_PARTITION, EIDX_BITS, EIDX_MASK, INITIAL_EIDX_FRONTIER, MAX_EID, MAX_EIDX, MAX_PARTITION,
     PARTITION_BITS, TX_PARTITION, USER_PARTITION, eid_to_eidx, eid_to_part, implicit_part,
@@ -139,17 +123,23 @@ pub use model::vocabulary::{
     DB_TYPE_TUPLE, DB_TYPE_URI, DB_TYPE_UUID, DB_UNIQUE, DB_UNIQUE_IDENTITY, DB_UNIQUE_VALUE,
     DB_VALUE_TYPE, MAX_SCHEMA_ATTRIBUTE_ID, canonical_genesis_datoms, schema_eid_to_attr_id,
 };
+pub use observation::consumer::{
+    ChangeCheckpoint, ChangeConsumer, ChangeConsumerConfig, ChangeConsumerStats, ChangeEvent,
+};
+pub use observation::notices::{
+    NoticeListenerStats, NoticePublisherStats, ObservationConfig, notice_listener_stats,
+    notice_publisher_stats,
+};
 pub use operations::{
     ExcisionConfig, ExcisionFault, ExcisionProgress, ExcisionReceipt, GarbageInventory,
     IndexMaintenanceReceipt, IntegrityProblem, IntegrityReport, MAX_COLLECTION_STEPS,
     OperationalMetrics, PostgresOperator, RECOMMENDED_GARBAGE_COLLECTION_AGE,
     RetiredDatabaseReclamation,
 };
-pub use database_value::log::{LogCursor, LogCursorStats, LogTransaction, LogValue};
-pub use database_value::reference::{SnapshotKey, SnapshotReference};
 pub use peer::{
     CacheStats, Peer, PeerCursorStats, PeerIndexCursor, PeerLoadStats, PeerSnapshot, RecoveryStats,
 };
+pub use postgres_connection::environment::postgres_config_from_env;
 pub use postgres_connection::{PostgresConnectionConfig, PostgresIoPolicy};
 pub use program::{
     CallableRef, Instruction, MAX_QUERY_PATTERNS, MAX_QUERY_VARIABLES, PROGRAM_ABI_VERSION,
@@ -160,8 +150,8 @@ pub use program::{
 };
 pub use program_cache::ProgramCacheStats;
 pub use pull::{
-    AttributeName, Entity, EntityIdentifier, EntityValue, PullAttribute, PullControl,
-    PullDirection, PullLimit, PullNested, PullPattern, PullTransform,
+    AttributeName, Entity, EntityIdentifier, EntityValue, IndexPullCursor, IndexPullOptions,
+    PullAttribute, PullControl, PullDirection, PullLimit, PullNested, PullPattern, PullTransform,
 };
 pub use query::{
     Aggregate, AggregateArg, AggregateCall, AggregateGroup, AggregateSource, AggregateValue,
@@ -172,15 +162,7 @@ pub use query::{
     QuerySequence, QuerySource, QuerySourceValue, QueryStats, QueryStepStatus, QueryStepWork,
     QueryValue, QueryWarning, RelationPattern, Rule, Term, Variable, query_diagnostics_to_edn,
 };
-pub use query_return_maps::{ReturnMap, ReturnMapShape, ReturnMaps};
-#[cfg(unix)]
-pub use remote_routing::RemoteWriter;
-#[cfg(unix)]
-pub use remote_transport::{
-    RemoteAuthToken, RemoteClientConfig, RemoteTransactionEndpoint, RemoteTransactionServer,
-    RemoteTransportConfig, RemoteTransportStats, RemoteWriterEndpoint,
-};
-pub use runtime_config::postgres_config_from_env;
+pub use query::{ReturnMap, ReturnMapShape, ReturnMaps};
 pub use sql_io::{
     OperationContext, OperationKind, SqlCallKind, SqlCallStats, SqlIoReport, SqlIoStats,
     SqlMetricCallback, process_sql_stats,

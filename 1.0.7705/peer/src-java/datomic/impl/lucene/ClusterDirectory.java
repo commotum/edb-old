@@ -18,6 +18,9 @@ import java.util.Collection;
  * lists file metadata through {@code IClusterFS}, opens chunked inputs, and
  * rejects mutation operations; closing installs the closed sentinel.
  */
+// ATOMIC-NOTE [observed]: Immutable file metadata and chunk lookup are the storage
+// boundary, not a remote search request. Native authenticated search pages
+// retain direct local-query reads and fail closed on missing/corrupt objects.
 public class ClusterDirectory
 extends Directory {
     private volatile IClusterFS cluster;

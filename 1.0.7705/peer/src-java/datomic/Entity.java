@@ -10,6 +10,13 @@ import java.util.Set;
  * or {@link #touch()} requests them and are then cached in the entity. Two
  * entities are equal when their ids match and their database ids match.</p>
  */
+// ATOMIC-NOTE [observed]: query/EntityMap implements this contract. valAt reads
+// eav/rae lazily; touch caches direct attributes and follows only components.
+// eav/ref-val may expose a forward ref's ident keyword; rae instead wraps every
+// incoming parent with emap, including identified parents and reverse components.
+// equals/hashCode use raw database identity plus eid, not basis or loaded values.
+// Native Entity retains an immutable DatabaseValue and synchronized local cache;
+// JVM Associative/Seqable/string-key conveniences are not separate native engines.
 public interface Entity {
     /**
      * Returns the value of an attribute.

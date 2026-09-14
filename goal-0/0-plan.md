@@ -1,5 +1,8 @@
 # Goal 0 — Learn from Datomic, simplify Atomic, complete the cutover
 
+Status: complete. All seven stages are complete; final acceptance and limits are
+recorded at the end of this plan.
+
 ## Objective
 
 Make Atomic a readable, source-grounded, idiomatic Rust realization of Datomic's
@@ -189,7 +192,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   writer/failover and maintenance cases pass using the actual service. Completed
   indexing preserves subsequent novelty, and acknowledgements follow durability.
 
-### 4. Reconcile peer-local reads and computation — active
+### 4. Reconcile peer-local reads and computation — complete
 
 - **Outcome:** A coherent peer library using shared immutable structures, with
   source-grounded algorithms and an understandable cache/observation model.
@@ -203,7 +206,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   contracts. Cache changes preserve active reader ownership and have measured
   complete-path costs, including contention/allocation where relevant.
 
-### 5. Finish application boundaries and chapter-organized docs — pending
+### 5. Finish application boundaries and chapter-organized docs — complete
 
 - **Outcome:** An end user can understand and use the organized product without
   knowing its development history or piecing together internal types.
@@ -220,7 +223,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   retention and other operational promises agree with code and checks. Peers do
   not depend on transactor runtime ownership; shared code is not duplicated.
 
-### 6. Close source/doc coverage and remove superseded work — pending
+### 6. Close source/doc coverage and remove superseded work — complete
 
 - **Outcome:** The requested source commentary and passage-level traceability are
   complete, and no abandoned implementation remains behind the new organization.
@@ -235,7 +238,7 @@ Keep decisions in this plan and existing trace records, not competing reports.
   non-goals. One current implementation remains, with no compatibility aliases,
   dead fallback path, misleading provenance or broken documentation links.
 
-### 7. Establish integrated product acceptance — pending
+### 7. Establish integrated product acceptance — complete
 
 - **Outcome:** One source-grounded, maintainable, working native product with
   an honest statement of verified behavior and operating limits.
@@ -471,27 +474,252 @@ with zero SQL. This includes actual write/index/sync/shutdown, with uncontrolled
 warm OS/PostgreSQL caches in debug; byte accounting is not RSS. Together with
 the fresh fault/restart/maintenance checks, this closes Stage 3, not the parent.
 
-Stage 4 active component: immutable database values and peer capture/observation.
-Read its source/callers and Pro time/read contracts before changing its owners;
-preserve the shared assessor and the verified storage/publication boundary.
-Peer/application packaging, Stages 4–7, complete source/doc coverage and final
-integrated acceptance remain unfinished. Carry the backup verifier's repeated
-per-entry seeks and obsolete fulltext idle-retry statistics into Stage 5; do not
-lose these identified cleanup/cost issues during the moves.
+Stage 4: immutable database values and peer capture/observation are integrated.
+The shared `database_value` owner now separates exact value/metadata, temporal
+views, ordered cursors, speculative overlays, identity resolution and discardable
+attempt read context. Public log/reference/hint adapters live beside these values.
+`peer::{live,snapshot}` captures and advances them; optional embedded-service
+composition belongs to `application::connection`. Stable DatabaseIdentity is
+a model value, no longer a reason for writer code to import a Connection.
+Root public APIs remain intentional; superseded internal file paths are removed.
+The resident transaction instant is a direct Option, not a lock/OnceLock memo.
 
-Disposable live fixture (leave unrelated databases alone):
-host=/tmp/atomic-cutover-pg.GbbJ4R/socket port=56147 dbname=atomic_cutover user=jake.
-It has fsync, synchronous_commit, full_page_writes and data checksums on; TCP is
-disabled. Binaries are under prefix/usr/lib/postgresql/16/bin inside that task
-directory; LD_LIBRARY_PATH points to prefix/usr/lib/x86_64-linux-gnu there.
-This fixture was provisioned from Ubuntu packages without system installation.
-Host-permitted test execution is required for local sockets. Stop this owned
-server when the execution session no longer needs it; do not delete other data.
+Two source comparisons produced substantive repairs. Schema/index synchronization
+now waits only for relevant work through the requested T, deriving its initiating
+schema transition from existing history. It separately checks the frozen partial
+descriptor and later tail, so later work cannot extend an older wait or hide an
+unfinished earlier checkpoint. Existing excision readiness was already targeted
+and is retained. Report-enabled catch-up now carries exact authenticated endpoints
+forward instead of reconstructing both recent prefixes for every report. Changed
+physical index/generation roots are still opened in full; equality of logical
+SnapshotKeys cannot substitute physical endpoint identity. Whole-batch validation
+still precedes peer publication/report delivery.
 
-Keep one active stage/component and one integration owner. Replace the
-continuation note with material decisions, actual checks, uncertainty and next
-action at session boundaries. Archived goals are evidence only.
+Public log scans now share the forward traversal used by storage/recovery rather
+than reseeking per transaction. The reader-independent navigation state permits
+an owned snapshot cursor without unsafe self-reference or a duplicate algorithm;
+the same authenticated, generation-scoped SSD payload reader remains in use.
 
-Completion requires the entire product cutover AND the requested learning and
-traceability deliverables. An annotation campaign, folder reorganization,
-scaffold, passing test count or completed individual stage is not the finish line.
+Fresh Stage 4 checks: the real-PG library run passed 463 cases and failed only
+the new readiness fixture's illegal uniqueness-before-index request. Corrected
+that fixture to assert the rejection, then exercise legal index-first admission;
+its focused rerun passed (1, 2.80 s). No engine rule was relaxed. All 46 selected
+integration cases passed: block_peer (3), database_value (8), native_connection
+(7), native_log (5), native_log_cache (2), native_speculation (3),
+native_time_points (5), query_runtime_sources (10), snapshot_references (3).
+The final block_peer rerun (3) additionally passed a same-basis physical index
+rebase between exact receipts, and native_log (5) reran with cleanup included.
+Held values, source-log provenance, actual restricted reads, restart-hot cache,
+corruption, ordered reports and two excision-generation handoffs are exercised.
+
+Report catch-up at 16/32/64 missing transactions took roughly 350/740/1,580
+SQL calls; an additional 16 already-held transactions did not multiply replay.
+Exact calls/bytes and concurrent debug timing samples are in the deployment
+companion, not a claim of source throughput parity. The final log sample used
+130 transactions across three pages: point reads 257 calls/284,489 result-cell
+bytes versus forward traversal 132 calls/20,348 bytes. Setup 4.20 s, point
+156 ms, forward 79 ms; complete startup/write/shutdown/read/drop/fixture cleanup
+4.45 s. This is a debug sample with uncontrolled PostgreSQL/OS warmth, not an
+RSS, cold-read or controlled latency-ratio result. Source preservation currently
+accounts for 493 files with 46 comment-only annotated files, not final coverage.
+
+Stage 4 Datalog query execution and rules are now integrated. The former flat
+query owner and sixteen helper files were cut over without compatibility aliases
+to `src/query/`: typed syntax, controls, execution, bindings, patterns, rules,
+results, sources, preparation and extensions have explicit owners; specialized
+join/range/numeric/nested/diagnostic/value mechanisms remain separate children.
+Moved helpers were retained where their algorithms already fit the source-backed
+contract. The prepared-query cache now reuses the shared keyed linked-slot LRU
+while retaining its existing admission weights, hit/miss/eviction semantics and
+invocation-local values.
+
+Two demonstrated behavior/control gaps were repaired. `distinct` now returns a
+public `QueryValue::Set` and readable EDN set, matching `aggregation/distinct`
+and the Pro example rather than merely returning the same members in a sequence.
+Lazy query Pull now carries the caller's original `max_value_bytes` through
+deferred projection instead of replacing it with an unlimited allowance. New
+typed and EDN regressions exercise grouped duplicates/`:with`, exact result shape,
+failure at a small lazy allocation limit, iterator fusion and successful reuse.
+
+The chapter-local query companion traces important execution/reference passages
+to recovered symbols, new Rust owners and focused checks. It records native
+bound-score scheduling and controlled unbound EAVT scans as explicit adaptations,
+not source equivalence, and preserves the stronger exact numeric implementation.
+The source guard accounts for all 493 files with 56 comment-only study changes.
+Fresh verification after the cutover: `cargo check --offline --all-targets`
+passed without warnings; 49 focused result/composition tests passed; 36 selected
+query/source tests then passed with PostgreSQL configured; the broader rules,
+negation, ranges, preparation, diagnostics, numeric and custom-aggregate run
+passed all 76 tests. Finally the PostgreSQL-configured library suite passed all
+464 tests in 68.91 seconds. These establish this component on the current tree,
+not final product acceptance.
+
+Stage 4 Pull and entity navigation are now integrated. The flat Pull, Index Pull
+and bounded-test owners were cut over without compatibility aliases to
+`src/pull/`: public model, controls, entity navigation, iterative execution,
+attribute preparation, transforms and lazy index projection have distinct
+owners. Entity identity remains a shared model concern because database values,
+recovery and backup consume it independently. The existing explicit continuation
+machine, stack-safe clone/drop, immutable-value capture, recursion/limit controls
+and cursor implementation were retained after comparison rather than rewritten.
+
+Five source-backed gaps were repaired. Bare reverse component selectors now
+return the singular parent id map and expand it only for an explicit nested
+selector. Failed entity resolution still processes each selector's transform and
+then default without inventing wildcard attributes. Index Pull polls cancellation
+inside filtered/rejected traversal and fuses the failed cursor. EDN underscore
+selectors use the captured schema: an exactly installed `_name` is forward,
+otherwise the spelling denotes reverse `name`; the public typed representation
+names this conditional behavior `PullDirection::SchemaResolved`, with an explicit
+current-format codec tag. Finally, reverse associative navigation preserves an
+identified incoming entity instead of applying the forward-only ident-as-keyword
+presentation rule.
+
+The Pull companion traces the relevant Pro promises and recovered `pull.clj`,
+`query.clj`, `db.clj` and Java Entity mechanisms to the new Rust owners. Fresh
+verification passed all-target compilation, the source-preservation/link and diff
+guards, 62 focused integration cases with PostgreSQL configured, and eight
+bounded internal cursor cases. The 62 cases include typed and EDN contracts,
+actual durable Index Pull/entity identity, held/time/filter views, transforms,
+deep component traversal and all five repairs. The source guard now accounts for
+all 493 files with 60 comment-only study changes. The final public variant rename
+was followed by another all-target compilation; it did not alter runtime logic.
+
+Stage 4 fulltext search, publication and immutable caching are integrated. The
+flat implementation was cut over without aliases to `src/fulltext/`: public
+model and cumulative controls, eager/native search with exact-view validation,
+analysis, source-bound readers, logical records/differences and the authenticated
+search tree now have visible owners. Search-tree model, page codec, positive
+cache, cursor, bulk builder and incremental path editor are separate internal
+modules. PostgreSQL/object I/O and coherent index publication remain under
+`storage::fulltext`; the Datalog bridge remains under `query::fulltext`.
+Existing analyzer, page encoding, cache and incremental algorithms were retained
+body-for-body apart from imports, sibling visibility and formatting.
+
+One independently demonstrated control gap was repaired: exact-view candidate
+validation now advances its prefix cursor through the shared callback, so custom
+filters cannot hide an arbitrarily long rejected history from cancellation or
+the direct/query work budget. The adversarial regression failed on the prior
+code and now passes for both `FulltextOptions` and enclosing `QueryControl`, then
+reuses the same immutable view successfully. Source comparison retains native
+versioned grammar/BM25, exact E/value/tx validation, post-validation truncation,
+and synchronous durable+recent+speculative answer composition as documented
+adaptations; Lucene ranking/file parity is not claimed. The nonexistent separate
+idle search worker is no longer represented by an always-zero public statistic,
+tests, diagnostics or docs.
+
+The fulltext companion traces Pro schema, Datalog, eventual indexing and cache
+promises through recovered fulltext/fulltext-index/Lucene mechanisms to current
+Rust owners. Source preservation now accounts for all 493 files with 74
+comment-only study changes. Fresh verification passed all-target compilation,
+diff/link/preservation guards, 20 focused integration cases with PostgreSQL
+configured, 24 fulltext internal cases, and three projection observation/retry
+cases (including real durable recovery). The final PostgreSQL-configured library
+suite passed all 464 cases in 265.86 seconds. Together with the earlier immutable
+value, peer/log, Datalog and Pull evidence, this closes Stage 4, not the parent.
+
+Stage 5 application boundaries and chapter-organized end-user docs are now
+integrated. No new crate was needed: module ownership is sufficient for the
+actual dependency boundaries. `runtime::executor` owns the generic bounded
+worker/resource lifetime used by async applications and deferred storage cleanup;
+`application` owns connection composition, async client/streams and local/remote
+transports; `observation` owns cross-cutting hints and durable change consumption.
+`operations` owns administrative inspection/index/reclamation/deployment policy,
+while storage/transactor retain their semantic workers. `backup` owns capture,
+repository publication, immutable read points, verification and restore.
+Immutable stored-function invocation remains with `database_value`. PostgreSQL
+environment parsing remains provider-owned. The binary is thinly divided under
+`src/bin/atomic`; curated root exports remain the public API, while superseded
+internal flat paths were removed without aliases.
+
+The canonical backup replay now retains `LogTraversal`'s authenticated forward
+anchors instead of calling `read_record` once per basis. The independent old-path
+oracle read 832 sealed navigation pages for the fixture versus eight with forward
+replay; each forward page was read once and the captured tail needed no read.
+History equality, cancellation at an interior basis and a missing next object
+are permanent regressions. Sparse receipt and retained-value authority checks
+remain point reads because their order is not chronological; no whole-verifier
+linear-I/O claim is made. The application fulltext example also stopped retrying
+a missing attachment against the same immutable value: one controlled call now
+returns a complete value-relative answer or a clear failure.
+
+User documentation now occupies the ten chapter families required by the plan,
+with 29 current guides and no flat forwarding stubs. Historical acceptance prose
+was removed; reproducible validation material lives under `development/validation`.
+README, lifecycle, query/fulltext and consumer guidance now agree with actual
+no-reader-pin grace retention, recent-tail search completion, exact retries and
+checkpoint-write authority. Optional SSD/hint/log caches are separated from core
+requirements. Three permanent checks validate chapter coverage, active relative
+links/anchors, rustdoc/example paths and stock CLI help. Archived historical links
+are evidence and were not rewritten as current guidance.
+
+Fresh verification passed warning-free all-target compilation, diff and active
+link checks, 22 focused internal backup/runtime/transport cases, and 52 distinct
+PostgreSQL-configured application/integration cases covering async clients,
+local/remote submission, routing, change consumers, EDN/product/admin CLIs,
+connections/failover and backup/restore including fulltext/program dependencies.
+The product workflow initially failed its explicit prerequisite because the
+external example binary was not built; after building the stock binary and
+example, all three product cases passed. The moved-body audit compared 417
+existing functions: production bodies were unchanged apart from approved paths,
+visibility and the canonical replay repair. This closes Stage 5, not the parent.
+
+Stage 6 is complete. Cleanup removed the obsolete CLI `migrate` alias, dead API
+paths (including the eager Entity constructor and unused raw SQL-client escape),
+and the unused SHA feature configuration. Current callers use the retained public
+APIs; no compatibility implementation was added. Source/API study closed the
+remaining consequential peer, async, cache, backup, capacity and catalog families.
+The recovered peer's bounded `queue/put` may block on admission; Atomic's bounded
+Busy admission is an explicit native policy, not source-equivalent behavior.
+
+The source and passage ledgers now account for all 493 source entries and all
+90 original Pro chapters. `inventory.py --check` permanently rejects missing,
+extra or duplicate rows, empty dispositions and nonexistent owner/trace paths;
+manual dispositions are never regenerated. Its final Stage 6 run verified
+99 comment-only source files with every recovered body preserved and 686 local
+trace links resolved. Five focused ledger checks passed, as did the diff guard.
+The current-path atlas distinguishes exact dependencies/resources, identical and
+nonidentical artifact copies, native counterparts/adaptations, and justified
+host/vendor/version-specific non-counterparts. Family-level accounting is not a
+claim that every source symbol is annotated or every Datomic product is ported.
+
+Fresh integrated Stage 6 evidence includes 21 focused core checks, the central
+binary's seven of seven socket tests, and both central live PostgreSQL
+install/refusal tests. Genuine residual unknowns concern arbitrary JVM host and
+classloader behavior, recovered metadata/version discrepancies, unclaimed
+Caffeine/Valcache/vendor scheduling, and exhaustive cross-process failure
+schedules. These are not identified gaps in advertised native behavior and do
+not imply whole-product parity or measured source throughput equivalence.
+
+Stage 7 and the parent goal are complete. After the explicit prerequisite
+`cargo build --offline --bin atomic --examples`, the clean serialized
+PostgreSQL-configured `cargo test --offline --all-targets -- --test-threads=1`
+run exited 0 across 1,191 registered tests: 466 library tests, seven binary tests,
+and the integration/example targets. An earlier incomplete run exposed the
+missing standalone example binary; it is not counted as acceptance. Dedicated
+fixtures supplied evidence that the broad suite alone cannot establish: the
+PostgreSQL crash witness passed 1/1 in 32.20 s, checking exact retry, rollback and
+held values; the TLS witness passed 1/1 in 2.67 s with two TLS 1.3 listeners,
+untrusted-root rejection and plaintext rejection.
+
+Final formatting and all-target compilation checks passed. The three current
+documentation/navigation/help checks passed, and the source/ledger guard again
+verified 493 preserved source bodies, 99 comment-only files, 493 source
+dispositions, 90 chapter dispositions and 686 resolving local trace links.
+The release-facing audit removed three obsolete historical-comparison sentences
+without changing operating limits; README, guides, examples and rustdoc navigate
+the current cutover. The diff guard passed.
+
+The final `BLOCK_LIVE_COST` sample measured startup through shutdown at 13.193 s
+and 1,868 SQL driver calls. Twenty-four writes took 0.500 s, or 4.599 s including
+automatic indexing; three automatic jobs ran, and 32 subsequent warm reads used
+zero SQL calls. This is a local debug run with uncontrolled warm PostgreSQL/OS
+caches, not a scalability result, RSS bound or performance-parity claim. Current
+reproduction prerequisites and acceptance evidence are in
+[development validation](../development/validation/README.md).
+
+The central disposable live fixture at `/tmp/atomic-release-pg.rRGLRj` was
+stopped after acceptance. This is fixture cleanup, not product deployment, and does
+not authorize deleting unrelated data. The source-study uncertainties listed
+above remain explicit: completing the advertised native cutover does not claim
+JVM/vendor parity, exhaustive failure schedules or production-scale performance.

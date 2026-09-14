@@ -315,3 +315,7 @@ Generally speaking, you should never downgrade peers or transactors to older ver
 - Our support team is better able to help if you are running a recent version
 
 If you have a need to downgrade Datomic, [contact support](https://www.datomic.com/support.html) first, and let the Datomic team advise you.
+
+<!-- ATOMIC-NOTE: development trace; original chapter retained above. -->
+
+[Atomic implementation trace: immutable capture and peer observation](02_datomic_deployment.atomic.md)

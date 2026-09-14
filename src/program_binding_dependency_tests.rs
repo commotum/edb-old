@@ -2,7 +2,7 @@
 //! test-only schema traversal on the measured path. Fixtures and independent
 //! expectations are constructed before the complete validation operation.
 use super::*;
-use crate::database_value::TransactionReadContext;
+use crate::database_value::read_context::TransactionReadContext;
 use crate::{
     Attribute, Cardinality, Database, EntityRef, Instruction, Keyword, Program, Schema, Symbol,
     TxOp, TxReport, ValueType,

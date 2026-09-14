@@ -99,6 +99,10 @@
       'invert-prefix-case
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/adaptation] This is a byte/key sink, not another database engine. Prefix-case
+  ;; fallback accommodates a recovered layout, not a first-release reader
+  ;; to reproduce. Native backup/repository uses one hash-addressed layout,
+  ;; bounded regular-file reads, authenticated reuse and fsynced publication.
   (deftype
     FileSystemStorage
     [root]

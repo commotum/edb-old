@@ -87,7 +87,7 @@ fn durable_clock_selects_normalized_maps_without_changing_speculation() {
         &options,
     )
     .unwrap();
-    assert_eq!(assessed.db_after.last_tx_instant().unwrap(), Some(150));
+    assert_eq!(assessed.db_after.last_tx_instant(), Some(150));
     assert!(
         assessed
             .tx_data
@@ -144,7 +144,7 @@ fn durable_clock_expands_generated_instant_once_even_when_rejected() {
         &options,
     )
     .unwrap();
-    assert_eq!(assessed.db_after.last_tx_instant().unwrap(), Some(150));
+    assert_eq!(assessed.db_after.last_tx_instant(), Some(150));
     assert_eq!(invoked.load(Ordering::SeqCst), 1);
     let error = assess_durable_forms(
         &base,

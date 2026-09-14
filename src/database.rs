@@ -1430,7 +1430,7 @@ impl Database {
         after.basis_t = assessed.basis_t;
         after.eidx_frontier = assessed.eidx_frontier;
         after.reserved_allocation = assessed.db_after.reserved_allocation()?;
-        after.last_tx_instant = assessed.db_after.last_tx_instant()?;
+        after.last_tx_instant = assessed.db_after.last_tx_instant();
         after.current_indexes = IndexRoots::build(&after.schema, facts_as_datoms(&current));
         after.current = current.into();
         let mut history: Vec<_> = self.history.iter().cloned().collect();

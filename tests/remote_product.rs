@@ -140,7 +140,7 @@ fn isolated_network_application_retry_replacement_and_reference_handoff() {
     cli(
         &fixture.admin_url,
         &[
-            "migrate",
+            "install",
             "--writer-role",
             writer_role,
             "--peer-role",
@@ -356,7 +356,7 @@ fn stock_auto_contender_health_and_cached_route_survive_process_crash() {
         .expect("acceptance needs restricted roles");
     cli(
         &fixture.admin_url,
-        &["migrate", "--writer-role", writer, "--peer-role", peer_role],
+        &["install", "--writer-role", writer, "--peer-role", peer_role],
     );
     cli(&fixture.admin_url, &["create", "--database", "automatic"]);
     let credentials = Credentials::new();

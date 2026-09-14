@@ -3,7 +3,7 @@ use super::activation;
 use super::client::TransactionClient;
 use super::config::{BackgroundIndexingConfig, ServiceOptions, TransactionServiceConfig};
 use super::observations::{BackgroundIndexingStats, WriterResidencyStats};
-use crate::connection::DatabaseIdentity;
+use crate::model::identity::DatabaseIdentity;
 use crate::{PostgresConnectionConfig, ProgramCacheStats, RecoveryStats, SemanticError};
 use std::sync::atomic::Ordering;
 use std::thread::JoinHandle;

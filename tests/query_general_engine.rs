@@ -668,7 +668,7 @@ fn general_predicate_and_existing_binding_comparisons_share_limits() {
 }
 
 #[test]
-fn legacy_shallow_tuple_find_results_preserve_native_representation_at_any_width() {
+fn typed_shallow_tuple_find_results_preserve_native_representation_at_any_width() {
     for width in [1, 9] {
         let mut inner = Query::new(
             FindSpec::Tuple((0..width).map(|_| find("value")).collect()),

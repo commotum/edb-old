@@ -83,10 +83,10 @@ fn cli_transactor_repairs_identity_and_peer_queries_across_restart() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     const DATABASE: &str = "declarative_repairs";
     cli(&fixture.admin_url, &["create", "--database", DATABASE]);

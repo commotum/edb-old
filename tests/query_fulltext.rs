@@ -2,7 +2,10 @@ mod common;
 
 use atomic_core::*;
 use std::collections::BTreeSet;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 const TEXT: u32 = 1000;
@@ -274,6 +277,107 @@ fn fulltext_queries_fail_closed_on_type_source_and_resource_limits() {
             &QueryControl::default()
         )
         .is_err()
+    );
+}
+
+#[test]
+fn fulltext_candidate_validation_polls_cancellation_inside_rejected_history() {
+    let first = Database::new(schema(true))
+        .unwrap()
+        .with(
+            &[TxOp::Add {
+                entity: EntityRef::Temp("article".into()),
+                attribute: TEXT,
+                value: Value::String("needle".into()).into(),
+            }],
+            1_000,
+        )
+        .unwrap();
+    let entity = first.tempids["article"];
+    let mut database = first.db_after;
+    let mut assertions = BTreeSet::from([t_to_tx(database.basis_t()).unwrap()]);
+    for round in 0..12 {
+        for (step, text) in ["other", "needle"].into_iter().enumerate() {
+            database = database
+                .with(
+                    &[TxOp::Add {
+                        entity: EntityRef::Id(entity),
+                        attribute: TEXT,
+                        value: Value::String(text.into()).into(),
+                    }],
+                    2_000 + round * 2 + step as i64,
+                )
+                .unwrap()
+                .db_after;
+            if text == "needle" {
+                assertions.insert(t_to_tx(database.basis_t()).unwrap());
+            }
+        }
+    }
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    let reject = Arc::new(AtomicBool::new(true));
+    let active = Arc::clone(&reject);
+    let examined = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&examined);
+    let view = database.database_value().history().filter(move |_, datom| {
+        if datom.entity == entity && datom.attribute == TEXT && active.load(Ordering::Relaxed) {
+            if observed.fetch_add(1, Ordering::Relaxed) + 1 == 3 {
+                flag.store(true, Ordering::Relaxed);
+            }
+            return false;
+        }
+        true
+    });
+
+    // Direct search uses its own cancellation option. The filter must not
+    // exhaust all versions inside one exact-view cursor next() before polling.
+    let options = FulltextOptions {
+        cancel: Arc::clone(&cancel),
+        ..Default::default()
+    };
+    assert_eq!(
+        view.fulltext(TEXT, "needle", &options).unwrap_err().code,
+        "fulltext/cancelled"
+    );
+    assert!((3..=4).contains(&examined.load(Ordering::Relaxed)));
+
+    // Datalog must poll the enclosing control too, not only a fresh internal
+    // FulltextOptions flag created by the query function adapter.
+    cancel.store(false, Ordering::Relaxed);
+    examined.store(0, Ordering::Relaxed);
+    let control = QueryControl {
+        cancel: Arc::clone(&cancel),
+        ..Default::default()
+    };
+    let q = query(false);
+    let input = [QueryInput::Scalar(Value::String("needle".into()))];
+    assert_eq!(
+        view.query(&q, &input, &control).unwrap_err().code,
+        "query/canceled"
+    );
+    assert!((3..=4).contains(&examined.load(Ordering::Relaxed)));
+
+    // The same captured view and controls remain usable after interruption.
+    reject.store(false, Ordering::Relaxed);
+    cancel.store(false, Ordering::Relaxed);
+    let found = view.fulltext(TEXT, "needle", &options).unwrap();
+    assert_eq!(found.hits.len(), assertions.len());
+    assert!(
+        found
+            .hits
+            .iter()
+            .all(|hit| hit.entity == entity && hit.value == "needle")
+    );
+    assert_eq!(
+        found.hits.iter().map(|hit| hit.tx).collect::<BTreeSet<_>>(),
+        assertions
+    );
+    let queried = rows(view.query(&q, &input, &control).unwrap());
+    assert_eq!(queried.len(), assertions.len());
+    assert_eq!(
+        queried.iter().map(|row| row.2).collect::<BTreeSet<_>>(),
+        assertions
     );
 }
 

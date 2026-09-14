@@ -499,14 +499,26 @@ impl LogRoot {
         start_t: u64,
         end_t: u64,
     ) -> Result<LogRange<'a>, SemanticError> {
+        Ok(LogRange {
+            store,
+            traversal: self.traversal(start_t, end_t)?,
+        })
+    }
+
+    /// Reader-independent state lets an owned snapshot supply authenticated I/O
+    /// on each step without a self-referential cursor or a second traversal.
+    pub(crate) fn traversal(
+        &self,
+        start_t: u64,
+        end_t: u64,
+    ) -> Result<LogTraversal, SemanticError> {
         if start_t == 0 || end_t < start_t {
             return Err(invalid(
                 "storage/log-range",
                 "Log range needs a positive start no later than its end",
             ));
         }
-        Ok(LogRange {
-            store,
+        Ok(LogTraversal {
             anchors: self.tail.iter().cloned().collect(),
             next: start_t,
             end: end_t.min(self.basis_t() + 1),
@@ -539,6 +551,10 @@ impl LogRoot {
 
 pub struct LogRange<'a> {
     store: &'a mut dyn ObjectReader,
+    traversal: LogTraversal,
+}
+
+pub(crate) struct LogTraversal {
     // Greater-index pages, descending toward the nearest unvisited ancestor.
     // Only the original captured tail may be partial; loaded pages are sealed.
     anchors: Vec<Page>,
@@ -557,7 +573,26 @@ impl Iterator for LogRange<'_> {
 }
 
 impl LogRange<'_> {
-    fn next_page(&mut self, wanted: u64) -> Result<Page, SemanticError> {
+    /// One authenticated transaction, retaining navigation between calls.
+    pub fn next_record(&mut self) -> Option<Result<LogRecord, SemanticError>> {
+        self.next_record_bounded(usize::MAX)
+    }
+
+    /// Reject oversized entries before fetching chunks or decoding datoms.
+    pub(crate) fn next_record_bounded(
+        &mut self,
+        max_bytes: usize,
+    ) -> Option<Result<LogRecord, SemanticError>> {
+        self.traversal.next_record_bounded(self.store, max_bytes)
+    }
+}
+
+impl LogTraversal {
+    fn next_page(
+        &mut self,
+        store: &mut dyn ObjectReader,
+        wanted: u64,
+    ) -> Result<Page, SemanticError> {
         let mut page = self.anchors.pop().ok_or_else(|| {
             invalid(
                 "storage/log-skip-coordinate",
@@ -579,7 +614,7 @@ impl LogRange<'_> {
             // from the tail at the next boundary. Each loaded page is either
             // yielded once or retained as one of O(log P) future anchors.
             self.anchors.push(page);
-            page = Page::load(self.store, id)?;
+            page = Page::load(store, id)?;
             if page.index != expected || page.entries.len() != LOG_PAGE_ENTRIES {
                 return Err(invalid(
                     "storage/log-skip-coordinate",
@@ -592,8 +627,11 @@ impl LogRange<'_> {
 
     /// The same streaming read with its actual authenticated object identity
     /// and canonical content byte count for recent-tier admission/accounting.
-    pub fn next_record(&mut self) -> Option<Result<LogRecord, SemanticError>> {
-        self.next_record_bounded(usize::MAX)
+    pub(crate) fn next_record(
+        &mut self,
+        store: &mut dyn ObjectReader,
+    ) -> Option<Result<LogRecord, SemanticError>> {
+        self.next_record_bounded(store, usize::MAX)
     }
 
     /// The same cursor with per-entry encoded-byte admission before chunk fetch
@@ -601,6 +639,7 @@ impl LogRange<'_> {
     /// checkpoint owners resume with a new range from their last durable basis.
     pub(crate) fn next_record_bounded(
         &mut self,
+        store: &mut dyn ObjectReader,
         max_bytes: usize,
     ) -> Option<Result<LogRecord, SemanticError>> {
         if self.failed || self.next >= self.end {
@@ -609,14 +648,9 @@ impl LogRange<'_> {
         let result = (|| {
             let index = (self.next - 1) / LOG_PAGE_ENTRIES as u64;
             if self.page.as_ref().is_none_or(|p| p.index != index) {
-                self.page = Some(self.next_page(index)?);
+                self.page = Some(self.next_page(store, index)?);
             }
-            read_entry_bounded(
-                self.store,
-                self.page.as_ref().unwrap(),
-                self.next,
-                max_bytes,
-            )
+            read_entry_bounded(store, self.page.as_ref().unwrap(), self.next, max_bytes)
         })();
         self.failed = result.is_err();
         self.next += 1;
@@ -975,13 +1009,13 @@ mod tests {
             }
         } else {
             let mut range = root.range(&mut reader, start, end).unwrap();
-            peak_anchors = range.anchors.len();
+            peak_anchors = range.traversal.anchors.len();
             while entries.len() < limit {
                 let Some(record) = range.next_record() else {
                     break;
                 };
                 entries.push(record.unwrap().entry);
-                peak_anchors = peak_anchors.max(range.anchors.len());
+                peak_anchors = peak_anchors.max(range.traversal.anchors.len());
             }
         }
         RangeSample {

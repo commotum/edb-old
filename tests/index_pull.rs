@@ -338,6 +338,41 @@ fn projection_is_lazy_and_cancellation_covers_offsets_and_fuses_errors() {
 }
 
 #[test]
+fn cancellation_interrupts_rejected_index_candidates_before_exhaustion() {
+    let value = database().db_after.database_value();
+    let control = PullControl::default();
+    let cancel = Arc::clone(&control.cancel);
+    let reject = Arc::new(AtomicBool::new(true));
+    let active = Arc::clone(&reject);
+    let candidates = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&candidates);
+    let filtered = value.filter(move |_, datom| {
+        if datom.attribute == SCORE && active.load(Ordering::Relaxed) {
+            if observed.fetch_add(1, Ordering::Relaxed) + 1 == 3 {
+                cancel.store(true, Ordering::Relaxed);
+            }
+            return false;
+        }
+        true
+    });
+    let mut cursor = filtered
+        .index_pull_with_control(options(score_start(None)), &control)
+        .unwrap();
+    assert_eq!(candidates.load(Ordering::Relaxed), 0);
+    assert_eq!(cursor.next().unwrap().unwrap_err().code, "pull/canceled");
+    assert!((3..=4).contains(&candidates.load(Ordering::Relaxed)));
+    assert!(cursor.next().is_none());
+    drop(cursor);
+
+    reject.store(false, Ordering::Relaxed);
+    control.cancel.store(false, Ordering::Relaxed);
+    let mut cursor = filtered
+        .index_pull_with_control(options(score_start(None)), &control)
+        .unwrap();
+    assert_eq!(name(&cursor.next().unwrap().unwrap()), "item-0000");
+}
+
+#[test]
 fn temporal_and_custom_views_use_the_same_snapshot_for_walk_and_projection() {
     let seeded = database();
     let old = seeded.db_after.database_value();

@@ -17,7 +17,7 @@ libc = "0.2.189"
 postgres = "0.19.14"
 postgres-native-tls = "0.5.1"
 rand = "0.10.2"
-sha2 = { version = "0.10.9", features = ["compress"] }
+sha2 = "0.10.9"
 socket2 = "0.6.5"
 tempfile = "3.27.0"
 tokio = { version = "1.53.1", features = ["rt", "net", "time", "sync"] }

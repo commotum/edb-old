@@ -66,7 +66,7 @@ whose `Arc` nodes share unchanged children and preserve prior roots; retain
 which reuses unaffected directory/leaf hashes. Retain the path-copied AVL
 [`SharedMap`](../../src/collections/persistent_map.rs) used by
 [`overlay_index`](../../src/index/overlay.rs) and
-[`database_value`](../../src/database_value.rs). AVL nodes and the recent B-tree
+[`database_value`](../../src/database_value/overlay.rs). AVL nodes and the recent B-tree
 serve different payload/access patterns; no Clojure namespace implies a Rust
 crate or requires replacing every persistent map with the same tree shape.
 
@@ -85,7 +85,7 @@ baseline 89–97, including all seven implementation bullets.
 | Documented mechanism | Observed source route | Current Rust route and limits |
 | --- | --- | --- |
 | Shallow trees of stored segments | S-INDEX `RootNode` → `DirNode` → segment; `Index.seek` loads the selected children. | Retain `index::tree::{RootNode, DirectoryNode, LeafSegment}` and canonical object I/O. PostgreSQL stores opaque objects; Rust owns ordering and tree policy. |
-| Periodic background indexing | S-UPDATE `process-request-index` runs `index/merge-db`; completion returns through `process-new-index`. | Retain [block_service.rs](../../src/block_service.rs) indexing jobs and [storage/indexing.rs](../../src/storage/indexing.rs); adopting a completed index must preserve later novelty. This companion does not revalidate all scheduling/failure cases. |
+| Periodic background indexing | S-UPDATE `process-request-index` runs `index/merge-db`; completion returns through `process-new-index`. | Retain [transactor/service.rs](../../src/transactor/service.rs) indexing jobs and [storage/indexing.rs](../../src/storage/indexing.rs); adopting a completed index must preserve later novelty. This companion does not revalidate all scheduling/failure cases. |
 | Adaptive work and segment reuse | S-INDEX `merge-data` consumes presorted streams; `aligned-dedup`/`start-dirs-pipeline` reuse directory IDs. | `persistent_tree` reuses unaffected child hashes and copies affected ranges. That local mechanism does not prove sublinear cost for every workload; background-indexing documentation separately lists excision, AVET installation and fulltext exceptions. |
 | Recent-plus-stored sorted view | S-ORDER `seek*` uses S-BT `IDataSet` and `iter/merge-iters`. | Retain [index/recent/mod.rs](../../src/index/recent/mod.rs) and [index/cursor.rs](../../src/index/cursor.rs) ordered cursors and merging, rather than materializing all datoms for every read. |
 | Every transaction reaches the log | S-UPDATE `writer` → S-LOG `Log.append` → conditional tail publication; notification waits for `:logged`. | [transactor/authority/mod.rs](../../src/transactor/authority/mod.rs) publishes log/receipt/root objects before returning a fresh report; Atomic also retains its exact-retry receipt contract. |
@@ -105,7 +105,7 @@ connection's current value; they do not mutate previously returned values.
 **Rust owner/disposition:** retain `index::tree::seek_tree` and
 `index::cursor::{DurableTreeCursor, MergeCursor}` traversal, plus
 [`storage/snapshot.rs`](../../src/storage/snapshot.rs) captured roots and
-[`connection.rs`](../../src/connection.rs) observation. The diagram's recent
+[`application/connection.rs`](../../src/application/connection.rs) observation. The diagram's recent
 plus cached durable tiers carry over. Its DynamoDB, optional Memcached and JVM
 Peer Server packaging are not native PostgreSQL deployment requirements.
 
@@ -154,7 +154,7 @@ forwarding aliases. Root-level type re-exports remain the intentional API facade
 | `index/boundary` | [boundary.rs](../../src/index/boundary.rs) `IndexBoundary`, `NormalizedIndexBoundary`, `IndexPrefix`; consumed by recent, durable and speculative cursors and public reads. | Boundary validation and prefix bias remain independent of tree shape. Full `Datom::cmp_in` and logical/stored `Value` equality remain model rules; omitted public components do not acquire fabricated sentinel values. |
 | `index/eager` | [eager.rs](../../src/index/eager.rs) `IndexRoots::build` and sorted `Arc<[Datom]>` arrays are consumed by [Database](../../src/database.rs), not the native snapshot cursor. | The explicit eager oracle is separate from public boundaries. Native incremental indexes are not replaced with its whole-array rebuilds. |
 | `index/recent/{mod,btset}` | [RecentTier](../../src/index/recent/mod.rs) authenticates contiguous log entries, tracks endpoint membership and memory limits, then inserts `RecentDatomRef` locators through [RecentBtSet](../../src/index/recent/btset.rs). Snapshot capture/advancement, indexing and service backlog accounting consume it. | Retain chunk-shared log plus path-copied B-tree. The locator depends on `DurableTransaction`; it is not presently a generic collection. Keep authentication, noHistory policy and pressure limits out of a generic set API. |
-| `index/overlay` | [OverlayIndexes](../../src/index/overlay.rs) owns speculative current/history maps, exact-EAV removals and ident projections; [DatabaseValue](../../src/database_value.rs) owns base-plus-overlay merging, read controls and exceptional AVET backfill. | Retain AVL `SharedMap` sharing and one `Arc<Datom>` payload across orders. It intentionally records all four raw orders; schema filtering occurs in `OverlayDeltaCursor`, so blindly applying recent-tier membership at insertion would change schema-transition behavior. |
+| `index/overlay` | [OverlayIndexes](../../src/index/overlay.rs) owns speculative current/history maps, exact-EAV removals and ident projections; [DatabaseValue overlay](../../src/database_value/overlay.rs) owns base-plus-overlay merging and exceptional AVET backfill, composed by shared [cursors](../../src/database_value/cursor.rs). | Retain AVL `SharedMap` sharing and one `Arc<Datom>` payload across orders. It intentionally records all four raw orders; schema filtering occurs in `OverlayDeltaCursor`, so blindly applying recent-tier membership at insertion would change schema-transition behavior. |
 | `index/tree` | [tree/mod.rs](../../src/index/tree/mod.rs) owns node values, sparse routing, canonical codec, build/merge and validation. `storage::indexing`, recovery, snapshot loading, backup verification and fulltext structural comparison use these values. | Root→directory→columnar-leaf shape and immutable hash reuse remain. Sparse bounds are not ordinary user values; PostgreSQL publication stays outside tree construction. |
 | `index/cursor` | [cursor.rs](../../src/index/cursor.rs) owns `DurableTreeSource`, loaded-node views, `DurableTreeCursor` and `MergeCursor`. `BlockSnapshot` supplies both source traits; fulltext `HistoryPages` supplies durable-only access. Portable backups reuse `BlockSnapshot`. | Generic source loading, bounded loaded-leaf ownership and mutable iterator positions remain together; cache policy and shared navigation helpers are separate. |
 | `index/tree/{navigation,cache}` | [navigation.rs](../../src/index/tree/navigation.rs) owns `TreeBoundary`, routing searches and child-edge checks consumed by cursors/preparation/metadata. [cache.rs](../../src/index/tree/cache.rs) owns `TreeNodeCache` mutation, weights and counters; its moved tests keep private ownership access. | Edit preparation no longer imports routing helpers from cursor state. Cache eviction drops only its `Arc`, not an active cursor's immutable payload. |
@@ -195,6 +195,6 @@ caching and workload-specific residence are handled by the caching companion.
 The comparative latency, millisecond fetch examples, fully cached small-database
 case and storage-performance advice are operational guidance, not benchmark
 results reproduced by this change. The final capacity requirement routes to
-`block_service` backpressure and indexing; scheduling acceptance remains with
+`transactor::service` backpressure and indexing; scheduling acceptance remains with
 that component. No test result, RSS reduction, latency improvement or complete
 indexing-policy equivalence is asserted here.

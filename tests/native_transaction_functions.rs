@@ -465,9 +465,9 @@ fn missing_stored_binding_is_not_reinterpreted_as_native_and_marker_is_exclusive
 }
 
 #[test]
-fn legacy_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_checked() {
-    let mut legacy = Schema::new();
-    legacy
+fn preexisting_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_checked() {
+    let mut preexisting = Schema::new();
+    preexisting
         .install(Attribute::new(
             SCORE,
             Keyword::new("item", "score"),
@@ -475,7 +475,7 @@ fn legacy_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_check
             Cardinality::One,
         ))
         .unwrap();
-    legacy
+    preexisting
         .install(Attribute::new(
             BEFORE,
             Keyword::new("item", "before"),
@@ -483,7 +483,7 @@ fn legacy_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_check
             Cardinality::One,
         ))
         .unwrap();
-    legacy
+    preexisting
         .install(Attribute::new(
             MARKER,
             native_deployment_ident(),
@@ -491,19 +491,19 @@ fn legacy_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_check
             Cardinality::One,
         ))
         .unwrap();
-    let db = Database::new(legacy).unwrap().database_value();
+    let db = Database::new(preexisting).unwrap().database_value();
     let initial = db
         .with(
             &[
                 add(
-                    EntityRef::Temp("legacy".into()),
+                    EntityRef::Temp("preexisting".into()),
                     MARKER,
-                    Value::String("ordinary old application data".into()),
+                    Value::String("ordinary application data".into()),
                 ),
                 add(
-                    EntityRef::Temp("legacy".into()),
+                    EntityRef::Temp("preexisting".into()),
                     DB_IDENT as u32,
-                    Value::Keyword(Keyword::new("checks", "legacy")),
+                    Value::Keyword(Keyword::new("checks", "preexisting")),
                 ),
                 add(EntityRef::Temp("item".into()), SCORE, Value::Long(1)),
             ],
@@ -520,7 +520,7 @@ fn legacy_ident_collision_is_not_a_global_gate_and_active_marker_schema_is_check
         vec![Value::Long(2)]
     );
     let mut attr = next.db_after.schema().attribute(SCORE).unwrap().clone();
-    attr.predicates = vec!["checks/legacy".into()];
+    attr.predicates = vec!["checks/preexisting".into()];
     assert_eq!(
         next.db_after
             .with(&[TxOp::AlterAttribute(attr)], 3)

@@ -69,6 +69,9 @@ impl EdnPullTransforms {
     }
 }
 
+/// Compile selector data without choosing a database. Underscore-leading names
+/// retain schema-resolved direction: an exact installed attribute wins over
+/// interpreting the spelling as reverse navigation.
 pub fn parse_pull_edn(text: &str) -> Result<PullPattern, SemanticError> {
     parse_pull_edn_with_transforms(text, &EdnPullTransforms::default())
 }
@@ -297,20 +300,13 @@ fn attribute(
 fn attribute_name(value: &EdnValue, path: &str) -> Result<PullAttribute, SemanticError> {
     match value {
         EdnValue::Keyword(keyword) => {
-            let mut keyword = keyword.clone();
-            if let Some(name) = keyword.name.strip_prefix('_') {
-                if name.is_empty() {
-                    return Err(form_error(
-                        "edn/pull-attribute",
-                        "empty reverse attribute name",
-                        path,
-                    ));
-                }
-                keyword.name = name.into();
-                Ok(PullAttribute::reverse(AttributeName::Ident(keyword)))
-            } else {
-                Ok(PullAttribute::forward(AttributeName::Ident(keyword)))
+            let mut attribute = PullAttribute::forward(AttributeName::Ident(keyword.clone()));
+            if keyword.name.starts_with('_') {
+                // Schema precedence is decided on the supplied immutable value,
+                // not while parsing database-independent selector data.
+                attribute.direction = crate::PullDirection::SchemaResolved(keyword.clone());
             }
+            Ok(attribute)
         }
         EdnValue::Long(id) if *id >= 0 => Ok(PullAttribute::forward(AttributeName::Id(
             u32::try_from(*id).map_err(|_| {

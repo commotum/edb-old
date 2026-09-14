@@ -365,6 +365,11 @@
             (fn fn__8495 ([msg] (java.lang.RuntimeException. ^java.lang.String msg))))))))
   ;; Reconstruct serialized exception data through the recognized information
   ;; classes, or use a cached String constructor for supported java.* classes.
+  ;; ATOMIC-NOTE [observed/disposition]: peer/Connection.notify-error reconstructs
+  ;; recognized information-bearing exceptions before promise delivery wraps
+  ;; them in ExecutionException. Preserve category/data across the boundary;
+  ;; arbitrary Java class identity is neither portable nor a native contract.
+  ;; A transport error still cannot establish whether a transaction committed.
   (defn deserialize-exception
     ([p__8499]
       (let [map__8500 p__8499

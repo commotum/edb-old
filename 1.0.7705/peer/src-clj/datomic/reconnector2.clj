@@ -41,6 +41,13 @@
   (.setMeta
     (clojure.lang.RT/var "datomic.reconnector2" "shutdown?")
     {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE [observed/disposition]: One worker_ref lock serializes reconnect and
+  ;; shutdown; replacing the promise preserves a stable caller-facing handle.
+  ;; A late worker only delivers to an unrealized promise, so shutdown wins.
+  ;; Retry/endpoint policy is supplied by peer/create-connection, not this type;
+  ;; that caller also fails pending requests instead of proving non-commit.
+  ;; Native peer/live and application/transport retain observation/routing
+  ;; separately from receipt-backed transaction retry, without JVM futures.
   (deftype
     Reconnector
     [current_promise_ref worker_ref shutdown_state reconnect_fn cleanup_fn]

@@ -25,6 +25,10 @@
           ['datomic.common :refer (clojure.core/list 'compare)]
           ['datomic.math :as 'math]))))
   (set! *warn-on-reflection* true)
+  ;; ATOMIC-NOTE [observed]: These functions receive one already-formed query
+  ;; ATOMIC-NOTE: group. Scalar min/max reduce without sorting; bounded min/max
+  ;; ATOMIC-NOTE: sort the group because they must retain an ordered prefix.
+  ;; ATOMIC-NOTE: Both paths use Datomic's cross-type value comparator.
   (defn min
     ([n coll] (vec (take n (sort datomic.common/compare coll))))
     ([coll]
@@ -90,6 +94,12 @@
       'count-distinct
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [documented/observed]: distinct returns a set, not an arbitrary
+  ;; ATOMIC-NOTE: sequence. This result shape is part of the query API as well as
+  ;; ATOMIC-NOTE: the mechanism that removes repeated values inside one group.
+  ;; ATOMIC-NOTE [native repair]: QueryValue::Set preserves this public shape
+  ;; through typed queries and readable EDN. A Collection with the same members
+  ;; is not equivalent: it compares differently and renders as a vector.
   (defn distinct ([coll] (set coll)))
   (reset-meta!
     #'distinct
@@ -112,6 +122,11 @@
       'sum
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [native numeric adaptation]: Atomic retains exact integer and
+  ;; decimal arithmetic until an explicitly approximate statistic requires f64.
+  ;; It admits coefficient growth before allocation and centers/rescales exact
+  ;; statistical inputs before conversion when necessary. That avoids losing
+  ;; nearby large values, but does not claim identical JVM rounding behavior.
   (defn avg
     ([coll] (java.lang.Double/valueOf (double (/ (sum coll) (.size ^java.util.Collection coll))))))
   (reset-meta!
@@ -147,6 +162,9 @@
       'median
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Variance is population variance: divide the sum of
+  ;; ATOMIC-NOTE: squared deviations by the whole group size. stddev is merely
+  ;; ATOMIC-NOTE: its square root; neither function applies a sample correction.
   (defn variance
     ([coll]
       (let [av (avg coll)
@@ -199,6 +217,9 @@
       'rand
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Convert to a set before reservoir sampling, so the
+  ;; ATOMIC-NOTE: aggregate samples distinct values without replacement. The
+  ;; ATOMIC-NOTE: reservoir bounds retained state by n while reading the group.
   (defn sample ([n coll] (math/reservoir-sample n (set coll))))
   (reset-meta!
     #'sample

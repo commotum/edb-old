@@ -44,7 +44,7 @@ Data-only queries need no --database or PostgreSQL connection configuration.
 The same PostgreSQL/TLS credential configuration applies. --remote uses verified
 TLS writer discovery and ATOMIC_REMOTE_TOKEN_FILE, not plaintext TCP.
 Input files are limited to16MiB each. Output conversion/printing is bounded;
-query defaults to a30s evaluation timeout. See docs/edn.md for format/type limits.
+query defaults to a30s evaluation timeout. See docs/01_tutorials/00_edn_workflow.md for format/type limits.
 ";
 
 struct Arguments {

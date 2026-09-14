@@ -109,6 +109,9 @@
            :name "query-40e7d292-b60a-40ef-b6d8-db96660e415b-",
            :metrics? false}))
       #'query-pool))
+  ;; ATOMIC-NOTE: Nested query-worker calls stay inline, so relation work does
+  ;; ATOMIC-NOTE: not recursively fan out through the same pool. Parallel batches
+  ;; ATOMIC-NOTE: are an execution choice; the returned relation has set semantics.
   (defn qmapv
     ([f coll] (if (on-query-thread?) (mapv f coll) (common/pooled-mapv query-pool f coll))))
   (reset-meta!
@@ -135,6 +138,9 @@
     (.setDynamic (clojure.lang.RT/var "datomic.datalog" "*cancel*") true)
     {:dynamic true, :column (int 1)})
   (.bindRoot (.setDynamic (clojure.lang.RT/var "datomic.datalog" "*cancel*") true) (atom nil))
+  ;; ATOMIC-NOTE: Timeout only marks a shared flag; these checkpoints observe it.
+  ;; ATOMIC-NOTE: This is cooperative cancellation, not interruption of arbitrary
+  ;; ATOMIC-NOTE: predicate/function code or a guarantee of prompt callback return.
   (defn maybe-cancel
     ([]
       (let [temp__5825__auto__ (deref *cancel*)]
@@ -341,6 +347,9 @@
       'join-project-coll
       :ns
       *ns*))
+  ;; ATOMIC-NOTE: Swap to hash the smaller relation, and only build buckets when
+  ;; ATOMIC-NOTE: shared bindings and more than ten rows justify them. Projection
+  ;; ATOMIC-NOTE: and predicates precede set insertion; batching does not cap output.
   (defn join-project-coll-with
     ([xs ys join_map project_map_x project_map_y predctor]
       (cond
@@ -542,6 +551,8 @@
                      :db.error/invalid-data-source
                      (str (.getClass xs) " is not a valid data source type.")
                      {:input xs})))))})
+  ;; ATOMIC-NOTE: This relation retains the exact database/window plus probe
+  ;; ATOMIC-NOTE: constraints, not an eagerly materialized copy of its datoms.
   (deftype DbRel [db isref iskey consts starts whiles])
   (clojure.core/import 'datomic.datalog.DbRel)
   (defn ->DbRel
@@ -687,6 +698,9 @@
   (reset-meta! #'ADDED (assoc {:const true, :column (int 1)} :name 'ADDED :ns *ns*))
   (def DCOUNT 5)
   (reset-meta! #'DCOUNT (assoc {:const true, :column (int 1)} :name 'DCOUNT :ns *ns*))
+  ;; ATOMIC-NOTE: Bound positions choose a contiguous index range; residual
+  ;; ATOMIC-NOTE: matching still enforces the complete clause. Unindexed scalar
+  ;; ATOMIC-NOTE: A/V probes scan that attribute, while wholly unbound scans fail.
   (extend
     datomic.datalog.DbRel
     IJoin
@@ -1187,6 +1201,8 @@
                             [ht ps])
                ht (nth vec__15500 (unchecked-int 0) nil)
                probeset (nth vec__15500 (unchecked-int 1) nil)
+               ;; ATOMIC-NOTE: Hash all joining rows, but deduplicate their index
+               ;; ATOMIC-NOTE: probes before partitioning; repeated inputs share I/O.
                PAR 4
                probelists (let [cnt (count probeset)]
                             (if (> cnt 100)
@@ -1583,6 +1599,11 @@
       'extensional?
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; demand is not declaration]: The adornment records
+  ;; which arguments happen to be bound at this invocation. add-rule's :reqcnt
+  ;; instead declares which arguments must be bound before scheduling. Keeping
+  ;; them separate lets one rule answer several input patterns without treating
+  ;; every exported or-join variable as a required input.
   (defn adorned-pred
     ([query bindset]
       [(first query)
@@ -1663,6 +1684,16 @@
   (reset-meta!
     #'used-srcs
     (assoc {:arglists (clojure.core/list ['srcs 'c]), :column (int 1)} :name 'used-srcs :ns *ns*))
+  ;; ATOMIC-NOTE: Readiness deferral, not cardinality estimates, selects clauses
+  ;; ATOMIC-NOTE: after input/expression grouping: prefer E/A bindings, then allow
+  ;; ATOMIC-NOTE: V-only database probes. The upward/downward binding intersection
+  ;; ATOMIC-NOTE: drops tuple columns once no later clause or head needs them.
+  ;; ATOMIC-NOTE [native adaptation]: Atomic schedules ready clauses using a
+  ;; bound-position score and permits controlled EAVT scans when no selective
+  ;; prefix exists. This differs from source-order readiness and the source's
+  ;; insufficient-binding full-scan rejection; neither is a cardinality model.
+  ;; query::diagnostics records actual scheduling and candidate work so these
+  ;; choices remain observable rather than implied source cost equivalence.
   (defn sched-in-order
     ([srcs prog p__15718 init_binds]
       (let [vec__15719 p__15718
@@ -1894,6 +1925,8 @@
       'sched-in-order
       :ns
       *ns*))
+  ;; ATOMIC-NOTE: Fuse ready predicates into the preceding join before retaining
+  ;; ATOMIC-NOTE: its tuples. Each worker constructs its own mutable argument array.
   (defn push-preds
     ([srcs sched]
       (let [pred? (fn pred_QMARK_
@@ -2566,6 +2599,8 @@
       :ns
       *ns*))
   (.setMeta (clojure.lang.RT/var "datomic.datalog" "add-rule") {:declared true, :column (int 1)})
+  ;; ATOMIC-NOTE: Lower disjunction into alternative generated rule bodies so
+  ;; ATOMIC-NOTE: the same binding schedule and answer-set machinery implements it.
   (defn prep-clauses
     ([rm clauses]
       (let [clauses (map normalize-or-join (map not-or->not-or-join (map not-or-all-pred clauses)))
@@ -2622,6 +2657,9 @@
   (reset-meta!
     #'callees
     (assoc {:arglists (clojure.core/list ['x]), :column (int 1)} :name 'callees :ns *ns*))
+  ;; ATOMIC-NOTE: Only a leading nested head-argument list declares required
+  ;; ATOMIC-NOTE: inputs; ordinary or-join variables are not all required bound.
+  ;; ATOMIC-NOTE: Preserve that prefix count before flattening the executable head.
   (defn add-rule
     ([rm rname preds]
       (let [heads (map first preds)
@@ -2679,6 +2717,10 @@
       'add-rule
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; alternative definitions]: Grouping by predicate
+  ;; name builds alternatives, not an ordered first-match dispatch. eval-query
+  ;; visits each body and eval-rule unions its head tuples into a shared set.
+  ;; Arity validation here is independent of invocation-time required bindings.
   (defn rule-map
     ([rules]
       (let [rules (if (string? rules) (binding [*read-eval* false] (read-string rules)) rules)
@@ -2745,6 +2787,9 @@
     (cache/create-computing rule-map 1000))
   (.setMeta (clojure.lang.RT/var "datomic.datalog" "q") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.datalog" "q") (clojure.lang.RT/var "datomic.query" "q"))
+  ;; ATOMIC-NOTE: Set difference must consume a completed nested query, not the
+  ;; ATOMIC-NOTE: provisional positive answers in an outer recursive round. Fresh
+  ;; ATOMIC-NOTE: names hide non-join columns while retaining the input tuple shape.
   (defn eval-not-join
     ([srcs prog inrel inbinds p__16044]
       (let [vec__16045 p__16044
@@ -2971,6 +3016,8 @@
       'remap-bounds
       :ns
       *ns*))
+  ;; ATOMIC-NOTE: A rule threads materialized relations through its scheduled
+  ;; ATOMIC-NOTE: clauses, then unions projected head tuples into shared answers.
   (defn eval-rule
     ([db prog oprog p__16090 p__16091 inrel sched_fn src ans ins top_bounds nested_bounds]
       (let [vec__16092 p__16090
@@ -3078,6 +3125,9 @@
       'eval-rule
       :ns
       *ns*))
+  ;; ATOMIC-NOTE: Seen inputs are keyed by source and bound/free adornment;
+  ;; ATOMIC-NOTE: answers are keyed separately by source and predicate. Subtract
+  ;; ATOMIC-NOTE: only inputs already visited in this round, not answer tuples.
   (defn eval-query
     ([db prog oprog p__16114 input sched_fn src ans ins top_bounds nested_bounds]
       (let [vec__16115 p__16114
@@ -3202,6 +3252,15 @@
       'ranges
       :ns
       *ns*))
+  ;; ATOMIC-NOTE: Keep monotone answer sets but reset seen inputs each round so
+  ;; ATOMIC-NOTE: newly discovered answers can flow through earlier rule bodies.
+  ;; ATOMIC-NOTE: Stable cardinalities terminate this fixed point; the repeated
+  ;; ATOMIC-NOTE: body evaluations are not a promise of delta-only scan cost.
+  ;; ATOMIC-NOTE [native adaptation; fixed-point accounting]: Native demand
+  ;; tables preserve source and bound arguments, with an explicit driver for
+  ;; completed negative subqueries. Repeated rounds/restarts still cost work;
+  ;; controls must meter them. Query preparation may cache validated structure,
+  ;; but these answer/input tables belong to one execution over exact sources.
   (defn qsqr
     ([db query sched-fn]
       (let [map__16144 query

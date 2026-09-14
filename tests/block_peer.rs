@@ -14,6 +14,191 @@ const VALUE: u32 = 1000;
 const WAIT: Duration = Duration::from_secs(20);
 
 #[test]
+fn report_catchup_extends_exact_endpoints_without_replaying_each_prefix() {
+    let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
+        eprintln!("SKIP PostgreSQL: set ATOMIC_POSTGRES_URL");
+        return;
+    };
+    let fixture = common::PostgresFixture::new(&url, "block_peer_report_cost");
+    let config = PostgresConnectionConfig::plaintext(&fixture.connection);
+    PgBlockStore::install(&config).unwrap();
+    let mut schema = Schema::new();
+    schema
+        .install(Attribute::new(
+            VALUE,
+            Keyword::new("item", "value"),
+            ValueType::Long,
+            Cardinality::One,
+        ))
+        .unwrap();
+    BlockDatabase::create(&config, "items", schema).unwrap();
+    let service = TransactionService::start(TransactionServiceConfig {
+        connection: config.clone(),
+        database_id: "items".into(),
+        holder_id: "report-cost".into(),
+        lease_duration: Duration::from_secs(10),
+        renew_interval: Duration::from_millis(100),
+        queue_capacity: 8,
+        capacity_limits: Default::default(),
+    })
+    .unwrap();
+
+    struct Case {
+        prefix: usize,
+        missing: usize,
+        peer: Peer,
+        held: atomic_core::DatabaseValue,
+    }
+    let open_cases = |prefix| {
+        [16, 32, 64].map(|missing| {
+            // No SSD or tree cache can hide repeated provider reads. Opening
+            // the held prefix is fixture preparation, outside catch-up cost.
+            let peer = Peer::connect_configured_with_cache_limits(&config, "items", 0, 0).unwrap();
+            let held = peer.db();
+            assert!(peer.enable_tx_reports());
+            Case {
+                prefix,
+                missing,
+                peer,
+                held,
+            }
+        })
+    };
+    let mut cases = Vec::from(open_cases(0));
+    let initial_basis = cases[0].held.basis_t();
+    let indexed_basis = cases[0].peer.durable_base_t();
+    let mut committed = Vec::new();
+    let mut samples = Vec::new();
+    for number in 1..=80 {
+        committed.push(
+            service
+                .client()
+                .transact(
+                    TransactionRequest::from_edn(
+                        format!("report-{number}"),
+                        &format!(r#"[{{:db/id "item" :item/value {number}}}]"#),
+                    )
+                    .unwrap()
+                    .with_tx_instant(1000 + number as i64),
+                    WAIT,
+                )
+                .unwrap(),
+        );
+        while let Some(position) = cases
+            .iter()
+            .position(|case| case.prefix + case.missing == number)
+        {
+            let case = cases.swap_remove(position);
+            let operation =
+                atomic_core::OperationContext::new(atomic_core::OperationKind::PeerObservation);
+            let started = Instant::now();
+            {
+                let _scope = operation.enter();
+                let current = case.peer.sync().unwrap();
+                assert_eq!(current.basis_t(), initial_basis + number as u64);
+                assert_eq!(case.peer.durable_base_t(), indexed_basis);
+                let reports = case.peer.take_tx_reports();
+                assert_eq!(reports.len(), case.missing);
+                for (offset, (report, expected)) in reports
+                    .iter()
+                    .zip(&committed[case.prefix..number])
+                    .enumerate()
+                {
+                    assert_eq!(report.basis_t, expected.basis_t);
+                    assert_eq!(report.tx_data, expected.tx_data);
+                    assert_eq!(report.tempids, expected.tempids);
+                    assert_eq!(report.tx_hash, expected.tx_hash);
+                    assert!(!report.replayed);
+                    assert_eq!(
+                        report.db_before.snapshot_key().unwrap(),
+                        expected.db_before.snapshot_key().unwrap()
+                    );
+                    assert_eq!(
+                        report.db_after.snapshot_key().unwrap(),
+                        expected.db_after.snapshot_key().unwrap()
+                    );
+                    let entity = report.tempids["item"];
+                    assert!(report.db_before.values(entity, VALUE).unwrap().is_empty());
+                    assert_eq!(
+                        report.db_after.values(entity, VALUE).unwrap(),
+                        [Value::Long((case.prefix + offset + 1) as i64)]
+                    );
+                }
+                assert_eq!(case.held.basis_t(), initial_basis + case.prefix as u64);
+                assert!(
+                    case.held
+                        .values(committed[number - 1].tempids["item"], VALUE)
+                        .unwrap()
+                        .is_empty()
+                );
+                // Include complete adoption, drain, verification and disposal
+                // of the returned values, not only cursor construction.
+                drop(reports);
+                drop(current);
+            }
+            let elapsed = started.elapsed();
+            let io = operation.snapshot();
+            let report_calls =
+                io.by_operation[&atomic_core::OperationKind::TransactionReport].calls;
+            assert!(io.known_payload_read_bytes > 0);
+            // Receipt membership and exact-root/prefix authentication still
+            // cost bounded reads per report. Reopening both full recent tails
+            // per transaction exceeds this ceiling for the larger cases.
+            assert!(
+                io.sql_calls <= 32 * case.missing as u64 + 128,
+                "prefix={} missing={} repeated replay: {io:?}",
+                case.prefix,
+                case.missing
+            );
+            let unchanged =
+                atomic_core::OperationContext::new(atomic_core::OperationKind::PeerObservation);
+            {
+                let _scope = unchanged.enter();
+                assert_eq!(
+                    case.peer.sync().unwrap().basis_t(),
+                    committed.last().unwrap().basis_t
+                );
+                assert!(case.peer.take_tx_reports().is_empty());
+            }
+            assert!(
+                !unchanged
+                    .snapshot()
+                    .by_operation
+                    .contains_key(&atomic_core::OperationKind::TransactionReport)
+            );
+            eprintln!(
+                "PEER_REPORT_CATCHUP prefix={} missing={} sql_calls={} report_calls={} payload_read_bytes={} complete_us={}",
+                case.prefix,
+                case.missing,
+                io.sql_calls,
+                report_calls,
+                io.known_payload_read_bytes,
+                elapsed.as_micros()
+            );
+            samples.push((case.prefix, case.missing, report_calls));
+        }
+        if number == 16 {
+            cases.extend(open_cases(16));
+        }
+    }
+    assert!(cases.is_empty());
+    for missing in [16, 32, 64] {
+        let calls = |prefix| {
+            samples
+                .iter()
+                .find(|sample| sample.0 == prefix && sample.1 == missing)
+                .unwrap()
+                .2
+        };
+        assert!(
+            calls(16).abs_diff(calls(0)) <= 4 * missing as u64 + 64,
+            "report replay must not multiply the already captured prefix"
+        );
+    }
+    service.shutdown();
+}
+
+#[test]
 fn live_peer_reports_index_adoption_and_restart_cache_use_the_same_block_values() {
     let Ok(url) = std::env::var("ATOMIC_POSTGRES_URL") else {
         eprintln!("SKIP PostgreSQL: set ATOMIC_POSTGRES_URL");
@@ -65,10 +250,27 @@ fn live_peer_reports_index_adoption_and_restart_cache_use_the_same_block_values(
         .unwrap();
     let held = first.db_after.clone();
     let reference = held.snapshot_reference().unwrap();
+    // Leave the manual peer behind while a physical index is published
+    // between two receipts. Logical endpoint equality must not substitute for
+    // the second receipt's exact before-root during one report batch.
+    assert_eq!(
+        service.client().request_index().unwrap().target_t,
+        first.basis_t
+    );
+    attached.sync_index(first.basis_t, WAIT).unwrap();
     let second = service
         .client()
         .transact(request("second", 22), WAIT)
         .unwrap();
+    assert_eq!(
+        first.db_after.snapshot_key().unwrap(),
+        second.db_before.snapshot_key().unwrap()
+    );
+    assert_ne!(
+        reference,
+        second.db_before.snapshot_reference().unwrap(),
+        "the fixture must cross a real physical index publication"
+    );
     assert_eq!(
         independent
             .sync_to(second.basis_t, WAIT)
@@ -97,6 +299,14 @@ fn live_peer_reports_index_adoption_and_restart_cache_use_the_same_block_values(
         assert_eq!(
             observed.db_after.snapshot_key().unwrap(),
             committed.db_after.snapshot_key().unwrap()
+        );
+        assert_eq!(
+            observed.db_before.snapshot_reference().unwrap(),
+            committed.db_before.snapshot_reference().unwrap()
+        );
+        assert_eq!(
+            observed.db_after.snapshot_reference().unwrap(),
+            committed.db_after.snapshot_reference().unwrap()
         );
         assert!(!observed.replayed);
     }

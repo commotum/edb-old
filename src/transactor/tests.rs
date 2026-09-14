@@ -436,17 +436,14 @@ fn fixed_append_revision_availability_and_status_work_does_not_scan_backlog() {
 }
 
 #[test]
-fn projection_observations_follow_attempt_retry_and_adoption_without_idle_policy() {
+fn projection_observations_track_attempt_retry_and_adoption_only() {
     let now = Instant::now();
     let error = SemanticError::conflict("storage/write-protection-conflict", "GC guard changed");
     let mut observation = ProjectionObservations::default();
     observation.started(3);
     observation.failed(&error, Some(now + Duration::from_millis(50)), false);
     let failed = observation.snapshot_with_messages(now, true);
-    assert_eq!(
-        (failed.attempts, failed.failures, failed.idle_retries),
-        (1, 1, 0)
-    );
+    assert_eq!((failed.attempts, failed.failures), (1, 1));
     assert_eq!(failed.attempted_basis_t, Some(3));
     assert_eq!(failed.checked_basis_t, None);
     assert_eq!(failed.retry_in, Some(Duration::from_millis(50)));
@@ -470,14 +467,13 @@ fn projection_observations_follow_attempt_retry_and_adoption_without_idle_policy
     let exhausted = observation.snapshot_with_messages(now, true);
     assert_eq!(exhausted.checked_basis_t, Some(3));
     assert_eq!(exhausted.attempted_basis_t, Some(4));
-    assert_eq!(exhausted.idle_retries, 0);
     assert_eq!(exhausted.retry_in, None);
     assert!(exhausted.retry_exhausted);
     assert_eq!(exhausted.last_failure.unwrap().message, error.message);
 }
 
 #[test]
-fn satisfied_index_request_does_not_invent_an_idle_search_retry() {
+fn satisfied_index_request_does_not_schedule_projection_work() {
     let (sender, receiver) = mpsc::sync_channel(1);
     let indexing = BackgroundIndexing::new(
         test_config(),
@@ -1089,7 +1085,6 @@ fn unified_projection_retry_reports_adopted_search_basis() {
         (2, 1)
     );
     assert_eq!(retrying.fulltext.checked_basis_t, None);
-    assert_eq!(retrying.fulltext.idle_retries, 0);
     assert_eq!(
         retrying.fulltext.retry_in, None,
         "retry is running, not scheduled"
@@ -1136,7 +1131,6 @@ fn unified_projection_retry_reports_adopted_search_basis() {
         (recovered.fulltext.attempts, recovered.fulltext.failures),
         (2, 1)
     );
-    assert_eq!(recovered.fulltext.idle_retries, 0);
     assert!(recovered.fulltext.last_failure.is_none());
     assert!(recovered.fulltext.retry_in.is_none());
     assert!(!recovered.fulltext.retry_exhausted);
@@ -1150,12 +1144,11 @@ fn unified_projection_retry_reports_adopted_search_basis() {
     assert_eq!(search.hits.len(), 1);
     assert_eq!(search.hits[0].entity, report.tempids["document"]);
     eprintln!(
-        "UNIFIED_PROJECTION basis={} attempts={} failures={} adopted_jobs={} idle_retries={}",
+        "UNIFIED_PROJECTION basis={} attempts={} failures={} adopted_jobs={}",
         report.basis_t,
         recovered.fulltext.attempts,
         recovered.fulltext.failures,
-        recovered.jobs_completed,
-        recovered.fulltext.idle_retries
+        recovered.jobs_completed
     );
     service.shutdown();
 }

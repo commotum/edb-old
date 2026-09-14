@@ -126,10 +126,10 @@ fn configured_partition_cli_preview_commit_and_changed_default_exact_retry() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     cli(&fixture.admin_url, &["create", "--database", "edn"]);
     let directory = tempfile::tempdir().unwrap();
@@ -278,10 +278,10 @@ fn actual_edn_commands_install_transact_preview_query_pull_history_and_retry() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     cli(&fixture.admin_url, &["create", "--database", "edn"]);
     let directory = tempfile::tempdir().unwrap();

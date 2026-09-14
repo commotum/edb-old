@@ -82,6 +82,41 @@ Datomic wire-format equivalence. Cached object bytes are not cached mutable
 refs. Provider SQL and Rust orchestration must continue to be inspected separately:
 a small DDL file alone cannot establish a small or faithful storage boundary.
 
+## Retry authority and database names
+
+Source `kv-cluster/retry-fn` bounds attempts and measures time spent inside
+provider calls. Its elapsed counter does not include semaphore waits or backoff
+sleep, and the first three attempts bypass the elapsed threshold. Therefore its
+10,000-ms comparison is not an end-to-end request deadline. `set-ref` resolves
+an uncertain conditional write by reading the proposed revision and value; it
+does not rerun transaction assessment. Native provider CAS results, writer
+receipts and request controls remain separate responsibilities. In particular,
+an exact committed receipt is not interchangeable with a retryable SQL failure.
+
+Source [catalog.clj](../../../1.0.7705/transactor/src-clj/datomic/catalog.clj)::
+`update-catalog` rereads the catalog and reevaluates its condition after each
+conflict. `rename-database` moves the same database identity between names;
+`delete-database` removes the live name and records the identity in the deleted
+set. Neither operation itself traverses and deletes that database's objects.
+The peer copy carries these same reviewed mechanisms; comments do not assert
+that the complete artifacts are byte-identical.
+
+Native [catalog/database.rs](../../../src/storage/catalog/database.rs) owns
+identity, names and creation. [operations/operator.rs](../../../src/operations/operator.rs)
+owns lifecycle actions; [operations/reclamation.rs](../../../src/operations/reclamation.rs)
+owns bounded collection entry points. Retirement and publication fencing must
+remain explicit even though they are reachable through a small admin API.
+[operations/deployment.rs](../../../src/operations/deployment.rs) owns stock
+writer/peer installation roles; PostgreSQL connection/TLS policy stays in the
+provider connection owner, not application configuration. `atomic install` is
+the sole setup spelling and refuses a nonempty unrelated namespace without
+changing its contents. Runtime connection does not install a schema.
+
+The [backup companion](../01_capacity_and_reliability/02_backup_and_restore.atomic.md)
+explains the deliberate `storage::snapshot` → `backup` dependency: repository
+file access supplies the same immutable reader, without starting a writer or
+providing reference mutation. It is not another storage-engine implementation.
+
 ## ATOMIC-NOTE: lifecycle reclamation boundary
 
 Source [garbage.clj](../../../1.0.7705/transactor/src-clj/datomic/garbage.clj)::

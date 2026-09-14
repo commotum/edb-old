@@ -140,7 +140,7 @@ fn publish(store: &mut PgBlockStore, db: &Database, log: &LogRoot, descriptor: &
         generation: 0,
         eidx_frontier: db.eidx_frontier(),
         reserved_frontier: 1003.min(db.eidx_frontier()),
-        last_tx_instant: db.database_value().last_tx_instant().unwrap(),
+        last_tx_instant: db.database_value().last_tx_instant(),
         excision: None,
     };
     let metadata = store.put(&metadata.encode().unwrap()).unwrap();

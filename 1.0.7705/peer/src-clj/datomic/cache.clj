@@ -267,6 +267,11 @@
       :ns
       *ns*))
   ;; Coalesces concurrent misses for the same key so the backing lookup executes once.
+  ;; ATOMIC-NOTE [observed/why]: putIfAbsent elects one delay per key; every
+  ;; waiter dereferences that same computation, including its failure. Finally
+  ;; removes the pending entry so failures do not become permanent cache data.
+  ;; domain/system-cache-olookup puts the successful object cache outside this
+  ;; wrapper. Sharing a miss is distinct from eviction or immutable DB history.
   (defn lookup-with-inflight-cache
     ([m]
       (let [in_flight (java.util.concurrent.ConcurrentHashMap.)]

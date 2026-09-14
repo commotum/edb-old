@@ -226,6 +226,11 @@
       'poll
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/why]: put is deliberately blocking and always true
+  ;; after insertion, unlike offer-nb/offer-b. peer/transactAsync passes a bounded
+  ;; ArrayBlockingQueue, so its when-not(put) branch is not a saturation check.
+  ;; Native executor/transport admission returns Busy under its own limits;
+  ;; source queue API names alone do not establish nonblocking submission.
   (extend
     java.util.concurrent.BlockingQueue
     Clear

@@ -609,12 +609,6 @@ impl SqlClient {
         Self { inner }
     }
 
-    /// Compatibility escape for APIs that explicitly return a public raw
-    /// driver client. Internal production paths must keep the observed wrapper.
-    pub fn into_raw(self) -> postgres::Client {
-        self.inner
-    }
-
     pub fn connect_with<E>(
         connect: impl FnOnce() -> Result<postgres::Client, E>,
     ) -> Result<Self, E> {
@@ -807,8 +801,8 @@ pub trait GenericClient {
 }
 
 // A single implementation body serves wrappers and raw fixture clients.
-// Inherent wrapper methods make the production migration an import change;
-// generic helpers use the owned trait and cannot silently bypass it.
+// Inherent methods and generic helpers share this accounting boundary;
+// the owned trait records the same calls without duplicating driver behavior.
 macro_rules! sql_methods {
     ($visibility:vis, $this:ident, $raw:expr, $context:expr) => {
         $visibility fn execute<T: ?Sized + ToStatement>(&mut self, query: &T, params: &[&(dyn ToSql + Sync)]) -> Result<u64, Error> {

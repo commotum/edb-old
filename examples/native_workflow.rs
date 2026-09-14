@@ -213,7 +213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(transforms.load(Ordering::Relaxed), 0);
     // Pure native branches can be queried, navigated, and extended without
     // advancing either peer or the durable writer.
-    let speculative_instant = original.last_tx_instant()?.unwrap_or(0) + 1;
+    let speculative_instant = original.last_tx_instant().unwrap_or(0) + 1;
     let rename_form = |name: &str| {
         TxForm::ProgramCall(ProgramCall {
             function: CallableRef::Database(EntityRef::Ident(Keyword::new("person", "rename"))),

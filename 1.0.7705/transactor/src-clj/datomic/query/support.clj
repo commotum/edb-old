@@ -41,6 +41,13 @@
       (listq->mapq q)
       q)))
 
+;; ATOMIC-NOTE [observed]: Return-map keys are presentation metadata removed
+;; before q* looks up the prepared query. Queries differing only in these
+;; keys can reuse a plan without sharing result tuples or source values.
+;; ATOMIC-NOTE [native adaptation]: The Rust adapter retains a shared ordered
+;; key table and original column values, including for an empty result. Its
+;; checked conversion rejects duplicate keys and width mismatches; native
+;; tuple return maps extend the relation-oriented source presentation path.
 (defn parse-as
   "Returns [query-map result-keys]. Converts :keys names to keywords,
   :strs names to strings, and :syms names to symbols, then removes the
@@ -58,6 +65,9 @@
         [(dissoc nq :keys :syms :strs) as])
       [nq nil])))
 
+;; ATOMIC-NOTE [observed]: This wraps an already-counted result basis, not an
+;; incremental relational evaluator. Count avoids realizing lazy per-item
+;; projection; methods that traverse base-seq can still invoke that work.
 (defn counted-seq
   "Wraps base-seq in an ASeq whose Counted implementation returns ct
   without realizing the sequence. Returns nil when ct is less than one."

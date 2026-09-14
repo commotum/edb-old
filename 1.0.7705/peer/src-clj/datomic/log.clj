@@ -954,6 +954,11 @@
       'fressianed-leaf
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; Stage 4 log reads]: LogValue seeks once into a
+  ;; captured root/directory/segment; this private mutable iterator then advances
+  ;; positions and reads adjacent segments. Cursor mutation is not database
+  ;; mutation. It bounds traversal state and avoids re-seeking per transaction.
+  ;; The even-directory read-ahead is cache policy, not membership authority.
   (deftype
     LogTxIter
     [lookup
@@ -1873,6 +1878,12 @@
        ([this k]
          (let [comp (common/key-comparator log-key) idx (binary-search (.-txes this) k comp)]
            (when idx (datomic.log.TailTxIter. (.-txes this) (long ^java.lang.Number idx))))))})
+  ;; ATOMIC-NOTE [contract/mechanism]: tx-range resolves both bounds against the
+  ;; captured db via t-at-or-since, then enforces inclusive start/exclusive end.
+  ;; Every iterator starts fresh navigation over the same immutable LogValue;
+  ;; later connection changes cannot extend its captured next-t. Native Rust
+  ;; keeps this separation with an owned cursor and authenticated object reads,
+  ;; not a borrowed connection or per-transaction root lookup.
   (defn tx-range
     ([log db start end]
       (let [start (if start (max 1000 (db/t-at-or-since db start)) 1000)

@@ -34,7 +34,7 @@ Do not advertise the source's two-heartbeat/11-second recovery bound for Rust.
 Keep lease authority together; endpoint discovery and standby process scheduling
 are consumers, not another implementation of canonical write authority.
 
-The Stage 3 ownership split puts this canonical writer and its CAS witnesses in
+The canonical writer and its CAS witnesses belong in
 `transactor/authority/{mod,tests}.rs`. The public writer types are exported from
 the root facade, not the storage-provider namespace. Shared
 [catalog/database.rs](../../../src/storage/catalog/database.rs) owns fixed database
@@ -81,8 +81,11 @@ The integrated library run passed this regression and measured
 `RECOVERY_FORWARD basis=130 pages=3 pageReads=5 totalSqlCalls=412`: tail once,
 each sealed page twice. Driver calls include rebuilding, not just replay; this
 is a navigation/read-shape result, not a latency improvement or cheap-repair
-claim. `backup_verify.rs` has a separate full-replay
-consumer to evaluate in the backup-owning component; it was not changed here.
+claim. The separate backup replay now uses the reader-independent authenticated
+`LogTraversal` in [backup/verify/replay.rs](../../../src/backup/verify/replay.rs).
+Its navigation oracle observes eight sealed-page reads instead of 832 repeated
+seeks, without changing sparse receipt checks; see the
+[backup companion](02_backup_and_restore.atomic.md#verification-is-not-ordinary-opening).
 
 ## Boundaries and evidence
 

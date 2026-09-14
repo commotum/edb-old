@@ -106,6 +106,11 @@
       *ns*))
   ;; Resolve a namespace-qualified symbol as a Clojure var; otherwise interpret
   ;; the symbol as a Java static method name. Missing vars and unsupported methods warn and return nil.
+  ;; ATOMIC-NOTE [observed/disposition]: process-monitor/metrics-callback and
+  ;; Cassandra configuration resolve host code here. This is not a Datalog
+  ;; callback registry or a serialized portable function. Native application
+  ;; computation uses explicit registrations; Java reflection/require/eval and
+  ;; Cassandra callback configuration have no required native counterpart.
   (defn create-callback
     ([sym]
       (if (namespace sym)

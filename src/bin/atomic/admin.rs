@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 pub const HELP: &str = "
 Administrative commands (explicit credentials/targets; no automatic provisioning):
   atomic install [--writer-role ROLE --peer-role ROLE]
-  atomic migrate [--writer-role ROLE --peer-role ROLE]  (installation alias)
   atomic create --database NAME
   atomic list-databases [--retired] [--after NAME-OR-STORAGE-ID] [--limit N]
   atomic rename --database NAME --new-name NAME [--lineage UUID --apply]
@@ -47,7 +46,7 @@ and point. Rebuild replaces only the derived search attachment. The explicit
 discard digest guards the current index descriptor; old search remains readable
 within the storage retention grace and is reclaimed by ordinary GC. There is no physical discard
 phase (the accepted --batches limit needs just one rebuild).
-See docs/admin.md and docs/operations.md.
+See docs/08_operations/01_administration.md and docs/08_operations/00_deployment.md.
 
 Create is idempotent; list is paginated (default 1000, maximum 4096). Rename/delete
 preview by default. Apply requires the lineage printed by preview to guard name
@@ -55,13 +54,12 @@ reuse. Delete retires and fences a database; it does not reclaim storage. Alread
 captured values remain readable within storage retention. gc-deleted targets one retired storage
 ID/lineage, admits a shared collection cycle and preserves still-owned shared content.
 Cycle completion does not promise deletion of still-owned objects. See
-docs/database-lifecycle.md. These mutations require catalog owner authority.
+docs/08_operations/02_database_lifecycle.md. These mutations require catalog owner authority.
 
-Install creates two opaque tables in the selected empty schema; migrate is an
-alias, not an upgrade chain. Neither command creates the PostgreSQL database or
-schema. Grants add generic storage permissions to existing dedicated roles;
+Install creates two opaque tables in the selected empty schema. It does not
+create the PostgreSQL database or schema. Grants add generic storage permissions to existing dedicated roles;
 they do not revoke existing grants or audit inherited access. Peers can read
-objects and maintain references. Writers can also insert/protect objects;
+objects and references. Writers can also insert/protect objects and maintain references;
 object deletion remains operator-only. References are trusted storage access,
 not per-database SQL authorization.
 ";
@@ -69,7 +67,7 @@ not per-database SQL authorization.
 pub fn dispatch(arguments: &[String]) -> Option<Result<(), SemanticError>> {
     let command = arguments.first()?.as_str();
     let (values, switches): (&[&str], &[&str]) = match command {
-        "install" | "migrate" => (&["--writer-role", "--peer-role"], &[]),
+        "install" => (&["--writer-role", "--peer-role"], &[]),
         "create" | "status" | "consolidate" => (&["--database"], &[]),
         "list-databases" => (&["--after", "--limit"], &["--retired"]),
         "rename" => (&["--database", "--new-name", "--lineage"], &["--apply"]),
@@ -162,7 +160,7 @@ impl Arguments {
             }
         }
         let required: &[&str] = match command {
-            "install" | "migrate" => &[],
+            "install" => &[],
             "list-databases" => &[],
             "rename" => &["--database", "--new-name"],
             "delete" => &["--database"],
@@ -209,7 +207,7 @@ impl Arguments {
         if parsed.values.contains_key("--batches") && parsed.number("--batches")? == 0 {
             return Err(usage("--batches requires a positive integer"));
         }
-        if matches!(command, "install" | "migrate") {
+        if matches!(command, "install") {
             let writer = parsed.values.get("--writer-role");
             let peer = parsed.values.get("--peer-role");
             if writer.is_some() != peer.is_some() {
@@ -425,7 +423,7 @@ fn run(args: Arguments) -> Result<(), SemanticError> {
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     )?;
     match args.command.as_str() {
-        "install" | "migrate" => {
+        "install" => {
             PgBlockStore::install(&config)?;
             println!("INSTALLED storage_format=atomic/opaque-storage/1 tables=2");
             std::io::stdout().flush().map_err(|_| process_io())?;

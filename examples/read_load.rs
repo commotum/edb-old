@@ -1,4 +1,4 @@
-//! Bounded independent-process read campaign; see docs/read-load.md.
+//! Bounded independent-process read campaign; see development/validation/read_load.md.
 use atomic_core::sql_io::SqlClient;
 use atomic_core::{
     Attribute, BackgroundIndexingConfig, CapacityLimits, Cardinality, Clause, Connection,

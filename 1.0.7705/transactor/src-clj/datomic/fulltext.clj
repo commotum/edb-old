@@ -85,6 +85,9 @@
         (clojure.core/import 'datomic.impl.lucene.HybridDirectory))))
   (set! *warn-on-reflection* true)
   (clojure.core/use 'clojure.pprint)
+  ;; ATOMIC-NOTE [observed; document identity]: Per-attribute directories supply A; each
+  ;; document stores E, original V and assertion T. An (E,T)-only native key
+  ;; would conflate cardinality-many strings; native document IDs also hash V.
   (defn doc->datum
     ([doc ^long a]
       (let [e (lucene/long-value (lucene/get-field doc "e"))
@@ -100,6 +103,10 @@
       :ns
       *ns*))
   (deftype
+  ;; ATOMIC-NOTE [observed; result boundary]: This iterator carries original document T
+  ;; and normalizes Lucene score by the first hit. extensions/fulltext projects
+  ;; columns 2..5 into a set. Native exact-view transaction rebinding and BM25
+  ;; scores are explicit adaptations, not Lucene numeric/row-order equivalence.
     SearchIterator
     [searcher search score_docs attr ^float high_score]
     java.util.Iterator
@@ -165,6 +172,11 @@
       '->SearchIterable
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; candidates are not facts]: Top-N Lucene documents are checked
+  ;; against db/windowed before being returned. Native validation must debit
+  ;; rejected historical candidates too, polling direct and enclosing-query
+  ;; cancellation inside the cursor. Native limit follows exact-view validation;
+  ;; the recovered top-N limit precedes it and may leave fewer visible hits.
   (defn search-iterable
     ([searcher db attr search-map]
       (let [qmap (if (string? search-map) {:search search-map} search-map)
@@ -326,6 +338,11 @@
       nil))
   (.setMeta (clojure.lang.RT/var "datomic.fulltext" "work-dir") {:column (int 1)})
   (.bindRoot (clojure.lang.RT/var "datomic.fulltext" "work-dir") (atom "tmp/search"))
+  ;; ATOMIC-NOTE [observed; immutable publication]: A local writable directory overlays an
+  ;; immutable clustered base; deletion requests accumulate without deleting the
+  ;; base in place. promote-to-cluster emits new file metadata/chunks and garbage
+  ;; candidates. Native authenticated page/path-copy publication retains this
+  ;; separation without preserving Lucene files or local-directory merge policy.
   (defn create-indexing-job
     ([cstore olookup baseid]
       (let [basefs (when baseid (get olookup baseid))
@@ -470,6 +487,9 @@
       'add-chunked-data-to-writer
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; history identity]: Search by E and T, then compare the original
+  ;; V before deleting a current document. Multiple strings can share E and T.
+  ;; The native assertion key preserves that distinction directly.
   (defn find-historic-docid
     ([searcher datum]
       (let [q (lucene/boolean-query
@@ -795,6 +815,11 @@
       'find-matching-assertion
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; retractions]: An AEVT retraction finds its matching assertion
+  ;; and transfers that assertion to history; it is not a fresh searchable text
+  ;; identity. Native canonical-history deltas retain ordinary retractions as
+  ;; history and remove search documents only when assertions physically disappear
+  ;; (for example noHistory/excision), then validate each hit against the view.
   (defn separate-history
     ([db data history]
       (loop [ds (transient []) data data history history]
@@ -832,6 +857,11 @@
       'separate-history
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; source job]: Only changed fulltext attributes are handed to
+  ;; per-attribute jobs; current/history roots are written after their files.
+  ;; Lucene can still merge large segments. Native history-tree differences,
+  ;; streaming analysis, spill bounds and path-copied pages are a distinct cost
+  ;; model; incremental is not a blanket sublinear or constant-I/O guarantee.
   (defn build-index
     ([cstore olookup db aevt attrids old_root_id old_hist_id]
       (let [m_13930 {:event :index/build-fulltext}
@@ -1070,6 +1100,11 @@
       'fulltext-index-reader
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed; tier composition]: Merge memory, active indexing and durable
+  ;; readers; add the history reader only for isHistory. peer/integrate-lucene
+  ;; updates its memory search tier asynchronously, explaining eventual search
+  ;; availability. Native recent/speculative candidate completion is synchronous
+  ;; and bounded; physical index lag is reported, not used to return stale facts.
   (defn search
     ([db a search-map]
       (let [attrid (db/resolve-id db a)

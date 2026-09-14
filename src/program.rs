@@ -3388,7 +3388,7 @@ fn busy(code: &'static str, message: impl Into<String>) -> SemanticError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database_value::LogicalReadObserver;
+    use crate::database_value::read_context::LogicalReadObserver;
     use crate::{Attribute, Cardinality, Schema, Unique, ValueType};
     use std::sync::Arc;
 

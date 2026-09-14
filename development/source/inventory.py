@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Mechanical provenance atlas and comment-only guard; not semantic coverage.
 
-Run --write to regenerate inventory.tsv, or --check to verify the inventory and
-that source study has preserved every baseline body. Uses Git and Python's stdlib.
+Run --write to regenerate inventory.tsv, or --check to verify the inventory,
+manual source/passage ledgers and preservation of every baseline body.
+Manual dispositions are never regenerated. Uses Git and Python's stdlib.
 """
 
 import argparse
@@ -11,6 +12,7 @@ import difflib
 import hashlib
 import io
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 
@@ -124,6 +126,69 @@ def verify_comments(sources):
     return changed
 
 
+def verify_ledger(path, key, expected, local_fields):
+    """Check complete manual accounting, not the truth of a disposition."""
+    with path.open(newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        required = {key, "disposition", *local_fields}
+        if not required.issubset(reader.fieldnames or ()):
+            raise ValueError(f"Missing ledger columns in {path}: {required}")
+        entries = list(reader)
+    seen = set()
+    for row in entries:
+        entry = row[key]
+        if entry in seen:
+            raise ValueError(f"Duplicate {key} in {path}: {entry}")
+        seen.add(entry)
+        if not row["disposition"].strip():
+            raise ValueError(f"Empty disposition in {path}: {entry}")
+        for field in local_fields:
+            target = row[field]
+            if not target:
+                raise ValueError(f"Empty {field} in {path}: {entry}; use - explicitly")
+            if target != "-" and not (ROOT / target).is_file():
+                raise ValueError(f"Missing {field} target in {path}: {target}")
+    if seen != set(expected):
+        raise ValueError(f"Ledger membership differs in {path}: "
+                         f"missing={sorted(set(expected) - seen)}, "
+                         f"extra={sorted(seen - set(expected))}")
+    return len(entries)
+
+
+def verify_ledgers(sources):
+    directory = INVENTORY.parent
+    source_count = verify_ledger(
+        directory / "coverage.tsv", "source_path", sources,
+        ("counterpart_path", "current_rust_owner", "trace_path"),
+    )
+    chapters = {path.relative_to(ROOT).as_posix()
+                for path in (ROOT / "datomic_pro_docs").rglob("*.md")
+                if not path.name.endswith(".atomic.md")}
+    chapter_count = verify_ledger(
+        directory / "passages.tsv", "reference_path", chapters, ("trace_path",),
+    )
+    return source_count, chapter_count
+
+
+def verify_trace_links():
+    """Resolve local Markdown destinations in study companions and the atlas."""
+    files = [INVENTORY.with_name("README.md"),
+             *(ROOT / "datomic_pro_docs").rglob("*.atomic.md")]
+    checked = 0
+    for path in files:
+        for match in re.finditer(r"\]\((<?[^\s)]+>?)(?:\s+\"[^\"]*\")?\)",
+                                 path.read_text()):
+            target = match.group(1).strip("<>")
+            if target.startswith(("#", "http:", "https:", "mailto:")):
+                continue
+            target = re.sub(r":\d+$", "", target.split("#", 1)[0])
+            resolved = ROOT / target.lstrip("/") if target.startswith("/") else path.parent / target
+            if not resolved.exists():
+                raise ValueError(f"Broken local trace link in {path.relative_to(ROOT)}: {target}")
+            checked += 1
+    return checked
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -137,7 +202,10 @@ def main():
     elif INVENTORY.read_text() != expected:
         raise ValueError("inventory.tsv differs from the baseline; regenerate with --write")
     changed = verify_comments(sources)
+    source_count, chapter_count = verify_ledgers(sources)
+    links = verify_trace_links()
     print(f"{len(sources)} source files accounted for; {changed} contain comment-only study changes; baseline {BASELINE}")
+    print(f"{source_count} source dispositions; {chapter_count} chapter dispositions; {links} local trace links resolve")
 
 
 if __name__ == "__main__":

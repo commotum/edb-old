@@ -263,6 +263,10 @@
     [databases memidx_max_fn memidx_threshold_fn memidx_usage]
     datomic.monitor.Metrics
     datomic.indexer.Indexer
+    ;; ATOMIC-NOTE [observed/adaptation] Above half the process-wide maximum, select the largest database by
+    ;; frozen-plus-live usage; the per-database threshold is independent. This
+    ;; does not establish native multi-database fairness: Atomic services have
+    ;; explicit individual memory/work policies.
     (queue-index-jobs
       [this]
       (when (< (* 0.5 (^clojure.lang.IFn memidx_max_fn)) (memidx-total this))
@@ -274,6 +278,10 @@
       [this dbname]
       (when (< (^clojure.lang.IFn memidx_threshold_fn) (db-total this dbname))
         (memory-threshold-request-index (get databases dbname))))
+    ;; ATOMIC-NOTE [observed/adaptation] Transfer the frozen charge into :indexing without reducing :total:
+    ;; the job still owns those datoms. Later transactions accrue in :memidx.
+    ;; Completion subtracts only the frozen charge, preserving backpressure on
+    ;; new arrivals. Native begin_job/publish_completed tracks this by basis.
     (indexing-started
       [this dbname]
       (swap!

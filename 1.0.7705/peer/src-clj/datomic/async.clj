@@ -13,6 +13,10 @@
   (.bindRoot
     (clojure.lang.RT/var "datomic.async" "binding-conveyor-fn")
     (deref #'clojure.core/binding-conveyor-fn))
+  ;; ATOMIC-NOTE [observed/disposition]: Conveying dynamic bindings preserves
+  ;; caller logging/context on a named daemon thread; finally logs completion.
+  ;; This helper imposes no work/admission bound. Native runtime/executor owns
+  ;; a fixed worker pool with bounded reservations, not one thread per request.
   (defn daemon
     ([f base]
       (let [n (get (swap! name-map update base (fnil inc 0)) base)

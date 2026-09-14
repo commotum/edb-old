@@ -85,3 +85,6 @@ Note the underscore binding. You should **not** bind the *?tx* position, as *?tx
               [(tx-data ?log ?tx) [[?e]]]]
      (d/db conn) (d/log conn) #inst "2013-08-01" #inst "2013-08-02")
 ```
+
+<!-- ATOMIC-NOTE: Development trace, separate from the reference text. -->
+[Atomic implementation trace](00_log_api.atomic.md)

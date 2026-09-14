@@ -52,10 +52,10 @@ fn deep_retraction_and_shared_recent_tail_survive_cli_consolidation_and_restart(
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     const DATABASE: &str = "stack_safety";
     cli(&fixture.admin_url, &["create", "--database", DATABASE]);

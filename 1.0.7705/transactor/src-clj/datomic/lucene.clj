@@ -118,6 +118,10 @@
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.lucene" "index-writer")
+    ;; ATOMIC-NOTE [observed; analysis version]: Writer and parse-query default
+    ;; to StandardAnalyzer/LUCENE_33. Native analyzer versions are authenticated
+    ;; with search attachments; the documented English defaults are retained,
+    ;; not Lucene's token ABI, merge policy or floating relevance numbers.
     (fn index_writer
       ([directory & p__11537]
         (let [map__11538 p__11537
@@ -351,6 +355,9 @@
     Readerable
     {:index-reader
      (fn fn__11587 ([this] (IndexReader/open this (boolean (.booleanValue false)))))})
+  ;; ATOMIC-NOTE [observed; shared readers]: fulltext/search passes false so
+  ;; composition does not close captured tier readers it does not own. Native
+  ;; Arc-owned pages/readers retain lifetime sharing across cache eviction.
   (defn multi-reader
     ([rdrs & p__11589]
       (let [map__11590 p__11589
@@ -557,6 +564,10 @@
      :column (int 1)})
   (.bindRoot
     (clojure.lang.RT/var "datomic.lucene" "parse-query")
+    ;; ATOMIC-NOTE [native syntax boundary]: The source delegates expression
+    ;; semantics to Lucene QueryParser. Native terms/phrases/Boolean groups and
+    ;; trailing prefixes are a declared subset; fuzzy/field/range/boost syntax
+    ;; is rejected, not silently interpreted as ordinary text.
     (fn parse_query
       ([f s & p__11618]
         (let [map__11619 p__11618

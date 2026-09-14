@@ -8,13 +8,13 @@ use super::root::{
     Block, DATABASE_ROOT_KIND, DATABASE_VALUE_ROOT_KIND, DatabaseRoot, DatabaseValueRoot,
 };
 use super::{ObjectId, PgBlockStore, RefCondition};
-use crate::async_client::executor::Owned;
 use crate::index::NormalizedIndexBoundary;
 use crate::index::cursor::{DurableTreeCursor, DurableTreeSource, MergeCursor, MergeSource};
 use crate::index::recent::{EndpointProjection, RecentLimits, RecentRange, RecentTier};
 use crate::index::tree::cache::TreeNodeCache;
 use crate::index::tree::{RootNode, TreeNode, TreeReadStats, decode_tree_node};
 use crate::model::idents::IdentIndex;
+use crate::runtime::executor::Owned;
 use crate::{
     CacheStats, DatabaseValue, Datom, Digest, DurableTransaction, ErrorCategory, IndexBoundary,
     IndexOrder, IndexPrefix, Keyword, PeerCursorStats, PostgresConnectionConfig, Schema,
@@ -164,7 +164,7 @@ struct BlockNodeSource {
     backend: SourceBackend,
     programs: crate::program_cache::SharedProgramCache,
     cache: TreeNodeCache,
-    fulltext_cache: crate::fulltext_store::FulltextCache,
+    fulltext_cache: crate::fulltext::store::FulltextCache,
     ssd_cache: crate::SsdCache,
     ssd_namespace: Digest,
     ssd_scope: Option<([u8; 16], u64)>,
@@ -175,6 +175,10 @@ struct BlockNodeSource {
 #[derive(Clone)]
 enum SourceBackend {
     Live(Arc<LiveSource>),
+    // ATOMIC-NOTE: the backup owner authenticates repository files; this owner
+    // still interprets the same immutable database structures. The dependency
+    // is offline-provider composition, not a second query engine or a route to
+    // live publication authority (see `live` below).
     Repository(Arc<PathBuf>),
 }
 #[derive(Clone)]
@@ -375,7 +379,7 @@ impl BlockReader {
                     connection: config.clone(),
                 })),
                 cache: TreeNodeCache::new(limits.cache_entries, limits.cache_bytes),
-                fulltext_cache: crate::fulltext_store::FulltextCache::new(
+                fulltext_cache: crate::fulltext::store::FulltextCache::new(
                     limits.cache_entries,
                     limits.cache_bytes,
                 ),
@@ -644,6 +648,30 @@ impl BlockReader {
         if captured == previous.inner.captured {
             return Ok(None);
         }
+        let mut snapshot = self.open_captured_value(
+            capture.root_id(),
+            captured,
+            &[capture.source_condition()],
+            previous,
+        )?;
+        Arc::get_mut(&mut snapshot.inner)
+            .unwrap()
+            .publication_revision = Some(capture.source_revision());
+        Ok(Some(snapshot))
+    }
+
+    /// Open a root already authenticated through a publication or exact receipt.
+    /// Matching index/generation captures share their prior immutable prefix;
+    /// metadata is derived only from authenticated canonical log records, never
+    /// from a report caller's schema or transaction data. A physical boundary
+    /// opens the target's complete current-format indexed base and recent tail.
+    fn open_captured_value(
+        &self,
+        root_id: ObjectId,
+        captured: DatabaseValueRoot,
+        conditions: &[RefCondition],
+        previous: &BlockSnapshot,
+    ) -> Result<BlockSnapshot, SemanticError> {
         if captured.identity != previous.inner.captured.identity
             || captured.basis < previous.basis_t()
         {
@@ -658,12 +686,17 @@ impl BlockReader {
         let metadata = SnapshotMetadata::decode(&metadata_id, &self.read_object(metadata_id)?)?;
         if captured.indexes != previous.inner.captured.indexes
             || metadata.generation != previous.generation()
+            || captured.log.is_none()
         {
-            let mut snapshot = self.capture_root(&capture)?;
-            let inner = Arc::get_mut(&mut snapshot.inner).unwrap();
-            inner.publication_revision = Some(capture.source_revision());
-            inner.route = route_from_conditions(&[capture.source_condition()]);
-            return Ok(Some(snapshot));
+            // A genesis endpoint without a log also uses its authenticated
+            // indexed base; there is no suffix representation to extend.
+            return BlockSnapshot::open_captured(
+                self.source.clone(),
+                root_id,
+                captured,
+                route_from_conditions(conditions),
+                self.limits.clone(),
+            );
         }
         if metadata.identity != captured.identity || metadata.basis != captured.basis {
             return Err(fault(
@@ -766,14 +799,14 @@ impl BlockReader {
             EndpointProjection::from_schema(Arc::clone(&endpoint.schema)),
         )?;
         let metadata_residency = endpoint.resident_stats();
-        Ok(Some(BlockSnapshot {
+        Ok(BlockSnapshot {
             source: self.source.scoped(captured.identity, metadata.generation),
             inner: Arc::new(SnapshotInner {
                 captured,
                 metadata,
-                storage_root: capture.root_id(),
-                publication_revision: Some(capture.source_revision()),
-                route: route_from_conditions(&[capture.source_condition()]),
+                storage_root: root_id,
+                publication_revision: None,
+                route: route_from_conditions(conditions),
                 indexes: Arc::clone(&previous.inner.indexes),
                 base_metadata: Arc::clone(&previous.inner.base_metadata),
                 schema: Arc::clone(&endpoint.schema),
@@ -788,7 +821,7 @@ impl BlockReader {
                 root_residency: previous.inner.root_residency,
                 limits: self.limits.clone(),
             }),
-        }))
+        })
     }
 
     pub(crate) fn exact_report(
@@ -809,6 +842,70 @@ impl BlockReader {
         let _report_phase = operation.phase(crate::OperationKind::TransactionReport);
         let root_id = capture.root_id();
         let root = DatabaseRoot::decode(&root_id, &self.read_object(root_id)?)?;
+        let receipt = self.exact_receipt_from_root(&root, basis)?;
+        self.report_from_receipt(capture, receipt, false)
+    }
+
+    /// Reconstruct an ordered report batch from one immutable publication.
+    /// Each exact after-value supplies the next receipt's before-value only
+    /// through its authenticated root. Sharing the reader's incremental capture
+    /// avoids replaying every earlier recent tail for every report. No partial
+    /// batch escapes if any receipt, endpoint, or log-prefix check fails.
+    pub(crate) fn exact_reports_from_capture(
+        &self,
+        capture: &RootCapture,
+        after_basis: u64,
+        through_basis: u64,
+        previous: Option<&BlockSnapshot>,
+    ) -> Result<Vec<crate::ServiceTransactionReport>, SemanticError> {
+        if after_basis > through_basis {
+            return Err(fault(
+                "storage/report-basis",
+                "Report batch has inverted transaction boundaries",
+            ));
+        }
+        if after_basis == through_basis {
+            return Ok(Vec::new());
+        }
+        let operation = crate::OperationContext::current_or_process();
+        let _report_phase = operation.phase(crate::OperationKind::TransactionReport);
+        let root_id = capture.root_id();
+        let root = DatabaseRoot::decode(&root_id, &self.read_object(root_id)?)?;
+        if through_basis > root.basis {
+            return Err(fault(
+                "storage/report-basis",
+                "Report batch is outside the captured log",
+            ));
+        }
+        let conditions = [capture.source_condition()];
+        let mut previous = previous.cloned();
+        let mut reports = Vec::new();
+        let mut basis = after_basis;
+        while basis < through_basis {
+            basis += 1;
+            let receipt = self.exact_receipt_from_root(&root, basis)?;
+            let before = match previous.as_ref() {
+                Some(previous) => {
+                    self.capture_immutable_after(receipt.before, &conditions, previous)?
+                }
+                None => self.capture_immutable(receipt.before, &conditions)?,
+            };
+            let after = self.capture_immutable_after(receipt.after, &conditions, &before)?;
+            let report =
+                self.report_from_captured_receipt(receipt, false, before, after.clone())?;
+            previous = Some(after);
+            reports.push(report);
+        }
+        Ok(reports)
+    }
+
+    /// The immutable publication, not a supplied endpoint or basis alone,
+    /// authenticates receipt membership and its canonical log transaction.
+    fn exact_receipt_from_root(
+        &self,
+        root: &DatabaseRoot,
+        basis: u64,
+    ) -> Result<super::receipts::ExactReceipt, SemanticError> {
         if basis == 0 || basis > root.basis {
             return Err(fault(
                 "storage/report-basis",
@@ -852,7 +949,7 @@ impl BlockReader {
                 "Exact report transaction differs from the captured publication log",
             ));
         }
-        self.report_from_receipt(capture, receipt, false)
+        Ok(receipt)
     }
 
     pub(crate) fn report_from_receipt(
@@ -866,6 +963,16 @@ impl BlockReader {
         let route = route_from_conditions(&[capture.source_condition()]);
         Arc::get_mut(&mut before.inner).unwrap().route = route.clone();
         Arc::get_mut(&mut after.inner).unwrap().route = route;
+        self.report_from_captured_receipt(receipt, replayed, before, after)
+    }
+
+    fn report_from_captured_receipt(
+        &self,
+        receipt: super::receipts::ExactReceipt,
+        replayed: bool,
+        before: BlockSnapshot,
+        after: BlockSnapshot,
+    ) -> Result<crate::ServiceTransactionReport, SemanticError> {
         if before.captured_root().identity != receipt.identity
             || after.captured_root().identity != receipt.identity
             || before.basis_t().checked_add(1) != Some(receipt.basis)
@@ -965,6 +1072,37 @@ impl BlockReader {
             decode_captured_root(root_id, &bytes)?,
             route_from_conditions(conditions),
             self.limits.clone(),
+        )
+    }
+
+    /// The receipt's exact root link, not logical SnapshotKey equality, permits
+    /// reuse. A different root is decoded and opened against its own physical
+    /// index/generation coordinates, sharing only an authenticated log prefix.
+    fn capture_immutable_after(
+        &self,
+        root_id: ObjectId,
+        conditions: &[RefCondition],
+        previous: &BlockSnapshot,
+    ) -> Result<BlockSnapshot, SemanticError> {
+        if root_id == previous.storage_root_id()
+            && previous.publication_revision().is_none()
+            && previous.inner.route == route_from_conditions(conditions)
+        {
+            let recent = previous.inner.recent.stats();
+            if recent.transactions > self.limits.max_recent_transactions as u64
+                || recent.datoms > self.limits.max_recent_datoms as u64
+                || recent.accounted_bytes > self.limits.max_recent_bytes as u64
+            {
+                return Err(limit("Captured recent data exceeds reader admission"));
+            }
+            return Ok(self.adopt_snapshot(previous));
+        }
+        let bytes = self.read_object(root_id)?;
+        self.open_captured_value(
+            root_id,
+            decode_captured_root(root_id, &bytes)?,
+            conditions,
+            previous,
         )
     }
 
@@ -1121,7 +1259,7 @@ impl BlockSnapshot {
             programs: Default::default(),
             backend: SourceBackend::Repository(Arc::new(directory.to_path_buf())),
             cache: TreeNodeCache::new(limits.cache_entries, limits.cache_bytes),
-            fulltext_cache: crate::fulltext_store::FulltextCache::new(
+            fulltext_cache: crate::fulltext::store::FulltextCache::new(
                 limits.cache_entries,
                 limits.cache_bytes,
             ),
@@ -1409,7 +1547,7 @@ impl BlockSnapshot {
     pub(crate) fn read_object(&self, hash: ObjectId) -> Result<Vec<u8>, SemanticError> {
         self.source.read(hash)
     }
-    pub(crate) fn fulltext_cache(&self) -> crate::fulltext_store::FulltextCache {
+    pub(crate) fn fulltext_cache(&self) -> crate::fulltext::store::FulltextCache {
         self.source.fulltext_cache.clone()
     }
     /// Advisory work owns a separate driver, while immutable metadata, recent
@@ -1532,6 +1670,32 @@ impl BlockSnapshot {
                 "Captured nonempty value has no log",
             )
         })?;
+        self.measure_log_read(|read| {
+            log.read_record(read, t)?.ok_or_else(|| {
+                fault(
+                    "storage/read-log-gap",
+                    "Captured log is missing a transaction",
+                )
+            })
+        })
+    }
+
+    pub(crate) fn next_log_record_measured(
+        &self,
+        traversal: &mut super::log::LogTraversal,
+    ) -> Option<Result<(super::log::LogRecord, u64, bool), SemanticError>> {
+        // The caller owns forward navigation, while this captured source owns
+        // generation-scoped cache and authenticated object I/O. No mutable head
+        // lookup, writer lock, or per-transaction restart of the seek path.
+        self.measure_log_read(|read| traversal.next_record(read).transpose())
+            .map(|(record, bytes, cached)| record.map(|record| (record, bytes, cached)))
+            .transpose()
+    }
+
+    fn measure_log_read<T>(
+        &self,
+        read_record: impl FnOnce(&mut dyn super::ObjectReader) -> Result<T, SemanticError>,
+    ) -> Result<(T, u64, bool), SemanticError> {
         let mut postgres_bytes = 0u64;
         let mut all_cached = !self.is_repository();
         let mut read = |id| {
@@ -1542,12 +1706,7 @@ impl BlockSnapshot {
             }
             Ok(bytes)
         };
-        let record = log.read_record(&mut read, t)?.ok_or_else(|| {
-            fault(
-                "storage/read-log-gap",
-                "Captured log is missing a transaction",
-            )
-        })?;
+        let record = read_record(&mut read)?;
         Ok((record, postgres_bytes, all_cached))
     }
     pub fn cache_stats(&self) -> CacheStats {

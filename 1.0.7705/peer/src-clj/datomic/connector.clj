@@ -560,6 +560,12 @@
   (defmethod notify :error fn__20052 ([msg conn] (notify-error conn (:id msg) msg)))
   (defmethod notify :index fn__20054 ([msg conn] (notify-index conn)))
   (defmethod notify :sync fn__20056 ([msg conn] (notify-sync conn (:id msg))))
+  ;; ATOMIC-NOTE [observed/why]: Construction does not consume notifications.
+  ;; Peer initialization controls the delayed start after its load/register/load
+  ;; sequence. The loop decodes batches then dispatches tx/error/index/sync to
+  ;; peer callbacks; idempotent cleanup closes transport, not database values.
+  ;; Native notices trigger authenticated durable observation, not acceptance
+  ;; of broker messages as transaction authority; Artemis wire parity is out.
   (defn create-hornet-notifier
     ([push_handler session result_queue hornet_consumer failure_handler]
       (let [push_handler_ref (java.lang.ref.WeakReference. push_handler)

@@ -53,10 +53,10 @@ fn stock_edn_client_reaches_compiled_rust_host_and_retries_across_restart() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     cli(
         &fixture.admin_url,

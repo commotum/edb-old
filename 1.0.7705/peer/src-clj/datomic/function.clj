@@ -215,6 +215,12 @@
       'normalize
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed/why]: Normalize portable definition data first,
+  ;; retain compilation in a delay, and dereference it only from Function.invoke.
+  ;; Peer.function and Db.invoke share this object; it is not the query engine.
+  ;; Native persisted programs and explicit native functions retain durable
+  ;; definition versus execution ownership without Java/Clojure compilation,
+  ;; classloader identity, or the Fn0..Fn10 host-interface family.
   (defn construct
     "Creates a lazily compiled database function from a definition map. :lang, :params, and :code are required; :imports and :requires configure Clojure compilation. Supported languages are :clojure and :java, and callable arity is limited to ten arguments."
     ([m]

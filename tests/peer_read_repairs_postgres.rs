@@ -287,10 +287,10 @@ fn bounded_pull_and_indexed_ranges_survive_cli_publication_views_and_restart() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     for size in [128_usize, 1_024, 4_096] {
         let database = format!("peer_reads_{size}");

@@ -906,6 +906,10 @@ fn encode_pull(
                 output.push(1);
                 encode_attribute(output, attribute)?;
             }
+            PullDirection::SchemaResolved(keyword) => {
+                output.push(2);
+                encode_keyword(output, keyword)?;
+            }
         }
         for value in [&attribute.alias, &attribute.default] {
             put_bool(output, value.is_some());
@@ -958,6 +962,7 @@ fn decode_pull(
         let direction = match cursor.u8()? {
             0 => PullDirection::Forward(decode_attribute(cursor)?),
             1 => PullDirection::Reverse(decode_attribute(cursor)?),
+            2 => PullDirection::SchemaResolved(decode_keyword(cursor)?),
             tag => return Err(invalid_tag("pull direction", tag)),
         };
         let alias = if cursor.boolean()? {

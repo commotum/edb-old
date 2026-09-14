@@ -59,11 +59,12 @@ pub struct LogCursorStats {
 
 /// Fallible ordered transaction traversal. It reads one authenticated
 /// transaction per payload page and fuses after an error or range exhaustion.
-/// Additional traversal memory, beyond the shared captured snapshot, is bounded
-/// by one codec-bounded transaction rather than the range length. A large
+/// Additional traversal memory is one codec-bounded transaction plus the
+/// shared log traversal's logarithmic forward anchors, not the range length. A large
 /// individual transaction still requires correspondingly large memory.
 pub struct LogCursor {
     log: LogValue,
+    traversal: crate::storage::log::LogTraversal,
     operation: Option<crate::OperationContext>,
     next_t: u64,
     end_t: u64,
@@ -126,6 +127,12 @@ impl LogValue {
             .min(next_t);
         Ok(LogCursor {
             log: self.clone(),
+            traversal: self
+                .source
+                .captured_log()
+                .cloned()
+                .unwrap_or_else(crate::storage::log::LogRoot::empty)
+                .traversal(start, end.max(start))?,
             operation: crate::OperationContext::current(),
             next_t: start,
             end_t: end,
@@ -254,8 +261,17 @@ impl Iterator for LogCursor {
             return None;
         }
         self.stats.range_reads = self.stats.range_reads.saturating_add(1);
-        match self.log.read_transaction(self.next_t) {
-            Ok((transaction, bytes, postgres_bytes, cache_hit)) => {
+        match self
+            .log
+            .source
+            .next_log_record_measured(&mut self.traversal)
+        {
+            Some(Ok((record, postgres_bytes, cache_hit))) => {
+                let transaction = LogTransaction {
+                    t: record.entry.basis_t,
+                    data: record.entry.tx_data,
+                };
+                let bytes = record.encoded_bytes;
                 self.next_t += 1;
                 self.stats.transactions_read = self.stats.transactions_read.saturating_add(1);
                 self.stats.datoms_read = self
@@ -273,9 +289,16 @@ impl Iterator for LogCursor {
                 self.stats.peak_buffered_transactions = 1;
                 Some(Ok(transaction))
             }
-            Err(error) => {
+            Some(Err(error)) => {
                 self.next_t = self.end_t;
                 Some(Err(error))
+            }
+            None => {
+                self.next_t = self.end_t;
+                Some(Err(fault(
+                    "storage/read-log-gap",
+                    "Captured log range ended before its requested boundary",
+                )))
             }
         }
     }

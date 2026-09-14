@@ -260,7 +260,7 @@ pub(crate) struct ValidatedTransaction {
     pub(crate) eidx_frontier: u64,
     pub(crate) tx_data: Vec<crate::Datom>,
     pub(crate) tempids: BTreeMap<String, u64>,
-    pub(crate) read_work: crate::database_value::TransactionReadWork,
+    pub(crate) read_work: crate::database_value::read_context::TransactionReadWork,
     pub(crate) assessment_work: crate::transaction::assess::AssessmentReadWork,
     /// Resolved fixed dependency closure. Publication must protect any newly
     /// referenced objects even when their immutable bytes already exist.
@@ -319,7 +319,7 @@ fn assess_forms_with_clock(
     limits: SpeculationLimits,
     options: &crate::TransactionExecutionOptions,
 ) -> Result<ValidatedTransaction, SemanticError> {
-    use crate::database_value::TransactionReadContext;
+    use crate::database_value::read_context::TransactionReadContext;
     use crate::program_bindings::{
         expand_submission_forms_with_native, persisted_predicates_with_native,
         transaction_program_roots, validate_successor_program_bindings_with_native,
@@ -491,7 +491,7 @@ pub(crate) fn select_tx_instant(
         (Some(instant), _) | (_, Some(instant)) => Some(instant),
         (None, None) => None,
     };
-    let previous = db_before.last_tx_instant()?;
+    let previous = db_before.last_tx_instant();
     if let Some(instant) = explicit {
         if instant > server_now {
             return Err(SemanticError::incorrect(

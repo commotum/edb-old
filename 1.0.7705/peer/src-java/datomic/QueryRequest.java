@@ -7,6 +7,10 @@ import java.util.Map;
 /**
  * Query, input, and execution parameters for {@link Peer#query(QueryRequest)}.
  */
+// ATOMIC-NOTE [observed/disposition]: timeout copies the request map, but args
+// and asData are shallow Java data views, not immutable database ownership.
+// Peer.query forwards this map to datomic.query/query. Native QueryControl
+// carries explicit deadlines/budgets independently of the prepared query AST.
 public class QueryRequest {
     final Map m;
     /** Request key containing query inputs. */

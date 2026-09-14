@@ -21,6 +21,11 @@ import java.util.stream.Stream;
  * <p>The peer library runs queries and database access in the application
  * process and communicates with transactor and storage services as needed.</p>
  */
+// ATOMIC-NOTE [observed/disposition]: This facade binds Clojure Vars at initialization;
+// q/query/qseq delegate to datomic.query, never a second Java query engine.
+// Native lib.rs likewise curates entry points while application, peer and the
+// shared query engine own behavior. Classpath loading and process-global
+// shutdown are JVM integration choices, not native API requirements.
 public class Peer {
     private static final Var REQUIRE = RT.var((String)"clojure.core", (String)"require");
     private static final Var CANCEL;

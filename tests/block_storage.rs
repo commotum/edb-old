@@ -190,11 +190,11 @@ fn installation_refuses_an_existing_catalog_without_changing_its_contents() {
         return;
     };
     let mut sql = Client::connect(&fixture.connection, NoTls).unwrap();
-    // A pre-existing catalog marker is enough to prove that installation
-    // refuses ownership; no historical engine schema is constructed here.
+    // An unrelated table proves installation refuses ownership without
+    // changing pre-existing application contents.
     sql.batch_execute(
-        "CREATE TABLE atomic_schema_migrations (version BIGINT PRIMARY KEY, checksum BYTEA NOT NULL); \
-         INSERT INTO atomic_schema_migrations VALUES (36, decode('123456', 'hex'))",
+        "CREATE TABLE application_marker (id BIGINT PRIMARY KEY, payload BYTEA NOT NULL); \
+         INSERT INTO application_marker VALUES (36, decode('123456', 'hex'))",
     )
     .unwrap();
     assert_eq!(
@@ -203,10 +203,7 @@ fn installation_refuses_an_existing_catalog_without_changing_its_contents() {
     );
     assert!(PgBlockStore::connect(&config).is_err());
     let rows = sql
-        .query(
-            "SELECT version, checksum FROM atomic_schema_migrations",
-            &[],
-        )
+        .query("SELECT id, payload FROM application_marker", &[])
         .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get::<_, i64>(0), 36);
@@ -221,7 +218,7 @@ fn installation_refuses_an_existing_catalog_without_changing_its_contents() {
         .into_iter()
         .map(|row| row.get::<_, String>(0))
         .collect::<Vec<_>>();
-    assert_eq!(tables, ["atomic_schema_migrations"]);
+    assert_eq!(tables, ["application_marker"]);
 }
 
 fn competing_updates(

@@ -56,6 +56,9 @@
   (reset-meta!
     #'sla
     (assoc {:arglists (clojure.core/list ['sorted-coll]), :column (int 1)} :name 'sla :ns *ns*))
+  ;; ATOMIC-NOTE [ownership]: This helper selects an element of an already
+  ;; sorted sequence. Query median is aggregation/median, which sorts and
+  ;; handles the even middle pair. A shared name is not a shared query contract.
   (defn median
     ([sorted_coll] (when (seq sorted_coll) (nth sorted_coll (int (/ (count sorted_coll) 2))))))
   (reset-meta!
@@ -121,6 +124,9 @@
   (.bindRoot
     (.setDynamic (clojure.lang.RT/var "datomic.math" "*rnd*") true)
     (java.util.Random. 42))
+  ;; ATOMIC-NOTE [observed]: Sampling draws through one dynamically replaceable
+  ;; ATOMIC-NOTE: RNG. The fixed root seed makes a fresh process repeatable, while
+  ;; ATOMIC-NOTE: dynamic binding lets callers isolate a different random stream.
   (defn uniform
     (^long [lo hi]
       (do
@@ -144,6 +150,10 @@
       'uniform
       :ns
       *ns*))
+  ;; ATOMIC-NOTE [observed]: Keep the first ct items, then give each later item
+  ;; ATOMIC-NOTE: the standard ct/(n+1) replacement chance. This is a one-pass,
+  ;; ATOMIC-NOTE: O(ct)-retained-state algorithm; input uniqueness is the caller's
+  ;; ATOMIC-NOTE: responsibility (aggregation/sample supplies a set).
   (defn reservoir-sample
     ([ct coll]
       (loop [result (transient (vec (take ct coll))) n ct coll (drop ct coll)]

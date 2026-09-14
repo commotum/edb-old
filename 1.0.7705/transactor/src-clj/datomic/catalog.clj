@@ -188,6 +188,10 @@
     (assoc {:arglists (clojure.core/list ['& 'body]), :column (int 1)} :name 'with-retry :ns *ns*))
   (.setMacro #'with-retry)
   ;; Applies a conditional catalog transformation, retrying compare-and-swap conflicts up to ten times.
+  ;; ATOMIC-NOTE [observed/adaptation] Each catalog CAS conflict re-reads and re-evaluates the condition.
+  ;; Retrying a stale transformed map could overwrite another name change.
+  ;; Semantic outcomes such as :exists are not CAS retry requests. Native
+  ;; storage/catalog uses exact name/route/lineage guards.
   (defn update-catalog
     ([cluster condition f]
       (common/retry-fn
@@ -347,6 +351,10 @@
       :ns
       *ns*))
   ;; Removes the live name and retains the database identity in :datomic/deleted for later reclamation.
+  ;; ATOMIC-NOTE [observed/adaptation] Deletion removes a live name and retains its ID in the deleted set;
+  ;; it does not erase values. Native retirement also fences writer/route
+  ;; authority; operations/reclamation admits the shared collector separately.
+  ;; A held value is not a GC pin.
   (defn delete-database
     ([cluster db_name]
       (let [condition (fn condition

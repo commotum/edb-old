@@ -861,7 +861,7 @@ fn main() -> Result<()> {
     cold_warm(&postgres, &database, 0, scale)?;
     let hypothetical = imported.with_forms(
         &[set_balance(123456)],
-        imported.last_tx_instant()?.ok_or("no instant")? + 1,
+        imported.last_tx_instant().ok_or("no instant")? + 1,
     )?;
     account(&hypothetical.db_after, 0, 123456)?;
     account(&imported, 0, 0)?;

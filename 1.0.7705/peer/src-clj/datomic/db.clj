@@ -1820,12 +1820,6 @@
   ;; transaction-attempt prefix memo is discardable, separately charged state,
   ;; not part of a database's information or source wire representation.
   ;; ATOMIC-NOTE END immutable-value-window
-  ;; ATOMIC-NOTE [observed]: Inclusive asOfT and exclusive sinceT filter the
-  ;; selected index stream before point-in-time retraction elimination. History
-  ;; bypasses that elimination, retaining assertions and retractions. Custom
-  ;; predicates receive the same temporal view with only filt cleared.
-  ;; [inferred] Applying bounds before collapse can recover an earlier assertion
-  ;; hidden by a later retraction; filtering the already-current view cannot.
   (defn windowed
     "Applies a database value's temporal and custom predicates to an index iterator. Point-in-time views collapse retractions; history views retain both assertions and retractions."
     ([db whilep iter]
@@ -5167,6 +5161,10 @@
     (^java.util.stream.Stream indexPull [this options] (Circular/indexPull this options))
     (pull [this selector eid options] (Circular/pull this selector eid options))
     (^java.util.Map pull [this selector eid] (Circular/pull this selector eid nil))
+    ;; ATOMIC-NOTE [observed; entity factory]: Capture this exact Db and resolve
+    ;; the identifier without an existence scan. Numeric ids can yield empty
+    ;; lazy entities; unresolved idents/lookups yield nil. Reject history, but
+    ;; retain filter/time/speculative layers through EntityMap navigation.
     (^datomic.Entity entity
       [this eid]
       (do
@@ -5918,6 +5916,9 @@
   (reset-meta!
     #'reverse-key?
     (assoc {:arglists (clojure.core/list ['k]), :column (int 1)} :name 'reverse-key? :ns *ns*))
+  ;; ATOMIC-NOTE [observed; shared naming]: Exact underscore-prefixed schema
+  ;; idents are forward data. query/eav tests this directly; Pull repairs its
+  ;; initially normalized direction in fix-specs-for-underscore-prefix-attrs.
   (defn reverse-lookup? ([db k] (and (datomic.db/reverse-key? k) (not (contains? (:_keys db) k)))))
   (reset-meta!
     #'reverse-lookup?

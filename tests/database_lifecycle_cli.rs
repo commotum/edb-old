@@ -83,10 +83,10 @@ fn stock_lifecycle_preserves_live_writer_and_receipts_across_rename_and_name_reu
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     let started = Instant::now();
     let created = cli(&fixture.admin_url, &["create", "--database", "customers"]);
@@ -283,7 +283,7 @@ fn stock_cli_reclaims_only_the_explicit_retired_identity() {
         return;
     };
     let fixture = Fixture::new(&url);
-    cli(&fixture.admin_url, &["migrate"]);
+    cli(&fixture.admin_url, &["install"]);
     cli(&fixture.admin_url, &["create", "--database", "temporary"]);
     let mut catalog = atomic_core::DatabaseCatalog::connect(&fixture.admin_url).unwrap();
     let retired = catalog.resolve("temporary").unwrap();
@@ -374,10 +374,10 @@ fn application_handoff_and_exact_retries_follow_identity_through_rename() {
     if let Some((writer, peer)) = &fixture.roles {
         cli(
             &fixture.admin_url,
-            &["migrate", "--writer-role", writer, "--peer-role", peer],
+            &["install", "--writer-role", writer, "--peer-role", peer],
         );
     } else {
-        cli(&fixture.admin_url, &["migrate"]);
+        cli(&fixture.admin_url, &["install"]);
     }
     cli(&fixture.admin_url, &["create", "--database", "projects"]);
     let entry = atomic_core::DatabaseCatalog::connect(&fixture.admin_url)

@@ -43,7 +43,7 @@ exact-LRU implementation or with every Caffeine admission/eviction heuristic.
 **Rust owner/disposition:** retain immutable `Arc` payloads and per-process caches
 in [index/tree/cache.rs](../../../src/index/tree/cache.rs),
 [program_cache.rs](../../../src/program_cache.rs) and
-[fulltext_store.rs](../../../src/fulltext_store.rs). Active [tree cursors](../../../src/index/cursor.rs) hold
+[fulltext/store/cache.rs](../../../src/fulltext/store/cache.rs). Active [tree cursors](../../../src/index/cursor.rs) hold
 `LoadedDirectory`/`LoadedLeaf` owners; eviction releases the cache's ownership and
 does not invalidate those active values. Persistent data ownership remains in
 [`collections/persistent_map.rs`](../../../src/collections/persistent_map.rs),
@@ -122,7 +122,7 @@ evidence instead of rewriting the reference or copying an unsafe early reply.
 [storage/snapshot.rs](../../../src/storage/snapshot.rs) captures/rebuilds a basis
 and detects changed index roots; [transactor/authority/mod.rs](../../../src/transactor/authority/mod.rs)
 publishes before replacing the writer's current snapshot.
-[block_service.rs](../../../src/block_service.rs) owns index scheduling/adoption
+[transactor/service.rs](../../../src/transactor/service.rs) owns index scheduling/adoption
 and fresh-work backpressure. This companion leaves full restart, failover and
 index-pressure acceptance to those components; exact retries retain their own
 receipt-first admission rule.
@@ -131,7 +131,7 @@ receipt-first admission rule.
 
 Passage: [Entity Caching](01_memory_and_caching.md#entity-caching), baseline 35.
 S-ENTITY `EntityMap.valAt` memoizes fetched values in its mutable cache; `touch`
-walks attributes and component references. Native [pull.rs](../../../src/pull.rs)
+walks attributes and component references. Native [pull/entity.rs](../../../src/pull/entity.rs)
 `Entity` holds a database value and shared mutex-protected lazy cache; `touch`
 realizes direct/component data. Retain this handle-local ownership. It is not
 one of the three global recency consumers changed here; this trace does not
